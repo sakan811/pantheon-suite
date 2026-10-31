@@ -1529,6 +1529,20 @@ TEST (clip_meter_ignores_clean_audio_and_finds_hard_clipping)
     CHECK (w2.clipEvents > 3500 && w2.clipEvents < 4500);
 }
 
+TEST (clip_meter_ignores_non_finite_samples)
+{
+    // A glitched buffer (NaN, +/-inf) is not clipping and must not pin the peak at +inf for the rest of the session.
+    const double fs = 48000;
+    auto tone = sine (fs, 997, -6.0, 1.0);
+    tone[1000] = std::nanf ("");
+    tone[2000] = std::numeric_limits<float>::infinity();
+    tone[3000] = -std::numeric_limits<float>::infinity();
+    const auto w = clipOf (tone, tone);
+    CHECK (std::isfinite (w.samplePeak) && std::isfinite (w.truePeak));
+    CHECK_NEAR (linToDb (w.samplePeak), -6.0, 0.05);
+    CHECK (w.overSamples == 0 && w.clipEvents == 0);
+}
+
 TEST (clip_meter_counts_overs_and_inter_sample_peaks)
 {
     const double fs = 48000;
@@ -2049,6 +2063,49 @@ TEST (loudness_monitor_tracks_the_loudest_section)
     CHECK_NEAR (m.maxShortTerm(), -12.0, 0.2);
     CHECK (m.shortTerm() < -29.0f); // the last 3 s are the quiet part
     CHECK (m.integrated() > -14.0f); // the relative gate drops the quiet part from the integrated value
+}
+
+TEST (loudness_monitor_recovers_from_non_finite_samples)
+{
+    const double fs = 48000.0;
+    LoudnessMonitor m;
+    m.prepare (fs);
+    const auto first = sine (fs, 997, -20, 5.0), second = sine (fs, 997, -10, 10.0);
+    m.process (first.data(), first.data(), static_cast<int> (first.size()));
+    const float before = m.integrated();
+    CHECK_NEAR (before, -20.0, 0.2);
+
+    // A burst of NaN and inf, as a host hands over on a glitch, must not freeze the meter: a NaN in the K-weighting
+    // filters would stay there for good, leaving the short-term value NaN and the integrated one stuck.
+    std::vector<float> bad (480, std::nanf (""));
+    for (size_t i = 0; i < bad.size(); i += 2)
+        bad[i] = std::numeric_limits<float>::infinity();
+    m.process (bad.data(), bad.data(), static_cast<int> (bad.size()));
+    m.process (second.data(), second.data(), static_cast<int> (second.size()));
+    CHECK (m.hasData());
+    CHECK (std::isfinite (m.shortTerm()));
+    CHECK_NEAR (m.shortTerm(), -10.0, 0.3);
+    CHECK (m.integrated() > before + 3.0f); // follows the louder passage that came after
+}
+
+TEST (loudness_monitor_reads_as_cleared_while_a_reset_is_pending)
+{
+    const double fs = 48000.0;
+    LoudnessMonitor m;
+    m.prepare (fs);
+    const auto tone = sine (fs, 997, -14, 6.0);
+    m.process (tone.data(), tone.data(), static_cast<int> (tone.size()));
+    CHECK (m.hasData() && m.seconds() > 5.0 && m.maxShortTerm() > -20.0f);
+
+    // No audio flows (a stopped host), yet every reader must already see the cleared meter, not the old programme: the
+    // master plan counts these seconds, and a plan built on stale ones next to a cleared CLIPPING cell is the "stuck" UI.
+    m.requestReset();
+    CHECK (!m.hasData());
+    CHECK (m.seconds() == 0.0);
+    CHECK (m.integrated() <= LoudnessMeter::kSilence && m.shortTerm() <= LoudnessMeter::kSilence && m.maxShortTerm() <= LoudnessMeter::kSilence);
+
+    m.process (tone.data(), tone.data(), 64);
+    CHECK (m.seconds() > 0.0 && m.seconds() < 0.1);
 }
 
 // ---- master advisor ----------------------------------------------------------------------------------------------

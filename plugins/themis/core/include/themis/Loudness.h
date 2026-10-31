@@ -82,8 +82,11 @@ public:
     {
         for (int i = 0; i < n; ++i)
         {
-            const float kl = stage2[0].process (stage1[0].process (l[i]));
-            const float kr = stage2[1].process (stage1[1].process (r[i]));
+            // A NaN or inf would stay in the filter state for good: every later value NaN, the short-term reading dead and
+            // the integrated one frozen at what it was. A glitched sample counts as silence instead.
+            const float xl = std::isfinite (l[i]) ? l[i] : 0.0f, xr = std::isfinite (r[i]) ? r[i] : 0.0f;
+            const float kl = stage2[0].process (stage1[0].process (xl));
+            const float kr = stage2[1].process (stage1[1].process (xr));
             subSum += static_cast<double> (kl) * kl + static_cast<double> (kr) * kr;
             if (++subCount >= subBlockLen)
                 finishSubBlock();

@@ -48,19 +48,22 @@ public:
         published.seconds.store (elapsed, std::memory_order_relaxed);
     }
 
-    // A pending reset counts as "no data" right away.
-    bool hasData() const
-    {
-        return published.seconds.load (std::memory_order_relaxed) >= kMinSeconds && integrated() > LoudnessMeter::kSilence + 1.0f
-               && !resetFlag.load (std::memory_order_acquire);
-    }
+    // A pending reset counts as "no data" right away, even if no audio is flowing to apply it (a stopped host): every
+    // reader below sees the cleared meter, so no readout keeps the old programme next to others that were reset.
+    bool hasData() const { return seconds() >= kMinSeconds && integrated() > LoudnessMeter::kSilence + 1.0f; }
 
-    float integrated() const { return published.integrated.load (std::memory_order_relaxed); }       // LUFS since the reset, gated
-    float shortTerm() const { return published.shortTerm.load (std::memory_order_relaxed); }         // LUFS over the last 3 s
-    float maxShortTerm() const { return published.maxShortTerm.load (std::memory_order_relaxed); }   // loudest 3 s since the reset
-    double seconds() const { return published.seconds.load (std::memory_order_relaxed); }            // audio measured since the reset
+    float integrated() const { return read (published.integrated, LoudnessMeter::kSilence); }       // LUFS since the reset, gated
+    float shortTerm() const { return read (published.shortTerm, LoudnessMeter::kSilence); }         // LUFS over the last 3 s
+    float maxShortTerm() const { return read (published.maxShortTerm, LoudnessMeter::kSilence); }   // loudest 3 s since the reset
+    double seconds() const { return read (published.seconds, 0.0); }                                // audio measured since the reset
 
 private:
+    template <typename T>
+    T read (const std::atomic<T>& value, T cleared) const
+    {
+        return resetFlag.load (std::memory_order_acquire) ? cleared : value.load (std::memory_order_relaxed);
+    }
+
     void clear()
     {
         meter.reset();

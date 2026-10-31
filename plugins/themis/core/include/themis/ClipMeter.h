@@ -144,7 +144,7 @@ private:
     static void step (Channel& s, float x, ClipWindow& w)
     {
         const float a = std::abs (x);
-        if (std::isnan (a)) // leave the detectors alone
+        if (!std::isfinite (a)) // a glitched sample is not a peak: leave the detectors (and the totals) alone
             return;
         w.samplePeak = std::max (w.samplePeak, a);
         w.truePeak = std::max ({ w.truePeak, a, s.oversampler.process (x) });
