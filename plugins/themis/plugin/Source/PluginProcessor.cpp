@@ -162,17 +162,9 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.deliveryName = delivery.shortName;
     readClip (in.clip);
 
-    in.target = activeTarget();
-    in.tolerance = paramReader.value (params::tolerance);
-    in.haveTonal = readSpectrum (in.measured);
-    in.maxHz = themis::BandGrid::usableMaxHz (getSampleRate() > 0.0 ? getSampleRate() : 48000.0);
-
-    themis::BandArray fold {};
-    const bool haveFold = readMonoFold (fold);
-    const auto* device = activeDevice();
-    in.deviceName = device != nullptr ? device->name : std::string();
-    if (in.haveTonal)
-        in.translation = themis::analyseTranslation (in.measured, haveFold ? &fold : nullptr, in.target, device);
+    themis::BandArray measured {}, fold {};
+    if (readSpectrum (measured) && readMonoFold (fold)) // the plan only uses the mono fold: the curve and the device are judged against the reference, which is taste
+        themis::addMonoFold (in.translation, measured, fold);
 
     themis::PhaseBands phase {};
     in.havePhase = readPhase (phase);

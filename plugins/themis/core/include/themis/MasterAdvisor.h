@@ -9,21 +9,25 @@
 #include "Loudness.h"
 #include "LowCrestMeter.h"
 #include "PhaseCancellation.h"
-#include "TargetCurve.h"
 #include "Translation.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <string>
 #include <vector>
 
 namespace themis
 {
-// Turns everything the plugin measures into a short list of things to do to the master, worst first: what to change, by
-// how much and where, and why. A pure function on the measurements (so it is tested without a UI); it never touches the
-// audio. Every number it recommends comes from a measurement; every limit it judges them by is a hand-authored rule of
-// thumb (the ones in `translation::`, `history::`, `lowcrest::` and the few below), not measured data.
+// Turns the faults the monitoring readouts find into a short list of things to do to the master, worst first: what to
+// change, by how much and where, and why. A pure function on the measurements (so it is tested without a UI); it never
+// touches the audio. Every number it recommends comes from a measurement; every limit it judges them by is a hand-authored
+// rule of thumb (the ones in `translation::`, `history::`, `lowcrest::` and the few below), not measured data.
+//
+// Only objective faults are listed: clipping, a peak over the ceiling, loudness away from the delivery target, phase
+// cancellation, a low end or image that does not survive mono, an unbalanced image, a squashed or spiky low end, a bass
+// that small speakers lose. How the spectrum differs from the reference curve (and how it would sound on a device, which
+// is measured against that curve too) is a matter of taste and genre, not a fault, so it is shown on the tonal view and
+// never turned into a to-do.
 namespace master
 {
 inline constexpr double kMinSeconds = 20.0; // less audio than this and the long-term averages are not worth advice
@@ -32,19 +36,15 @@ inline constexpr double kMinSeconds = 20.0; // less audio than this and the long
 inline constexpr float kLoudnessWarnLu = 2.0f, kLoudnessBadLu = 4.0f;
 inline constexpr float kStreamingLufs = -14.0f; // what the big streaming services normalise to (they only turn louder masters down)
 
-// A tonal region is worth a move when it is out of tolerance over at least this many adjacent bands (1/3 octave).
-inline constexpr int kMinTonalRunBands = 2;
-inline constexpr int kMaxTonalItems = 2;
-inline constexpr float kMinMoveDb = 0.5f; // EQ moves are suggested in half-dB steps, never less than this
 } // namespace master
 
 // What an item is about; the order is the order of priority among items of the same severity.
-enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, tonal, lowCrest, balance, bass, device, swing };
+enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, lowCrest, balance, bass, swing };
 
 struct Advice
 {
     Level level = Level::warn;
-    Topic topic = Topic::tonal;
+    Topic topic = Topic::clipping;
     std::string headline; // what to do, with the numbers
     std::string why;      // what was measured and what it means
     Switches hear;        // the Solo / Mute setting that lets you listen to it (nothing = no suggestion)
@@ -61,14 +61,7 @@ struct MasterInputs
 
     ClipTotals clip; // peaks and clips since the reset
 
-    bool haveTonal = false;
-    BandArray measured {};
-    TargetCurve target;
-    float tolerance = 1.0f;
-    double maxHz = BandGrid::kMaxHz; // bands above this are beyond the analysed signal's Nyquist
-
-    TranslationReport translation; // device (when one is selected) and mono fold
-    std::string deviceName;
+    TranslationReport translation; // mono fold (the device part is not used: it is judged against the reference curve)
 
     bool havePhase = false;
     PhaseReport phase;
@@ -91,81 +84,9 @@ namespace master
 {
 inline std::string rounded (float db) { return format ("%.1f", static_cast<double> (std::round (db * 2.0f) / 2.0f)); }
 
-// A move in dB rounded to the half dB an EQ is set in, but never below kMinMoveDb.
-inline float eqMoveDb (float db) { return std::max (kMinMoveDb, std::round (db * 2.0f) / 2.0f); }
-
 inline Advice make (Level level, Topic topic, std::string headline, std::string why, Switches hear = {})
 {
     return { level, topic, std::move (headline), std::move (why), hear };
-}
-
-// A region of adjacent bands that sits on one side of the target, outside its tolerance.
-struct TonalRun
-{
-    int first = 0, last = 0;
-    float meanDeltaDb = 0.0f; // measured minus target, mean over the run
-    float meanTolDb = 0.0f;
-    float weight = 0.0f;      // how far outside the tolerance, summed over the bands: the size of the problem
-};
-
-inline std::vector<TonalRun> tonalRuns (const BandArray& measured, const TargetCurve& target, float tolerance, double maxHz)
-{
-    BandArray sm = measured; // the same light smoothing the curve is drawn with
-    smoothBands (sm, 1);
-    std::array<int, BandGrid::kNum> side {};
-    std::array<float, BandGrid::kNum> delta {}, tol {};
-    for (int i = 0; i < BandGrid::kNum; ++i)
-    {
-        const auto s = static_cast<size_t> (i);
-        if (BandGrid::centreHz (i) > maxHz || measured[s] <= kNoDataDb)
-            continue;
-        delta[s] = sm[s] - target.medianDb[s];
-        tol[s] = target.halfWidthDb[s] * tolerance;
-        side[s] = std::abs (delta[s]) > tol[s] ? (delta[s] > 0.0f ? 1 : -1) : 0;
-    }
-
-    std::vector<TonalRun> runs;
-    for (int i = 0; i < BandGrid::kNum;)
-    {
-        if (side[static_cast<size_t> (i)] == 0)
-        {
-            ++i;
-            continue;
-        }
-        const int dir = side[static_cast<size_t> (i)];
-        int last = i;
-        for (int j = i + 1; j < BandGrid::kNum && j <= last + 2; ++j) // one band back inside the tolerance does not end a run
-            if (side[static_cast<size_t> (j)] == dir)
-                last = j;
-        TonalRun r;
-        r.first = i;
-        r.last = last;
-        for (int j = i; j <= last; ++j)
-        {
-            const auto s = static_cast<size_t> (j);
-            r.meanDeltaDb += delta[s];
-            r.meanTolDb += tol[s];
-            r.weight += side[s] == dir ? std::abs (delta[s]) - tol[s] : 0.0f;
-        }
-        const float n = static_cast<float> (last - i + 1);
-        r.meanDeltaDb /= n;
-        r.meanTolDb /= n;
-        if (last - i + 1 >= kMinTonalRunBands)
-            runs.push_back (r);
-        i = last + 1;
-    }
-    std::sort (runs.begin(), runs.end(), [] (const TonalRun& a, const TonalRun& b) { return a.weight > b.weight; });
-    return runs;
-}
-
-// The range (kEnergyRanges index) that holds the middle of a run.
-inline int rangeOfRun (const TonalRun& r)
-{
-    const int mid = (r.first + r.last) / 2;
-    for (int i = 0; i < kNumEnergyRanges; ++i)
-        if (kEnergyRanges[i].contains (mid))
-            return i;
-    return kNumEnergyRanges - 1;
 }
 
 inline Switches soloRange (int range) { return { Switches::bit (static_cast<Source> (kFirstBandSource + range)), 0u }; }
@@ -298,39 +219,6 @@ inline MasterAdvice advise (const MasterInputs& in)
                                        master::soloSide()));
     }
 
-    // ---- tonal balance --------------------------------------------------------------------------
-    if (in.haveTonal)
-    {
-        const auto runs = master::tonalRuns (in.measured, in.target, in.tolerance, in.maxHz);
-        const int lastBand = [&] {
-            int b = BandGrid::kNum - 1;
-            while (b > 0 && BandGrid::centreHz (b) > in.maxHz)
-                --b;
-            return b;
-        }();
-        const size_t reported = std::min (runs.size(), static_cast<size_t> (master::kMaxTonalItems));
-        ++out.checks;
-        if (runs.empty())
-            ++out.passed;
-        for (size_t i = 0; i < reported; ++i)
-        {
-            const auto& r = runs[i];
-            const Level level = translation::toleranceLevel (r.meanDeltaDb, r.meanTolDb);
-            const double lo = std::max (BandGrid::lowEdgeHz (r.first), BandGrid::kF0), hi = std::min (BandGrid::highEdgeHz (r.last), BandGrid::kMaxHz); // the edges of the displayed range
-            const bool over = r.meanDeltaDb > 0.0f;
-            const float insideDb = master::eqMoveDb (std::abs (r.meanDeltaDb) - r.meanTolDb);
-            const char* shape = r.first == 0 ? " (low shelf)" : r.last >= lastBand ? " (high shelf)" : std::log2 (hi / lo) < 1.0 ? " (narrow bell)" : " (broad bell)";
-            const std::string where = hzText (lo) + " - " + hzText (hi);
-            out.items.push_back (make (level == Level::good ? Level::warn : level, Topic::tonal,
-                                       format ("%s about %.1f dB at %s%s", over ? "Cut" : "Boost", static_cast<double> (insideDb), where.c_str(), shape),
-                                       format ("%s is %.1f dB %s the %s target (tolerance +/-%.1f dB). That move brings it back inside the band; %.1f dB reaches the target. Levels are relative to "
-                                               "the 200 Hz - 5 kHz average, so fix the biggest region first and look again.",
-                                               where.c_str(), static_cast<double> (std::abs (r.meanDeltaDb)), over ? "over" : "under", in.target.name.c_str(), static_cast<double> (r.meanTolDb),
-                                               static_cast<double> (std::abs (r.meanDeltaDb))),
-                                       master::soloRange (master::rangeOfRun (r))));
-        }
-    }
-
     // ---- dynamics of the low end ----------------------------------------------------------------
     if (in.haveCrest)
     {
@@ -404,19 +292,6 @@ inline MasterAdvice advise (const MasterInputs& in)
                                            "The level of 20 - 120 Hz differs a lot from moment to moment. If a section is meant to lose its bass that is fine; if not, match the bass level between verse and chorus.",
                                            master::soloRange (0)));
         }
-    }
-
-    // ---- how it translates to the selected device -----------------------------------------------
-    if (in.translation.haveDevice)
-    {
-        const auto& t = in.translation;
-        check (t.deviceLevel);
-        if (t.deviceLevel != Level::good)
-            out.items.push_back (make (t.deviceLevel, Topic::device,
-                                       format ("Make the mix hold up on %s: carry the bass with harmonics instead of sub level", in.deviceName.c_str()),
-                                       format ("Through the %s the track loses %.1f dB more than the target does: it relies on frequencies this device cannot reproduce. Saturate the bass and kick so their upper partials "
-                                               "carry the note, and trim what sits under the device's range.", in.deviceName.c_str(), static_cast<double> (t.extraLossDb)),
-                                       master::soloRange (0)));
     }
 
     std::stable_sort (out.items.begin(), out.items.end(), [] (const Advice& a, const Advice& b) {

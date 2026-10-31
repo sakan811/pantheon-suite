@@ -2111,7 +2111,7 @@ TEST (loudness_monitor_reads_as_cleared_while_a_reset_is_pending)
 // ---- master advisor ----------------------------------------------------------------------------------------------
 namespace
 {
-// A programme that measures clean everywhere: on target, mono-safe, no clips, at the delivery loudness.
+// A programme that measures clean everywhere: mono-safe, no clips, at the delivery loudness.
 MasterInputs cleanMaster()
 {
     MasterInputs in;
@@ -2121,9 +2121,6 @@ MasterInputs cleanMaster()
     in.clip.have = true;
     in.clip.truePeakDb = -1.5f;
     in.clip.samplePeakDb = -1.8f;
-    in.haveTonal = true;
-    in.target = TargetCurve::builtIns()[1];
-    in.measured = in.target.medianDb;
     in.translation.haveFold = true;
     in.haveCrest = true;
     in.lowCrestDb = 8.0f;
@@ -2215,46 +2212,6 @@ TEST (advisor_compares_loudness_with_the_delivery_target)
     CHECK (pick (in, Topic::loudness) == nullptr);
 }
 
-TEST (advisor_points_at_the_region_that_is_out_of_tolerance)
-{
-    auto in = cleanMaster();
-    const auto& t = in.target;
-    // +4 dB over 250 - 630 Hz.
-    for (int i = 0; i < BandGrid::kNum; ++i)
-        if (BandGrid::centreHz (i) >= 250.0 && BandGrid::centreHz (i) <= 630.0)
-            in.measured[static_cast<size_t> (i)] += 4.0f;
-    const auto a = advise (in);
-    const auto* tonal = find (a, Topic::tonal);
-    CHECK (tonal != nullptr);
-    if (tonal != nullptr)
-    {
-        CHECK (tonal->headline.rfind ("Cut about", 0) == 0);
-        CHECK (tonal->headline.find ("bell") != std::string::npos);
-        CHECK (tonal->hear.solo == Switches::bit (Source::lowMid)); // 250 - 630 Hz is in LOW-MID
-        CHECK (tonal->why.find (t.name) != std::string::npos);
-        CHECK (tonal->level != Level::good);
-    }
-    // The cut is the amount that brings the region back inside the tolerance: less than the whole +4 dB.
-    CHECK (tonal != nullptr && tonal->headline.find ("4.0 dB") == std::string::npos);
-
-    // A hole in the highs reads as a boost, and runs to the top of the curve: a shelf.
-    in = cleanMaster();
-    for (int i = 0; i < BandGrid::kNum; ++i)
-        if (BandGrid::centreHz (i) >= 9000.0)
-            in.measured[static_cast<size_t> (i)] -= 9.0f;
-    in.maxHz = 20000.0;
-    const auto* high = pick (in, Topic::tonal);
-    CHECK (high != nullptr && high->headline.rfind ("Boost about", 0) == 0 && high->headline.find ("high shelf") != std::string::npos);
-
-    // Bands beyond the signal's Nyquist are not judged.
-    in = cleanMaster();
-    for (int i = 0; i < BandGrid::kNum; ++i)
-        if (BandGrid::centreHz (i) >= 9000.0)
-            in.measured[static_cast<size_t> (i)] = -200.0f;
-    in.maxHz = 8000.0;
-    CHECK (pick (in, Topic::tonal) == nullptr);
-}
-
 TEST (advisor_speaks_for_each_stereo_problem)
 {
     auto in = cleanMaster();
@@ -2331,19 +2288,37 @@ TEST (advisor_reads_the_low_end_dynamics_and_the_history)
     CHECK (bass != nullptr && bass->headline.find ("under 40 Hz") != std::string::npos && bass->hear.solo == Switches::bit (Source::low));
 }
 
-TEST (advisor_checks_the_selected_device)
+TEST (advisor_lists_faults_not_differences_from_the_reference_curve)
 {
+    // The device preview is measured against the reference curve, so even a bad DEVICE LOSS is not a to-do; the same goes
+    // for the tonal curve (there are no inputs for it any more). The mono fold is a fault and is still listed.
     auto in = cleanMaster();
     in.translation.haveDevice = true;
-    in.translation.extraLossDb = 4.0f;
+    in.translation.extraLossDb = 6.0f;
     in.translation.deviceLevel = Level::bad;
-    in.deviceName = "Phone speaker";
-    const auto* d = pick (in, Topic::device);
-    CHECK (d != nullptr && d->headline.find ("Phone speaker") != std::string::npos && d->why.find ("4.0 dB more") != std::string::npos);
-    in.translation.deviceLevel = Level::good;
-    CHECK (pick (in, Topic::device) == nullptr);
+    const auto a = advise (in);
+    CHECK (a.items.empty() && a.level() == Level::good);
+
+    in.translation.monoLevel = Level::bad;
+    in.translation.monoLossDb = 5.0f;
+    CHECK (pick (in, Topic::monoFold) != nullptr);
 }
 
+TEST (mono_fold_report_needs_no_target_or_device)
+{
+    BandArray measured {}, fold {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        measured[static_cast<size_t> (i)] = -20.0f;
+        fold[static_cast<size_t> (i)] = BandGrid::centreHz (i) < 100.0 ? -6.0f : 0.0f; // the low end cancels in mono
+    }
+    TranslationReport alone;
+    addMonoFold (alone, measured, fold);
+    const auto full = analyseTranslation (measured, &fold, TargetCurve::builtIns().front(), nullptr);
+    CHECK (alone.haveFold && !alone.haveDevice);
+    CHECK (alone.lowMonoLossDb > 3.0f && alone.lowMonoLevel != Level::good);
+    CHECK (alone.monoLossDb == full.monoLossDb && alone.lowMonoLossDb == full.lowMonoLossDb && alone.worstBand == full.worstBand);
+}
 
 int main()
 {

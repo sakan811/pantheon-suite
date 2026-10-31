@@ -166,6 +166,32 @@ inline float monoLossDb (const BandArray& midDb, const BandArray& foldDb, double
     return kept > 0.0 && total > 0.0 ? static_cast<float> (std::max (0.0, powerToDb (total / kept, 0.0))) : 0.0f;
 }
 
+// The mono-fold part of a report: the power a sum to mono loses, overall and in the low end, and the worst band. Needs no
+// target or device, so the master plan uses it on its own.
+inline void addMonoFold (TranslationReport& r, const BandArray& measured, const BandArray& fold)
+{
+    r.haveFold = true;
+    r.monoLossDb = monoLossDb (measured, fold, 0.0, 1.0e9);
+    r.lowMonoLossDb = monoLossDb (measured, fold, 0.0, translation::kLowEndHz);
+    r.monoLevel = translation::classify (r.monoLossDb, translation::kMonoWarnDb, translation::kMonoBadDb);
+    r.lowMonoLevel = translation::classify (r.lowMonoLossDb, translation::kLowMonoWarnDb, translation::kLowMonoBadDb);
+
+    float worst = 0.0f;
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        const auto s = static_cast<size_t> (i);
+        const double f = BandGrid::centreHz (i);
+        if (f < translation::kWorstBandMinHz || f > translation::kWorstBandMaxHz || measured[s] < translation::kWorstBandFloorDb)
+            continue;
+        if (-fold[s] > worst)
+        {
+            worst = -fold[s];
+            r.worstBand = i;
+        }
+    }
+    r.worstBandLossDb = worst;
+}
+
 // Summarises how the measured balance is likely to translate. `fold` and `device` are optional.
 inline TranslationReport analyseTranslation (const BandArray& measured, const BandArray* fold, const TargetCurve& target,
                                              const DeviceProfile* device)
@@ -181,28 +207,7 @@ inline TranslationReport analyseTranslation (const BandArray& measured, const Ba
         r.deviceLevel = translation::classify (r.extraLossDb, translation::kDeviceWarnDb, translation::kDeviceBadDb);
     }
     if (fold != nullptr)
-    {
-        r.haveFold = true;
-        r.monoLossDb = monoLossDb (measured, *fold, 0.0, 1.0e9);
-        r.lowMonoLossDb = monoLossDb (measured, *fold, 0.0, translation::kLowEndHz);
-        r.monoLevel = translation::classify (r.monoLossDb, translation::kMonoWarnDb, translation::kMonoBadDb);
-        r.lowMonoLevel = translation::classify (r.lowMonoLossDb, translation::kLowMonoWarnDb, translation::kLowMonoBadDb);
-
-        float worst = 0.0f;
-        for (int i = 0; i < BandGrid::kNum; ++i)
-        {
-            const auto s = static_cast<size_t> (i);
-            const double f = BandGrid::centreHz (i);
-            if (f < translation::kWorstBandMinHz || f > translation::kWorstBandMaxHz || measured[s] < translation::kWorstBandFloorDb)
-                continue;
-            if (-(*fold)[s] > worst)
-            {
-                worst = -(*fold)[s];
-                r.worstBand = i;
-            }
-        }
-        r.worstBandLossDb = worst;
-    }
+        addMonoFold (r, measured, *fold);
     return r;
 }
 } // namespace themis
