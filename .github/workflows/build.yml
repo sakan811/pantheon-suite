@@ -37,7 +37,7 @@ jobs:
 
   macos:
     # Universal (arm64 + x86_64) VST3 + AU, the plugin formats for macOS.
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     needs: dsp-tests
     steps:
