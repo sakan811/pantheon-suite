@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <array>
 
-namespace hep
+namespace pdsp
 {
 // Single-producer/single-consumer sample FIFO: the audio thread pushes, the editor pulls.
 class AnalyzerFifo

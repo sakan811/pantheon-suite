@@ -4,25 +4,16 @@
 #pragma once
 
 #include "../DSP/Engine.h"
-#include "../DSP/SpectrumAnalyzer.h"
 #include "../Parameters.h"
 #include "HephaestusUi.h"
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <pantheon/dsp/SpectrumAnalyzer.h>
+#include <pantheon/ui/FreqAxis.h>
 
 namespace hep::gui
 {
-// Logarithmic frequency axis shared by everything the view draws.
-struct FreqAxis
-{
-    static constexpr float minHz = 20.0f, maxHz = 20000.0f;
-
-    static float toNormalised (float hz) noexcept
-    {
-        return juce::jlimit (0.0f, 1.0f, std::log (hz / minHz) / std::log (maxHz / minHz));
-    }
-
-    static float toHz (float normalised) noexcept { return minHz * std::pow (maxHz / minHz, normalised); }
-};
+// The logarithmic frequency axis shared by everything the view draws (the kit's).
+using FreqAxis = ui::FreqAxis;
 
 // Input (dim) vs output (cream) spectrum, with the user's bands drawn over it. Bands are made and
 // edited here: double-click to add one, drag an edge to resize it, drag its body to move it,
@@ -412,7 +403,7 @@ private:
         g.drawText ("OUTPUT", (int) plot.getRight() - 100, (int) plot.getY() + 4, 70, 12, juce::Justification::right);
     }
 
-    void drawTrace (juce::Graphics& g, juce::Rectangle<float> plot, const SpectrumAnalyzer& analyzer,
+    void drawTrace (juce::Graphics& g, juce::Rectangle<float> plot, const pdsp::SpectrumAnalyzer& analyzer,
                     juce::Colour line, juce::Colour fill) const
     {
         juce::Path path;
@@ -552,9 +543,9 @@ private:
     // Defaults: 90 dB range and 4.5 dB/oct tilt; medium release.
     Setting range { "Range", "spectrumRange", { { "60 dB", 60.0f }, { "90 dB", 90.0f }, { "120 dB", 120.0f } }, 1 };
     Setting speed { "Speed", "spectrumSpeed", { { "Slow", 0.8f }, { "Medium", 0.4f }, { "Fast", 0.15f } }, 1 };
-    Setting tilt  { "Tilt",  "spectrumTilt",  { { "0 dB/oct", 0.0f }, { "3 dB/oct", 3.0f }, { "4.5 dB/oct", SpectrumAnalyzer::defaultTilt }, { "6 dB/oct", 6.0f } }, 2 };
+    Setting tilt  { "Tilt",  "spectrumTilt",  { { "0 dB/oct", 0.0f }, { "3 dB/oct", 3.0f }, { "4.5 dB/oct", pdsp::SpectrumAnalyzer::defaultTilt }, { "6 dB/oct", 6.0f } }, 2 };
 
-    SpectrumAnalyzer inTrace, outTrace;
+    pdsp::SpectrumAnalyzer inTrace, outTrace;
 
     int selected = 0;
 

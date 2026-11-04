@@ -31,13 +31,12 @@ auval -v aufx Hphs Hpha                             # Apple's AU validator
 ```
 Source/DSP/        no GUI dependencies; everything here is covered by Tests/Tests.cpp
   Band.h             BandMode, maxBands, effectiveRange(), harmonicReach(), harmonicSpan(): where a band really sits and where its harmonics land
-  Biquad.h           double-precision biquads, Butterworth, Bandpass pair
   Waveshaper.h       curves + residual-ADAA shaper
   Saturator.h        user-placed saturate bands: band-pass, per-band oversample + shape, outputs only the distortion
   FundamentalEngine.h  Chebyshev "extend" (+ adaptive gain) + difference-tone "rebuild", GapDetector, harmonicsForTone()
   Engine.h           BandParams, latency alignment, band mixing, M/S, gain match, delta, meters, analyzer taps
-  AnalyzerTap.h      lock-free sample FIFOs (audio thread -> editor)
-  SpectrumAnalyzer.h EQ-style FFT analyzer (GUI-free so its calibration is testable)
+../../shared/dsp/       Biquad.h (double-precision biquads, Butterworth, Bandpass pair), AnalyzerTap.h (lock-free sample FIFOs, audio thread -> editor) and
+                     SpectrumAnalyzer.h (EQ-style FFT analyzer, GUI-free so its calibration is testable; test [10]), namespace `pdsp`, shared with Iris
 Source/Parameters.h  parameter layout, presets, readParams(), band helpers, legacy migration  <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/HephaestusUi.h` holds what is Hephaestus' own)
 Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse drags, slots, legacy sessions), HostCheck.cpp (loads the VST3),
@@ -100,7 +99,7 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
 - band colours -> `hep::gui::forMode()` in `UI/HephaestusUi.h`
 - every pixel of the interface and the parameter-bound controls (panels, glass, lamps, knobs, selectors, switches, fonts, the palette) -> `shared/ui`, shared with the other plugins (see the repository's [CLAUDE.md](../../CLAUDE.md)); the editor calls it and does not draw its own
 - knob id / caption / tooltip / panel membership -> `knobSpecs` and `panelSpecs` (character, master) and `bandKnobSpecs` (the six slots that follow the selected band) in `PluginEditor.cpp`
-- log-frequency axis -> `FreqAxis` in `SpectrumView.h`
+- log-frequency axis -> `ui::FreqAxis` in `shared/ui` (`SpectrumView.h` only aliases it)
 - test signals and `check()` -> `Tests/TestSignals.h`, `Tests/Check.h`
 
 ## Gotchas already paid for

@@ -9,7 +9,7 @@
 #include <array>
 #include <cmath>
 
-namespace hep
+namespace pdsp
 {
 // Real-time spectrum analysis for the display, modelled on the analyzer of a typical parametric EQ:
 //  - an 8192-point FFT (the highest resolution such analyzers offer) for good low-frequency detail,

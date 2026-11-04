@@ -4,7 +4,7 @@
 #pragma once
 
 #include "Band.h"
-#include "Biquad.h"
+#include <pantheon/dsp/Biquad.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -119,7 +119,7 @@ public:
     }
 
 private:
-    std::array<std::array<Biquad, numBands>, maxChannels> existing, restored;
+    std::array<std::array<pdsp::Biquad, numBands>, maxChannels> existing, restored;
     std::array<double, numBands> energyExisting {}, energyRestored {};
     double energyCoeff = 0.0;
 };
@@ -341,7 +341,7 @@ private:
     double energyBand = 0.0, energyReach = 0.0, energyCoeff = 0.0, adaptGain = 1.0, adaptCoeff = 0.0;
     double usable[4] = { 1.0, 1.0, 1.0, 1.0 };
 
-    std::array<Bandpass, maxChannels> band, ext, restoreIn, restoreOut, region;
+    std::array<pdsp::Bandpass, maxChannels> band, ext, restoreIn, restoreOut, region;
     GapDetector<maxChannels> gaps;
     EnvelopeFollower envBand, envRestore;
 };
