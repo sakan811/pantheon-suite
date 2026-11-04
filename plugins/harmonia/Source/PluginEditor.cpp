@@ -49,7 +49,15 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
     // ---- key card ----
     detectButton.setTooltip ("Click, sing or play a phrase of the song, then click again - Harmonia picks the key for you.");
     detectButton.onClick = [this] { onDetectClicked(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton })
+    resetButton.setTooltip ("Start tracking afresh: drops the pitch history and the graph. Use it if the pitch or the graph looks stuck.");
+    resetButton.onClick = [this]
+    {
+        proc.reset(); // done on the audio thread, in the next block
+        if (proc.learnState() == HarmoniaProcessor::LearnState::idle)
+            detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
+        awaitingKeyResult = false;
+    };
+    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton, &resetButton })
         content.addAndMakeVisible (c);
 
     detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
@@ -117,6 +125,7 @@ void HarmoniaEditor::resized()
 
     rangeBox.setBounds (580, 36, 190, 28);
     bypassButton.setBounds (784, 36, 76, 28);
+    resetButton.setBounds (kLatencyBounds.getRight() + 16, 36, 84, 28);
 
     graph.setBounds (20, kRowTop, 560, kRowH);
 
