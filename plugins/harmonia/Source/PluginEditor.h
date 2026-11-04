@@ -56,6 +56,7 @@ private:
     ui::Choice rangeBox, keyBox, scaleBox;
     ui::Toggle bypassButton, autoKeyButton;
     juce::TextButton detectButton { "Detect key" };
+    juce::TextButton resetButton { "RESET" };
     juce::TextButton presetButtons[3];
     juce::Label statusLabel;
     std::array<std::unique_ptr<ui::Knob>, 6> knobs;
