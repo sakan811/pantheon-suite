@@ -701,6 +701,164 @@ void testRobust()
         check (secs < 3.0, "the worst case runs in real time with a wide margin");
     }
 }
+// Settings that change while the engine runs must end up exactly where a fresh start with them would.
+void testLiveChanges()
+{
+    std::printf("\n[10] Settings changed while running behave as if they had been there from the start\n");
+
+    const auto slice = [] (const std::vector<float>& x, int from, int to) { return std::vector<float> (x.begin() + from, x.begin() + to); };
+    const auto sum = [] (std::vector<float> a, const std::vector<float>& b)
+    {
+        for (size_t i = 0; i < a.size(); ++i)
+            a[i] += b[i];
+        return a;
+    };
+    // Runs `first` for samples [0, split) and `second` from there on, on one engine.
+    const auto runChanged = [&] (const EngineParams& first, const EngineParams& second, int split, const std::vector<float>& l, const std::vector<float>& r)
+    {
+        Engine e;
+        e.prepare (fs, 512);
+        const int n = (int) l.size();
+        auto a = run (e, first, slice (l, 0, split), slice (r, 0, split));
+        const auto b = run (e, second, slice (l, split, n), slice (r, split, n));
+        a.l.insert (a.l.end(), b.l.begin(), b.l.end());
+        a.r.insert (a.r.end(), b.r.begin(), b.r.end());
+        return a;
+    };
+
+    // A cut's slope changed on a running band.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::lowCut, 400.0, 0.0, 1.0, Placement::stereo, 0);
+        Engine e;
+        e.prepare (fs, 512);
+        const auto tone = sine (200.0, 0.5, oneSecond + 12000);
+        run (e, p, tone, tone);
+        p.bands[0].slope = 3;
+        const auto out = run (e, p, tone, tone);
+        const double g = toDb (amplitudeAt (out.l, 200.0, 12000, oneSecond) / amplitudeAt (tone, 200.0, 12000, oneSecond));
+        check (std::fabs (g + 48.18) < 0.5, fmt ("a low cut moved from 12 to 48 dB/oct while running: %.2f dB at half the corner (want -48.18)", g));
+    }
+
+    // Dynamic switched on while the band runs: its detector must listen to the band's own region, not to everything.
+    {
+        const int n = oneSecond * 2;
+        const auto loudBass = sine (100.0, 0.3, n), quietMid = sine (1000.0, 0.003, n);
+        const auto in = sum (loudBass, quietMid);
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 1000.0, 0.0, 1.0);
+        const DynamicsParams below { DynMode::below, -30.0, 20.0, 6.0, 5.0, 50.0 };
+
+        auto measure = [&] (const Stereo& out)
+        {
+            return toDb (amplitudeAt (out.l, 1000.0, n - oneSecond, oneSecond) / amplitudeAt (in, 1000.0, n - oneSecond, oneSecond));
+        };
+        EngineParams dynamicFromStart = p;
+        dynamicFromStart.bands[0].dynamic = true;
+        dynamicFromStart.bands[0].dyn = below;
+        const double reference = measure (runSame (dynamicFromStart, in));
+
+        EngineParams later = p;
+        later.bands[0].dynamic = true;
+        later.bands[0].dyn = below;
+        const double switchedOn = measure (runChanged (p, later, oneSecond / 2, in, in));
+        check (std::fabs (reference - 6.0) < 0.3 && std::fabs (switchedOn - reference) < 0.3,
+               fmt ("Below, loud bass and a quiet 1 kHz tone: %+.2f dB when dynamic from the start, %+.2f dB when switched on while running", reference, switchedOn));
+
+        // Above: nothing in the band's own region is over the threshold, so the gain must not move at all, not even for the first few ms.
+        EngineParams above = p;
+        above.bands[0].dynamic = true;
+        above.bands[0].dyn = { DynMode::above, -30.0, 20.0, -12.0, 5.0, 50.0 };
+        Engine e;
+        e.prepare (fs, 512);
+        run (e, p, slice (in, 0, oneSecond / 2), slice (in, 0, oneSecond / 2));
+        double deepest = 0.0;
+        for (int start = oneSecond / 2; start < oneSecond / 2 + 4800; start += 32)
+        {
+            run (e, above, slice (in, start, start + 32), slice (in, start, start + 32), 32);
+            deepest = std::min (deepest, (double) e.dynamicDb[0].load());
+        }
+        check (deepest > -0.05, fmt ("a band made dynamic while running listens to its own region from the first tick (gain moved by at most %.2f dB)", std::fabs (deepest)));
+    }
+
+    // Changing the sample rate: prepare() must leave nothing of the old rate behind (the region crossovers are set only when they change).
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 500.0, 6.0, 1.0);
+        const auto in = sine (200.0, 0.3, 96000);
+        Engine fresh;
+        fresh.prepare (96000.0, 512);
+        fresh.monitor.regions = 1u;
+        const auto want = run (fresh, p, in, in);
+
+        Engine moved;
+        moved.prepare (44100.0, 512);
+        moved.monitor.regions = 1u;
+        run (moved, p, in, in);
+        moved.prepare (96000.0, 512);
+        check (identical (run (moved, p, in, in), want), "a region solo after prepare() at a new sample rate is the same as on a fresh engine");
+    }
+
+    // A change that reaches the engine in the middle of a tick waits for the next tick, like everything else that varies.
+    {
+        const auto l = noise (41, 0.5, 20000), r = noise (42, 0.5, 20000);
+        EngineParams a;
+        setBand (a, 0, BandType::bell, 1000.0, 6.0, 1.0);
+        EngineParams b = a;
+        b.bands[0].place = Placement::mid;
+        check (identical (runChanged (a, b, 6416, l, r), runChanged (a, b, 6432, l, r)),
+               "a placement change arriving 16 samples into a tick takes effect at the tick, not before");
+
+        EngineParams c = a;
+        c.sat = true;
+        c.driveDb = 24.0;
+        c.style = SatStyle::tape;
+        EngineParams d = c;
+        d.style = SatStyle::tube;
+        check (identical (runChanged (c, d, 6416, l, r), runChanged (c, d, 6432, l, r)),
+               "... and so does a change of saturation style");
+    }
+
+    // Gain Match works both ways: a band that takes most of the level away is made up, but never by more than 12 dB.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::highCut, 200.0, 0.0, 1.0, Placement::stereo, 3);
+        p.match = true;
+        Engine e;
+        e.prepare (fs, 512);
+        const auto bed = noise (43, 0.2, oneSecond * 6);
+        run (e, p, bed, bed);
+        check (e.matchDb.load() > 11.8 && e.matchDb.load() < 12.1, fmt ("GAIN MATCH makes up at most 12 dB (%.2f dB)", e.matchDb.load()));
+    }
+
+    // What a dynamic band hears is the level of its own channel, as the peak of a sine, whatever it is placed on.
+    {
+        const int n = oneSecond;
+        const auto tone = sine (1000.0, std::pow (10.0, -20.0 / 20.0), n), silence = std::vector<float> ((size_t) n, 0.0f);
+        const struct { Placement place; const std::vector<float>* l; const std::vector<float>* r; const char* name; } cases[] =
+        {
+            { Placement::stereo, &tone, &tone, "Stereo" }, { Placement::left, &tone, &silence, "Left" }, { Placement::right, &silence, &tone, "Right" },
+            { Placement::mid, &tone, &tone, "Mid" }, { Placement::side, &tone, nullptr, "Side" },
+        };
+        std::string line;
+        bool ok = true;
+        for (const auto& c : cases)
+        {
+            EngineParams p;
+            setBand (p, 0, BandType::bell, 1000.0, 0.0, 1.0, c.place);
+            p.bands[0].dynamic = true;
+            p.bands[0].dyn.thresholdDb = -60.0;
+            Engine e;
+            e.prepare (fs, 512);
+            const auto negated = scaled (tone, -1.0);
+            run (e, p, *c.l, c.r != nullptr ? *c.r : negated);
+            const double level = e.detectedDb[0].load();
+            ok = ok && std::fabs (level + 20.0) < 0.3;
+            line += fmt (" %s %.2f;", c.name, level);
+        }
+        check (ok, "a dynamic band reads a -20 dB sine as -20 dB on every placement:" + line);
+    }
+}
 } // namespace
 
 int main()
@@ -714,5 +872,6 @@ int main()
     testDelta();
     testSolo();
     testRobust();
+    testLiveChanges();
     return finish ("IrisTests");
 }
