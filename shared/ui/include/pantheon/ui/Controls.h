@@ -16,8 +16,10 @@ using Apvts = juce::AudioProcessorValueTreeState;
 // A rotary knob bound to a parameter, with its name and a digital read-out of the value in a window of glass. A choice
 // parameter turns it into a detent switch (the tick ring shows the positions). `beside` puts the knob at the left with the name
 // and read-out to its right; `below` stacks name, knob and read-out for a tall cell. A knob can be bound later and re-bound to
-// another parameter (a panel whose knobs change meaning).
-class Knob : public juce::Component
+// another parameter (a panel whose knobs change meaning). Clicking the read-out opens it for typing: Enter applies the value
+// (in the parameter's own units, e.g. "250" or "250 Hz"; a detent switch takes the name of a position), Esc or a click
+// elsewhere leaves it as it was.
+class Knob : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     enum class Layout { beside, below };
@@ -30,6 +32,24 @@ public:
         slider.setMouseDragSensitivity (140);
         addAndMakeVisible (slider);
         slider.onValueChange = [this] { repaint(); };
+
+        entry.setMultiLine (false);
+        entry.setReturnKeyStartsNewLine (false);
+        entry.setSelectAllWhenFocused (true);
+        entry.setJustification (juce::Justification::centred);
+        entry.setFont (lcdFont (12.0f));
+        entry.setColour (juce::TextEditor::backgroundColourId, juce::Colours::black);
+        entry.setColour (juce::TextEditor::textColourId, colours::amber);
+        entry.setColour (juce::TextEditor::highlightColourId, colours::amber.withAlpha (0.35f));
+        entry.setColour (juce::TextEditor::highlightedTextColourId, colours::amber);
+        entry.setColour (juce::TextEditor::outlineColourId, colours::amber.withAlpha (0.6f));
+        entry.setColour (juce::TextEditor::focusedOutlineColourId, colours::amber);
+        entry.setColour (juce::CaretComponent::caretColourId, colours::amber);
+        entry.onReturnKey = [this] { finishTyping (true); };
+        entry.onEscapeKey = [this] { finishTyping (false); };
+        entry.onFocusLost = [this] { finishTyping (true); };
+        addChildComponent (entry);
+        setTooltip ("Click the number to type a value. Enter applies it, Esc cancels.");
     }
 
     Knob (Apvts& state, const juce::String& paramId, const juce::String& labelText, const juce::String& tooltip, Layout layoutToUse = Layout::beside)
@@ -46,7 +66,9 @@ public:
     // (Re-)attaches the knob to a parameter; any earlier binding ends.
     void bind (Apvts& state, const juce::String& paramId)
     {
+        finishTyping (false);
         attachment.reset();
+        choiceParam = dynamic_cast<juce::AudioParameterChoice*> (state.getParameter (paramId));
         attachment = std::make_unique<Apvts::SliderAttachment> (state, paramId, slider);
         if (auto* p = state.getParameter (paramId))
         {
@@ -55,7 +77,31 @@ public:
         }
     }
 
-    void unbind() { attachment.reset(); }
+    void unbind() { finishTyping (false); attachment.reset(); choiceParam = nullptr; }
+
+    // Opens the read-out for typing (what a click on it does).
+    void beginTyping()
+    {
+        if (attachment == nullptr || typing)
+            return;
+        typing = true;
+        entry.setBounds (readout);
+        entry.setText (slider.getTextFromValue (slider.getValue()), false);
+        entry.setVisible (true);
+        entry.grabKeyboardFocus();
+        entry.selectAll();
+    }
+
+    juce::MouseCursor getMouseCursor() override
+    {
+        return attachment != nullptr && readout.contains (getMouseXYRelative()) ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor;
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (readout.contains (e.getPosition()))
+            beginTyping();
+    }
 
     void resized() override
     {
@@ -73,6 +119,7 @@ public:
             readout = r.removeFromBottom (24).reduced (juce::jmax (0, (r.getWidth() - 84) / 2), 2);
             slider.setBounds (r.reduced (juce::jmax (0, (r.getWidth() - r.getHeight()) / 2), 2));
         }
+        entry.setBounds (readout);
     }
 
     void paint (juce::Graphics& g) override
@@ -87,8 +134,35 @@ public:
     }
 
 private:
+    // Closes the entry; with `apply`, sets the parameter from the text if it makes sense (anything else leaves the value alone).
+    void finishTyping (bool apply)
+    {
+        if (! typing)
+            return;
+        typing = false;
+        const auto text = entry.getText().trim();
+        entry.setVisible (false); // gives up the focus without ending in here again: `typing` is already false
+        if (apply && attachment != nullptr && text.isNotEmpty())
+        {
+            if (choiceParam != nullptr)
+            {
+                const int index = choiceParam->choices.indexOf (text, true);
+                if (index >= 0)
+                    slider.setValue (index, juce::sendNotificationSync);
+            }
+            else if (text.containsAnyOf ("0123456789")) // "abc" is not 0
+            {
+                slider.setValue (slider.getValueFromText (text), juce::sendNotificationSync);
+            }
+        }
+        repaint();
+    }
+
     Layout layout;
     juce::Slider slider;
+    juce::TextEditor entry;
+    bool typing = false;
+    juce::AudioParameterChoice* choiceParam = nullptr;
     juce::String caption;
     juce::Rectangle<int> captionArea, readout;
     std::unique_ptr<Apvts::SliderAttachment> attachment;

@@ -11,6 +11,7 @@
 #include "Check.h"
 #include "PluginProcessor.h"
 #include "UI/SpectrumView.h"
+#include <pantheon/ui/Controls.h>
 
 using namespace hep;
 using namespace test;
@@ -167,6 +168,47 @@ int main()
                    && ! isBandOn (p3.apvts, 4),
                fmt ("the bass engine becomes fill band 4: %.0f-%.0f Hz, amount %.1f dB, adapt %.0f %% (the old engine was open-loop)",
                     at (3, &BandIds::lo), at (3, &BandIds::hi), at (3, &BandIds::amount), at (3, &BandIds::adapt)));
+    }
+
+    std::printf ("\nTyping a value into a knob\n");
+    {
+        ui::Knob knob (proc.apvts, id::outGain, "Output", "tip", ui::Knob::Layout::below);
+        knob.setBounds (0, 0, 120, 140);
+        const auto entry = [&] () -> juce::TextEditor*
+        {
+            for (auto* child : knob.getChildren())
+                if (auto* te = dynamic_cast<juce::TextEditor*> (child))
+                    return te;
+            return nullptr;
+        };
+        const auto typeIn = [&] (const juce::String& text)
+        {
+            knob.mouseDown (mouse (knob, 60.0f, 60.0f, false).withNewPosition (juce::Point<float> (60.0f, 130.0f))); // on the read-out
+            auto* te = entry();
+            if (te == nullptr || ! te->isVisible())
+                return false;
+            te->setText (text, false);
+            te->onReturnKey();
+            return true;
+        };
+
+        const auto expectTyped = [&] (const juce::String& text, float expectedDb, const char* what)
+        {
+            const bool opened = typeIn (text);
+            const float now = value (proc, id::outGain);
+            check (opened && std::fabs (now - expectedDb) < 0.01f, fmt ("%s (%.2f dB)", what, (double) now));
+        };
+        expectTyped ("-7.5", -7.5f, "typing -7.5 sets the output gain");
+        expectTyped ("3 dB", 3.0f, "a value with its unit is accepted");
+        expectTyped ("99", 12.0f, "a value out of range is clamped");
+        typeIn ("abc");
+        check (std::fabs (value (proc, id::outGain) - 12.0f) < 0.01f, "text that is not a number leaves the value alone");
+        check (entry() != nullptr && ! entry()->isVisible(), "the entry closes after Enter");
+
+        knob.mouseDown (mouse (knob, 60.0f, 60.0f, false).withNewPosition (juce::Point<float> (60.0f, 130.0f)));
+        entry()->setText ("-1", false);
+        entry()->onEscapeKey();
+        check (std::fabs (value (proc, id::outGain) - 12.0f) < 0.01f && ! entry()->isVisible(), "Esc cancels the entry");
     }
 
     return finish ("UI CHECK");

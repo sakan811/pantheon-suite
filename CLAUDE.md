@@ -27,7 +27,7 @@ plugins/<name>/  one self-contained plugin each: its own CMakeLists.txt, core/, 
   words, its verdict or mode colours). A plugin's own namespaces must not be called `ui`, which is the kit's.
 - It owns every pixel of the interface: [Hardware.h](shared/ui/include/pantheon/ui/Hardware.h) (`colours::`, fonts, `ui::hw`
   panels, glass, lamps, buttons, knobs, the header plate and the nameplate), [HardwareLookAndFeel.h](shared/ui/include/pantheon/ui/HardwareLookAndFeel.h),
-  [Controls.h](shared/ui/include/pantheon/ui/Controls.h) (the parameter-bound `Knob`, `Choice` and `Toggle`; a choice takes its items from the parameter, so a plugin never lists them twice) and
+  [Controls.h](shared/ui/include/pantheon/ui/Controls.h) (the parameter-bound `Knob`, `Choice` and `Toggle`; a choice takes its items from the parameter, so a plugin never lists them twice; clicking a `Knob`'s read-out opens it for typing a value) and
   [MeterCell.h](shared/ui/include/pantheon/ui/MeterCell.h). Plugins call them; they do not draw their own panels, lamps or
   buttons. The namespaces (`colours`, `ui`, `ui::hw`) are kept short on purpose.
 - Everything is drawn from code: no image or font files, nothing random at run time.
