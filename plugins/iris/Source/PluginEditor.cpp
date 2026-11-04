@@ -142,14 +142,15 @@ IrisEditor::~IrisEditor()
 // What changes the band panel: which band, whether it exists, its type and whether it is dynamic.
 int IrisEditor::bandSignature() const
 {
-    int signature = view.getSelectedBand();
+    // Unsigned: eight bands of 14 states each do not fit an int, and it is the wrap-around that is wanted here.
+    unsigned signature = (unsigned) view.getSelectedBand();
     for (int i = 0; i < maxBands; ++i)
     {
         const bool on = isBandOn (proc.apvts, i);
-        signature = signature * 7 + (on ? 1 + (int) bandType (proc.apvts, i) : 0);
-        signature = signature * 2 + (on && proc.apvts.getRawParameterValue (bandIds (i).dyn)->load() > 0.5f ? 1 : 0);
+        signature = signature * 7u + (on ? 1u + (unsigned) bandType (proc.apvts, i) : 0u);
+        signature = signature * 2u + (on && proc.apvts.getRawParameterValue (bandIds (i).dyn)->load() > 0.5f ? 1u : 0u);
     }
-    return signature;
+    return (int) (signature & 0x7fffffffu);
 }
 
 void IrisEditor::refreshBandPanel()

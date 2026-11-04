@@ -252,6 +252,8 @@ public:
         if (band < 0)
             return;
         setSelectedBand (band);
+        if (wheel.deltaY == 0.0f) // a sideways scroll is not a step up or down
+            return;
 
         const auto b = bandParamsOf (apvts, band);
         const auto& ids = bandIds (band);
@@ -823,6 +825,11 @@ private:
 
     void timerCallback() override
     {
+        // A band that is removed (or a preset that frees its slot) takes its solo with it; otherwise the pill would say SOLO while the
+        // engine plays everything, and the solo would come back the moment a band was put in that slot again.
+        if (const int soloed = engine.monitor.soloBand.load(); soloed >= 0 && ! isBandOn (apvts, soloed))
+            engine.monitor.soloBand = -1;
+
         for (auto* a : { &inTrace, &outTrace })
             a->setSampleRate (sampleRate);
 
