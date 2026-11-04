@@ -487,6 +487,76 @@ int main()
         check (worst > 0.97, "voice + inharmonic tone: worst fraction of frames within 15 cents", worst);
     }
 
+    // ------------------------------------------------------------------ 7b3. octave guard
+    std::printf ("7b3. A 2nd harmonic far stronger than the fundamental still reads as the fundamental (octave guard)\n");
+    {
+        std::mt19937 rng (3);
+        std::normal_distribution<double> nd (0.0, 1.0);
+        double worst = 1.0;
+        for (double f0 : { 90.0, 140.0, 220.0, 330.0, 500.0 })
+            for (double h1 : { 0.08, 0.15, 0.3 }) // the fundamental relative to the 2nd harmonic: -22 .. -10 dB
+            {
+                std::vector<float> in ((size_t) (1.5 * fs));
+                double ph = 0.0, jit = 1.0;
+                for (auto& v : in)
+                {
+                    ph += f0 * jit / fs;
+                    if (ph >= 1.0)
+                    {
+                        ph -= 1.0;
+                        jit = 1.0 + 0.004 * nd (rng);
+                    }
+                    const double w = 2.0 * kPi * ph;
+                    v = (float) (0.3 * (h1 * std::sin (w) + std::sin (2.0 * w) + 0.3 * std::sin (3.0 * w) + 0.1 * std::sin (4.0 * w)));
+                }
+                auto ps = measurePitch (in, fs, 60, 1300);
+                int ok = 0, n = 0;
+                for (auto& p : ps)
+                {
+                    if (p.t < 0.4)
+                        continue;
+                    ++n;
+                    if (std::fabs ((p.midi - hzToMidi (f0)) * 100.0) < 15.0)
+                        ++ok;
+                }
+                worst = std::min (worst, n ? (double) ok / n : 0.0);
+            }
+        check (worst > 0.97, "strong 2nd harmonic: worst fraction of frames at the fundamental", worst);
+    }
+
+    // ------------------------------------------------------------------ 7b4. voice ranges follow the tuning
+    std::printf ("7b4. Each voice range tracks its top and bottom notes (+-40 cent vibrato) at A4 = 415, 440 and 466 Hz\n");
+    {
+        struct Edge { int range, midi; };
+        // Top notes G4 (baritone), F5 (alto), C6 (soprano, also for Auto); bottom notes E2 (bass), C3 (tenor), C4 (soprano).
+        const Edge edges[] = { { 0, 84 }, { 0, 40 }, { 1, 67 }, { 1, 40 }, { 2, 77 }, { 2, 48 }, { 3, 84 }, { 3, 60 } };
+        int bad = 0;
+        double worst = 1.0;
+        for (const double a4 : { 415.0, 440.0, 466.0 })
+            for (const auto& e : edges)
+            {
+                harmonia::EngineParams ep;
+                ep.setVoiceRange (e.range, (float) a4);
+                const double base = a4 * std::pow (2.0, (e.midi - 69) / 12.0);
+                auto f0 = [&] (double t) { return base * std::pow (2.0, 0.40 / 12.0 * std::sin (2.0 * kPi * 5.5 * t)); };
+                auto in = makeVoice (fs, 1.5, f0, kAh, 11u + (unsigned) e.midi, 0.004);
+                auto ps = measurePitch (in, fs, ep.minHz, ep.maxHz);
+                int ok = 0;
+                for (auto& p : ps)
+                    if (p.t >= 0.4 && std::fabs ((p.midi - hzToMidi (f0 (p.t))) * 100.0) < 15.0)
+                        ++ok;
+                const double fraction = ok / (1.1 / 0.005); // every 5 ms hop after the first 0.4 s should be there
+                worst = std::min (worst, fraction);
+                if (fraction < 0.97)
+                {
+                    ++bad;
+                    std::printf ("    %s, MIDI %d at A4 = %.0f Hz: %.0f %% tracked\n", harmonia::kVoiceRanges[e.range].name, e.midi, a4, 100.0 * fraction);
+                }
+            }
+        check (bad == 0, "range edges not tracked", bad);
+        check (worst > 0.97, "range edges: worst fraction of frames tracked", worst);
+    }
+
     // ------------------------------------------------------------------ 7c. sample rates
     std::printf ("7c. Other sample rates and low voices: 35 cents sharp, hard tune\n");
     {

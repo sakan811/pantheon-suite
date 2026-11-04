@@ -41,7 +41,7 @@ line and the key it is meant to be in. (CMake targets, namespaces and plugin cod
 | **Note Hold** | How long the voice has to stay near a new note before Harmonia moves to it (default 70 ms). Stops the correction flickering to a wrong neighbouring note; a real note change is delayed by about that long. 0 = switch at once. Automatable. |
 | **Formant** | Shifts vocal character without changing pitch. Leave at 0 to keep your own voice. |
 | **Tuning (A4)** | Reference pitch, for songs not tuned to 440 Hz. |
-| **Voice** | Bass/baritone, tenor/alto, soprano or Auto. Narrows the pitch search: faster, never jumps an octave. |
+| **Voice** | Bass/baritone, tenor/alto, soprano or Auto. Narrows the pitch search: faster, never jumps an octave. Each range reaches a whole tone past the usual top note of its voices (G4, F5, C6; Auto covers them all), and moves with **Tuning**. |
 | **Bypass** | Original vocal, delayed by the latency so it stays aligned. |
 | **Pitch graph** | Your pitch (amber) and the corrected pitch (teal) over the last few seconds against the allowed notes. |
 

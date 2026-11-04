@@ -20,6 +20,9 @@
 namespace harmonia
 {
 // Pitch search range per voice type. A narrower range tracks faster and cannot jump octaves.
+// The limits are for a song tuned to A4 = 440 Hz and move with the Tuning knob (a G4 sung at A4 = 466 Hz
+// is 415 Hz). Each top sits a whole tone above the usual top note of the voices it names (G4, F5, C6),
+// so that note still tracks with a wide vibrato on it.
 struct VoiceRange
 {
     const char* name;
@@ -29,9 +32,9 @@ struct VoiceRange
 inline constexpr float kLowestHz = 75.0f; // the detector is built to reach down to this pitch
 
 inline constexpr VoiceRange kVoiceRanges[] = {
-    { "Auto",                  kLowestHz, 1000.0f },
-    { "Low (bass / baritone)", kLowestHz,  400.0f },
-    { "Mid (tenor / alto)",    100.0f,     700.0f },
+    { "Auto",                  kLowestHz, 1200.0f },
+    { "Low (bass / baritone)", kLowestHz,  440.0f },
+    { "Mid (tenor / alto)",    100.0f,     780.0f },
     { "High (soprano)",        180.0f,    1200.0f },
 };
 inline constexpr int kNumVoiceRanges = (int) (sizeof (kVoiceRanges) / sizeof (kVoiceRanges[0]));
@@ -45,11 +48,13 @@ struct EngineParams
     float minHz = kVoiceRanges[0].minHz;
     float maxHz = kVoiceRanges[0].maxHz;
 
-    void setVoiceRange (int index)
+    // Sets the search range from a voice type, for a song tuned to `refA4`.
+    void setVoiceRange (int index, float refA4 = 440.0f)
     {
         const auto& r = kVoiceRanges[std::clamp (index, 0, kNumVoiceRanges - 1)];
-        minHz = r.minHz;
-        maxHz = r.maxHz;
+        const float scale = refA4 / 440.0f;
+        minHz = std::max (kLowestHz, r.minHz * scale);
+        maxHz = r.maxHz * scale;
     }
 };
 
