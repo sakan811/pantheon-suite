@@ -283,12 +283,15 @@ void HephaestusEditor::resized()
     nameplate = header.removeFromLeft (250);
     header.removeFromLeft (24);
     meterArea = header.removeFromRight (120).reduced (0, 10);
-    header.removeFromRight (16);
+    header.removeFromRight (8);
     {
+        // The clear button sits right next to the meters it clears; the row is tight at the fixed editor width.
         auto h = header.withTrimmedTop (28).withHeight (28);
-        for (auto [component, width, gap] : { std::tuple<juce::Component*, int, int> { &presetBox, 170, 12 },
-                                              { &stereoBox, 120, 12 }, { &osBox, 76, 16 },
-                                              { &deltaButton, 64, 8 }, { &matchButton, 96, 8 }, { &clearMetersButton, 92, 0 } })
+        clearMetersButton.setBounds (h.removeFromRight (64));
+        h.removeFromRight (10);
+        for (auto [component, width, gap] : { std::tuple<juce::Component*, int, int> { &presetBox, 158, 10 },
+                                              { &stereoBox, 112, 10 }, { &osBox, 72, 12 },
+                                              { &deltaButton, 64, 8 }, { &matchButton, 96, 0 } })
         {
             component->setBounds (h.removeFromLeft (width));
             h.removeFromLeft (gap);
