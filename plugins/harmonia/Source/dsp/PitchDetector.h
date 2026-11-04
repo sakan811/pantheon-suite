@@ -157,7 +157,12 @@ public:
         // Octave guard: a strong 2nd/3rd harmonic (e.g. sitting on a formant) can make the
         // half or third period look periodic. If a whole multiple of the first dip is
         // clearly deeper, the true period is that multiple.
-        if (chosen.v > 0.035f)
+        // While the first dip continues the voice being followed, it takes a dip that is no longer
+        // periodic by YIN's own measure (0.1) to move away from it. A first formant near f0 / 2 (an
+        // "ee" sung around D5) rings at twice the period after every jittered cycle, which deepens the
+        // even multiples without the pitch heard being any lower; a real half-period error dips to about 0.2.
+        const bool following = prevPeriod > 0.0f && std::fabs (std::log2 ((float) (chosen.tau * decim) / prevPeriod)) < 0.06f;
+        if (chosen.v > (following ? 0.1f : 0.035f))
         {
             for (int i = 1; i < nc; ++i)
             {

@@ -147,7 +147,7 @@ EngineParams HarmoniaProcessor::readParams() const
     p.formantSemitones = pFormant->load();
     p.mix = pBypass->load() >= 0.5f ? 0.0f : 1.0f;
     p.autoKey = pAutoKey->load() >= 0.5f;
-    p.setVoiceRange ((int) pRange->load());
+    p.setVoiceRange ((int) pRange->load(), p.corrector.refA4);
     return p;
 }
 
