@@ -209,6 +209,17 @@ int main()
         entry()->setText ("-1", false);
         entry()->onEscapeKey();
         check (std::fabs (value (proc, id::outGain) - 12.0f) < 0.01f && ! entry()->isVisible(), "Esc cancels the entry");
+
+        // A word the parameter itself shows ("Off") is a value too; the knob is re-bound, as the band panel does.
+        const auto rebuild = bandIds (0).rebuild;
+        knob.bind (proc.apvts, rebuild);
+        typeIn ("0");
+        const float before = value (proc, rebuild);
+        typeIn ("off");
+        check (std::fabs (before) < 0.01f && value (proc, rebuild) <= offDb + 0.05f,
+               fmt ("typing \"off\" turns Rebuild off (%.1f dB, then %.1f dB)", (double) before, (double) value (proc, rebuild)));
+        typeIn ("loud");
+        check (value (proc, rebuild) <= offDb + 0.05f, "a word the parameter does not show is ignored");
     }
 
     return finish ("UI CHECK");
