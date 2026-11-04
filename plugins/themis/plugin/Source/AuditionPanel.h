@@ -64,7 +64,9 @@ public:
         if (active)
         {
             ui::hw::drawLamp (g, { static_cast<float> (alertBounds.getX()) + 3.0f, static_cast<float> (alertBounds.getCentreY()) }, 3.0f, colours::bad);
-            ui::hw::drawLabel (g, "OUTPUT ALTERED", alertBounds.withTrimmedLeft (11), juce::Justification::centredLeft, colours::bad, 9.0f);
+            const auto textArea = alertBounds.withTrimmedLeft (11);
+            const bool fits = juce::GlyphArrangement::getStringWidth (ui::labelFont (9.0f), "OUTPUT ALTERED") <= static_cast<float> (textArea.getWidth());
+            ui::hw::drawLabel (g, fits ? "OUTPUT ALTERED" : "ALTERED", textArea, juce::Justification::centredLeft, colours::bad, 9.0f);
         }
 
         for (const auto& group : groups)
@@ -84,7 +86,7 @@ public:
         auto r = getLocalBounds().reduced (10, 6);
         titleBounds = r.removeFromTop (kTitleHeight);
         clear.setBounds (titleBounds.removeFromRight (46).reduced (0, 1));
-        alertBounds = titleBounds.withTrimmedLeft (68);
+        alertBounds = titleBounds.withTrimmedLeft (juce::roundToInt (juce::GlyphArrangement::getStringWidth (ui::labelFont(), "AUDITION")) + 12);
 
         // Fit the three groups (a label row each, then one row per source) into what is left.
         const int labelRows = 3, sourceRows = themis::kNumSources;

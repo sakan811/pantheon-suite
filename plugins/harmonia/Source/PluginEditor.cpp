@@ -64,6 +64,7 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
     statusLabel.setJustificationType (juce::Justification::topLeft);
     statusLabel.setColour (juce::Label::textColourId, colours::dim);
     statusLabel.setFont (ui::font (12.0f));
+    statusLabel.setMinimumHorizontalScale (1.0f); // wrap onto the second line rather than squash the letters
     content.addAndMakeVisible (statusLabel);
 
     keyboard.onToggle = [this] (int pc) { toggleNote (pc); };
