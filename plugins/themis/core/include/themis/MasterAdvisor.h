@@ -34,7 +34,7 @@ inline constexpr double kMinSeconds = 20.0; // less audio than this and the long
 
 // Programme loudness against the chosen delivery target, in LU (= dB).
 inline constexpr float kLoudnessWarnLu = 2.0f, kLoudnessBadLu = 4.0f;
-inline constexpr float kStreamingLufs = -14.0f; // what the big streaming services normalise to (they only turn louder masters down)
+inline constexpr float kStreamingLufs = -14.0f; // what Spotify, YouTube and Tidal normalise to: a louder master is turned down (Spotify also lifts a quieter one, but only as far as its true peak allows)
 
 } // namespace master
 
