@@ -17,6 +17,8 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/Juce.cmake) # JUCE, one version 
 
 # The interface kit shared by the plugins of this repository (shared/ui).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/ui ${CMAKE_BINARY_DIR}/shared/ui)
+# The DSP shared by the plugins (shared/dsp): biquads, the analyzer taps and the FFT analyzer.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/dsp ${CMAKE_BINARY_DIR}/shared/dsp)
 
 # ---------------------------------------------------------------------------------------
 # Plugin
@@ -49,6 +51,7 @@ target_compile_definitions(Hephaestus PUBLIC ${PANTHEON_JUCE_DEFINITIONS})
 target_link_libraries(Hephaestus
     PRIVATE
         pantheon_ui
+        pantheon_dsp
         juce::juce_audio_utils
         juce::juce_dsp
     PUBLIC
@@ -64,6 +67,7 @@ target_sources(HephaestusTests PRIVATE Tests/Tests.cpp)
 target_include_directories(HephaestusTests PRIVATE Source Tests)
 target_link_libraries(HephaestusTests
     PRIVATE
+        pantheon_dsp
         juce::juce_dsp
         juce::juce_audio_basics
     PUBLIC
@@ -102,6 +106,7 @@ target_compile_definitions(HephaestusSnapshot PRIVATE JucePlugin_Name="${HEPHAES
 target_link_libraries(HephaestusSnapshot
     PRIVATE
         pantheon_ui
+        pantheon_dsp
         juce::juce_audio_utils
         juce::juce_dsp
     PUBLIC
@@ -119,6 +124,7 @@ target_compile_definitions(HephaestusUiCheck PRIVATE JucePlugin_Name="${HEPHAEST
 target_link_libraries(HephaestusUiCheck
     PRIVATE
         pantheon_ui
+        pantheon_dsp
         juce::juce_audio_utils
         juce::juce_dsp
     PUBLIC

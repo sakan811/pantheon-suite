@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "AnalyzerTap.h"
+#include <pantheon/dsp/AnalyzerTap.h>
 #include "FundamentalEngine.h"
 #include "Saturator.h"
 #include <atomic>
@@ -129,7 +129,7 @@ public:
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     void clearMeters() noexcept { inPeak.store (0.0f, std::memory_order_relaxed); outPeak.store (0.0f, std::memory_order_relaxed); }
     std::atomic<float> bandActivity[maxBands]; // fill bands: how much of its Amount the adaptive fill is adding now (0..1)
-    StereoTap tapIn, tapOut; // pre (delay-aligned dry) and post signal, for the spectrum display
+    pdsp::StereoTap tapIn, tapOut; // pre (delay-aligned dry) and post signal, for the spectrum display
 
 private:
     using Ptrs = std::array<float*, maxChannels>; // a mono buffer repeats channel 0, so no entry is null

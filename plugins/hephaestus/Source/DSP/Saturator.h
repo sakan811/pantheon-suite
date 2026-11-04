@@ -4,7 +4,7 @@
 #pragma once
 
 #include "Band.h"
-#include "Biquad.h"
+#include <pantheon/dsp/Biquad.h>
 #include "Waveshaper.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
@@ -153,7 +153,7 @@ public:
 private:
     struct BandState
     {
-        std::array<Bandpass, maxChannels> filter;
+        std::array<pdsp::Bandpass, maxChannels> filter;
         std::array<AdaaState, maxChannels> adaa;
         double cutLo = -1.0, cutHi = -1.0, drive = 1.0;
         float gain = 0.0f; // fade level of the band's contribution

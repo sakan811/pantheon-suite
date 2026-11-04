@@ -6,7 +6,7 @@
 
 #include "Check.h"
 #include "DSP/Engine.h"
-#include "DSP/SpectrumAnalyzer.h"
+#include <pantheon/dsp/SpectrumAnalyzer.h>
 #include "TestSignals.h"
 #include <chrono>
 #include <limits>
@@ -657,13 +657,13 @@ void testMetersRecover()
 void testSpectrumAnalyzer()
 {
     std::printf ("\n[10] Spectrum analyzer calibration (8192-point Hann, dBFS, tilt around 1 kHz)\n");
-    const int N = SpectrumAnalyzer::fftSize;
+    const int N = pdsp::SpectrumAnalyzer::fftSize;
     const double binHz = fs / N;
 
     // Pushes a sine on the given channels, lets the analyzer consume it, and returns the analyzer.
-    const auto measure = [&] (double f, float tilt, bool bothChannels, SpectrumAnalyzer& an)
+    const auto measure = [&] (double f, float tilt, bool bothChannels, pdsp::SpectrumAnalyzer& an)
     {
-        static StereoTap tap;
+        static pdsp::StereoTap tap;
         const auto x = sines ({ { f, 0.5 } }, 3 * N); // 0.5 amplitude = -6.02 dBFS
         const std::vector<float> silence (x.size(), 0.0f);
         const float* ch[2] = { x.data(), bothChannels ? x.data() : silence.data() };
@@ -674,7 +674,7 @@ void testSpectrumAnalyzer()
     };
 
     const double f1k = 171 * binHz, f4k = 683 * binHz; // bin-centred
-    SpectrumAnalyzer flat, tilted, offBin, oneSided;
+    pdsp::SpectrumAnalyzer flat, tilted, offBin, oneSided;
     measure (f1k, 0.0f, true, flat);
     measure (f4k, 4.5f, true, tilted);
     measure (f1k + 0.5 * binHz, 0.0f, true, offBin);
@@ -690,7 +690,7 @@ void testSpectrumAnalyzer()
            fmt ("worst-case off-bin sine (Hann scalloping) reads %.2f dB, within 1.5 dB", offBin.peakInRange (900, 1100)));
     check (std::fabs (oneSided.peakInRange (900, 1100) - (sixDb - 3.01)) < 0.2,
            fmt ("left-only signal reads %.2f dB: L/R power is averaged, not summed", oneSided.peakInRange (900, 1100)));
-    check (std::fabs (tilted.getTilt() - SpectrumAnalyzer::defaultTilt) < 1.0e-6f && SpectrumAnalyzer::defaultTilt == 4.5f,
+    check (std::fabs (tilted.getTilt() - pdsp::SpectrumAnalyzer::defaultTilt) < 1.0e-6f && pdsp::SpectrumAnalyzer::defaultTilt == 4.5f,
            "default tilt is 4.5 dB/oct, as in common EQ analyzers");
 }
 
@@ -720,7 +720,7 @@ Power powerBetween (const std::vector<float>& x, double lo, double hi)
 // Noise confined to [lo, hi] by the same kind of filter the bands use.
 std::vector<float> bandNoise (int n, double lo, double hi, unsigned seed)
 {
-    Bandpass bp;
+    pdsp::Bandpass bp;
     bp.setup (fs, 4, lo, 4, hi);
     auto x = noise (n, seed, 1.0f);
     double peak = 1.0e-9;
