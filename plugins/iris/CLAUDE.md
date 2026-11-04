@@ -62,6 +62,11 @@ crosses a tick boundary (`process` cuts the host's block there). That is what ma
 Anything new that varies over time belongs in `control()`, interpolated per sample from `...Prev` to the new value, and nowhere
 else. The loop in `process` steps by the samples it just did (`start += n`), not by `tick`: stepping by `tick` skips samples when a
 block begins in the middle of one, and one-sample blocks hide it.
+Within a tick, read what a band is doing from its `BandState` (`s.place`, `satStyle`), never from `params`: the host's new value may
+arrive 16 samples into a tick, and the filters were set up for the old one until the next `control()` (test [10]). Anything cached
+from a parameter (`appliedGain`, `appliedOrder`, the detector's filter) must be refreshed when that parameter changes, not only
+when the gain or frequency does: a cut's slope and a band's DYNAMIC switch are such parameters. `reset()` forgets every cache,
+including `appliedCrossover`, because `prepare()` may change the sample rate.
 
 **A bell or shelf at 0 dB is not run.** It is the identity (its biquad's memory is zero), so it costs nothing until its gain, or its
 dynamics, moves it (`BandState::active`). A cut is always run. A band that is off and has faded out is not processed either, and starts

@@ -199,6 +199,9 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
   dynamics and a region solo stays finite at 22.05, 44.1, 48, 96 and 192 kHz; a NaN and an inf in the input do not leave the output broken;
   a 12 dB jump, an off/on and a frequency jump never step the output by more than 0.0104 (a click would be over 0.05). Eight dynamic
   bands in Sat mode on every placement cost about 1.1 % of one core (10 s of stereo audio in 0.11 s).
+- **Changes while playing.** A cut's slope, a band's DYNAMIC switch, the placement, the saturation style and the sample rate can all be
+  changed on a running engine and it ends up where a fresh start would (a change that reaches it mid-tick waits for the next tick);
+  a dynamic band reads a -20 dB sine as -20.0 dB on every placement; Gain Match makes up at most 12 dB.
 - **As a plugin.** `IrisHostCheck` loads the built VST3 and fuzzes it at 5 sample rates x 5 block sizes (1 to 4096), mono and stereo
   layouts, state and preset round trips and the editor; `IrisUiCheck` drives the display with mouse events; Apple's `auval` passes the AU.
   pluginval was not run, and it has not been tried in a DAW.
