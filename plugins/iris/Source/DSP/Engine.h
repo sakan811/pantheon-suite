@@ -89,6 +89,7 @@ public:
             for (auto& s : f)
                 s.reset();
         phase = 0;
+        appliedCrossover = { 0.0, 0.0, 0.0, 0.0 }; // the splitter's coefficients belong to the old sample rate
         satAmount = satPrev = 0.0;
         soloAmount = regionAmount = 0.0;
         shownIndex = -1;
@@ -146,6 +147,7 @@ private:
         double logFreq = 0.0, gainDb = 0.0, logQ = 0.0;   // where the glide has got to
         double dynDb = 0.0;
         double appliedGain = 1.0e9, appliedFreq = 0.0, appliedQ = 0.0;
+        int appliedOrder = -1;                            // a cut's slope: a change of it is a new filter too
         double mix = 0.0, mixPrev = 0.0, mixStep = 0.0;   // 0..1 fade when the band is switched on or off
         bool dynamic = false;
     };
@@ -160,6 +162,16 @@ private:
         satAmount += satK * (wantSat - satAmount);
         if (std::fabs (wantSat - satAmount) < 1.0e-4) satAmount = wantSat;
         satDrive = std::pow (10.0, std::clamp (p.driveDb, 0.0, 36.0) / 20.0);
+
+        // The style, like everything else, changes at a tick. The shaper's memory (its last input and antiderivative) belongs to
+        // the old curve, so it starts again.
+        if (p.style != satStyle)
+        {
+            satStyle = p.style;
+            for (auto& b : bands)
+                for (auto& sh : b.shaper)
+                    sh.reset (satStyle);
+        }
 
         for (int b = 0; b < maxBands; ++b)
             controlBand (b, bands[(size_t) b], p.bands[(size_t) b]);
@@ -229,7 +241,9 @@ private:
         s.mix = s.mixPrev = s.mixStep = 0.0;
         for (auto& f : s.filter) f.reset();
         for (auto& d : s.det) d.reset();
-        for (auto& sh : s.shaper) sh.reset (params.style);
+        for (auto& sh : s.shaper) sh.reset (satStyle);
+        s.dynamic = false;
+        s.appliedOrder = -1;
     }
 
     void controlBand (int index, BandState& s, const BandParams& t)
@@ -271,7 +285,15 @@ private:
         s.gainDb += glideK * (t.gainDb - s.gainDb);
         s.logQ += glideK * (std::log (std::clamp (t.q, 0.1, 18.0)) - s.logQ);
 
+        const bool wasDynamic = s.dynamic;
         s.dynamic = t.isDynamic();
+        if (s.dynamic && ! wasDynamic)
+        {
+            // The detector has not been fed (or configured) while the band was not dynamic: it starts from silence, on the band's
+            // current frequency and width.
+            for (auto& d : s.det) d.reset();
+            s.appliedGain = 1.0e9;
+        }
         if (s.dynamic)
         {
             const double level = std::max (s.det[0].level(), s.det[1].level());
@@ -292,9 +314,10 @@ private:
 
         const double f = std::exp (s.logFreq), q = std::exp (s.logQ);
         const double g = hasGain (t.type) ? std::clamp (s.gainDb + s.dynDb, -36.0, 36.0) : 0.0;
-        if (std::fabs (g - s.appliedGain) > 1.0e-5 || std::fabs (f - s.appliedFreq) > f * 1.0e-6 || std::fabs (q - s.appliedQ) > q * 1.0e-6)
+        const int order = orderForSlope (t.slope);
+        if (std::fabs (g - s.appliedGain) > 1.0e-5 || std::fabs (f - s.appliedFreq) > f * 1.0e-6 || std::fabs (q - s.appliedQ) > q * 1.0e-6
+            || order != s.appliedOrder)
         {
-            const int order = orderForSlope (t.slope);
             for (auto& filter : s.filter)
                 filter.configure (t.type, fs, f, q, g, order);
             if (s.dynamic)
@@ -303,6 +326,7 @@ private:
             s.appliedGain = g;
             s.appliedFreq = f;
             s.appliedQ = q;
+            s.appliedOrder = order;
         }
 
         // A bell or shelf at 0 dB is the identity, so it costs nothing until it has something to do.
@@ -333,7 +357,7 @@ private:
             auto& s = bands[(size_t) b];
             const bool capture = b == shownIndex && curveShown;
             if (s.running && (s.active || s.dynamic))
-                runBand (s, params.bands[(size_t) b], L, R, n, capture ? soloL : nullptr, capture ? soloR : nullptr);
+                runBand (s, L, R, n, capture ? soloL : nullptr, capture ? soloR : nullptr);
         }
 
         const bool bandSolo = soloIndex >= 0;
@@ -406,10 +430,10 @@ private:
     }
 
     // One band over a segment. It adds its difference to L and R, so what it does not touch stays exactly as it was.
-    void runBand (BandState& s, const BandParams& t, double* L, double* R, int n, double* soloL, double* soloR)
+    void runBand (BandState& s, double* L, double* R, int n, double* soloL, double* soloR)
     {
         const bool sat = satAmount > 0.0 && s.saturating;
-        const SatStyle style = params.style;
+        const SatStyle style = satStyle;
         const double drive = satDrive;
         const bool dyn = s.dynamic;
         const int base = phase;
@@ -424,7 +448,7 @@ private:
             const double m = s.mixPrev + s.mixStep * (double) (base + i + 1);
             const double satMix = satPrev + (satAmount - satPrev) * (double) (base + i + 1) / tick;
             double dL = 0.0, dR = 0.0;
-            switch (t.place)
+            switch (s.place) // the placement the filters were set up for, which changes at a tick (not `t.place`, which may be newer)
             {
                 case Placement::stereo:
                 {
@@ -535,6 +559,7 @@ private:
     double glideK = 0.1, mixK = 0.1, satK = 0.1, outK = 0.1, matchEnergyK = 0.001, matchGainK = 0.01, soloStep = 0.002;
 
     double satAmount = 0.0, satPrev = 0.0, satDrive = 4.0;
+    SatStyle satStyle = SatStyle::tape;
     double outGain = 1.0, outPrev = 1.0;
     bool outInitialised = false;
 
