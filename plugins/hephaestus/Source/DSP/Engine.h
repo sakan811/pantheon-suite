@@ -7,6 +7,7 @@
 #include "FundamentalEngine.h"
 #include "Saturator.h"
 #include <atomic>
+#include <cmath>
 #include <vector>
 
 namespace hep
@@ -126,6 +127,7 @@ public:
     }
 
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
+    void clearMeters() noexcept { inPeak.store (0.0f, std::memory_order_relaxed); outPeak.store (0.0f, std::memory_order_relaxed); }
     std::atomic<float> bandActivity[maxBands]; // fill bands: how much of its Amount the adaptive fill is adding now (0..1)
     StereoTap tapIn, tapOut; // pre (delay-aligned dry) and post signal, for the spectrum display
 
@@ -166,7 +168,9 @@ private:
             {
                 g += step;
                 ch[(size_t) c][i] *= g;
-                peak = std::max (peak, std::fabs (ch[(size_t) c][i]));
+                const float a = std::fabs (ch[(size_t) c][i]);
+                if (std::isfinite (a)) // an inf or NaN sample must not pin the meter (inf decays to inf)
+                    peak = std::max (peak, a);
             }
         }
         return peak;
@@ -338,7 +342,8 @@ private:
     void smoothPeak (std::atomic<float>& meter, float peak, int n) noexcept
     {
         const float decay = std::exp (-(float) n / (0.3f * (float) fs)); // ~300 ms fall-back
-        meter.store (std::max (meter.load (std::memory_order_relaxed) * decay, peak), std::memory_order_relaxed);
+        const float held = meter.load (std::memory_order_relaxed);
+        meter.store (std::max (std::isfinite (held) ? held * decay : 0.0f, peak), std::memory_order_relaxed);
     }
 
     double fs = 48000.0;

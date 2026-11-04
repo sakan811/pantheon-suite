@@ -132,7 +132,15 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
     presetBox.setTooltip ("Presets. Global settings (gain, mix, stereo mode, oversampling) are kept.");
     addAndMakeVisible (presetBox);
 
-    for (auto* c : std::initializer_list<juce::Component*> { &stereoBox, &osBox, &curveBox, &deltaButton, &matchButton })
+    clearMetersButton.setTooltip ("Clear the IN and OUT level meters. Use it if a reading looks stuck.");
+    clearMetersButton.onClick = [this]
+    {
+        proc.engine.clearMeters();
+        inLevel = outLevel = 0.0f;
+        repaint (meterArea.expanded (24, 4));
+    };
+
+    for (auto* c : std::initializer_list<juce::Component*> { &stereoBox, &osBox, &curveBox, &deltaButton, &matchButton, &clearMetersButton })
         addAndMakeVisible (c);
 
     // The first band that exists is the one to show.
@@ -280,7 +288,7 @@ void HephaestusEditor::resized()
         auto h = header.withTrimmedTop (28).withHeight (28);
         for (auto [component, width, gap] : { std::tuple<juce::Component*, int, int> { &presetBox, 170, 12 },
                                               { &stereoBox, 120, 12 }, { &osBox, 76, 16 },
-                                              { &deltaButton, 64, 8 }, { &matchButton, 96, 0 } })
+                                              { &deltaButton, 64, 8 }, { &matchButton, 96, 8 }, { &clearMetersButton, 92, 0 } })
         {
             component->setBounds (h.removeFromLeft (width));
             h.removeFromLeft (gap);

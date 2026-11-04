@@ -9,6 +9,7 @@
 #include "DSP/SpectrumAnalyzer.h"
 #include "TestSignals.h"
 #include <chrono>
+#include <limits>
 #include <random>
 
 using namespace hep;
@@ -633,6 +634,26 @@ void testRobustness()
 }
 
 // ------------------------------------------------------------------------------------------
+void testMetersRecover()
+{
+    std::printf ("\n[9b] Level meters: a bad sample must not pin them, and the Clear button zeroes them\n");
+    Rig rig;
+    auto burst = noise (480, 7);
+    burst[100] = std::numeric_limits<float>::infinity();
+    burst[200] = std::numeric_limits<float>::quiet_NaN();
+    rig.run (burst);
+    rig.run (std::vector<float> (48000 * 2, 0.0f)); // two seconds of silence: the ~300 ms fall-back has long finished
+    const float in = rig.eng.inPeak.load(), out = rig.eng.outPeak.load();
+    check (std::isfinite (in) && in < 0.01f, fmt ("IN meter falls back after an inf / NaN sample (%.4f)", (double) in));
+    check (std::isfinite (out) && out < 0.01f, fmt ("OUT meter falls back after an inf / NaN sample (%.4f)", (double) out));
+
+    rig.run (noise (4800, 8, 0.5f));
+    check (rig.eng.inPeak.load() > 0.1f, "IN meter reads a normal signal");
+    rig.eng.clearMeters();
+    check (rig.eng.inPeak.load() <= 0.0f && rig.eng.outPeak.load() <= 0.0f, "clearMeters() zeroes both meters");
+}
+
+// ------------------------------------------------------------------------------------------
 void testSpectrumAnalyzer()
 {
     std::printf ("\n[10] Spectrum analyzer calibration (8192-point Hann, dBFS, tilt around 1 kHz)\n");
@@ -885,6 +906,7 @@ int main()
     testMixDeltaMatch();
     testBandSwitching();
     testRobustness();
+    testMetersRecover();
     testSpectrumAnalyzer();
     benchmark();
     return finish ("ALL TESTS");
