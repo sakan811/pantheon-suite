@@ -1,7 +1,7 @@
 # Security policy
 
-The plugins in this repository (Themis Verdict, Hephaestus Forge, Harmonia Pitch) are source only: they ship no binaries, have no network
-code (JUCE's web browser and curl support are switched off in every build) and no installer. Of the three, only Themis
+The plugins in this repository (Themis Verdict, Hephaestus Forge, Harmonia Pitch, Iris Prism) are source only: they ship no binaries, have no network
+code (JUCE's web browser and curl support are switched off in every build) and no installer. Of them, only Themis
 reads files you pick (reference masters for *Learn from tracks…*, `.themiscurve` target files); it decodes them with JUCE's
 audio format readers, so a malformed file is the most realistic way to hurt it.
 
