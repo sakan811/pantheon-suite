@@ -150,9 +150,13 @@ private:
                 if (index >= 0)
                     slider.setValue (index, juce::sendNotificationSync);
             }
-            else if (text.containsAnyOf ("0123456789")) // "abc" is not 0
+            else
             {
-                slider.setValue (slider.getValueFromText (text), juce::sendNotificationSync);
+                // A number is taken as one; a word only when it is what the parameter itself shows for the value it reads as
+                // ("Off", "Instant"), since anything unparseable reads as 0 and "abc" must not set the knob to 0.
+                const double v = slider.getValueFromText (text);
+                if (text.containsAnyOf ("0123456789") || slider.getTextFromValue (v).trim().equalsIgnoreCase (text))
+                    slider.setValue (v, juce::sendNotificationSync);
             }
         }
         repaint();
