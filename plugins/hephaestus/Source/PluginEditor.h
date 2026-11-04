@@ -43,6 +43,7 @@ private:
     juce::ComboBox presetBox;
     ui::Choice stereoBox, osBox, curveBox;
     ui::Toggle deltaButton, matchButton;
+    juce::TextButton clearMetersButton { "CLR PEAKS" };
 
     juce::TextButton saturateModeButton, fillModeButton, removeButton, addSaturateButton, addFillButton;
     std::array<juce::Rectangle<int>, hep::maxBands> chipBounds;
