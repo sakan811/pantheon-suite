@@ -4,7 +4,7 @@
 
 Copyright (C) 2026 The Pantheon authors.
 
-Every plugin in this repository (Themis Verdict, Hephaestus Forge, Harmonia Pitch) and the code they share is free software: you can
+Every plugin in this repository (Themis Verdict, Hephaestus Forge, Harmonia Pitch, Iris Prism) and the code they share is free software: you can
 redistribute it and/or modify it under the terms of the **GNU Affero General Public License, version 3 or (at your option)
 any later version**. The full text is in [LICENSE](LICENSE).
 
@@ -45,5 +45,5 @@ what a statement is about. This project is **not affiliated with, endorsed by or
 - FL Studio, FabFilter and Pro-Q, iZotope and Ozone, and Ableton and Ableton Live, where a README names them, are trademarks
   of their respective owners.
 
-"Themis Verdict", "Hephaestus Forge" and "Harmonia Pitch" are the names of the plugins in this repository. If you publish a fork or a
+"Themis Verdict", "Hephaestus Forge", "Harmonia Pitch" and "Iris Prism" are the names of the plugins in this repository. If you publish a fork or a
 build, give it a name of your own where that could be confused with another product.
