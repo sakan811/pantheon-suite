@@ -141,6 +141,9 @@ int main()
            "dragging a cut's node up and down changes nothing but is harmless");
     wheel (view, { xOf (60.0), yOfGain (0.0) }, 0.1f);
     check ((int) value (proc, bandIds (cut).slope) == std::min (3, slope0 + 1), "the wheel over a cut steps its slope");
+    const int slope1 = (int) value (proc, bandIds (cut).slope);
+    wheel (view, { xOf (60.0), yOfGain (0.0) }, 0.0f);
+    check ((int) value (proc, bandIds (cut).slope) == slope1, "a sideways scroll (no vertical delta) leaves the slope alone");
     removeBand (proc.apvts, cut);
     removeBand (proc.apvts, 0);
 
@@ -184,8 +187,11 @@ int main()
     check (monitor.soloBand.load() == 0 && monitor.soloKind.load() == (int) SoloKind::band, "... switches to its region");
     view.toggleBandSolo (0, SoloKind::band);
     check (monitor.soloBand.load() == -1, "... and the same button releases it");
-    view.clearSolos();
+    view.toggleBandSolo (0, SoloKind::curve);
     removeBand (proc.apvts, 0);
+    pump (150);
+    check (monitor.soloBand.load() == -1, "removing the soloed band ends its solo (it does not wait for the slot to be used again)");
+    view.clearSolos();
 
     std::printf ("\nEditor\n");
     {
