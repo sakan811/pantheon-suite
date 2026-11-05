@@ -8,10 +8,12 @@
 #include <themis/Biquad.h>
 #include <themis/ClipMeter.h>
 #include <themis/EqFit.h>
+#include <themis/EqMove.h>
 #include <themis/FrameHistory.h>
 #include <themis/Fundamental.h>
 #include <themis/HistoryChecks.h>
 #include <themis/Limiter.h>
+#include <themis/Listen.h>
 #include <themis/LowCrestMeter.h>
 #include <themis/Loudness.h>
 #include <themis/LoudnessMonitor.h>
@@ -195,6 +197,114 @@ TEST (loudness_gating_ignores_quiet_passages)
     lm.process (quiet.data(), quiet.data(), static_cast<int> (quiet.size()));
     CHECK_NEAR (lm.integrated(), -20.0, 0.15);
     CHECK_NEAR (lm.momentary(), -60.0, 0.2);
+}
+
+TEST (loudness_range_follows_ebu_tech_3342)
+{
+    // Tech 3342's first two test signals: 20 s of a stereo sine at -20 dBFS then 20 s at -30 (LRA 10 +/- 1 LU), and at
+    // -20 then -15 (5 +/- 1 LU). A steady tone has no range, and a passage far under the rest is gated out.
+    const double fs = 48000;
+    const auto lra = [&] (std::initializer_list<std::pair<double, double>> parts) {
+        LoudnessMeter lm;
+        lm.prepare (fs);
+        for (const auto& [db, secs] : parts)
+        {
+            auto x = sine (fs, 1000, db, secs);
+            lm.process (x.data(), x.data(), static_cast<int> (x.size()));
+        }
+        return lm.loudnessRange();
+    };
+    CHECK_NEAR (lra ({ { -20.0, 20.0 }, { -30.0, 20.0 } }), 10.0, 1.0);
+    CHECK_NEAR (lra ({ { -20.0, 20.0 }, { -15.0, 20.0 } }), 5.0, 1.0);
+    CHECK_NEAR (lra ({ { -20.0, 30.0 } }), 0.0, 0.2);
+    CHECK_NEAR (lra ({ { -20.0, 30.0 }, { -50.0, 30.0 } }), 0.0, 0.5); // 30 LU under the mean: under the -20 LU gate
+
+    LoudnessMonitor m;
+    m.prepare (fs);
+    auto x = sine (fs, 1000, -20.0, 5.0);
+    m.process (x.data(), x.data(), static_cast<int> (x.size()));
+    CHECK (m.momentary() > -20.0f && m.momentary() < -16.0f); // a stereo sine at -20 dBFS reads about -17.7 LUFS
+    m.requestReset();
+    CHECK (m.momentary() <= LoudnessMeter::kSilence && m.loudnessRange() == 0.0f);
+}
+
+// ---- listening aids: streaming preview and reference player --------------------------------------------------------
+TEST (listen_gains_follow_the_measurements)
+{
+    CHECK_NEAR (listen::previewGainDb (-9.0f, -14.0f), -5.0, 1e-6);   // louder than the target: turned down
+    CHECK_NEAR (listen::previewGainDb (-18.0f, -14.0f), 0.0, 1e-6);   // quieter: left alone
+    CHECK_NEAR (listen::previewGainDb (LoudnessMeter::kSilence, -14.0f), 0.0, 1e-6);
+
+    ReferenceClip clip;
+    clip.integratedLufs = -10.0f;
+    clip.samplePeakDb = -0.5f;
+    auto g = listen::referenceGainDb (clip, -14.0f);
+    CHECK_NEAR (g.db, -4.0, 1e-6);
+    CHECK (!g.capped);
+    clip.integratedLufs = -16.0f;  // 2 dB quieter than the master, 0.5 dB of peak room: raised 0.5 dB and flagged
+    g = listen::referenceGainDb (clip, -14.0f);
+    CHECK_NEAR (g.db, 0.5, 1e-6);
+    CHECK (g.capped);
+}
+
+TEST (reference_clip_measures_its_loudness)
+{
+    const double fs = 48000;
+    ReferenceClip clip;
+    clip.left = sine (fs, 997, -20, 6.0);
+    clip.right = clip.left;
+    clip.measure (fs);
+    CHECK_NEAR (clip.integratedLufs, -20.0, 0.15); // the same reading as loudness_gating_ignores_quiet_passages
+    CHECK_NEAR (clip.samplePeakDb, -20.0, 0.05);
+}
+
+TEST (listen_stage_is_bit_exact_when_idle_and_switches_cleanly)
+{
+    const double fs = 48000;
+    ListenStage stage;
+    stage.prepare (fs);
+    auto l = sine (fs, 440, -6, 0.1), r = sine (fs, 660, -6, 0.1);
+    auto l2 = l, r2 = r;
+    stage.process (l2.data(), r2.data(), static_cast<int> (l2.size()), 0);
+    CHECK (l2 == l && r2 == r);
+    CHECK (stage.idle());
+
+    // Preview: -6 dB once the 10 ms ramp is done.
+    stage.setMasterGainDb (-6.0f);
+    l2 = l; r2 = r;
+    stage.process (l2.data(), r2.data(), static_cast<int> (l2.size()), 0);
+    const size_t late = l.size() - 1;
+    CHECK_NEAR (l2[late], l[late] * std::pow (10.0f, -6.0f / 20.0f), 1e-6);
+
+    // The reference replaces the master at its own position on the host's timeline (modulo its length).
+    ReferenceClip clip;
+    clip.left.assign (1000, 0.25f);
+    clip.right.assign (1000, -0.25f);
+    for (size_t i = 0; i < clip.left.size(); ++i)
+        clip.left[i] = static_cast<float> (i) / 1000.0f;
+    stage.setClip (&clip);
+    stage.setReferenceOn (true);
+    stage.setReferenceGainDb (0.0f);
+    std::vector<float> a (4800, 1.0f), b (4800, 1.0f);
+    stage.process (a.data(), b.data(), 4800, 2000); // ramps in over 480 samples
+    CHECK (stage.retiredClipSafe());
+    a.assign (4800, 1.0f); b.assign (4800, 1.0f);
+    stage.process (a.data(), b.data(), 4800, 2000 + 4800);
+    CHECK_NEAR (a[10], clip.left[(2000 + 4800 + 10) % 1000], 1e-6);
+    CHECK_NEAR (b[10], -0.25, 1e-6);
+
+    // Back to the master with no preview: the ramps land on unity and the stage is bit-exact again.
+    stage.setReferenceOn (false);
+    stage.setMasterGainDb (0.0f);
+    std::vector<float> x (4800, 0.3f), y (4800, 0.3f);
+    stage.process (x.data(), y.data(), 4800, -1);
+    float maxStep = 0.0f;
+    for (size_t i = 1; i < x.size(); ++i)
+        maxStep = std::max (maxStep, std::abs (y[i] - y[i - 1])); // right: the reference is a constant -0.25, the master 0.3
+    CHECK (maxStep < 0.01f); // no click: the fade moves at most 1/480 of full scale per sample
+    l2 = l; r2 = r;
+    stage.process (l2.data(), r2.data(), static_cast<int> (l2.size()), -1);
+    CHECK (l2 == l && r2 == r);
 }
 
 TEST (true_peak_finds_intersample_peaks)
@@ -2302,6 +2412,70 @@ TEST (advisor_lists_faults_not_differences_from_the_reference_curve)
     in.translation.monoLevel = Level::bad;
     in.translation.monoLossDb = 5.0f;
     CHECK (pick (in, Topic::monoFold) != nullptr);
+}
+
+TEST (plan_snapshot_counts_what_a_change_fixed_and_broke)
+{
+    auto before = cleanMaster();
+    before.integratedLufs = -8.0f;      // too loud: a loudness item
+    before.clip.clipEvents = 12;        // clipping: a bad item
+    auto after = cleanMaster();
+    after.integratedLufs = -9.0f;       // still too loud, one LU less
+    after.clip.truePeakDb = -0.5f;      // no clips now, but the true peak is over -1 dBTP
+    const auto a = snapshotOf (before, advise (before)), b = snapshotOf (after, advise (after));
+    CHECK (a.have && b.have);
+    const auto c = compare (a, b);
+    CHECK (c.haveLoudness && std::abs (c.loudnessDelta + 1.0f) < 1.0e-6f);
+    CHECK (c.havePeak && std::abs (c.truePeakDelta - 1.0f) < 1.0e-6f);
+    CHECK (c.better == 1);              // clipping: bad -> warn (the true-peak warning)
+    CHECK (c.fixed == 0 && c.added == 0 && c.worse == 0);
+    CHECK (describe (c) == "1 better, -1.0 LU, TP +1.0 dB");
+
+    const auto clean = snapshotOf (cleanMaster(), advise (cleanMaster()));
+    const auto fixedAll = compare (a, clean);
+    CHECK (fixedAll.fixed == static_cast<int> (a.items.size()) && fixedAll.added == 0);
+    CHECK (compare (clean, a).added == static_cast<int> (a.items.size()));
+}
+
+TEST (advisor_hands_over_the_bands_that_make_its_changes)
+{
+    // Low-end mono: a side low cut at the low-end edge.
+    auto in = cleanMaster();
+    in.translation.lowMonoLevel = Level::bad;
+    in.translation.lowMonoLossDb = -4.0f;
+    const auto* item = pick (in, Topic::lowEndMono);
+    CHECK (item != nullptr && item->moves.size() == 1);
+    if (item != nullptr && item->moves.size() == 1)
+    {
+        CHECK (item->moves[0].kind == EqMove::Kind::lowCut && item->moves[0].place == EqMove::Place::side);
+        CHECK_NEAR (item->moves[0].freqHz, translation::kLowEndHz, 1e-6);
+    }
+    // Items that are not an EQ move (clipping, loudness) carry none.
+    auto loud = cleanMaster();
+    loud.integratedLufs = -8.0f;
+    const auto* l = pick (loud, Topic::loudness);
+    CHECK (l != nullptr && l->moves.empty());
+
+    // Fill band around a bass note, kept inside the range the tracker looks at and wide enough for a fill band.
+    const auto fill = master::fillAround (40.0f); // 40 / 1.5 is under the tracker's floor: clamped
+    CHECK (fill.kind == EqMove::Kind::harmonicFill && fill.place == EqMove::Place::mid);
+    CHECK_NEAR (fill.loHz, fundamental::kMinHz, 1e-6);
+    CHECK_NEAR (fill.hiHz, 60.0, 1e-4);
+}
+
+TEST (tonal_moves_turn_the_curve_difference_into_bands)
+{
+    TargetCurve flat;
+    BandArray measured {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        measured[static_cast<size_t> (i)] = BandGrid::centreHz (i) < 60.0 ? 4.0f : 0.0f; // 4 dB too much sub
+    const auto moves = tonalMoves (measured, flat, 48000.0);
+    CHECK (!moves.empty());
+    if (!moves.empty())
+    {
+        CHECK (moves[0].kind == EqMove::Kind::lowShelf && moves[0].gainDb < -1.0f);
+    }
+    CHECK (tonalMoves (BandArray {}, flat, 48000.0).empty()); // on target: nothing to do
 }
 
 TEST (mono_fold_report_needs_no_target_or_device)

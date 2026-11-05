@@ -3,6 +3,8 @@
 
 #include "PluginEditor.h"
 
+#include <themis/EqFit.h>
+
 ThemisEditor::ThemisEditor (ThemisProcessor& p)
     : AudioProcessorEditor (&p),
       proc (p),
@@ -27,7 +29,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     addAndMakeVisible (advicePanel);
     addAndMakeVisible (auditionPanel);
     for (auto* c : std::initializer_list<juce::Component*> { &targetBox, &avgKnob, &deviceBox, &deviceLabel, &loudnessBox, &loudnessLabel, &learnButton, &saveButton, &loadButton,
-                                                              &resetButton, &statusLabel, &toleranceKnob })
+                                                              &copyEqButton, &resetButton, &statusLabel, &toleranceKnob })
         addAndMakeVisible (c);
 
     deviceBox.setTooltip ("Preview how the balance would translate to a typical playback device (approximate response; "
@@ -51,6 +53,11 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
 
     learnButton.onClick = [this] { chooseReferenceTracks(); };
     saveButton.onClick = [this] { saveCurve(); };
+    copyEqButton.setTooltip ("Copy the equaliser moves that bring the measured curve towards the target (a low shelf, up to three bells and a high "
+                             "shelf, from the long-term average) to paste in Iris (PASTE on its band panel). A difference from the target is a "
+                             "matter of taste, so treat it as a starting point and judge it by ear.");
+    copyEqButton.onClick = [this] { copyTonalEq(); };
+    advicePanel.onCopied = [this] (const juce::String& text) { setStatus (text, false); };
     loadButton.onClick = [this] { loadCurve(); };
     resetButton.onClick = [this] {
         proc.resetAnalyzer();
@@ -69,6 +76,9 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
 ThemisEditor::~ThemisEditor()
 {
     stopTimer();
+    // The preview and reference gains are kept up to date by this editor's timer; without it they would go stale, so they end with it.
+    proc.setStreamingPreview (false);
+    proc.setReferenceOn (false);
     setLookAndFeel (nullptr);
 }
 
@@ -88,10 +98,29 @@ void ThemisEditor::timerCallback()
     if (++planTicks >= kPlanRefreshTicks)
     {
         planTicks = 0;
+        proc.updateListen(); // the preview and reference gains follow the loudness measured so far
         advicePanel.refresh();
     }
     if (statusTicks > 0 && --statusTicks == 0)
         statusLabel.setText ({}, juce::dontSendNotification);
+}
+
+void ThemisEditor::copyTonalEq()
+{
+    themis::BandArray measured {};
+    if (!proc.readSpectrum (measured))
+    {
+        setStatus ("Nothing measured yet: play the track first.", true);
+        return;
+    }
+    const auto moves = themis::tonalMoves (measured, proc.activeTarget(), proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0);
+    if (moves.empty())
+    {
+        setStatus ("The curve is within 0.5 dB of the target: nothing to copy.", false);
+        return;
+    }
+    juce::SystemClipboard::copyTextToClipboard (ui::linkText (moves));
+    setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " EQ band(s): paste them in Iris (PASTE on its band panel).", false);
 }
 
 void ThemisEditor::setStatus (const juce::String& text, bool isError)
@@ -199,6 +228,8 @@ void ThemisEditor::resized()
     saveButton.setBounds (row1.removeFromLeft (84).reduced (0, 3));
     row1.removeFromLeft (4);
     loadButton.setBounds (row1.removeFromLeft (84).reduced (0, 3));
+    row1.removeFromLeft (4);
+    copyEqButton.setBounds (row1.removeFromLeft (76).reduced (0, 3));
     row1.removeFromLeft (14);
     deviceLabel.setBounds (row1.removeFromLeft (84));
     row1.removeFromLeft (6);

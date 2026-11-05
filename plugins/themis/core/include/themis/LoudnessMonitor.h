@@ -42,6 +42,8 @@ public:
         samples += static_cast<uint64_t> (n);
         published.integrated.store (meter.integrated(), std::memory_order_relaxed);
         published.shortTerm.store (meter.shortTerm(), std::memory_order_relaxed);
+        published.momentary.store (meter.momentary(), std::memory_order_relaxed);
+        published.range.store (meter.loudnessRange(), std::memory_order_relaxed);
         const double elapsed = static_cast<double> (samples) / fs;
         if (elapsed >= kMinSeconds) // before a full 3 s window the short-term value is a partial average
             published.maxShortTerm.store (loudestShortTerm = std::max (loudestShortTerm, meter.shortTerm()), std::memory_order_relaxed);
@@ -56,6 +58,8 @@ public:
     float shortTerm() const { return read (published.shortTerm, LoudnessMeter::kSilence); }         // LUFS over the last 3 s
     float maxShortTerm() const { return read (published.maxShortTerm, LoudnessMeter::kSilence); }   // loudest 3 s since the reset
     double seconds() const { return read (published.seconds, 0.0); }                                // audio measured since the reset
+    float momentary() const { return read (published.momentary, LoudnessMeter::kSilence); }         // LUFS over the last 400 ms
+    float loudnessRange() const { return read (published.range, 0.0f); }                            // LU, EBU Tech 3342, since the reset
 
 private:
     template <typename T>
@@ -73,6 +77,8 @@ private:
         published.shortTerm.store (LoudnessMeter::kSilence, std::memory_order_relaxed);
         published.maxShortTerm.store (LoudnessMeter::kSilence, std::memory_order_relaxed);
         published.seconds.store (0.0, std::memory_order_relaxed);
+        published.momentary.store (LoudnessMeter::kSilence, std::memory_order_relaxed);
+        published.range.store (0.0f, std::memory_order_relaxed);
     }
 
     double fs = 48000.0;
@@ -84,6 +90,7 @@ private:
     struct Published
     {
         std::atomic<float> integrated { LoudnessMeter::kSilence }, shortTerm { LoudnessMeter::kSilence }, maxShortTerm { LoudnessMeter::kSilence };
+        std::atomic<float> momentary { LoudnessMeter::kSilence }, range { 0.0f };
         std::atomic<double> seconds { 0.0 };
     } published;
 };

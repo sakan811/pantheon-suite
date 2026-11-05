@@ -26,6 +26,7 @@ public:
 private:
     void timerCallback() override;
     void setStatus (const juce::String& text, bool isError);
+    void copyTonalEq();
 
     void launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int chooserFlags,
                         std::function<void (ThemisEditor&, const juce::FileChooser&)> onChosen);
@@ -54,7 +55,7 @@ private:
     ui::Choice targetBox, deviceBox, loudnessBox;
     juce::Label deviceLabel, loudnessLabel;
     juce::TextButton learnButton { "Learn from tracks..." }, saveButton { "Save curve" }, loadButton { "Load curve" },
-        resetButton { "Reset" };
+        resetButton { "Reset" }, copyEqButton { "Copy EQ" };
     juce::Label statusLabel;
     ui::Knob avgKnob, toleranceKnob;
     juce::TooltipWindow tooltipWindow { this, 600 };

@@ -38,6 +38,10 @@ if(THEMIS_BUILD_PLUGIN)
     if(NOT TARGET pantheon_ui)
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/ui ${CMAKE_BINARY_DIR}/shared/ui)
     endif()
+    # The shared DSP (shared/dsp): Themis uses only its band hand-off format (BandLink.h), to copy a fix to the equaliser.
+    if(NOT TARGET pantheon_dsp)
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/dsp ${CMAKE_BINARY_DIR}/shared/dsp)
+    endif()
 
     set(THEMIS_FORMATS VST3 Standalone)
     if(APPLE)
@@ -80,6 +84,7 @@ if(THEMIS_BUILD_PLUGIN)
         PRIVATE
             themis_core
             pantheon_ui
+            pantheon_dsp
             juce::juce_audio_utils
             juce::juce_audio_formats
         PUBLIC
@@ -96,7 +101,7 @@ if(THEMIS_BUILD_PLUGIN)
             plugin/Source/PluginEditor.cpp)
         target_compile_definitions(ThemisSmoke PRIVATE JucePlugin_Name="${THEMIS_PLUGIN_NAME}" ${PANTHEON_JUCE_DEFINITIONS} JUCE_MODAL_LOOPS_PERMITTED=1)
         target_link_libraries(ThemisSmoke
-            PRIVATE themis_core pantheon_ui juce::juce_audio_utils juce::juce_audio_formats
+            PRIVATE themis_core pantheon_ui pantheon_dsp juce::juce_audio_utils juce::juce_audio_formats
             PUBLIC juce::juce_recommended_config_flags)
     endif()
 endif()

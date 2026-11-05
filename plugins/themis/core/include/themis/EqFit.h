@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Eq.h"
+#include "EqMove.h"
 #include "TargetCurve.h"
 
 namespace themis
@@ -121,5 +122,25 @@ inline EqFitResult fitEqToTarget (const BandArray& measuredDb, const TargetCurve
 
     res.residualRmsAfter = rms (resid);
     return res;
+}
+// The fit as bands for an equaliser: the low shelf, the bells and the high shelf that move more than `minGainDb`, on both
+// channels. What the tonal view's COPY EQ hands over: a difference from the target, i.e. a suggestion to judge by ear.
+inline EqMoves tonalMoves (const BandArray& measuredDb, const TargetCurve& target, double fs, float minGainDb = 0.5f)
+{
+    const auto fit = fitEqToTarget (measuredDb, target, fs);
+    EqMoves moves;
+    for (int i = 1; i <= 5; ++i)
+    {
+        const auto& b = fit.bands[static_cast<size_t> (i)];
+        if (!b.enabled || std::abs (b.gainDb) < minGainDb)
+            continue;
+        EqMove m;
+        m.kind = i == 1 ? EqMove::Kind::lowShelf : i == 5 ? EqMove::Kind::highShelf : EqMove::Kind::bell;
+        m.freqHz = b.freq;
+        m.gainDb = b.gainDb;
+        m.q = b.q;
+        moves.push_back (m);
+    }
+    return moves;
 }
 } // namespace themis

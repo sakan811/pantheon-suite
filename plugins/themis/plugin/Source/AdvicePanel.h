@@ -60,11 +60,26 @@ public:
         g.setFont (ui::lcdFont (11.5f, juce::Font::bold));
         g.drawText (verdict, titleRow.withTrimmedRight (16.0f).toNearestInt(), juce::Justification::right);
 
-        const auto readout = area.removeFromTop (20.0f);
+        auto readout = area.removeFromTop (snapshot.have ? 50.0f : 34.0f);
+        snapChip = readout.removeFromRight (kChipWidth).removeFromTop (20.0f).toNearestInt();
+        ui::hw::drawPushButton (g, snapChip.toFloat(), snapshot.have, colours::amber, false, hoverSnap);
+        g.setColour (snapshot.have ? colours::lampInk : colours::text);
+        g.setFont (ui::labelFont (9.5f));
+        g.drawText (snapshot.have ? "CLEAR" : "SNAP", snapChip, juce::Justification::centred);
+        readout.removeFromRight (4.0f);
+        readoutArea = readout.toNearestInt();
         ui::hw::drawGlass (g, readout, 3.0f, colours::amber);
         g.setFont (ui::lcdFont (11.0f));
         g.setColour (colours::amber);
-        g.drawText (readoutText(), readout.reduced (7.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft);
+        auto text = readout.reduced (7.0f, 0.0f);
+        g.drawText (readoutText(), text.removeFromTop (17.0f).toNearestInt(), juce::Justification::centredLeft);
+        g.drawText (loudnessText(), text.removeFromTop (14.0f).toNearestInt(), juce::Justification::centredLeft);
+        if (snapshot.have)
+        {
+            g.setColour (colours::text);
+            g.drawText ("SINCE SNAP: " + juce::String (themis::describe (themis::compare (snapshot, themis::snapshotOf (inputs, advice)))),
+                        text.toNearestInt(), juce::Justification::centredLeft);
+        }
         ui::hw::drawGlassOverlay (g, readout, 3.0f, false);
         area.removeFromTop (6.0f);
 
@@ -95,13 +110,49 @@ public:
     void mouseMove (const juce::MouseEvent& e) override
     {
         hoverRow = rowAt (e.position.toInt());
-        setMouseCursor (hoverRow >= 0 && advice.items[static_cast<size_t> (hoverRow)].hear.active() ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        lastMouse = e.position.toInt();
+        if (const bool copy = overCopy (lastMouse); copy != hoverCopy)
+        {
+            hoverCopy = copy;
+            repaint();
+        }
+        const bool snap = snapChip.contains (e.position.toInt());
+        if (snap != hoverSnap)
+        {
+            hoverSnap = snap;
+            repaint (snapChip);
+        }
+        setMouseCursor (hoverSnap || hoverCopy || (hoverRow >= 0 && advice.items[static_cast<size_t> (hoverRow)].hear.active()) ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
-    void mouseExit (const juce::MouseEvent&) override { hoverRow = -1; }
+    void mouseExit (const juce::MouseEvent&) override { hoverRow = -1; hoverSnap = hoverCopy = false; }
+
+    // Called with the status text after COPY put an item's bands on the clipboard.
+    std::function<void (const juce::String&)> onCopied;
+
+    // SNAP keeps the plan as it is now; the readout then says what changed since (CLEAR forgets it). Not saved.
+    void toggleSnapshot()
+    {
+        snapshot = snapshot.have ? themis::PlanSnapshot {} : themis::snapshotOf (inputs, advice);
+        repaint();
+    }
+    bool hasSnapshot() const { return snapshot.have; }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (snapChip.contains (e.position.toInt()))
+        {
+            toggleSnapshot();
+            return;
+        }
         const int row = rowAt (e.position.toInt());
+        if (row >= 0 && overCopy (e.position.toInt()))
+        {
+            const auto& moves = advice.items[static_cast<size_t> (row)].moves;
+            juce::SystemClipboard::copyTextToClipboard (ui::linkText (moves));
+            if (onCopied)
+                onCopied ("Copied: paste it in " + ui::linkDestination (moves) + " (PASTE on its band panel).");
+            return;
+        }
         if (row < 0 || !advice.items[static_cast<size_t> (row)].hear.active())
             return;
         const auto hear = advice.items[static_cast<size_t> (row)].hear;
@@ -122,11 +173,23 @@ public:
 
     juce::String getTooltip() override
     {
+        if (hoverSnap)
+            return snapshot.have ? "CLEAR forgets the snapshot." :
+                   "SNAP keeps the plan as it is now. Change the master, play the same part again (press Reset first for a fair comparison), "
+                   "and the plan says how many items were fixed, got better, got worse or are new, and how far the loudness and the true peak moved. "
+                   "It works once the plan has finished measuring.";
+        if (hoverRow < 0 && readoutArea.contains (lastMouse))
+            return "Loudness since Reset: integrated LUFS (the Deliver for target in brackets), true peak and PLR. Second line: momentary (last 400 ms) "
+                   "and short-term (last 3 s) LUFS, and the loudness range LRA (EBU Tech 3342: the spread between the quieter and the louder "
+                   "sections, 10th to 95th percentile of the short-term values). A low LRA (under about 4 LU) means the sections all sit at one level.";
         if (hoverRow < 0)
             return "The master plan turns every measurement into what to do next, worst first. The limits behind it are rules of thumb, not measured data, "
                    "and a plan is only as good as the audio that has played: press Reset, then play the whole track. Themis never changes the audio; "
                    "only the HEAR chips and the AUDITION buttons change what you hear.";
         const auto& item = advice.items[static_cast<size_t> (hoverRow)];
+        if (hoverCopy)
+            return "Copy the band(s) that make this change, to paste in " + ui::linkDestination (item.moves)
+                   + ". The amounts come from the measurement; judge the result by ear (SNAP first, to compare before and after).";
         juce::String text = juce::String (item.headline) + "\n\n" + juce::String (item.why);
         if (item.hear.active())
             text += "\n\nClick to hear it: solo " + juce::String (themis::soloText (item.hear)) + ". Click again to release.";
@@ -145,6 +208,19 @@ private:
     {
         return { listArea.getX(), listArea.getY() + visibleIndex * kRowHeight, listArea.getWidth(), kRowHeight };
     }
+    // The chip column of a row (as drawRow lays it out): HEAR on top, COPY under it.
+    static juce::Rectangle<int> chipColumn (juce::Rectangle<int> row) { return row.withTrimmedBottom (4).reduced (9, 5).removeFromRight (kChipWidth); }
+    static juce::Rectangle<int> hearChip (juce::Rectangle<int> column) { return column.removeFromTop (17); }
+    static juce::Rectangle<int> copyChip (juce::Rectangle<int> column) { return column.withTrimmedTop (21).removeFromTop (17); }
+    bool overCopy (juce::Point<int> p) const
+    {
+        for (int r = 0; r < visibleRows(); ++r)
+            if (firstRow + r < static_cast<int> (advice.items.size()) && !advice.items[static_cast<size_t> (firstRow + r)].moves.empty()
+                && copyChip (chipColumn (rowBounds (r))).contains (p))
+                return true;
+        return false;
+    }
+
     int rowAt (juce::Point<int> p) const
     {
         for (int r = 0; r < visibleRows(); ++r)
@@ -163,15 +239,26 @@ private:
         ui::hw::drawLamp (g, { static_cast<float> (row.getX()) + 5.0f, static_cast<float> (row.getY()) + 7.5f }, 4.5f, colour);
         row.removeFromLeft (17);
 
-        if (item.hear.active())
+        if (item.hear.active() || !item.moves.empty())
         {
-            const auto chip = row.removeFromRight (kChipWidth).removeFromTop (17);
-            const bool on = audition == item.hear;
-            ui::hw::drawPushButton (g, chip.toFloat(), on, colours::amber, false, hoverRow >= 0 && &advice.items[static_cast<size_t> (hoverRow)] == &item);
-            g.setColour (on ? colours::lampInk : colours::text);
-            g.setFont (ui::labelFont (9.5f));
-            g.drawText (on ? "STOP" : "HEAR", chip, juce::Justification::centred);
+            const auto column = row.removeFromRight (kChipWidth);
             row.removeFromRight (4);
+            const bool hovered = hoverRow >= 0 && &advice.items[static_cast<size_t> (hoverRow)] == &item;
+            if (item.hear.active())
+            {
+                const bool on = audition == item.hear;
+                ui::hw::drawPushButton (g, hearChip (column).toFloat(), on, colours::amber, false, hovered && !hoverCopy);
+                g.setColour (on ? colours::lampInk : colours::text);
+                g.setFont (ui::labelFont (9.5f));
+                g.drawText (on ? "STOP" : "HEAR", hearChip (column), juce::Justification::centred);
+            }
+            if (!item.moves.empty())
+            {
+                ui::hw::drawPushButton (g, copyChip (column).toFloat(), false, colours::amber, false, hovered && hoverCopy);
+                g.setColour (colours::text);
+                g.setFont (ui::labelFont (9.5f));
+                g.drawText ("COPY", copyChip (column), juce::Justification::centred);
+            }
         }
 
         const auto headlineFont = ui::font (12.0f, juce::Font::bold);
@@ -222,6 +309,16 @@ private:
         return parts.joinIntoString ("   ");
     }
 
+    // The moment-to-moment loudness next to the integrated value: momentary (400 ms), short-term (3 s), and the loudness
+    // range since the reset (EBU Tech 3342: how much the sections differ; a heavily limited master reads low).
+    juce::String loudnessText() const
+    {
+        const auto& m = proc.loudnessMonitor();
+        const auto lufs = [] (float v) { return v <= themis::LoudnessMeter::kSilence + 1.0f ? juce::String ("--") : juce::String (v, 1); };
+        return "M " + lufs (m.momentary()) + "   S " + lufs (m.shortTerm()) + "   LRA "
+               + (m.hasData() ? juce::String (m.loudnessRange(), 1) + " LU" : juce::String ("--"));
+    }
+
     juce::String emptyText() const
     {
         if (advice.measuring)
@@ -234,8 +331,11 @@ private:
     themis::MasterInputs inputs;
     themis::MasterAdvice advice;
     themis::Switches audition;
-    juce::Rectangle<int> listArea;
+    themis::PlanSnapshot snapshot;
+    juce::Rectangle<int> listArea, snapChip, readoutArea;
+    juce::Point<int> lastMouse;
     int firstRow = 0, hoverRow = -1;
+    bool hoverSnap = false, hoverCopy = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AdvicePanel)
 };

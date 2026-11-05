@@ -37,6 +37,7 @@ void ThemisProcessor::prepareToPlay (double sr, int)
     scope.prepare (sr);
     loudness.prepare (sr);
     audition.prepare (sr);
+    listen.prepare (sr);
     prepared = true;
     analysisThread = std::make_unique<AnalysisThread> (analyzer);
     analysisThread->startThread();
@@ -75,7 +76,95 @@ void ThemisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // The audition is the only thing that writes to the buffer, and only while a Solo / Mute is engaged. A render
     // (non-realtime) is never altered.
     if (!isNonRealtime())
+    {
         audition.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n);
+        int64_t position = -1;
+        if (auto* head = getPlayHead())
+            if (const auto pos = head->getPosition(); pos.hasValue() && pos->getIsPlaying())
+                if (const auto t = pos->getTimeInSamples(); t.hasValue())
+                    position = *t;
+        listen.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n, position);
+    }
+}
+
+// ---- listening aids -------------------------------------------------------------------------
+void ThemisProcessor::updateListen()
+{
+    if (!retiredClips.empty() && listen.retiredClipSafe())
+        retiredClips.clear();
+
+    // A reference decoded for another sample rate would play at the wrong pitch: decode it again for this one.
+    if (referenceClip != nullptr && prepared && std::abs (referenceRate - getSampleRate()) > 0.5 && !loadingReference.load())
+        loadReference (referenceFile, [] (const juce::String&) {});
+
+    const float master = loudness.hasData() ? loudness.integrated() : themis::LoudnessMeter::kSilence;
+    previewDb = previewOn.load() ? themis::listen::previewGainDb (master, deliveryTarget().lufs) : 0.0f;
+    listen.setMasterGainDb (previewDb);
+    refGain = referenceClip != nullptr ? themis::listen::referenceGainDb (*referenceClip, master + previewDb) : themis::listen::ReferenceGain {};
+    listen.setReferenceGainDb (refGain.db);
+}
+
+void ThemisProcessor::loadReference (const juce::File& file, std::function<void (const juce::String&)> onDone)
+{
+    if (loadingReference.exchange (true))
+    {
+        onDone ("Already loading a reference.");
+        return;
+    }
+    const double rate = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
+    if (pool == nullptr)
+        pool = std::make_unique<juce::ThreadPool> (1);
+    pool->addJob ([this, file, rate, onDone, aliveFlag = alive] {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+        juce::String error;
+        auto clip = std::make_unique<themis::ReferenceClip>();
+        if (reader == nullptr || reader->lengthInSamples <= 0)
+            error = "Could not read " + file.getFileName();
+        else
+        {
+            const auto length = std::min<juce::int64> (reader->lengthInSamples, static_cast<juce::int64> (kMaxReferenceSeconds * reader->sampleRate));
+            juce::AudioBuffer<float> source (2, static_cast<int> (length));
+            const bool mono = reader->numChannels < 2;
+            reader->read (&source, 0, static_cast<int> (length), 0, true, !mono);
+            if (mono)
+                source.copyFrom (1, 0, source, 0, 0, static_cast<int> (length));
+
+            // Resampled once, here, so the audio thread only copies samples.
+            const double ratio = reader->sampleRate / rate;
+            const auto outLength = static_cast<size_t> (static_cast<double> (length) / ratio);
+            clip->left.resize (outLength);
+            clip->right.resize (outLength);
+            for (int c = 0; c < 2; ++c)
+            {
+                juce::LagrangeInterpolator interp;
+                auto& out = c == 0 ? clip->left : clip->right;
+                interp.process (ratio, source.getReadPointer (c), out.data(), static_cast<int> (outLength), static_cast<int> (length), 0);
+            }
+            clip->measure (rate);
+            if (clip->integratedLufs <= themis::LoudnessMeter::kSilence + 1.0f)
+                error = file.getFileName() + " is too short or silent to measure.";
+        }
+        juce::MessageManager::callAsync ([this, file, rate, onDone, error, aliveFlag, raw = clip.release()] {
+            std::unique_ptr<themis::ReferenceClip> loaded (raw);
+            if (!aliveFlag->load())
+                return;
+            loadingReference.store (false);
+            if (error.isEmpty())
+            {
+                // The old clip stays alive until the audio thread has finished a block without it (updateListen frees it).
+                listen.setClip (loaded.get());
+                if (referenceClip != nullptr)
+                    retiredClips.push_back (std::move (referenceClip));
+                referenceClip = std::move (loaded);
+                referenceFile = file;
+                referenceRate = rate;
+                updateListen();
+            }
+            onDone (error);
+        });
+    });
 }
 
 juce::AudioProcessorEditor* ThemisProcessor::createEditor()
@@ -151,13 +240,18 @@ bool ThemisProcessor::readLowCrest (float& outDb) const
     return true;
 }
 
+const params::LoudnessTarget& ThemisProcessor::deliveryTarget() const
+{
+    return params::loudnessTargets[juce::jlimit (0, params::kNumLoudnessTargets - 1, static_cast<int> (paramReader.value (params::loudnessTarget)))];
+}
+
 themis::MasterInputs ThemisProcessor::masterInputs() const
 {
     themis::MasterInputs in;
     in.analysedSeconds = loudness.seconds();
     in.haveLoudness = loudness.hasData();
     in.integratedLufs = loudness.integrated();
-    const auto& delivery = params::loudnessTargets[juce::jlimit (0, params::kNumLoudnessTargets - 1, static_cast<int> (paramReader.value (params::loudnessTarget)))];
+    const auto& delivery = deliveryTarget();
     in.targetLufs = delivery.lufs;
     in.deliveryName = delivery.shortName;
     readClip (in.clip);

@@ -26,8 +26,16 @@ public:
         }
         clear.setButtonText ("CLEAR");
         clear.setTooltip ("Release every Solo and Mute: the output is the input again, bit for bit.");
-        clear.onClick = [this] { proc.setAudition ({}); update(); };
+        clear.onClick = [this] { proc.setAudition ({}); proc.setStreamingPreview (false); proc.setReferenceOn (false); update(); };
         addAndMakeVisible (clear);
+
+        setup (preview, "ON", colours::warn, "Streaming preview: hear the master turned down the way a normalising service plays it (to the Deliver for "
+                                             "target; a quieter master is left alone). Louder-than-target masters lose their level advantage here, so "
+                                             "you hear what the limiting cost", [this] { proc.setStreamingPreview (!proc.streamingPreview()); update(); });
+        setup (load, "LOAD", colours::warn, "Load a reference track (wav / aiff / flac / ogg; mp3 / m4a where the system decodes them; the first "
+                                            "6 minutes). It is measured once and played at the loudness the master is heard at", [this] { chooseReference(); });
+        setup (ab, "REF", colours::warn, "Switch between the master and the reference, loudness-matched, at the same place on the host's timeline", 
+               [this] { proc.setReferenceOn (!proc.referenceOn()); update(); });
         update();
     }
 
@@ -43,7 +51,17 @@ public:
             solo[static_cast<size_t> (i)].setToggleState ((sw.solo & b) != 0, juce::dontSendNotification);
             mute[static_cast<size_t> (i)].setToggleState ((sw.mute & b) != 0, juce::dontSendNotification);
         }
+        preview.setToggleState (proc.streamingPreview(), juce::dontSendNotification);
+        ab.setToggleState (proc.referenceOn(), juce::dontSendNotification);
+        ab.setEnabled (proc.hasReference());
+        active = active || proc.streamingPreview() || proc.referenceOn();
         clear.setEnabled (active);
+        const auto text = compareText();
+        if (text != shownCompare)
+        {
+            shownCompare = text;
+            repaint();
+        }
         if (wasActive != active)
             repaint();
     }
@@ -79,6 +97,12 @@ public:
         g.setColour (colours::text);
         for (int i = 0; i < themis::kNumSources; ++i)
             g.drawText (juce::String (themis::sourceName (static_cast<themis::Source> (i))).toUpperCase(), nameBounds[static_cast<size_t> (i)], juce::Justification::centredLeft);
+        g.drawText ("STREAM", previewName, juce::Justification::centredLeft);
+        g.drawText ("REF", refName, juce::Justification::centredLeft);
+        g.setFont (ui::lcdFont (9.5f));
+        g.setColour (colours::amber);
+        g.drawFittedText (shownCompare.upToFirstOccurrenceOf ("\n", false, false), previewName.withTrimmedLeft (44), juce::Justification::centredLeft, 1, 0.8f);
+        g.drawFittedText (shownCompare.fromFirstOccurrenceOf ("\n", false, false), refName.withTrimmedLeft (28), juce::Justification::centredLeft, 1, 0.8f);
     }
 
     void resized() override
@@ -89,12 +113,23 @@ public:
         alertBounds = titleBounds.withTrimmedLeft (juce::roundToInt (juce::GlyphArrangement::getStringWidth (ui::labelFont(), "AUDITION")) + 12);
 
         // Fit the three groups (a label row each, then one row per source) into what is left.
-        const int labelRows = 3, sourceRows = themis::kNumSources;
-        const int rowH = juce::jlimit (16, 24, (r.getHeight() - labelRows * kLabelHeight) / sourceRows);
+        const int labelRows = static_cast<int> (groups.size()), rows = themis::kNumSources + 2;
+        const int rowH = juce::jlimit (14, 24, (r.getHeight() - labelRows * kLabelHeight) / rows);
         int i = 0;
         for (auto& group : groups)
         {
             group.labelBounds = r.removeFromTop (kLabelHeight);
+            if (group.count == 0) // COMPARE: the streaming preview, then the reference
+            {
+                auto row = r.removeFromTop (rowH);
+                preview.setBounds (row.removeFromRight (kButtonWidth * 2).reduced (1, 1));
+                previewName = row;
+                row = r.removeFromTop (rowH);
+                ab.setBounds (row.removeFromRight (kButtonWidth).reduced (1, 1));
+                load.setBounds (row.removeFromRight (kButtonWidth).reduced (1, 1));
+                refName = row;
+                continue;
+            }
             for (int n = 0; n < group.count; ++n, ++i)
             {
                 auto row = r.removeFromTop (rowH);
@@ -138,6 +173,37 @@ private:
         addAndMakeVisible (b);
     }
 
+    // Two lines: what the preview does, and which reference is loaded and how it is matched.
+    juce::String compareText() const
+    {
+        juce::String first = proc.streamingPreview() ? ui::signedDb (proc.previewGainDb()) : juce::String (proc.deliveryLufs(), 0) + " LUFS";
+        juce::String second = "--";
+        if (proc.hasReference())
+        {
+            const auto g = proc.referenceGain();
+            second = proc.referenceName() + " " + ui::signedDb (g.db) + (g.capped ? "!" : "");
+        }
+        return first + "\n" + second;
+    }
+
+    void chooseReference()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Load a reference track", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this] (const juce::FileChooser& fc) {
+            const auto file = fc.getResult();
+            if (file == juce::File())
+                return;
+            juce::Component::SafePointer<AuditionPanel> safe (this);
+            proc.loadReference (file, [safe] (const juce::String& error) {
+                if (safe == nullptr)
+                    return;
+                if (error.isNotEmpty())
+                    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Reference", error);
+                safe->update();
+            });
+        });
+    }
+
     void toggle (themis::Source source, bool isSolo)
     {
         auto sw = proc.auditionSwitches();
@@ -148,10 +214,13 @@ private:
 
     ThemisProcessor& proc;
     std::array<juce::TextButton, themis::kNumSources> solo, mute;
-    juce::TextButton clear;
+    juce::TextButton clear, preview, load, ab;
+    std::unique_ptr<juce::FileChooser> chooser;
+    juce::Rectangle<int> previewName, refName;
+    juce::String shownCompare;
     std::array<juce::Rectangle<int>, themis::kNumSources> nameBounds {};
     juce::Rectangle<int> titleBounds, alertBounds;
-    std::array<Group, 3> groups { { { "IMAGE", 2 }, { "CHANNELS", 2 }, { "RANGES", 4 } } };
+    std::array<Group, 4> groups { { { "IMAGE", 2 }, { "CHANNELS", 2 }, { "RANGES", 4 }, { "COMPARE", 0 } } };
     bool active = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AuditionPanel)
