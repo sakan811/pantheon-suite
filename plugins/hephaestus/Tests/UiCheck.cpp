@@ -9,6 +9,7 @@
 //   HephaestusUiCheck
 
 #include "Check.h"
+#include "PluginEditor.h"
 #include "PluginProcessor.h"
 #include "UI/SpectrumView.h"
 #include <pantheon/ui/Controls.h>
@@ -249,6 +250,35 @@ int main()
                        && std::fabs (fresh.apvts.getRawParameterValue (bandIds (slots[0]).lo)->load() - 40.0f) < 0.5f
                        && std::fabs (fresh.apvts.getRawParameterValue (bandIds (slots[0]).hi)->load() - 90.0f) < 0.5f,
                    "... over the range it was given");
+    }
+
+    std::printf ("\nBand solo\n");
+    {
+        HephaestusProcessor host;
+        host.setPlayConfigDetails (2, 2, 48000.0, 512);
+        host.prepareToPlay (48000.0, 512);
+        const auto pressed = [] (juce::Component& parent, const char* text)
+        {
+            for (int i = 0; i < parent.getNumChildComponents(); ++i)
+                if (auto* b = dynamic_cast<juce::TextButton*> (parent.getChildComponent (i)); b != nullptr && b->getButtonText() == text)
+                {
+                    b->onClick(); // triggerClick is posted, not run now
+                    return true;
+                }
+            return false;
+        };
+        {
+            HephaestusEditor editor (host);
+            auto& m = host.engine.monitor;
+            check (m.soloBand.load() == -1, "no solo to begin with");
+            check (pressed (editor, "SOLO ADDS") && m.soloBand.load() == 0 && m.soloKind.load() == (int) SoloKind::adds,
+                   "SOLO ADDS solos the selected band, in its ADDS way");
+            check (pressed (editor, "SOLO BAND") && m.soloBand.load() == 0 && m.soloKind.load() == (int) SoloKind::band,
+                   "SOLO BAND switches it to the band's region");
+            check (pressed (editor, "SOLO BAND") && m.soloBand.load() == -1, "pressing the same button again releases it");
+            pressed (editor, "SOLO ADDS");
+        }
+        check (host.engine.monitor.soloBand.load() == -1, "closing the editor ends the solo (it is not saved state)");
     }
 
     return finish ("UI CHECK");

@@ -45,9 +45,10 @@ private:
     ui::Toggle deltaButton, matchButton;
     juce::TextButton clearMetersButton { "CLEAR" };
 
-    juce::TextButton saturateModeButton, fillModeButton, removeButton, addSaturateButton, addFillButton, pasteButton { "PASTE" };
+    juce::TextButton saturateModeButton, fillModeButton, removeButton, addSaturateButton, addFillButton, pasteButton { "PASTE" }, soloBandButton { "SOLO BAND" }, soloAddsButton { "SOLO ADDS" };
     std::array<juce::Rectangle<int>, hep::maxBands> chipBounds;
-    int shownBandSignature = -1;
+    int shownBandSignature = -1, shownSolo = -1;
+    void toggleSolo (hep::SoloKind kind);
 
     float inLevel = 0.0f, outLevel = 0.0f;
     std::array<juce::Rectangle<int>, (size_t) Panel::count> panelBounds;

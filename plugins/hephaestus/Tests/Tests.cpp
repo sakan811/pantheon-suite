@@ -884,6 +884,76 @@ void testSampleRates()
            fmt ("latency after prepare (8x): %d, same as after the first block: %d", eng.getLatency(), reference.eng.getLatency()));
 }
 
+void testBandSolo()
+{
+    std::printf ("\n[12] Band solo: ADDS plays only what a band adds, BAND the band's own region; releasing returns the output bit for bit\n");
+    const auto in = noise (48000, 7, 0.3f);
+    const auto setup = [] (Rig& rig)
+    {
+        rig.p.bands[0] = saturateBand (60.0, 300.0, 8.0);
+        rig.p.bands[1] = saturateBand (1000.0, 3000.0, 8.0);
+        rig.p.bands[2] = fillBand (extendParams());
+    };
+
+    // What the bands add together is the delta; the bands' solos are its parts, so they must sum to it.
+    Rig delta;
+    setup (delta);
+    delta.p.delta = true;
+    const auto whole = delta.runMono (in);
+
+    std::vector<float> sum (in.size(), 0.0f);
+    for (int b = 0; b < 3; ++b)
+    {
+        Rig rig;
+        setup (rig);
+        rig.eng.monitor.soloKind = (int) SoloKind::adds;
+        rig.eng.monitor.soloBand = b;
+        const auto part = rig.runMono (in);
+        for (size_t i = 0; i < in.size(); ++i)
+            sum[i] += part[i];
+    }
+    float worst = 0.0f, peak = 0.0f;
+    for (size_t i = 24000; i < in.size(); ++i)
+    {
+        worst = std::max (worst, std::fabs (sum[i] - whole[i]));
+        peak = std::max (peak, std::fabs (whole[i]));
+    }
+    check (peak > 0.01f && worst < 1.0e-4f, fmt ("the three bands' ADDS solos sum to the delta (peak %.3f, max error %.1e)", peak, worst));
+
+    // BAND: a tone inside the band passes, one well outside is gone.
+    {
+        const auto tones = sines ({ { 1400.0, 0.2 }, { 200.0, 0.2 } }, 48000);
+        Rig rig;
+        setup (rig);
+        rig.eng.monitor.soloKind = (int) SoloKind::band;
+        rig.eng.monitor.soloBand = 1;
+        const auto out = rig.runMono (tones);
+        const double inside = db (settledAmplitude (out, 1400.0) / 0.2), outside = db (settledAmplitude (out, 200.0) / 0.2);
+        check (inside > -1.5 && outside < -30.0, fmt ("BAND solo of a 1-3 kHz band: 1.4 kHz %+.1f dB, 200 Hz %+.1f dB", inside, outside));
+    }
+
+    // Releasing it: the output is the plain output again, exactly.
+    {
+        Rig soloed, plain;
+        setup (soloed);
+        setup (plain);
+        soloed.eng.monitor.soloKind = (int) SoloKind::adds;
+        soloed.eng.monitor.soloBand = 0;
+        const std::vector<float> first (in.begin(), in.begin() + 24000), second (in.begin() + 24000, in.end());
+        soloed.runMono (first);
+        plain.runMono (first);
+        soloed.eng.monitor.soloBand = -1;
+        const auto a = soloed.runMono (second), b = plain.runMono (second);
+        float mid = 0.0f;
+        for (size_t i = 0; i < 400; ++i)
+            mid = std::max (mid, std::fabs (a[i] - b[i]));
+        float after = 0.0f;
+        for (size_t i = 1000; i < a.size(); ++i)
+            after = std::max (after, std::fabs (a[i] - b[i]));
+        check (mid > 0.001f && after == 0.0f, fmt ("while it fades out the output differs (%.3f), once it has, it equals the plain output (max difference %.1e)", mid, after));
+    }
+}
+
 void benchmark()
 {
     std::printf ("\n[11] CPU: 10 s of stereo @ 48 kHz, all six bands on (4 saturate, 2 adaptive fill with rebuild)\n");
@@ -930,6 +1000,7 @@ int main()
     testBandSwitching();
     testRobustness();
     testMetersRecover();
+    testBandSolo();
     testSpectrumAnalyzer();
     benchmark();
     return finish ("ALL TESTS");

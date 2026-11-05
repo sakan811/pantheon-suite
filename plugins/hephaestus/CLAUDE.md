@@ -67,6 +67,8 @@ non-zero bias clicks at start).
 ADAA state, oversampler and fill engine are reset (`startBand`, `runFillBand`). The fade is one block. Band edges
 glide towards their target so dragging doesn't zipper.
 
+**Band solo is monitoring, not state.** `Engine::monitor` (atomics: band, and BAND or ADDS) is not a parameter, so a host cannot record or restore it, and the editor clears it in its destructor. It replaces the output (Mix and Delta) just before the output gain and fades over 10 ms; released, the output is the plain output bit for bit (test [12]). ADDS takes each band's own contribution from where it is made (`Saturator::process`'s `soloOut`, `runFillBand`'s capture) and lines the fill's up with `soloDelay`; the bands keep running while one is soloed, so nothing jumps on release. BAND is a band-pass over `effectiveRange` of the delayed dry signal.
+
 **Fundamental engine.** Harmonic weights are exact only while the normalised amplitude `a` is ~1 (the k-th Chebyshev
 harmonic scales as `a^k`), so the envelope release is deliberately slow (`6 / lo`). Shortening it costs accuracy at
 the top harmonics (test [5]); lengthening it risks hanging tails (test [5b]). Rebuild's gap detector must stay
