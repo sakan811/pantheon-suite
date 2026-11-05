@@ -27,7 +27,7 @@ private:
     void timerCallback() override;
     void setStatus (const juce::String& text, bool isError);
 
-    void launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
+    void launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int chooserFlags,
                         std::function<void (ThemisEditor&, const juce::FileChooser&)> onChosen);
     void chooseReferenceTracks();
     void saveCurve();

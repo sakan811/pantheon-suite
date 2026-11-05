@@ -214,9 +214,9 @@ private:
 class Toggle : public juce::TextButton
 {
 public:
-    Toggle (Apvts& state, const juce::String& paramId, const juce::String& text, const juce::String& tooltip)
+    Toggle (Apvts& state, const juce::String& paramId, const juce::String& buttonText, const juce::String& tooltip)
     {
-        setButtonText (text);
+        setButtonText (buttonText);
         setTooltip (tooltip);
         setClickingTogglesState (true);
         attachment = std::make_unique<Apvts::ButtonAttachment> (state, paramId, *this);
