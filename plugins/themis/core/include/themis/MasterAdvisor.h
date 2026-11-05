@@ -99,6 +99,7 @@ inline EqMove fillAround (double medianHz)
     return m;
 }
 inline constexpr float kMaxBoostDb = 6.0f; // the most a suggested bell asks for; past that the problem is not an EQ move
+inline constexpr float kMinBoostDb = 0.5f; // the least: under it a suggested bell is not worth handing over
 
 inline Advice make (Level level, Topic topic, std::string headline, std::string why, Switches hear = {})
 {
@@ -299,11 +300,13 @@ inline MasterAdvice advise (const MasterInputs& in)
                                                             : "the note is carried by its upper partials; the weight underneath is thin."),
                                            master::soloRange (0)));
                 // Sub-heavy: fill in harmonics. Thin: lift the fundamental by how far it sits under the balanced zone.
+                // The class is where it sat most of the time, the lift comes from the median, and the two can disagree (a
+                // median inside the balanced zone): then there is no measured lift to hand over, and no move.
                 if (subHeavy)
                     out.items.back().moves = { master::fillAround (bass.medianHz) };
-                else
+                else if (const float lift = fundamental::kHarmonicRichDb - bass.medianTiltDb; lift >= master::kMinBoostDb)
                     out.items.back().moves = { { EqMove::Kind::bell, EqMove::Place::mid, static_cast<float> (bass.medianHz),
-                                                 std::min (master::kMaxBoostDb, fundamental::kHarmonicRichDb - bass.medianTiltDb), 1.4f, 0.0f, 0.0f } };
+                                                 std::min (master::kMaxBoostDb, lift), 1.4f, 0.0f, 0.0f } };
             }
         }
 
@@ -359,24 +362,33 @@ struct PlanChange
 inline PlanChange compare (const PlanSnapshot& before, const PlanSnapshot& after)
 {
     PlanChange c;
-    const auto levelIn = [] (const PlanSnapshot& s, Topic t, Level& out) {
-        for (const auto& [topic, level] : s.items)
-            if (topic == t) { out = level; return true; }
-        return false;
-    };
-    for (const auto& [topic, level] : before.items)
+    // A topic can carry more than one item (bass: under 40 Hz and the balance), so each item is paired with at most one on the
+    // other side: same topic and level first, then same topic. What is left unpaired was fixed (before) or is new (after).
+    std::vector<int> pairOf (before.items.size(), -1);
+    std::vector<bool> taken (after.items.size(), false);
+    for (const bool sameLevel : { true, false })
+        for (size_t i = 0; i < before.items.size(); ++i)
+            for (size_t j = 0; j < after.items.size() && pairOf[i] < 0; ++j)
+                if (!taken[j] && after.items[j].first == before.items[i].first && (!sameLevel || after.items[j].second == before.items[i].second))
+                {
+                    pairOf[i] = static_cast<int> (j);
+                    taken[j] = true;
+                }
+    for (size_t i = 0; i < before.items.size(); ++i)
     {
-        Level now {};
-        if (!levelIn (after, topic, now))   ++c.fixed;
-        else if (now < level)               ++c.better;
-        else if (now > level)               ++c.worse;
+        const Level was = before.items[i].second;
+        if (pairOf[i] < 0)
+        {
+            ++c.fixed;
+            continue;
+        }
+        const Level now = after.items[static_cast<size_t> (pairOf[i])].second;
+        if (now < was)      ++c.better;
+        else if (now > was) ++c.worse;
     }
-    for (const auto& [topic, level] : after.items)
-    {
-        Level was {};
-        if (!levelIn (before, topic, was))
+    for (const bool t : taken)
+        if (!t)
             ++c.added;
-    }
     c.haveLoudness = before.haveLoudness && after.haveLoudness;
     c.loudnessDelta = after.integratedLufs - before.integratedLufs;
     c.havePeak = before.havePeak && after.havePeak;

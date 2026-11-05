@@ -2435,6 +2435,21 @@ TEST (plan_snapshot_counts_what_a_change_fixed_and_broke)
     const auto fixedAll = compare (a, clean);
     CHECK (fixedAll.fixed == static_cast<int> (a.items.size()) && fixedAll.added == 0);
     CHECK (compare (clean, a).added == static_cast<int> (a.items.size()));
+
+    // Two items on one topic (bass: under 40 Hz and the balance) are paired one to one: one gone is one fixed, not "same".
+    PlanSnapshot two, one;
+    two.have = one.have = true;
+    two.items = { { Topic::bass, Level::warn }, { Topic::bass, Level::warn } };
+    one.items = { { Topic::bass, Level::warn } };
+    const auto gone = compare (two, one);
+    CHECK (gone.fixed == 1 && gone.better == 0 && gone.worse == 0 && gone.added == 0);
+    CHECK (compare (one, two).added == 1 && compare (one, two).fixed == 0);
+    // Same topic, levels moved: an exact pair is kept, the other is compared with what is left.
+    PlanSnapshot mixedBefore = one, mixedAfter = one;
+    mixedBefore.items = { { Topic::clipping, Level::bad }, { Topic::clipping, Level::warn } };
+    mixedAfter.items = { { Topic::clipping, Level::warn } };
+    const auto m = compare (mixedBefore, mixedAfter);
+    CHECK (m.fixed == 1 && m.better == 0 && m.worse == 0 && m.added == 0);
 }
 
 TEST (advisor_hands_over_the_bands_that_make_its_changes)
@@ -2461,6 +2476,37 @@ TEST (advisor_hands_over_the_bands_that_make_its_changes)
     CHECK (fill.kind == EqMove::Kind::harmonicFill && fill.place == EqMove::Place::mid);
     CHECK_NEAR (fill.loHz, fundamental::kMinHz, 1e-6);
     CHECK_NEAR (fill.hiHz, 60.0, 1e-4);
+
+    // A thin fundamental: a mid bell lifted by how far the median sits under the balanced zone.
+    const auto bassFrames = [] (std::initializer_list<std::pair<int, float>> runs) {
+        std::vector<FrameStats> frames;
+        for (const auto& [count, tiltDb] : runs)
+            for (int i = 0; i < count; ++i)
+            {
+                FrameStats f;
+                for (int s = 0; s < kNumSignals; ++s)
+                    for (int c = 0; c < kNumEnergyColumns; ++c)
+                        f.energy (static_cast<Signal> (s), c) = -30.0f;
+                f.f0Hz = 60.0f;
+                f.harmonicsDb = -30.0f;
+                f.fundamentalDb = -30.0f + tiltDb;
+                frames.push_back (f);
+            }
+        return frames;
+    };
+    auto thin = cleanMaster();
+    thin.frames = bassFrames ({ { 100, -10.0f } });
+    const auto* t = pick (thin, Topic::bass);
+    CHECK (t != nullptr && t->moves.size() == 1);
+    if (t != nullptr && t->moves.size() == 1)
+    {
+        CHECK (t->moves[0].kind == EqMove::Kind::bell && t->moves[0].place == EqMove::Place::mid);
+        CHECK_NEAR (t->moves[0].gainDb, fundamental::kHarmonicRichDb + 10.0f, 1e-4);
+    }
+    // Harmonic-rich most of the time, but the median sits in the balanced zone: no lift was measured, so no bell (never a cut).
+    thin.frames = bassFrames ({ { 40, -10.0f }, { 30, 0.0f }, { 30, 20.0f } });
+    t = pick (thin, Topic::bass);
+    CHECK (t != nullptr && t->headline.rfind ("Strengthen", 0) == 0 && t->moves.empty());
 }
 
 TEST (tonal_moves_turn_the_curve_difference_into_bands)

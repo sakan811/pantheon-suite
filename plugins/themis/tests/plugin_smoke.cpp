@@ -322,6 +322,12 @@ int main (int argc, char** argv)
         CHECK (pdsp::link::decode (ui::linkText ({ cut }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut
                    && back[0].place == pdsp::LinkBand::Place::side && std::abs (back[0].freq - 150.0) < 0.5,
                "a copied side low cut reads back as one");
+        // A key from a newer writer is ignored whatever its value, so the band still arrives (the format's promise).
+        CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=270 gain=-2.0 q=0.70 place=mid shape=tilt\nbell freq=500 gain=1 q=1", back)
+                   && back.size() == 2 && std::abs (back[0].freq - 270.0) < 0.5 && back[0].place == pdsp::LinkBand::Place::mid,
+               "an unknown key with a non-numeric value does not drop the band");
+        CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=abc gain=1 q=1", back) && back.empty(),
+               "a known key with a bad number still drops the band");
     }
 
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");
