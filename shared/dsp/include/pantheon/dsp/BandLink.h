@@ -130,6 +130,15 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out)
                         b.place = p;
                 continue;
             }
+            double* field = key == "freq"  ? &b.freq
+                          : key == "gain"  ? &b.gainDb
+                          : key == "q"     ? &b.q
+                          : key == "slope" ? &b.slopeDbPerOct
+                          : key == "lo"    ? &b.loHz
+                          : key == "hi"    ? &b.hiHz
+                                           : nullptr;
+            if (field == nullptr)
+                continue; // a key this reader does not know, whatever its value: ignored, not a reason to drop the band
             char* end = nullptr;
             const double v = std::strtod (value.c_str(), &end);
             if (end == value.c_str() || !std::isfinite (v))
@@ -137,12 +146,7 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out)
                 valid = false;
                 continue;
             }
-            if (key == "freq")       b.freq = v;
-            else if (key == "gain")  b.gainDb = v;
-            else if (key == "q")     b.q = v;
-            else if (key == "slope") b.slopeDbPerOct = v;
-            else if (key == "lo")    b.loHz = v;
-            else if (key == "hi")    b.hiHz = v;
+            *field = v;
         }
         if (valid && b.freq > 0.0 && b.q > 0.0 && b.loHz > 0.0 && b.hiHz > b.loHz)
             out.push_back (b);
