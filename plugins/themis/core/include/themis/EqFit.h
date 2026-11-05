@@ -5,6 +5,7 @@
 
 #include "Eq.h"
 #include "EqMove.h"
+#include "Fundamental.h"
 #include "TargetCurve.h"
 
 namespace themis
@@ -123,8 +124,47 @@ inline EqFitResult fitEqToTarget (const BandArray& measuredDb, const TargetCurve
     res.residualRmsAfter = rms (resid);
     return res;
 }
+// A low end that is short of the target is a case for harmonics as much as for a boost: a boost spends headroom on notes small
+// speakers cannot play, harmonics are what they carry. The fill band covers the longest stretch of the bass range (where a
+// fundamental is looked for) that sits `kFillShortDb` or more under the target's lower edge for at least `kFillMinBands` bands in
+// a row (two thirds of an octave: a broad shortfall, not a dip). Empty when there is no such stretch. A rule of thumb, like the rest.
+inline constexpr float kFillShortDb = 3.0f;
+inline constexpr int kFillMinBands = 4;
+inline EqMoves lowEndFill (const BandArray& measuredDb, const TargetCurve& target)
+{
+    int bestFirst = -1, bestLen = 0, first = -1, len = 0;
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        const double f = BandGrid::centreHz (i);
+        const auto idx = static_cast<size_t> (i);
+        const bool short_ = f >= fundamental::kMinHz && f <= fundamental::kMaxHz
+                            && target.medianDb[idx] - target.halfWidthDb[idx] - measuredDb[idx] >= kFillShortDb;
+        if (short_)
+        {
+            if (len == 0)
+                first = i;
+            if (++len > bestLen)
+            {
+                bestLen = len;
+                bestFirst = first;
+            }
+        }
+        else
+            len = 0;
+    }
+    if (bestLen < kFillMinBands)
+        return {};
+    EqMove m;
+    m.kind = EqMove::Kind::harmonicFill;
+    m.place = EqMove::Place::mid; // bass stays centred
+    m.loHz = static_cast<float> (std::max (fundamental::kMinHz, BandGrid::lowEdgeHz (bestFirst)));
+    m.hiHz = static_cast<float> (std::min (fundamental::kMaxHz, BandGrid::highEdgeHz (bestFirst + bestLen - 1)));
+    m.freqHz = static_cast<float> (std::sqrt (static_cast<double> (m.loHz) * m.hiHz));
+    return { m };
+}
+
 // The fit as bands for an equaliser: the low shelf, the bells and the high shelf that move more than `minGainDb`, on both
-// channels. What the tonal view's COPY EQ hands over: a difference from the target, i.e. a suggestion to judge by ear.
+// channels, then a harmonic-fill band when the low end is short (lowEndFill). What the tonal view's COPY EQ hands over: a difference from the target, i.e. a suggestion to judge by ear.
 inline EqMoves tonalMoves (const BandArray& measuredDb, const TargetCurve& target, double fs, float minGainDb = 0.5f)
 {
     const auto fit = fitEqToTarget (measuredDb, target, fs);
@@ -141,6 +181,8 @@ inline EqMoves tonalMoves (const BandArray& measuredDb, const TargetCurve& targe
         m.q = b.q;
         moves.push_back (m);
     }
+    for (const auto& m : lowEndFill (measuredDb, target)) // after the equaliser bands: Iris takes those, Hephaestus this one
+        moves.push_back (m);
     return moves;
 }
 } // namespace themis

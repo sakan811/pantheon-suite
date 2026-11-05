@@ -106,8 +106,9 @@ inline Advice make (Level level, Topic topic, std::string headline, std::string 
     return { level, topic, std::move (headline), std::move (why), hear, {} };
 }
 
-inline Switches soloRange (int range) { return { Switches::bit (static_cast<Source> (kFirstBandSource + range)), 0u }; }
-inline Switches soloSideRange (int range) { return { Switches::bit (Source::side) | soloRange (range).solo, 0u }; }
+// The low end of the checks (the readouts' LOW range) is two audition ranges, the sub and the bass.
+inline Switches soloLow() { return { Switches::bit (Source::sub) | Switches::bit (Source::bass), 0u }; }
+inline Switches soloSideLow() { return { Switches::bit (Source::side) | soloLow().solo, 0u }; }
 inline Switches soloSide() { return { Switches::bit (Source::side), 0u }; }
 } // namespace master
 
@@ -226,7 +227,7 @@ inline MasterAdvice advise (const MasterInputs& in)
                                        format ("Make the low end mono: high-pass the side channel around %.0f Hz", translation::kLowEndHz),
                                        format ("A mono sum loses %.1f dB below %.0f Hz. Bass and kick should sit in the middle: club systems and phones sum the low end to mono, and out-of-phase bass cancels there.",
                                               static_cast<double> (t.lowMonoLossDb), translation::kLowEndHz),
-                                       master::soloSideRange (0)));
+                                       master::soloSideLow()));
         if (t.lowMonoLevel != Level::good)
             out.items.back().moves = { { EqMove::Kind::lowCut, EqMove::Place::side, static_cast<float> (translation::kLowEndHz), 0.0f, 0.7071f, 0.0f, 0.0f } };
         check (t.monoLevel);
@@ -248,12 +249,12 @@ inline MasterAdvice advise (const MasterInputs& in)
             out.items.push_back (make (level, Topic::lowCrest, format ("Open up the low end: ease the compression or clipping on the bass by about %.0f dB", static_cast<double> (std::max (1.0f, -outside))),
                                        format ("The 20 - 250 Hz crest factor is %.1f dB, %.1f dB under the typical %.0f - %.0f dB: a squashed low end sounds flat and loses punch.", static_cast<double> (in.lowCrestDb),
                                                static_cast<double> (-outside), static_cast<double> (lowcrest::kZoneLoDb), static_cast<double> (lowcrest::kZoneHiDb)),
-                                       master::soloRange (0)));
+                                       master::soloLow()));
         else if (outside > 0.0f)
             out.items.push_back (make (level, Topic::lowCrest, format ("Tame the low-end peaks: compress or saturate the kick and bass by about %.0f dB", static_cast<double> (std::max (1.0f, outside))),
                                        format ("The 20 - 250 Hz crest factor is %.1f dB, %.1f dB over the typical %.0f - %.0f dB: isolated low peaks make the limiter work hard and pump the whole mix.", static_cast<double> (in.lowCrestDb),
                                                static_cast<double> (outside), static_cast<double> (lowcrest::kZoneLoDb), static_cast<double> (lowcrest::kZoneHiDb)),
-                                       master::soloRange (0)));
+                                       master::soloLow()));
     }
 
     // ---- left / right balance, bass and sections, from the history window ---------------------
@@ -284,7 +285,7 @@ inline MasterAdvice advise (const MasterInputs& in)
                                            format ("Move the bass up or add harmonics: it sits under %.0f Hz for %.0f %% of the time", history::kSubFloorHz, static_cast<double> (bass.belowFloorShare) * 100.0),
                                            format ("Phones, laptops and small monitors cannot play under %.0f Hz, so a bass line that lives there disappears. Saturate the bass so its harmonics carry the note, "
                                                    "and high-pass the master near 30 Hz.", history::kSubFloorHz),
-                                           master::soloRange (0)));
+                                           master::soloLow()));
             if (bass.floorLevel != Level::good)
                 out.items.back().moves = { master::fillAround (bass.medianHz) };
             check (bass.balanceLevel);
@@ -298,7 +299,7 @@ inline MasterAdvice advise (const MasterInputs& in)
                                                    hzText (bass.medianHz).c_str(), static_cast<double> (bass.share[static_cast<size_t> (bass.dominant)]) * 100.0,
                                                    subHeavy ? "little above it for small speakers to play."
                                                             : "the note is carried by its upper partials; the weight underneath is thin."),
-                                           master::soloRange (0)));
+                                           master::soloLow()));
                 // Sub-heavy: fill in harmonics. Thin: lift the fundamental by how far it sits under the balanced zone.
                 // The class is where it sat most of the time, the lift comes from the median, and the two can disagree (a
                 // median inside the balanced zone): then there is no measured lift to hand over, and no move.
@@ -319,7 +320,7 @@ inline MasterAdvice advise (const MasterInputs& in)
             if (level != Level::good)
                 out.items.push_back (make (level, Topic::swing, format ("Even out the low end between sections: it moves %.0f dB", static_cast<double> (low.swingDb())),
                                            "The level of 20 - 120 Hz differs a lot from moment to moment. If a section is meant to lose its bass that is fine; if not, match the bass level between verse and chorus.",
-                                           master::soloRange (0)));
+                                           master::soloLow()));
         }
     }
 

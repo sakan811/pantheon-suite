@@ -39,7 +39,7 @@ private:
     static constexpr int kHeaderHeight = 84;   // the control panel along the top
     static constexpr int kTitleWidth = 196;    // the nameplate; the header rows start after it
     static constexpr int kSideWidth = 450;  // the right-hand column: master plan on top, stereo scope and audition below
-    static constexpr int kScopeHeight = 228, kAuditionWidth = 226; // the stereo scope and the audition strip along the bottom of that column
+    static constexpr int kScopeHeight = 246, kAuditionWidth = 226; // the stereo scope and the audition strip along the bottom of that column
     static constexpr int kPlanRefreshTicks = 15; // the plan is re-read twice a second
 
     ThemisProcessor& proc;
