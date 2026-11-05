@@ -103,11 +103,11 @@ void ThemisEditor::setStatus (const juce::String& text, bool isError)
 
 // ---- actions ------------------------------------------------------------------------------------
 // Shows a file chooser and calls `onChosen` with it if the editor still exists when the user is done.
-void ThemisEditor::launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
+void ThemisEditor::launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int chooserFlags,
                                   std::function<void (ThemisEditor&, const juce::FileChooser&)> onChosen)
 {
     chooser = std::make_unique<juce::FileChooser> (title, start, patterns);
-    chooser->launchAsync (flags, [safe = juce::Component::SafePointer<ThemisEditor> (this), handler = std::move (onChosen)] (const juce::FileChooser& fc) {
+    chooser->launchAsync (chooserFlags, [safe = juce::Component::SafePointer<ThemisEditor> (this), handler = std::move (onChosen)] (const juce::FileChooser& fc) {
         if (safe != nullptr)
             handler (*safe, fc);
     });
