@@ -461,6 +461,29 @@ void testAdaptiveFill()
     check (db (std::sqrt (gRich / gHollow)) < -20.0,
            fmt ("adapt 100%%, plenty above the band: adds %+.1f dB re the hollow case", db (std::sqrt (gRich / gHollow))));
 
+    // The ABOVE read-out on the band's tab: the energy above the band re the band's own, as the fill measures it.
+    const auto reachDb = [&] (const std::vector<float>& x)
+    {
+        FundamentalEngine e;
+        e.prepare (fs);
+        std::vector<float> out (x.size());
+        for (size_t i = 0; i + 512 <= x.size(); i += 512)
+        {
+            const float* in[1] = { x.data() + i };
+            float* o[1] = { out.data() + i };
+            e.process (in, o, 1, 512, p);
+        }
+        return e.currentReachDb();
+    };
+    const double wantRich = 10.0 * std::log10 ((above (200.0, 0.3) + above (280.0, 0.3)) / eBand);
+    check (std::fabs (reachDb (rich) - wantRich) < 1.0,
+           fmt ("ABOVE read-out on the full passage: %+.1f dB (expected %+.1f)", reachDb (rich), wantRich));
+    // With nothing above the band, what remains is the band's own tone through the skirt of the region's 2nd-order filters:
+    // the read-out shows what the fill compares, leak included.
+    const double wantHollow = 10.0 * std::log10 (above (60.0, 0.4) / eBand);
+    check (std::fabs (reachDb (hollow) - wantHollow) < 1.0,
+           fmt ("ABOVE read-out with nothing above the band: %+.1f dB (the band's own tone through the region filter: %+.1f)", reachDb (hollow), wantHollow));
+
     const double expected = 1.0 - above (200.0, 0.1) / (eBand * p.target);
     const double measured = gPartial / gHollow;
     check (std::fabs (db (std::sqrt (measured / expected))) < 1.5,

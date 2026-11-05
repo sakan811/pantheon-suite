@@ -194,6 +194,16 @@ public:
     // Current level of the adaptive fill (1 = full amount, 0 = the reach above the band is already full).
     double currentAdaptGain() const noexcept { return adaptGain; }
 
+    // What the adaptive fill measures, as a level: the energy already above the band (harmonicReach) relative to the
+    // band's own, in dB (the scale Amount is set on). Below kReachFloorDb, or with a silent band, it reads kReachFloorDb.
+    static constexpr double kReachFloorDb = -60.0;
+    double currentReachDb() const noexcept
+    {
+        if (energyBand < 1.0e-12)
+            return kReachFloorDb;
+        return std::max (kReachFloorDb, 10.0 * std::log10 (energyReach / energyBand + 1.0e-30));
+    }
+
     // in: nCh read pointers; out: nCh write pointers that receive the additive signal.
     void process (const float* const* in, float* const* out, int nCh, int n, const Params& p) noexcept
     {

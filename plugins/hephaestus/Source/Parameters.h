@@ -4,6 +4,7 @@
 #pragma once
 
 #include "DSP/Engine.h"
+#include <pantheon/dsp/BandLink.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
 namespace hep
@@ -372,6 +373,32 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandMode mode, double
         setParameterValue (s, ids.on, 1.0f);
     }
     return slot;
+}
+
+// Fill bands handed over as text by another plugin of the repository (pdsp::link, e.g. Themis' COPY on a bass item), each into
+// the next free slot with its range (held to a fill band's limits by effectiveRange). Equaliser bands are not Hephaestus' and
+// are left out. Returns the slots used; `skipped` counts what did not fit or was not a fill band.
+inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const juce::String& text, int& skipped)
+{
+    std::vector<int> slots;
+    skipped = 0;
+    std::vector<pdsp::LinkBand> bands;
+    if (! pdsp::link::decode (text.toStdString(), bands))
+        return slots;
+    for (const auto& b : bands)
+    {
+        const int slot = b.kind == pdsp::LinkBand::Kind::fill ? addBand (s, BandMode::fill, std::sqrt (b.loHz * b.hiHz)) : -1;
+        if (slot < 0)
+        {
+            ++skipped;
+            continue;
+        }
+        const auto range = effectiveRange (BandMode::fill, b.loHz, b.hiHz);
+        setParameterValue (s, bandIds (slot).lo, (float) range.lo);
+        setParameterValue (s, bandIds (slot).hi, (float) range.hi);
+        slots.push_back (slot);
+    }
+    return slots;
 }
 
 // Switching to fill can shrink the range (see effectiveRange): write what the band really covers back.

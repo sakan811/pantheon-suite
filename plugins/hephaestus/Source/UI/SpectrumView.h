@@ -242,7 +242,13 @@ private:
     {
         juce::String label (band + 1);
         if (showsFill (band))
+        {
             label << "  FILL " << juce::roundToInt (100.0f * engine.bandActivity[band].load (std::memory_order_relaxed)) << "%";
+            const float reach = engine.bandReachDb[band].load (std::memory_order_relaxed);
+            label << "  ABOVE " << (reach <= (float) FundamentalEngine::kReachFloorDb + 0.5f ? juce::String ("--")
+                                                                                       : juce::String (juce::roundToInt (reach)))
+                  << " dB";
+        }
         return label;
     }
 
@@ -260,8 +266,8 @@ private:
 
             const auto extent = bandRange (apvts, i);
             const float x0 = xOf ((float) extent.lo, plot), x1 = xOf ((float) extent.hi, plot);
-            const float wanted = showsFill (i) ? 72.0f : 20.0f;
-            const float width = std::min (wanted, std::max (20.0f, x1 - x0 - 6.0f));
+            // A fill band's tab carries two read-outs (FILL and ABOVE), so it may stick out past a narrow band; the rows keep it clear.
+            const float width = showsFill (i) ? 148.0f : std::min (20.0f, std::max (20.0f, x1 - x0 - 6.0f));
 
             for (int row = 0;; ++row)
             {

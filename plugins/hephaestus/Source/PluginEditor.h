@@ -45,7 +45,7 @@ private:
     ui::Toggle deltaButton, matchButton;
     juce::TextButton clearMetersButton { "CLEAR" };
 
-    juce::TextButton saturateModeButton, fillModeButton, removeButton, addSaturateButton, addFillButton;
+    juce::TextButton saturateModeButton, fillModeButton, removeButton, addSaturateButton, addFillButton, pasteButton { "PASTE" };
     std::array<juce::Rectangle<int>, hep::maxBands> chipBounds;
     int shownBandSignature = -1;
 
