@@ -12,8 +12,11 @@
 namespace iris
 {
 constexpr int maxBands = 8;
-constexpr int numRegions = 5;               // low, low-mid, mid, high-mid, high
+constexpr int numRegions = 6;               // sub, bass, low-mid, mid, high-mid, high
 constexpr int numCrossovers = numRegions - 1;
+// Where the regions are cut by default. The first two are Themis' SUB / BASS and BASS / LOW-MID edges (its kSubBassHz and the top of
+// its LOW range), so a region here and a range there cover the same part of the spectrum.
+constexpr std::array<double, numCrossovers> defaultCrossoverHz { 60.0, 120.0, 500.0, 2000.0, 6000.0 };
 constexpr double minHz = 20.0, maxHz = 20000.0;
 
 enum class BandType { bell, lowShelf, highShelf, lowCut, highCut, notch };

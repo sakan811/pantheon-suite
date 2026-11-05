@@ -23,7 +23,7 @@ struct EngineParams
     double driveDb = 12.0;
     double outGainDb = 0.0;
     bool match = false;
-    std::array<double, numCrossovers> crossover { 120.0, 500.0, 2000.0, 6000.0 };
+    std::array<double, numCrossovers> crossover = defaultCrossoverHz;
 };
 
 // What is being listened to instead of the plain output. These are monitoring aids, not settings: they are not parameters,
@@ -575,6 +575,6 @@ private:
     bool deltaOn = false;
     unsigned regionMask = 0, lastRegionMask = 0;
     RegionSplitter regions;
-    std::array<double, numCrossovers> appliedCrossover { 0.0, 0.0, 0.0, 0.0 };
+    std::array<double, numCrossovers> appliedCrossover {};
 };
 } // namespace iris
