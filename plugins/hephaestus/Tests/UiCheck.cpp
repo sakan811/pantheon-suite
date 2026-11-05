@@ -220,6 +220,20 @@ int main()
                fmt ("typing \"off\" turns Rebuild off (%.1f dB, then %.1f dB)", (double) before, (double) value (proc, rebuild)));
         typeIn ("loud");
         check (value (proc, rebuild) <= offDb + 0.05f, "a word the parameter does not show is ignored");
+
+        // A detent switch takes a position's name, or as much of it as tells it apart.
+        knob.bind (proc.apvts, id::curve); // Tanh, Atan, Soft
+        typeIn ("soft");
+        check (std::lround (value (proc, id::curve)) == 2, "typing \"soft\" picks Soft");
+        typeIn ("a");
+        check (std::lround (value (proc, id::curve)) == 1, "a unique start (\"a\") picks Atan");
+        typeIn ("sine");
+        check (std::lround (value (proc, id::curve)) == 1, "a word that names no position (\"sine\") is ignored");
+        knob.bind (proc.apvts, id::stereo); // Stereo (L/R), Mid/Side
+        typeIn ("mid / side");
+        check (std::lround (value (proc, id::stereo)) == 1, "spaces and case do not matter (\"mid / side\")");
+        typeIn ("s");
+        check (std::lround (value (proc, id::stereo)) == 0, "\"s\" picks Stereo (L/R)");
     }
 
     return finish ("UI CHECK");

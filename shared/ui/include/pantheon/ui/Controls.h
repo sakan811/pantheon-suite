@@ -17,8 +17,8 @@ using Apvts = juce::AudioProcessorValueTreeState;
 // parameter turns it into a detent switch (the tick ring shows the positions). `beside` puts the knob at the left with the name
 // and read-out to its right; `below` stacks name, knob and read-out for a tall cell. A knob can be bound later and re-bound to
 // another parameter (a panel whose knobs change meaning). Clicking the read-out opens it for typing: Enter applies the value
-// (in the parameter's own units, e.g. "250" or "250 Hz"; a detent switch takes the name of a position), Esc or a click
-// elsewhere leaves it as it was.
+// (in the parameter's own units, e.g. "250" or "250 Hz"; a detent switch takes the name of a position, or as much of it as
+// tells it apart: "inf" for "Infinite"), Esc or a click elsewhere leaves it as it was.
 class Knob : public juce::Component, public juce::SettableTooltipClient
 {
 public:
@@ -146,7 +146,7 @@ private:
         {
             if (choiceParam != nullptr)
             {
-                const int index = choiceParam->choices.indexOf (text, true);
+                const int index = choiceIndexFor (choiceParam->choices, text);
                 if (index >= 0)
                     slider.setValue (index, juce::sendNotificationSync);
             }
@@ -160,6 +160,27 @@ private:
             }
         }
         repaint();
+    }
+
+    // The position a typed word names: its name with case and spaces ignored ("10s" for "10 s"), else the one position whose
+    // name starts with it ("inf" for "Infinite", "30" for "30 s"); -1 when none or more than one fit.
+    static int choiceIndexFor (const juce::StringArray& choices, const juce::String& text)
+    {
+        const auto squash = [] (const juce::String& s) { return s.removeCharacters (" \t").toLowerCase(); };
+        const auto typed = squash (text);
+        int prefixMatch = -1, prefixCount = 0;
+        for (int i = 0; i < choices.size(); ++i)
+        {
+            const auto name = squash (choices[i]);
+            if (name == typed)
+                return i;
+            if (name.startsWith (typed))
+            {
+                prefixMatch = i;
+                ++prefixCount;
+            }
+        }
+        return prefixCount == 1 ? prefixMatch : -1;
     }
 
     Layout layout;
