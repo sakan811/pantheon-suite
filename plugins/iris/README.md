@@ -224,6 +224,6 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
 ## License and terms
 
 Copyright (C) 2026 The Pantheon authors. Free software under the **GNU Affero General Public License, version 3 or (at your
-option) any later version**, with **no warranty**. This repository holds source only: no binaries or releases are published
-from it. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy),
+option) any later version**, with **no warranty**. This repository holds source only: no compiled plugin is published
+from it, and releases are source tags. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy),
 [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).

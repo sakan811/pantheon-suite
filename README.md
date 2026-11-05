@@ -13,6 +13,10 @@ under the AGPL-3.0-or-later. It holds source only: no binaries or downloads.
 [shared/ui](shared/ui) holds the hardware-style interface kit (metal faceplates, glass displays, lamps, knobs) that all the
 plugins draw with, and [shared/dsp](shared/dsp) the DSP more than one of them uses (biquads, the spectrum analyzer). The rules for working across plugins, and what is not yet in line, are in [CLAUDE.md](CLAUDE.md).
 
+Every knob works the same way in all of them: drag it (up and down or sideways), double-click it to return to its default,
+or click its read-out and type a value (Enter applies it, Esc cancels). A number may carry its unit (`250 Hz`, `2.5k`,
+`-3 dB`, `0.5 s`); a switch takes the name of a position, or enough of it to tell it apart (`inf` for Infinite).
+
 Each plugin keeps its own README, build commands and
 contributor rules in `plugins/<name>/`; this file only lists what is in the repository. CI lives in
 [.github/](.github) and runs per plugin.
