@@ -135,7 +135,18 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
                                                                 : "The clipboard holds no bands. Copy them in Themis first (COPY on a plan item).");
     };
     addAndMakeVisible (pasteButton);
-    for (auto* b : { &saturateModeButton, &fillModeButton, &removeButton, &addSaturateButton, &addFillButton })
+    soloBandButton.setTooltip ("Listen to this band's region: the signal through a filter over the band's range, what the band works on. "
+                               "Press again to release. Not saved with the session.");
+    soloAddsButton.setTooltip ("Listen to only what this band adds (its distortion, or its filled harmonics), nothing else. "
+                               "Press again to release. Not saved with the session.");
+    for (auto* b : { &soloBandButton, &soloAddsButton })
+    {
+        b->setClickingTogglesState (false);
+        b->setColour (juce::TextButton::buttonOnColourId, colours::text);
+    }
+    soloBandButton.onClick = [this] { toggleSolo (SoloKind::band); };
+    soloAddsButton.onClick = [this] { toggleSolo (SoloKind::adds); };
+    for (auto* b : { &saturateModeButton, &fillModeButton, &removeButton, &addSaturateButton, &addFillButton, &soloBandButton, &soloAddsButton })
         addChildComponent (b);
 
     // Header.
@@ -173,7 +184,22 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
 
 HephaestusEditor::~HephaestusEditor()
 {
+    proc.engine.monitor.soloBand = -1; // monitoring never outlives the window that asked for it
     setLookAndFeel (nullptr);
+}
+
+void HephaestusEditor::toggleSolo (SoloKind kind)
+{
+    auto& m = proc.engine.monitor;
+    const int band = spectrum.getSelectedBand();
+    if (m.soloBand.load() == band && m.soloKind.load() == (int) kind)
+        m.soloBand = -1;
+    else
+    {
+        m.soloKind = (int) kind;
+        m.soloBand = band;
+    }
+    repaint (panelBounds[(size_t) Panel::band]);
 }
 
 void HephaestusEditor::addKnob (const char* paramId, const char* caption, const char* tooltip)
@@ -222,7 +248,7 @@ void HephaestusEditor::refreshBandPanel()
 
     saturateModeButton.setToggleState (mode == BandMode::saturate, juce::dontSendNotification);
     fillModeButton.setToggleState (mode == BandMode::fill, juce::dontSendNotification);
-    for (auto* b : { &saturateModeButton, &fillModeButton, &removeButton })
+    for (auto* b : { &saturateModeButton, &fillModeButton, &removeButton, &soloBandButton, &soloAddsButton })
         b->setVisible (on);
     for (auto* b : { &addSaturateButton, &addFillButton })
         b->setVisible (! on);
@@ -250,6 +276,8 @@ void HephaestusEditor::layoutBandPanel()
         chipBounds[(size_t) i] = { panel.getX() + 14 + i * (chipWidth + chipGap), panel.getY() + 34, chipWidth, chipHeight };
 
     pasteButton.setBounds (panel.getRight() - 14 - 64, panel.getY() + 6, 64, 20);
+    soloAddsButton.setBounds (pasteButton.getX() - 8 - 86, panel.getY() + 6, 86, 20);
+    soloBandButton.setBounds (soloAddsButton.getX() - 6 - 86, panel.getY() + 6, 86, 20);
     auto buttons = juce::Rectangle<int> (panel.getX(), panel.getY() + 34, panel.getWidth() - 14, chipHeight);
     removeButton.setBounds (buttons.removeFromRight (76));
     buttons.removeFromRight (8);
@@ -417,6 +445,11 @@ void HephaestusEditor::paint (juce::Graphics& g)
                           juce::Justification::topLeft, 2);
     }
 
+    // A solo on another band than the one shown would otherwise be easy to forget.
+    if (const int soloed = proc.engine.monitor.soloBand.load(); soloed >= 0 && soloed != spectrum.getSelectedBand() && isBandOn (proc.apvts, soloed))
+        hw::drawLabel (g, "SOLO: BAND " + juce::String (soloed + 1) + (proc.engine.monitor.soloKind.load() == (int) SoloKind::adds ? " ADDS" : ""),
+                       { soloBandButton.getX() - 160, soloBandButton.getY(), 150, soloBandButton.getHeight() }, juce::Justification::centredRight, colours::amber, 9.5f);
+
     // Level meters: two bars in one window of glass, green until -6 dBFS, amber to -0.5, red above (a lamp's verdict colours).
     hw::drawGlass (g, meterArea.toFloat(), 3.0f, colours::amber);
     const auto drawMeter = [&] (juce::Rectangle<int> r, float level, const juce::String& name)
@@ -443,6 +476,19 @@ void HephaestusEditor::timerCallback()
     inLevel = proc.engine.inPeak.load (std::memory_order_relaxed);
     outLevel = proc.engine.outPeak.load (std::memory_order_relaxed);
     repaint (meterArea.expanded (24, 4));
+
+    // The solo buttons show what is soloed, whoever asked; the label says which band when it is not the selected one.
+    {
+        const int soloed = proc.engine.monitor.soloBand.load(), kind = proc.engine.monitor.soloKind.load();
+        const int band = spectrum.getSelectedBand();
+        soloBandButton.setToggleState (soloed == band && kind == (int) SoloKind::band, juce::dontSendNotification);
+        soloAddsButton.setToggleState (soloed == band && kind == (int) SoloKind::adds, juce::dontSendNotification);
+        if (soloed != shownSolo)
+        {
+            shownSolo = soloed;
+            repaint (panelBounds[(size_t) Panel::band]);
+        }
+    }
 
     if (bandSignature() != shownBandSignature)
     {

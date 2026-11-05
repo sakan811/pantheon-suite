@@ -80,11 +80,17 @@ public:
     }
 
     // Writes the summed distortion of the active bands to `out` (nCh channels, n samples, delayed
-    // by latencyFor(osMode)). `in` is not modified.
-    void process (const float* const* in, float* const* out, int nCh, int n, int osMode, const Params& p)
+    // by latencyFor(osMode)). `in` is not modified. With `soloOut`, the distortion of band `soloBand`
+    // alone (its share of `out`, faded as it is) is written there too, for the band solo.
+    void process (const float* const* in, float* const* out, int nCh, int n, int osMode, const Params& p,
+                  int soloBand = -1, float* const* soloOut = nullptr)
     {
         for (int c = 0; c < nCh; ++c)
+        {
             std::fill_n (out[c], n, 0.0f);
+            if (soloOut != nullptr)
+                std::fill_n (soloOut[c], n, 0.0f);
+        }
 
         for (int b = 0; b < maxBands; ++b)
         {
@@ -141,6 +147,8 @@ public:
                 {
                     g += step;
                     out[c][i] += data[c][i] * g;
+                    if (soloOut != nullptr && b == soloBand)
+                        soloOut[c][i] = data[c][i] * g;
                 }
             }
             st.gain = target;

@@ -53,6 +53,18 @@ struct BandParams
     FundamentalEngine::Params fill; // fill: everything but the range
 };
 
+// What is listened to instead of the plain output: a monitoring aid, not a setting. It is not a parameter, so a host cannot
+// record, save or restore it, and the editor ends it when it closes.
+//   band: the band's own region, the signal through a band-pass over its range (what the band works on)
+//   adds: only what the band adds (its distortion, or its filled harmonics), nothing else
+enum class SoloKind { band, adds };
+
+struct Monitor
+{
+    std::atomic<int> soloBand { -1 }; // -1 = none
+    std::atomic<int> soloKind { (int) SoloKind::band };
+};
+
 struct EngineParams
 {
     float inGainDb = 0.0f, outGainDb = 0.0f, mix = 1.0f;
@@ -87,7 +99,7 @@ public:
         }
 
         forEachDelay ([&] (IntDelay& d) { d.prepare (maxLatency + 8); });
-        for (auto* b : { &dryBuf, &wetBuf, &fundBuf, &satBuf, &tmpBuf })
+        for (auto* b : { &dryBuf, &wetBuf, &fundBuf, &satBuf, &tmpBuf, &soloBuf, &soloFillBuf, &soloSatBuf })
             b->setSize (maxChannels, maxBlockSize, false, false, true);
 
         fillGain.fill (0.0f);
@@ -100,6 +112,9 @@ public:
         currentOs = -1; // forces a latency refresh on the first block
         msDry = msWet = 1.0e-6;
         matchGain = 1.0;
+        soloStep = 1.0 / (0.010 * fs);
+        soloAmount = 0.0;
+        shownBand = -1;
         inGainLast = outGainLast = 1.0f;
         reset();
 
@@ -115,6 +130,9 @@ public:
         fillGain.fill (0.0f);
         fillRunning.fill (false);
         forEachDelay ([] (IntDelay& d) { d.reset(); });
+        for (auto& f : soloFilter)
+            f.reset();
+        soloAmount = 0.0;
     }
 
     int getLatency() const noexcept { return latency; }
@@ -132,6 +150,7 @@ public:
     void clearMeters() noexcept { inPeak.store (0.0f, std::memory_order_relaxed); outPeak.store (0.0f, std::memory_order_relaxed); }
     std::atomic<float> bandActivity[maxBands]; // fill bands: how much of its Amount the adaptive fill is adding now (0..1)
     std::atomic<float> bandReachDb[maxBands];  // fill bands: energy already above the band re the band's own (dB, the Amount scale)
+    Monitor monitor;
     pdsp::StereoTap tapIn, tapOut; // pre (delay-aligned dry) and post signal, for the spectrum display
 
 private:
@@ -146,7 +165,7 @@ private:
     template <class Fn>
     void forEachDelay (Fn&& fn)
     {
-        for (auto* set : { &dryDelay, &fundDelay, &bypassDelay })
+        for (auto* set : { &dryDelay, &fundDelay, &bypassDelay, &soloDelay })
             for (auto& d : *set)
                 fn (d);
     }
@@ -251,15 +270,37 @@ private:
 
         if (ms) midSideEncode (wet, n);
 
+        // The band solo: which band is heard and in which way. A band that is switched off, or deselected, fades out as it was.
+        int soloWant = monitor.soloBand.load (std::memory_order_relaxed);
+        if (soloWant < 0 || soloWant >= maxBands || ! p.bands[(size_t) soloWant].on)
+            soloWant = -1;
+        if (soloWant >= 0)
+        {
+            if (soloAmount <= 0.0)
+                for (auto& f : soloFilter)
+                    f.reset();
+            shownBand = soloWant;
+            shownKind = (SoloKind) monitor.soloKind.load (std::memory_order_relaxed);
+        }
+        const bool soloShown = shownBand >= 0 && (soloWant >= 0 || soloAmount > 0.0);
+        captureBand = soloShown && shownKind == SoloKind::adds ? shownBand : -1;
+        const auto solo = pointersOf (soloBuf), soloFill = pointersOf (soloFillBuf), soloSat = pointersOf (soloSatBuf);
+        for (auto& c : { 0, 1 })
+            std::fill_n (soloFill[(size_t) c], n, 0.0f);
+
         // 3. Fill bands on the clean signal. In mid/side only the mid channel feeds them, so bass
         //    stays centred.
         for (auto& c : { 0, 1 })
             std::fill_n (add[(size_t) c], n, 0.0f);
         for (int b = 0; b < maxBands; ++b)
-            runFillBand (b, wet, add, nCh, n, ms, p.bands[(size_t) b]);
+            runFillBand (b, wet, add, soloFill, nCh, n, ms, p.bands[(size_t) b]);
 
         // Always run the delay so its ring buffer keeps flowing when a fill band is switched on later.
-        forEachSample (nCh, n, [&] (int c, int i) { add[(size_t) c][i] = fundDelay[(size_t) c].process (add[(size_t) c][i]); });
+        forEachSample (nCh, n, [&] (int c, int i)
+        {
+            add[(size_t) c][i] = fundDelay[(size_t) c].process (add[(size_t) c][i]);
+            soloFill[(size_t) c][i] = soloDelay[(size_t) c].process (soloFill[(size_t) c][i]); // the soloed fill band, aligned the same way
+        });
 
         // 4. Saturate bands add their distortion to the clean signal, which is delayed to match.
         Saturator::Params sat;
@@ -272,7 +313,7 @@ private:
         }
 
         const float* satIn[maxChannels] = { wet[0], wet[1] };
-        saturator.process (satIn, shaped.data(), nCh, n, os, sat);
+        saturator.process (satIn, shaped.data(), nCh, n, os, sat, captureBand, soloSat.data());
 
         forEachSample (nCh, n, [&] (int c, int i)
         {
@@ -282,7 +323,27 @@ private:
 
         if (ms) midSideDecode (wet, n);
 
-        // 5. Mix / delta, then output gain.
+        // What the solo plays, in the output's own channels.
+        if (soloShown)
+        {
+            if (shownKind == SoloKind::band)
+            {
+                const auto& band = p.bands[(size_t) shownBand];
+                const auto range = effectiveRange (band.mode, band.lo, band.hi);
+                const double hiHz = std::min (range.hi, fs * 0.45), loHz = std::min (range.lo, hiHz / minRangeRatio);
+                for (auto& f : soloFilter)
+                    f.setup (fs, 4, loHz, 4, hiHz);
+                forEachSample (nCh, n, [&] (int c, int i) { solo[(size_t) c][i] = (float) soloFilter[(size_t) c].process ((double) dry[(size_t) c][i]); });
+            }
+            else
+            {
+                forEachSample (nCh, n, [&] (int c, int i) { solo[(size_t) c][i] = soloFill[(size_t) c][i] + soloSat[(size_t) c][i]; });
+                if (ms)
+                    midSideDecode (solo, n);
+            }
+        }
+
+        // 5. Mix / delta, then the solo (it wins over both), then output gain.
         float gMatch = 1.0f;
         if (p.match) gMatch = (float) matchGainFor (dry, wet, nCh, n);
         else         matchGain = 1.0;
@@ -292,6 +353,14 @@ private:
             const float w = wet[(size_t) c][i] * gMatch, d = dry[(size_t) c][i];
             io[(size_t) c][i] = p.delta ? (w - d) : d + p.mix * (w - d);
         });
+
+        if (soloShown)
+            for (int i = 0; i < n; ++i)
+            {
+                soloAmount = std::clamp (soloAmount + (soloWant >= 0 ? soloStep : -soloStep), 0.0, 1.0);
+                for (int c = 0; c < nCh; ++c)
+                    io[(size_t) c][i] += (float) soloAmount * (solo[(size_t) c][i] - io[(size_t) c][i]);
+            }
 
         const float outGain = juce::Decibels::decibelsToGain (p.outGainDb);
         smoothPeak (outPeak, rampGain (io, nCh, n, outGainLast, outGain), n);
@@ -306,7 +375,7 @@ private:
 
     // Runs one fill band and accumulates its (faded) output into `add`. A band that is off and has
     // faded out is left alone, and starts from clean history when it comes back.
-    void runFillBand (int b, const Ptrs& wet, const Ptrs& add, int nCh, int n, bool ms, const BandParams& band)
+    void runFillBand (int b, const Ptrs& wet, const Ptrs& add, const Ptrs& soloFill, int nCh, int n, bool ms, const BandParams& band)
     {
         auto& engine = fillEngine[(size_t) b];
         auto& gain = fillGain[(size_t) b];
@@ -337,7 +406,10 @@ private:
         const float target = want ? 1.0f : 0.0f, step = (target - gain) / (float) n;
         forEachSample (nCh, n, [&] (int c, int i)
         {
-            add[(size_t) c][i] += tmp[(size_t) c][i] * (gain + step * (float) (i + 1));
+            const float v = tmp[(size_t) c][i] * (gain + step * (float) (i + 1));
+            add[(size_t) c][i] += v;
+            if (b == captureBand)
+                soloFill[(size_t) c][i] = v;
         });
         gain = target;
         bandActivity[b].store (want && band.fill.extGain > 0.0 ? (float) engine.currentAdaptGain() : 0.0f, std::memory_order_relaxed);
@@ -359,8 +431,15 @@ private:
     std::array<FundamentalEngine, maxBands> fillEngine;
     std::array<float, maxBands> fillGain {};
     std::array<bool, maxBands> fillRunning {};
-    std::array<IntDelay, maxChannels> dryDelay, fundDelay, bypassDelay;
-    juce::AudioBuffer<float> dryBuf, wetBuf, fundBuf, satBuf, tmpBuf;
+    std::array<IntDelay, maxChannels> dryDelay, fundDelay, bypassDelay, soloDelay;
+    juce::AudioBuffer<float> dryBuf, wetBuf, fundBuf, satBuf, tmpBuf, soloBuf, soloFillBuf, soloSatBuf;
+
+    // Band solo state (audio thread): the band shown (kept while it fades out), its way, how far it has faded in, and the
+    // band whose additions are being captured this chunk.
+    std::array<pdsp::Bandpass, maxChannels> soloFilter;
+    int shownBand = -1, captureBand = -1;
+    SoloKind shownKind = SoloKind::band;
+    double soloAmount = 0.0, soloStep = 0.002;
 
     double msDry = 1.0e-6, msWet = 1.0e-6, matchGain = 1.0;
     float inGainLast = 1.0f, outGainLast = 1.0f;
