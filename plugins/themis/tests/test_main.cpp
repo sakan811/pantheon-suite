@@ -1958,7 +1958,7 @@ TEST (audition_leaves_the_audio_bit_exact_when_nothing_is_engaged)
     Audition a;
     a.prepare (48000.0);
     auto ll = l, rr = r;
-    a.setSwitches (mute ({ Source::side, Source::low }));
+    a.setSwitches (mute ({ Source::side, Source::bass }));
     a.process (ll.data(), rr.data(), 9000);
     a.setSwitches ({});
     a.process (ll.data() + 9000, rr.data() + 9000, 5000); // fades back
@@ -1983,9 +1983,9 @@ TEST (audition_resolves_solo_and_mute_within_each_group)
     a = resolve (both);
     CHECK (!a.mid && !a.side); // soloed and muted: silent, and the solo still silences the rest of the group
     a = resolve (solo ({ Source::highMid }));
-    CHECK (!a.band[0] && !a.band[1] && a.band[2] && !a.band[3] && a.mid && a.left); // other groups are not touched
-    a = resolve (mute ({ Source::low, Source::high }));
-    CHECK (!a.band[0] && a.band[1] && a.band[2] && !a.band[3]);
+    CHECK (!a.band[0] && !a.band[1] && !a.band[2] && a.band[3] && !a.band[4] && a.mid && a.left); // other groups are not touched
+    a = resolve (mute ({ Source::sub, Source::high }));
+    CHECK (!a.band[0] && a.band[1] && a.band[2] && a.band[3] && !a.band[4]);
     CHECK (Switches::unpack (solo ({ Source::side, Source::high }).pack()) == solo ({ Source::side, Source::high }));
     CHECK (Switches::unpack (mute ({ Source::left }).pack()) == mute ({ Source::left }));
 }
@@ -2057,38 +2057,38 @@ TEST (audition_solos_and_mutes_the_channels)
 TEST (audition_isolates_the_energy_ranges)
 {
     const double fs = 48000.0;
-    // A tone in the middle of each range: 60 Hz, 400 Hz, 2.5 kHz, 12 kHz.
-    const double tones[kNumEnergyRanges] = { 60.0, 400.0, 2500.0, 12000.0 };
-    for (int soloed = 0; soloed < kNumEnergyRanges; ++soloed)
-        for (int t = 0; t < kNumEnergyRanges; ++t)
+    // A tone in the middle of each range: 30 Hz, 85 Hz, 400 Hz, 2.5 kHz, 12 kHz.
+    const double tones[kNumAuditionRanges] = { 30.0, 85.0, 400.0, 2500.0, 12000.0 };
+    for (int soloed = 0; soloed < kNumAuditionRanges; ++soloed)
+        for (int t = 0; t < kNumAuditionRanges; ++t)
         {
             const auto x = sine (fs, tones[t], -12, 1.0);
             const auto out = audition (solo ({ static_cast<Source> (kFirstBandSource + soloed) }), x, x);
             const double dB = tailDb (out.l) - tailDb (x);
             if (t == soloed)
-                CHECK_NEAR (dB, 0.0, 0.7);
+                CHECK_NEAR (dB, soloed == 1 ? -3.9 : 0.0, 0.7); // BASS is one octave wide: even its middle is 1.9 dB down at each crossover
             else
-                CHECK (dB < -18.0); // 4th-order crossovers: well under a decade away is at least 18 dB down
+                CHECK (dB < (std::abs (t - soloed) == 1 ? -12.0 : -18.0)); // 4th-order crossovers: neighbours that are an octave apart are at least 12 dB down
         }
 }
 
 TEST (audition_muting_a_range_removes_only_that_range)
 {
     const double fs = 48000.0;
-    // Muting LOW and HIGH leaves the middle two ranges intact (flat magnitude through the crossovers and their all-passes).
+    // Muting SUB and HIGH leaves the middle three ranges intact (flat magnitude through the crossovers and their all-passes).
     // (A 4th-order crossover is 0.5 dB down half an octave from its corner; the tones are at least that far in.)
-    for (double hz : { 300.0, 500.0, 2000.0, 3000.0 })
+    for (double hz : { 200.0, 300.0, 500.0, 2000.0, 3000.0 })
     {
         const auto x = sine (fs, hz, -12, 1.0);
-        const auto out = audition (mute ({ Source::low, Source::high }), x, x);
+        const auto out = audition (mute ({ Source::sub, Source::high }), x, x);
         CHECK_NEAR (tailDb (out.l) - tailDb (x), 0.0, 0.8);
     }
-    // The four ranges add back up to a flat-magnitude signal: at each corner, where the neighbours overlap most.
-    for (double hz : { 120.0, 1000.0, 6000.0 })
+    // The five ranges add back up to a flat-magnitude signal: at each corner, where the neighbours overlap most.
+    for (double hz : { kSubBassHz, 120.0, 1000.0, 6000.0 })
     {
         const auto x = sine (fs, hz, -12, 1.0);
         std::vector<float> sum (x.size(), 0.0f);
-        for (int r = 0; r < kNumEnergyRanges; ++r)
+        for (int r = 0; r < kNumAuditionRanges; ++r)
         {
             const auto part = audition (solo ({ static_cast<Source> (kFirstBandSource + r) }), x, x);
             for (size_t i = 0; i < sum.size(); ++i)
@@ -2109,7 +2109,7 @@ TEST (audition_fades_without_clicks)
 {
     const double fs = 48000.0;
     const auto x = sine (fs, 100, -6, 1.0);
-    for (const auto& sw : { mute ({ Source::mid, Source::side }), solo ({ Source::side }), mute ({ Source::low }), mute ({ Source::left }) })
+    for (const auto& sw : { mute ({ Source::mid, Source::side }), solo ({ Source::side }), mute ({ Source::bass }), mute ({ Source::left }) })
     {
         const auto out = audition (sw, x, x, fs, 480);
         double maxStep = 0.0;
@@ -2345,7 +2345,7 @@ TEST (advisor_speaks_for_each_stereo_problem)
     const auto* low = find (a, Topic::lowEndMono);
     const auto* fold = find (a, Topic::monoFold);
     CHECK (phase != nullptr && phase->headline.find ("0.50 ms") != std::string::npos && phase->why.find ("1.0 kHz") != std::string::npos);
-    CHECK (low != nullptr && low->hear.solo == (Switches::bit (Source::side) | Switches::bit (Source::low)));
+    CHECK (low != nullptr && low->hear.solo == master::soloSideLow().solo);
     CHECK (fold != nullptr && fold->level == Level::warn && fold->hear.solo == Switches::bit (Source::side));
     // Worst first: both bad items come before the warning.
     CHECK (a.items.size() >= 3 && a.items[0].level == Level::bad && a.items[1].level == Level::bad && a.items[2].level == Level::warn);
@@ -2363,7 +2363,7 @@ TEST (advisor_reads_the_low_end_dynamics_and_the_history)
     CHECK (crest != nullptr && crest->headline.rfind ("Open up the low end", 0) == 0);
     in.lowCrestDb = 13.0f;
     crest = pick (in, Topic::lowCrest);
-    CHECK (crest != nullptr && crest->headline.rfind ("Tame the low-end peaks", 0) == 0 && crest->hear.solo == Switches::bit (Source::low));
+    CHECK (crest != nullptr && crest->headline.rfind ("Tame the low-end peaks", 0) == 0 && crest->hear.solo == master::soloLow().solo);
 
     in = cleanMaster();
     std::vector<FrameStats> frames (100);
@@ -2395,7 +2395,7 @@ TEST (advisor_reads_the_low_end_dynamics_and_the_history)
     in.frames = frames;
     a = advise (in);
     const auto* bass = find (a, Topic::bass);
-    CHECK (bass != nullptr && bass->headline.find ("under 40 Hz") != std::string::npos && bass->hear.solo == Switches::bit (Source::low));
+    CHECK (bass != nullptr && bass->headline.find ("under 40 Hz") != std::string::npos && bass->hear.solo == master::soloLow().solo);
 }
 
 TEST (advisor_lists_faults_not_differences_from_the_reference_curve)
@@ -2522,6 +2522,40 @@ TEST (tonal_moves_turn_the_curve_difference_into_bands)
         CHECK (moves[0].kind == EqMove::Kind::lowShelf && moves[0].gainDb < -1.0f);
     }
     CHECK (tonalMoves (BandArray {}, flat, 48000.0).empty()); // on target: nothing to do
+}
+
+TEST (a_short_low_end_adds_a_fill_band_after_the_equaliser_bands)
+{
+    TargetCurve flat;
+    BandArray measured {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        measured[static_cast<size_t> (i)] = BandGrid::centreHz (i) >= 40.0 && BandGrid::centreHz (i) <= 120.0 ? -6.0f : 0.0f; // 6 dB short from 40 to 120 Hz
+    const auto moves = tonalMoves (measured, flat, 48000.0);
+    const EqMove* fill = nullptr;
+    for (const auto& m : moves)
+        if (m.kind == EqMove::Kind::harmonicFill)
+            fill = &m;
+    CHECK (fill != nullptr && &moves.back() == fill); // the equaliser bands come first
+    if (fill != nullptr)
+    {
+        CHECK (fill->loHz >= 30.0f && fill->loHz <= 40.0f && fill->hiHz >= 110.0f && fill->hiHz <= 135.0f);
+        CHECK (fill->hiHz >= fill->loHz * 1.5f && fill->place == EqMove::Place::mid);
+    }
+    // A dip too narrow to be a shortfall of the whole bass, a shortfall under the limit, and a low end that is too loud: no fill.
+    BandArray dip {}, mild {}, loud {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        const double f = BandGrid::centreHz (i);
+        dip[static_cast<size_t> (i)] = f >= 60.0 && f <= 80.0 ? -8.0f : 0.0f;
+        mild[static_cast<size_t> (i)] = f >= 40.0 && f <= 120.0 ? -2.0f : 0.0f;
+        loud[static_cast<size_t> (i)] = f < 120.0 ? 6.0f : 0.0f;
+    }
+    for (const auto* curve : { &dip, &mild, &loud })
+        CHECK (lowEndFill (*curve, flat).empty());
+    // The tolerance counts: a curve inside the target's band is not short.
+    TargetCurve wide;
+    wide.halfWidthDb.fill (5.0f);
+    CHECK (lowEndFill (measured, wide).empty());
 }
 
 TEST (mono_fold_report_needs_no_target_or_device)

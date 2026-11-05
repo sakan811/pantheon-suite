@@ -120,7 +120,7 @@ void ThemisEditor::copyTonalEq()
         return;
     }
     juce::SystemClipboard::copyTextToClipboard (ui::linkText (moves));
-    setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " EQ band(s): paste them in Iris (PASTE on its band panel).", false);
+    setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s): paste them in " + ui::linkDestination (moves) + " (PASTE on its band panel).", false);
 }
 
 void ThemisEditor::setStatus (const juce::String& text, bool isError)

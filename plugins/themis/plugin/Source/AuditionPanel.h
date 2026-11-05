@@ -8,7 +8,7 @@
 
 #include <array>
 
-// Solo / Mute for the stereo image, the channels and the four energy ranges: the only controls that change what you hear.
+// Solo / Mute for the stereo image, the channels and the five ranges (SUB and BASS are the readouts' LOW range, split): the only controls that change what you hear.
 // With nothing pressed the audio passes through untouched. State lives in the processor (not saved with the session);
 // this panel only mirrors it, so the master plan's "hear it" rows and the buttons stay in step.
 class AuditionPanel : public juce::Component
@@ -114,7 +114,7 @@ public:
 
         // Fit the three groups (a label row each, then one row per source) into what is left.
         const int labelRows = static_cast<int> (groups.size()), rows = themis::kNumSources + 2;
-        const int rowH = juce::jlimit (14, 24, (r.getHeight() - labelRows * kLabelHeight) / rows);
+        const int rowH = juce::jlimit (13, 24, (r.getHeight() - labelRows * kLabelHeight) / rows);
         int i = 0;
         for (auto& group : groups)
         {
@@ -159,7 +159,7 @@ private:
             return "what differs between the channels, (L - R) / 2: what a mono sum loses (silent for a mono signal)";
         if (s == themis::Source::left || s == themis::Source::right)
             return s == themis::Source::left ? "the left channel (played on both sides)" : "the right channel (played on both sides)";
-        const auto& range = themis::kEnergyRanges[static_cast<int> (s) - themis::kFirstBandSource];
+        const auto& range = themis::kAuditionRanges[static_cast<int> (s) - themis::kFirstBandSource];
         return "the " + juce::String (range.name) + " range, " + ui::hzText (range.loHz) + " - " + ui::hzText (range.hiHz);
     }
 
@@ -220,7 +220,7 @@ private:
     juce::String shownCompare;
     std::array<juce::Rectangle<int>, themis::kNumSources> nameBounds {};
     juce::Rectangle<int> titleBounds, alertBounds;
-    std::array<Group, 4> groups { { { "IMAGE", 2 }, { "CHANNELS", 2 }, { "RANGES", 4 }, { "COMPARE", 0 } } };
+    std::array<Group, 4> groups { { { "IMAGE", 2 }, { "CHANNELS", 2 }, { "RANGES", themis::kNumAuditionRanges }, { "COMPARE", 0 } } };
     bool active = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AuditionPanel)
