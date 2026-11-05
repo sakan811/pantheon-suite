@@ -8,6 +8,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <themis/Audition.h>
+#include <themis/Listen.h>
 #include <themis/LoudnessMonitor.h>
 #include <themis/LowCrestMeter.h>
 #include <themis/MasterAdvisor.h>
@@ -65,6 +66,26 @@ public:
     // saved with the session; ignored while the host renders offline so an export can never carry it.
     void setAudition (const themis::Switches& s) { audition.setSwitches (s); }
     themis::Switches auditionSwitches() const { return audition.switches(); }
+    const themis::LoudnessMonitor& loudnessMonitor() const { return loudness; }
+
+    // Listening aids, like the audition: not saved, ignored offline, bit-exact while off (see themis::ListenStage).
+    // The streaming preview plays the master turned down to the Deliver for target; the reference plays a loaded track at the
+    // loudness the master is heard at, on the host's timeline. updateListen() recomputes the gains from the measurements
+    // (the editor's timer calls it) and frees a replaced reference once the audio thread has let go of it.
+    void setStreamingPreview (bool on) { previewOn.store (on); updateListen(); }
+    bool streamingPreview() const { return previewOn.load(); }
+    void setReferenceOn (bool on) { listen.setReferenceOn (on && referenceClip != nullptr); updateListen(); }
+    bool referenceOn() const { return listen.isReferenceOn(); }
+    bool hasReference() const { return referenceClip != nullptr; }
+    juce::String referenceName() const { return referenceFile.getFileNameWithoutExtension(); }
+    float referenceLufs() const { return referenceClip != nullptr ? referenceClip->integratedLufs : themis::LoudnessMeter::kSilence; }
+    themis::listen::ReferenceGain referenceGain() const { return refGain; }
+    juce::String deliveryName() const { return deliveryTarget().shortName; }
+    float deliveryLufs() const { return deliveryTarget().lufs; }
+    float previewGainDb() const { return previewDb; }
+    void loadReference (const juce::File& file, std::function<void (const juce::String& error)> onDone);
+    void updateListen();
+    static constexpr double kMaxReferenceSeconds = 360.0;
 
     // Everything the master plan is made of, read from the measurements (message thread).
     themis::MasterInputs masterInputs() const;
@@ -127,6 +148,7 @@ private:
     };
 
     void setParameterValue (const juce::String& id, float plainValue);
+    const params::LoudnessTarget& deliveryTarget() const;
     void stopAnalysis();
 
     themis::TonalAnalyzer analyzer;
@@ -134,6 +156,15 @@ private:
     themis::StereoScope scope;
     themis::LoudnessMonitor loudness;
     themis::Audition audition;
+    themis::ListenStage listen;
+    std::atomic<bool> previewOn { false };
+    std::unique_ptr<themis::ReferenceClip> referenceClip;
+    std::vector<std::unique_ptr<themis::ReferenceClip>> retiredClips; // message thread only; the audio thread reads through `listen`
+    juce::File referenceFile;
+    double referenceRate = 0.0;
+    float previewDb = 0.0f;
+    themis::listen::ReferenceGain refGain;
+    std::atomic<bool> loadingReference { false };
     std::unique_ptr<AnalysisThread> analysisThread; // exists between prepareToPlay and releaseResources
     std::atomic<bool> prepared { false };
 

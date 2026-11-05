@@ -75,7 +75,9 @@ public:
         subCount = 0;
         subSum = 0.0;
         hist.fill ({});
+        shortHist.fill (0);
         momentaryLufs = shortTermLufs = integratedLufs = kSilence;
+        rangeLu = 0.0f;
     }
 
     void process (const float* l, const float* r, int n)
@@ -96,6 +98,9 @@ public:
     float momentary() const { return momentaryLufs; }
     float shortTerm() const { return shortTermLufs; }
     float integrated() const { return integratedLufs; }
+    // Loudness range (EBU Tech 3342): the spread of the short-term loudness, 10th to 95th percentile of the 3 s values above
+    // -70 LUFS and no more than 20 LU under their mean. 0 until there is a short-term value to rank.
+    float loudnessRange() const { return rangeLu; }
 
 private:
     static constexpr int kRing = 30; // 3 s of 100 ms sub-blocks
@@ -145,7 +150,48 @@ private:
                 updateIntegrated();
             }
         }
+        if (filled >= kRing && shortTermLufs > -70.0f)
+        {
+            shortHist[static_cast<size_t> (std::clamp (static_cast<int> ((shortTermLufs + 70.0f) * 10.0f), 0, kBins - 1))]++;
+            updateRange();
+        }
     }
+
+    // Walks the 900-bin histogram once per 100 ms, like the integrated gate.
+    void updateRange()
+    {
+        double energy = 0.0;
+        long n = 0;
+        for (int i = 0; i < kBins; ++i)
+        {
+            const auto c = shortHist[static_cast<size_t> (i)];
+            energy += static_cast<double> (c) * std::pow (10.0, (binCentre (i) + 0.691) / 10.0);
+            n += c;
+        }
+        if (n == 0)
+            return;
+        const float gate = toLufs (energy / static_cast<double> (n)) - 20.0f;
+        long gated = 0;
+        for (int i = 0; i < kBins; ++i)
+            if (binCentre (i) >= gate)
+                gated += shortHist[static_cast<size_t> (i)];
+        const auto percentile = [&] (double share) {
+            const double want = share * static_cast<double> (gated);
+            long seen = 0;
+            for (int i = 0; i < kBins; ++i)
+            {
+                if (binCentre (i) < gate)
+                    continue;
+                seen += shortHist[static_cast<size_t> (i)];
+                if (static_cast<double> (seen) >= want)
+                    return binCentre (i);
+            }
+            return binCentre (kBins - 1);
+        };
+        rangeLu = gated > 0 ? std::max (0.0f, percentile (0.95) - percentile (0.10)) : 0.0f;
+    }
+
+    static float binCentre (int i) { return -70.0f + (static_cast<float> (i) + 0.5f) * 0.1f; }
 
     void updateIntegrated()
     {
@@ -181,6 +227,7 @@ private:
     std::array<double, kRing> ring {};
     int ringPos = 0, filled = 0;
     std::array<Bin, kBins> hist {};
-    float momentaryLufs = kSilence, shortTermLufs = kSilence, integratedLufs = kSilence;
+    std::array<long, kBins> shortHist {}; // short-term values, for the loudness range
+    float momentaryLufs = kSilence, shortTermLufs = kSilence, integratedLufs = kSilence, rangeLu = 0.0f;
 };
 } // namespace themis

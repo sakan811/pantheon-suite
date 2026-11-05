@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "EqMove.h"
 #include "Audition.h"
 #include "ClipMeter.h"
 #include "HistoryChecks.h"
@@ -48,6 +49,7 @@ struct Advice
     std::string headline; // what to do, with the numbers
     std::string why;      // what was measured and what it means
     Switches hear;        // the Solo / Mute setting that lets you listen to it (nothing = no suggestion)
+    EqMoves moves;        // the band(s) that make the change, where an equaliser or a harmonic generator can (empty = none)
 };
 
 struct MasterInputs
@@ -84,9 +86,23 @@ namespace master
 {
 inline std::string rounded (float db) { return format ("%.1f", static_cast<double> (std::round (db * 2.0f) / 2.0f)); }
 
+// A harmonic-fill band over the bass notes: half an octave either side of the median fundamental, inside the range the
+// fundamental tracker looks at.
+inline EqMove fillAround (double medianHz)
+{
+    EqMove m;
+    m.kind = EqMove::Kind::harmonicFill;
+    m.place = EqMove::Place::mid; // bass stays centred
+    m.loHz = static_cast<float> (std::max (fundamental::kMinHz, medianHz / 1.5));
+    m.hiHz = static_cast<float> (std::min (fundamental::kMaxHz, medianHz * 1.5));
+    m.freqHz = static_cast<float> (medianHz);
+    return m;
+}
+inline constexpr float kMaxBoostDb = 6.0f; // the most a suggested bell asks for; past that the problem is not an EQ move
+
 inline Advice make (Level level, Topic topic, std::string headline, std::string why, Switches hear = {})
 {
-    return { level, topic, std::move (headline), std::move (why), hear };
+    return { level, topic, std::move (headline), std::move (why), hear, {} };
 }
 
 inline Switches soloRange (int range) { return { Switches::bit (static_cast<Source> (kFirstBandSource + range)), 0u }; }
@@ -210,6 +226,8 @@ inline MasterAdvice advise (const MasterInputs& in)
                                        format ("A mono sum loses %.1f dB below %.0f Hz. Bass and kick should sit in the middle: club systems and phones sum the low end to mono, and out-of-phase bass cancels there.",
                                               static_cast<double> (t.lowMonoLossDb), translation::kLowEndHz),
                                        master::soloSideRange (0)));
+        if (t.lowMonoLevel != Level::good)
+            out.items.back().moves = { { EqMove::Kind::lowCut, EqMove::Place::side, static_cast<float> (translation::kLowEndHz), 0.0f, 0.7071f, 0.0f, 0.0f } };
         check (t.monoLevel);
         if (t.monoLevel != Level::good)
             out.items.push_back (make (t.monoLevel, Topic::monoFold, format ("Narrow the stereo image: a mono sum loses %.1f dB", static_cast<double> (t.monoLossDb)),
@@ -266,6 +284,8 @@ inline MasterAdvice advise (const MasterInputs& in)
                                            format ("Phones, laptops and small monitors cannot play under %.0f Hz, so a bass line that lives there disappears. Saturate the bass so its harmonics carry the note, "
                                                    "and high-pass the master near 30 Hz.", history::kSubFloorHz),
                                            master::soloRange (0)));
+            if (bass.floorLevel != Level::good)
+                out.items.back().moves = { master::fillAround (bass.medianHz) };
             check (bass.balanceLevel);
             if (bass.balanceLevel != Level::good)
             {
@@ -278,6 +298,12 @@ inline MasterAdvice advise (const MasterInputs& in)
                                                    subHeavy ? "little above it for small speakers to play."
                                                             : "the note is carried by its upper partials; the weight underneath is thin."),
                                            master::soloRange (0)));
+                // Sub-heavy: fill in harmonics. Thin: lift the fundamental by how far it sits under the balanced zone.
+                if (subHeavy)
+                    out.items.back().moves = { master::fillAround (bass.medianHz) };
+                else
+                    out.items.back().moves = { { EqMove::Kind::bell, EqMove::Place::mid, static_cast<float> (bass.medianHz),
+                                                 std::min (master::kMaxBoostDb, fundamental::kHarmonicRichDb - bass.medianTiltDb), 1.4f, 0.0f, 0.0f } };
             }
         }
 
@@ -297,6 +323,84 @@ inline MasterAdvice advise (const MasterInputs& in)
     std::stable_sort (out.items.begin(), out.items.end(), [] (const Advice& a, const Advice& b) {
         return a.level != b.level ? a.level > b.level : a.topic < b.topic;
     });
+    return out;
+}
+// Before / after: a snapshot of the plan, and what changed since. The user takes one, changes the master, and the
+// plan says how many items went away, how many appeared and how far the loudness and the peak moved, so a change is
+// judged on the same measurements instead of on memory. Pure functions, nothing is saved with the session.
+struct PlanSnapshot
+{
+    bool have = false;
+    std::vector<std::pair<Topic, Level>> items;
+    bool haveLoudness = false, havePeak = false;
+    float integratedLufs = 0.0f, truePeakDb = 0.0f;
+};
+
+inline PlanSnapshot snapshotOf (const MasterInputs& in, const MasterAdvice& a)
+{
+    PlanSnapshot s;
+    s.have = !a.measuring;
+    for (const auto& i : a.items)
+        s.items.emplace_back (i.topic, i.level);
+    s.haveLoudness = in.haveLoudness;
+    s.integratedLufs = in.integratedLufs;
+    s.havePeak = in.clip.have;
+    s.truePeakDb = in.clip.truePeakDb;
+    return s;
+}
+
+struct PlanChange
+{
+    int fixed = 0, better = 0, worse = 0, added = 0; // items gone, bad -> warn, warn -> bad, new
+    bool haveLoudness = false, havePeak = false;
+    float loudnessDelta = 0.0f, truePeakDelta = 0.0f;
+};
+
+inline PlanChange compare (const PlanSnapshot& before, const PlanSnapshot& after)
+{
+    PlanChange c;
+    const auto levelIn = [] (const PlanSnapshot& s, Topic t, Level& out) {
+        for (const auto& [topic, level] : s.items)
+            if (topic == t) { out = level; return true; }
+        return false;
+    };
+    for (const auto& [topic, level] : before.items)
+    {
+        Level now {};
+        if (!levelIn (after, topic, now))   ++c.fixed;
+        else if (now < level)               ++c.better;
+        else if (now > level)               ++c.worse;
+    }
+    for (const auto& [topic, level] : after.items)
+    {
+        Level was {};
+        if (!levelIn (before, topic, was))
+            ++c.added;
+    }
+    c.haveLoudness = before.haveLoudness && after.haveLoudness;
+    c.loudnessDelta = after.integratedLufs - before.integratedLufs;
+    c.havePeak = before.havePeak && after.havePeak;
+    c.truePeakDelta = after.truePeakDb - before.truePeakDb;
+    return c;
+}
+
+inline std::string describe (const PlanChange& c)
+{
+    std::string out;
+    const auto add = [&] (int n, const char* what) {
+        if (n > 0)
+            out += (out.empty() ? "" : ", ") + std::to_string (n) + " " + what;
+    };
+    add (c.fixed, "fixed");
+    add (c.better, "better");
+    add (c.worse, "worse");
+    add (c.added, "new");
+    if (out.empty())
+        out = "same items";
+    if (c.haveLoudness)
+        out += format (", %+.1f LU", static_cast<double> (c.loudnessDelta));
+    if (c.havePeak)
+        out += format (", TP %+.1f dB", static_cast<double> (c.truePeakDelta));
     return out;
 }
 } // namespace themis

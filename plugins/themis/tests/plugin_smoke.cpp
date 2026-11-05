@@ -276,6 +276,54 @@ int main (int argc, char** argv)
         run (1);
     }
 
+    std::printf ("[1a'] streaming preview and the band hand-off: a loud master is turned down only while the preview is on\n");
+    {
+        const int n = 4800;
+        std::vector<float> loud (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+            loud[static_cast<size_t> (i)] = static_cast<float> (0.9 * std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / fs));
+        juce::MidiBuffer midi;
+        juce::AudioBuffer<float> buf (2, n);
+        const auto run = [&] (int blocks) {
+            for (int b = 0; b < blocks; ++b)
+            {
+                buf.copyFrom (0, 0, loud.data(), n);
+                buf.copyFrom (1, 0, loud.data(), n);
+                proc.processBlock (buf, midi);
+            }
+            return buf.getMagnitude (0, 0, n);
+        };
+        proc.resetAnalyzer();
+        run (60); // 6 s: past the loudness monitor's minimum
+        proc.setStreamingPreview (true);
+        const float expected = juce::Decibels::decibelsToGain (proc.previewGainDb()) * 0.9f;
+        const float previewed = run (3);
+        CHECK (proc.previewGainDb() < -5.0f && std::abs (previewed - expected) < 0.01f,
+               "the preview turns a -1 dBFS sine down to the target: gain %.1f dB, peak %.3f (expected %.3f)",
+               static_cast<double> (proc.previewGainDb()), static_cast<double> (previewed), static_cast<double> (expected));
+        proc.setNonRealtime (true);
+        CHECK (run (1) > 0.89f, "an offline render ignores the preview");
+        proc.setNonRealtime (false);
+        proc.setStreamingPreview (false);
+        run (1);
+        bool identical = true;
+        run (1);
+        for (int i = 0; i < n; ++i)
+            identical = identical && buf.getSample (0, i) == loud[static_cast<size_t> (i)];
+        CHECK (identical, "switching the preview off restores the input bit for bit");
+        proc.resetAnalyzer();
+        run (1);
+
+        themis::EqMove cut;
+        cut.kind = themis::EqMove::Kind::lowCut;
+        cut.place = themis::EqMove::Place::side;
+        cut.freqHz = 150.0f;
+        std::vector<pdsp::LinkBand> back;
+        CHECK (pdsp::link::decode (ui::linkText ({ cut }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut
+                   && back[0].place == pdsp::LinkBand::Place::side && std::abs (back[0].freq - 150.0) < 0.5,
+               "a copied side low cut reads back as one");
+    }
+
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");
     {
         const auto& scope = proc.stereoScope();

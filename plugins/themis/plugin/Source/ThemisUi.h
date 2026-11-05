@@ -8,7 +8,10 @@
 #include <pantheon/ui/HardwareLookAndFeel.h>
 #include <pantheon/ui/MeterCell.h>
 
+#include <pantheon/dsp/BandLink.h>
+
 #include <themis/Common.h>
+#include <themis/EqMove.h>
 #include <themis/Translation.h>
 
 // What the shared hardware kit (shared/ui) cannot know about: Themis' own words, number formats and verdict type. The
@@ -32,4 +35,37 @@ inline constexpr const char* kPluginWord = "Verdict";
 inline juce::String signedDb (float v) { return juce::String (themis::signedDbText (v)); }
 
 inline juce::String hzText (double hz) { return juce::String (themis::hzText (hz)); }
+
+// Suggested bands as the text the other plugins of the repository paste (pdsp::link): equaliser bands go to the equaliser,
+// a harmonic-fill band to the harmonic generator.
+inline juce::String linkText (const themis::EqMoves& moves)
+{
+    using K = themis::EqMove::Kind;
+    std::vector<pdsp::LinkBand> bands;
+    for (const auto& m : moves)
+    {
+        pdsp::LinkBand b;
+        b.kind = m.kind == K::lowShelf ? pdsp::LinkBand::Kind::lowShelf : m.kind == K::highShelf ? pdsp::LinkBand::Kind::highShelf
+               : m.kind == K::lowCut ? pdsp::LinkBand::Kind::lowCut : m.kind == K::highCut ? pdsp::LinkBand::Kind::highCut
+               : m.kind == K::harmonicFill ? pdsp::LinkBand::Kind::fill : pdsp::LinkBand::Kind::bell;
+        b.place = m.place == themis::EqMove::Place::mid ? pdsp::LinkBand::Place::mid
+                : m.place == themis::EqMove::Place::side ? pdsp::LinkBand::Place::side : pdsp::LinkBand::Place::stereo;
+        b.freq = m.freqHz;
+        b.gainDb = m.gainDb;
+        b.q = m.q;
+        b.loHz = m.kind == K::harmonicFill ? m.loHz : b.loHz;
+        b.hiHz = m.kind == K::harmonicFill ? m.hiHz : b.hiHz;
+        bands.push_back (b);
+    }
+    return juce::String (pdsp::link::encode (bands));
+}
+
+// Where a copied fix goes, for the status line.
+inline juce::String linkDestination (const themis::EqMoves& moves)
+{
+    bool fill = false, eq = false;
+    for (const auto& m : moves)
+        (m.kind == themis::EqMove::Kind::harmonicFill ? fill : eq) = true;
+    return fill && eq ? "Iris (EQ bands) and Hephaestus (fill band)" : fill ? "Hephaestus" : "Iris";
+}
 } // namespace ui
