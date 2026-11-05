@@ -19,7 +19,7 @@ namespace iris::gui
 using FreqAxis = ui::FreqAxis;
 
 // The equaliser's display. Behind: the spectrum before (dim) and after (cream) the equaliser. Over it: the curve each channel
-// ends up with, one node per band, and along the bottom the five frequency regions, each a button that solos that part of the
+// ends up with, one node per band, and along the bottom the six frequency regions, each a button that solos that part of the
 // spectrum (and a handle between two of them that moves the crossover).
 //
 // Bands are made and edited here: double-click empty space to add a bell, drag a node (frequency across, gain up and down;
@@ -665,7 +665,7 @@ private:
             }
     }
 
-    // The five regions as one row of push switches along the bottom of the glass.
+    // The six regions as one row of push switches along the bottom of the glass.
     void drawStrip (juce::Graphics& g, const std::array<double, numCrossovers>& xo) const
     {
         namespace hw = ui::hw;
@@ -760,7 +760,7 @@ private:
     {
         juce::PopupMenu menu;
         menu.addItem (1, "Clear region solo", engine.monitor.regions.load() != 0);
-        menu.addItem (2, "Reset the four crossovers");
+        menu.addItem (2, "Reset the crossovers");
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [this] (int result)
         {
             if (result == 1)

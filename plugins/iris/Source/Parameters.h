@@ -19,7 +19,9 @@ namespace id
     inline const juce::String drive { "drive" };
     inline const juce::String style { "style" };
 
-    inline const std::array<juce::String, numCrossovers> crossover { "xo1", "xo2", "xo3", "xo4" };
+    // xo1 ... xo4 were the four crossovers of the first layout (the five regions); xo0, the sub / bass split at the front, came after
+    // them, so a session saved before it has the other four exactly where they were.
+    inline const std::array<juce::String, numCrossovers> crossover { "xo0", "xo1", "xo2", "xo3", "xo4" };
 }
 
 // The parameters of one band. Ids are "b1_on" ... "b8_release": built once and kept, so the audio thread can look
@@ -62,8 +64,6 @@ inline constexpr float defaultFreq (int band) noexcept
     constexpr float table[maxBands] = { 60.0f, 150.0f, 400.0f, 1000.0f, 2500.0f, 5000.0f, 9000.0f, 14000.0f };
     return table[band];
 }
-
-inline constexpr std::array<float, numCrossovers> defaultCrossovers { 120.0f, 500.0f, 2000.0f, 6000.0f };
 
 // Session-wide controls: presets leave these alone.
 inline bool isGlobalParameter (const juce::String& paramId)
@@ -109,10 +109,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         return t.containsIgnoreCase ("ms") || ! t.containsIgnoreCase ("s") ? v : v * 1000.0f;
     };
 
-    // Every parameter carries version 1: this is the first layout.
-    const auto F = [&] (const String& pid, const String& name, NormalisableRange<float> r, float def, Attr a)
+    // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover, version 2.
+    const auto F = [&] (const String& pid, const String& name, NormalisableRange<float> r, float def, Attr a, int version = 1)
     {
-        p.push_back (std::make_unique<Float> (ParameterID { pid, 1 }, name, r, def, a));
+        p.push_back (std::make_unique<Float> (ParameterID { pid, version }, name, r, def, a));
     };
     const auto Choice = [&] (const String& pid, const String& name, StringArray items, int def)
     {
@@ -130,8 +130,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     F (id::drive, "Drive", { 0.0f, 30.0f, 0.1f }, defaultDriveDb, Attr().withStringFromValueFunction (plainDb));
     Choice (id::style, "Saturation Style", styleNames, 0);
     for (int k = 0; k < numCrossovers; ++k)
-        F (id::crossover[(size_t) k], "Region Split " + String (k + 1), freq (800.0f), defaultCrossovers[(size_t) k],
-           Attr().withStringFromValueFunction (hzText).withValueFromStringFunction (hzValue));
+        F (id::crossover[(size_t) k], "Region Split " + String (k + 1), freq (800.0f), (float) defaultCrossoverHz[(size_t) k],
+           Attr().withStringFromValueFunction (hzText).withValueFromStringFunction (hzValue), k == 0 ? 2 : 1);
 
     // Bands
     for (int i = 0; i < maxBands; ++i)

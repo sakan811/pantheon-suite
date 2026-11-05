@@ -35,9 +35,9 @@ struct LR4
     }
 };
 
-// Five regions of the spectrum for soloing (low, low-mid, mid, high-mid, high), cut at four crossovers. A region below another
+// Six regions of the spectrum for soloing (sub, bass, low-mid, mid, high-mid, high), cut at five crossovers. A region below another
 // is run through the all-pass of every crossover above it, so any combination of regions adds up to the input's own magnitude
-// response: soloing all five is the same sound as soloing none.
+// response: soloing all six is the same sound as soloing none.
 class RegionSplitter
 {
 public:
@@ -61,7 +61,7 @@ public:
         }
     }
 
-    // The sum of the regions in `mask` (bit 0 = low ... bit 4 = high) for one sample of channel `c`.
+    // The sum of the regions in `mask` (bit 0 = sub ... bit 5 = high) for one sample of channel `c`.
     inline double process (int c, double x, unsigned mask) noexcept
     {
         auto& ch = channel[(size_t) c];
@@ -72,7 +72,7 @@ public:
             ch.split[(size_t) k].split (rest, low[k], h);
             rest = h;
         }
-        // low[k] is region k; `rest` is the top region. Region j goes through the all-pass of crossovers j+1 ... 3.
+        // low[k] is region k; `rest` is the top region. Region j goes through the all-pass of crossovers j+1 ... the last.
         double sum = 0.0;
         for (int j = 0; j < numCrossovers; ++j)
         {
@@ -98,7 +98,7 @@ private:
 
 inline const char* regionName (int region) noexcept
 {
-    static constexpr const char* names[numRegions] = { "Low", "Low-Mid", "Mid", "High-Mid", "High" };
+    static constexpr const char* names[numRegions] = { "Sub", "Bass", "Low-Mid", "Mid", "High-Mid", "High" };
     return names[std::clamp (region, 0, numRegions - 1)];
 }
 } // namespace iris

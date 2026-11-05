@@ -84,7 +84,7 @@ int main()
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
 
     std::printf ("\nParameters\n");
-    check (proc.getParameters().size() == 9 + 14 * maxBands, fmt ("%d parameters: 9 global and 14 for each of %d bands", proc.getParameters().size(), maxBands));
+    check (proc.getParameters().size() == 5 + numCrossovers + 14 * maxBands, fmt ("%d parameters: %d global (five settings and the %d region crossovers) and 14 for each of %d bands", proc.getParameters().size(), 5 + numCrossovers, numCrossovers, maxBands));
     bool presetsOk = true;
     for (auto& preset : presets())
         for (auto& [pid, v] : preset.values)
@@ -151,33 +151,53 @@ int main()
     auto& monitor = proc.engine.monitor;
     const auto strip = [&] (double hz) { return juce::Point<float> { xOf (hz), stripY }; };
     check (monitor.regions.load() == 0u, "no region is soloed to begin with");
-    click (view, strip (60.0));
-    check (monitor.regions.load() == 1u, "clicking LOW solos it");
+    click (view, strip (35.0));
+    check (monitor.regions.load() == 1u, "clicking SUB solos it");
     click (view, strip (1000.0));
-    check (monitor.regions.load() == 5u, "clicking MID adds it: regions are additive");
-    click (view, strip (60.0));
-    check (monitor.regions.load() == 4u, "clicking LOW again releases it");
+    check (monitor.regions.load() == 9u, "clicking MID adds it: regions are additive");
+    click (view, strip (35.0));
+    check (monitor.regions.load() == 8u, "clicking SUB again releases it");
+    click (view, strip (85.0));
+    check (monitor.regions.load() == 10u, "clicking BASS (60 to 120 Hz) adds it");
+    click (view, strip (85.0));
     click (view, strip (12000.0), juce::ModifierKeys (juce::ModifierKeys::altModifier));
-    check (monitor.regions.load() == 16u, "Alt-click solos HIGH alone");
+    check (monitor.regions.load() == 32u, "Alt-click solos HIGH alone");
     click (view, strip (12000.0), juce::ModifierKeys (juce::ModifierKeys::altModifier));
     check (monitor.regions.load() == 0u, "Alt-click on the only soloed region releases it");
 
     click (view, strip (300.0));
     click (view, strip (3500.0));
-    check (monitor.regions.load() == 10u, "LOW-MID and HIGH-MID (bits 1 and 3)");
+    check (monitor.regions.load() == 20u, "LOW-MID and HIGH-MID (bits 2 and 4)");
     click (view, { 20.0f, 6.0f + 14.0f });
     check (monitor.regions.load() == 0u && monitor.soloBand.load() == -1, "clicking the SOLO pill clears every solo");
 
     // The crossover handles.
-    const float xo1 = value (proc, id::crossover[0]);
-    check (std::fabs (xo1 - 120.0f) < 0.5f, "the first crossover starts at 120 Hz");
+    check (std::fabs (value (proc, id::crossover[0]) - 60.0f) < 0.5f && std::fabs (value (proc, id::crossover[1]) - 120.0f) < 0.5f,
+          "the first two crossovers start at 60 Hz (sub / bass, Themis' split) and 120 Hz");
     dragFrom (view, strip (120.0), strip (300.0));
-    check (std::fabs (value (proc, id::crossover[0]) / 300.0f - 1.0f) < 0.03f && monitor.regions.load() == 0u,
-           fmt ("dragging the handle moves the crossover to %.0f Hz without soloing anything", value (proc, id::crossover[0])));
+    check (std::fabs (value (proc, id::crossover[1]) / 300.0f - 1.0f) < 0.03f && monitor.regions.load() == 0u,
+           fmt ("dragging the handle moves the crossover to %.0f Hz without soloing anything", value (proc, id::crossover[1])));
     dragFrom (view, strip (300.0), strip (2500.0));
-    check (value (proc, id::crossover[0]) <= value (proc, id::crossover[1]) / 1.24f, fmt ("a handle cannot be dragged into the next one (stops at %.0f Hz, the next is at %.0f Hz)", value (proc, id::crossover[0]), value (proc, id::crossover[1])));
-    view.mouseDoubleClick (mouse (view, strip (value (proc, id::crossover[0])), strip (value (proc, id::crossover[0])), false));
-    check (std::fabs (value (proc, id::crossover[0]) - 120.0f) < 0.5f, "double-clicking a handle puts it back");
+    check (value (proc, id::crossover[1]) <= value (proc, id::crossover[2]) / 1.24f, fmt ("a handle cannot be dragged into the next one (stops at %.0f Hz, the next is at %.0f Hz)", value (proc, id::crossover[1]), value (proc, id::crossover[2])));
+    view.mouseDoubleClick (mouse (view, strip (value (proc, id::crossover[1])), strip (value (proc, id::crossover[1])), false));
+    check (std::fabs (value (proc, id::crossover[1]) - 120.0f) < 0.5f, "double-clicking a handle puts it back");
+
+    // A session saved before the sub / bass crossover existed has xo1 ... xo4 and no xo0: they keep their values, the new one is its default.
+    {
+        IrisProcessor before;
+        setParameterValue (before.apvts, id::crossover[1], 250.0f);
+        auto state = before.apvts.copyState();
+        for (int i = state.getNumChildren(); --i >= 0;)
+            if (state.getChild (i).getProperty ("id").toString() == id::crossover[0])
+                state.removeChild (i, nullptr);
+        juce::MemoryBlock block;
+        if (auto xml = state.createXml())
+            juce::AudioProcessor::copyXmlToBinary (*xml, block);
+        IrisProcessor after;
+        after.setStateInformation (block.getData(), (int) block.getSize());
+        check (std::fabs (value (after, id::crossover[1]) - 250.0f) < 0.5f && std::fabs (value (after, id::crossover[0]) - 60.0f) < 0.5f,
+               fmt ("an older session loads: its crossover stays at %.0f Hz and the new first split at %.0f Hz", value (after, id::crossover[1]), value (after, id::crossover[0])));
+    }
 
     // Band solo through the display's own API (the buttons and the menu call it).
     addBand (proc.apvts, BandType::bell, 1000.0, 4.0);

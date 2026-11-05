@@ -429,11 +429,12 @@ void testDelta()
 void testSolo()
 {
     std::printf("\n[8] Solo: frequency regions, bands and curves\n");
-    const double mids[numRegions] = { 50.0, 245.0, 1000.0, 3500.0, 12000.0 }; // about the middle of each range, in octaves
+    const double mids[numRegions] = { 35.0, 85.0, 245.0, 1000.0, 3500.0, 12000.0 }; // about the middle of each range, in octaves
+    constexpr unsigned allRegions = (1u << numRegions) - 1u;
 
     // Each region lets its own range through and keeps the others out.
     bool ownOk = true, othersOk = true;
-    double worstOwn = 0.0, loudestOther = -200.0, loudestNeighbour = -200.0;
+    double worstOwn = 0.0, worstBass = 0.0, loudestOther = -200.0, loudestNeighbour = -200.0, loudestBassNeighbour = -200.0;
     for (int region = 0; region < numRegions; ++region)
         for (int tone = 0; tone < numRegions; ++tone)
         {
@@ -445,13 +446,13 @@ void testSolo()
             const double g = toDb (amplitudeAt (out.l, mids[tone], 12000, oneSecond) / amplitudeAt (in, mids[tone], 12000, oneSecond));
             if (region == tone)
             {
-                worstOwn = std::max (worstOwn, std::fabs (g));
-                ownOk = ownOk && std::fabs (g) < 2.5;
+                (region == 1 ? worstBass : worstOwn) = std::max (region == 1 ? worstBass : worstOwn, std::fabs (g));
+                ownOk = ownOk && std::fabs (g) < (region == 1 ? 4.3 : 2.5); // the bass is one octave wide: its middle is 1.9 dB down at each crossover
             }
             else if (std::abs (region - tone) == 1)
             {
-                loudestNeighbour = std::max (loudestNeighbour, g);
-                othersOk = othersOk && g < -15.0;
+                (tone == 1 || region == 1 ? loudestBassNeighbour : loudestNeighbour) = std::max (tone == 1 || region == 1 ? loudestBassNeighbour : loudestNeighbour, g);
+                othersOk = othersOk && g < (tone == 1 || region == 1 ? -13.0 : -15.0); // a tone in the one-octave bass leaks 14 dB into the regions beside it
             }
             else
             {
@@ -459,29 +460,29 @@ void testSolo()
                 othersOk = othersOk && g < -35.0;
             }
         }
-    check (ownOk, fmt ("a region passes a tone in the middle of its own range (within %.2f dB)", worstOwn));
-    check (othersOk, fmt ("... and keeps the next range's tone %.1f dB down at most, and the others %.1f dB", loudestNeighbour, loudestOther));
+    check (ownOk, fmt ("a region passes a tone in the middle of its own range (within %.2f dB; %.2f dB for the one-octave bass)", worstOwn, worstBass));
+    check (othersOk, fmt ("... and keeps the next range's tone %.1f dB down at most (%.1f dB beside the bass), and the others %.1f dB", loudestNeighbour, loudestBassNeighbour, loudestOther));
 
-    // All five together are the original magnitude.
+    // All six together are the original magnitude.
     double worst = 0.0;
-    for (double f : { 30.0, 100.0, 120.0, 300.0, 500.0, 1200.0, 2000.0, 4500.0, 6000.0, 15000.0 })
+    for (double f : { 30.0, 60.0, 100.0, 120.0, 300.0, 500.0, 1200.0, 2000.0, 4500.0, 6000.0, 15000.0 })
     {
         Engine e;
         e.prepare (fs, 512);
-        e.monitor.regions = 31u;
+        e.monitor.regions = allRegions;
         const auto in = sine (f, 0.3, oneSecond + 12000);
         const auto out = run (e, EngineParams {}, in, in);
         worst = std::max (worst, std::fabs (toDb (amplitudeAt (out.l, f, 12000, oneSecond) / amplitudeAt (in, f, 12000, oneSecond))));
     }
-    check (worst < 0.05, fmt ("all five regions together are flat (largest deviation %.3f dB over ten tones, crossovers included)", worst));
+    check (worst < 0.05, fmt ("all six regions together are flat (largest deviation %.3f dB over eleven tones, crossovers included)", worst));
 
     // Moving the crossovers moves the regions; crossovers out of order are put back in order.
     {
         EngineParams p;
-        p.crossover = { 1000.0, 3000.0, 100.0, 50.0 };
+        p.crossover = { 1000.0, 3000.0, 100.0, 50.0, 20.0 };
         Engine e;
         e.prepare (fs, 512);
-        e.monitor.regions = 31u;
+        e.monitor.regions = allRegions;
         const auto in = noise (9, 0.3, 30000);
         check (allFinite (run (e, p, in, in)), "crossovers given out of order are sorted, and the output stays finite");
     }
@@ -623,7 +624,7 @@ void testRobust()
         p.driveDb = 30.0;
         p.match = true;
         p.outGainDb = 24.0;
-        p.crossover = { 20.0, 21.0, 20000.0, 20000.0 };
+        p.crossover = { 20.0, 21.0, 22.0, 20000.0, 20000.0 };
         Engine e;
         e.prepare (rate, 256);
         e.monitor.regions = 0b10101;

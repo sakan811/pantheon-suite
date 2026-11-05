@@ -6,7 +6,7 @@
 //   IrisSnapshot <out.png> [preset name] [band=N] [region=MASK] [solo=BAND:band|curve] [delta]
 //
 //   band=N     select band N (1-based)
-//   region=M   solo the frequency regions in bit mask M (1 = low ... 16 = high)
+//   region=M   solo the frequency regions in bit mask M (1 = sub ... 32 = high)
 //   solo=N:k   solo band N, as its region (k = band) or its curve (k = curve)
 //   sidechain  feed a second track (a bass line over low-passed noise) to the sidechain input, for the masking view
 

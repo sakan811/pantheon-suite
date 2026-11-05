@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Iris Prism: a JUCE dynamic equaliser (VST3 / AU / Standalone, macOS). Eight bands, each on Stereo / Left / Right / Mid / Side,
-optionally dynamic; a Clean and a Sat mode; Delta, Gain Match; solo for a band, for what a band adds, and for five frequency
+optionally dynamic; a Clean and a Sat mode; Delta, Gain Match; solo for a band, for what a band adds, and for six frequency
 regions. See `README.md` for what it does and what has been measured; this file is what you need to change it safely.
 
 ## Build and verify
@@ -36,7 +36,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   ResonanceFinder.h  narrow, lasting peaks in a spectrum (the display's markers); GUI-free, fed by the display's timer
   Masking.h          MaskingMeter: where this track and the sidechain mask each other (the display's clash zones); GUI-free, fed by the display's timer
   Saturator.h        Shaper: three curves, residual ADAA, DC block
-  Crossover.h        LR4, RegionSplitter (five regions, flat sum), regionName()
+  Crossover.h        LR4, RegionSplitter (six regions, flat sum), regionName()
   Engine.h           the whole signal path, the tick, solo, delta, gain match, meters, analyzer taps
 Source/Parameters.h  parameter layout, presets, readParams(), band helpers                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/IrisUi.h` holds what is Iris' own; `UI/EqView.h` is the display)
@@ -95,7 +95,7 @@ out over 10 ms and its filters are reset when it starts; releasing one returns t
 
 **Region solo sums flat.** Every region goes through the all-pass of each crossover above it (`RegionSplitter`), so any combination adds
 to the input's magnitude (test [8]). Do not "save" the compensation filters: soloing two regions at once would then bump at the crossover.
-The crossovers are kept in order, at least a ratio of 1.2 apart, in `control()`; the display and the engine agree on that.
+The crossovers are kept in order, at least a ratio of 1.2 apart, in `control()`; the display and the engine agree on that. Their defaults are `defaultCrossoverHz` in `Band.h`: the first two (60 Hz, 120 Hz) are the edges of Themis' SUB / BASS audition ranges, keep them in step. `xo0`, the sub / bass split, was added after `xo1` ... `xo4` (version 2): the crossover array is `xo0` ... `xo4` in that order, so a session from before it keeps the other four where they were.
 
 **The sidechain is only measured.** The second input bus (`Sidechain`, off unless the host connects it) is pushed into
 `IrisProcessor::sidechainTap` for the masking view and never reaches the engine: `processBlock` hands the engine the main bus only
@@ -119,8 +119,8 @@ alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arriv
 
 ## DRY: where each thing lives (change it there only)
 
-- parameter ranges, defaults, choice lists (`typeNames`, `placeNames`, ...), the crossover defaults -> `Parameters.h` (the editor reads the
-  items from the parameters)
+- parameter ranges, defaults, choice lists (`typeNames`, `placeNames`, ...) -> `Parameters.h` (the editor reads the
+  items from the parameters); the crossover defaults -> `defaultCrossoverHz` in `DSP/Band.h` (`Parameters.h` and the engine use it)
 - per-band parameter ids -> `bandIds()`; adding and removing a band -> `addBand`, `removeBand` (the display's double-click, its menu and the
   ADD BAND / REMOVE buttons all call them)
 - which channels a placement touches -> `touchesLeft` / `touchesRight` / `touchesMid` / `touchesSide` in `Band.h`

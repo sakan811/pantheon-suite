@@ -3,7 +3,7 @@
 A **dynamic equaliser** (VST3 + AU + Standalone) for mixing and mastering: eight bands that each work on both channels, on
 left or right alone, or on the mid or the side of the stereo image; any band can follow the level of its own frequency
 region; a **Clean** mode that is a plain equaliser and a **Sat** mode that warms up the boosts; **Delta** and **Gain Match**
-to judge what you did; and **solo** for a band, for what a band adds, and for the low, low-mid, mid, high-mid and high parts
+to judge what you did; and **solo** for a band, for what a band adds, and for the sub, bass, low-mid, mid, high-mid and high parts
 of the spectrum.
 
 ## Name origin
@@ -18,7 +18,7 @@ namespaces and plugin codes use the short name "Iris".)
 over a stereo programme whose top is on the sides. Band 1 (violet) is a low cut on the **Side** only, so the bass stays in the
 centre; band 2 (violet, selected) is a high shelf on the Side; band 3 (teal) is a bell on the **Mid**. The display draws one curve for each
 channel that has a band of its own, in the band's colour (Mid teal, Side violet; Left blue and Right rose when a band is placed on one
-channel); the dim trace is the spectrum going in, the cream one coming out. Along the bottom, the five frequency regions are the solo
+channel); the dim trace is the spectrum going in, the cream one coming out. Along the bottom, the six frequency regions are the solo
 switches, and the triangles between them move the crossovers. Regenerate with the command under "Development".*
 
 ![A dynamic band](docs/dynamics.png)
@@ -68,7 +68,7 @@ of their neighbourhood (double-click one for a narrow dynamic bell).*
 | **Delta** | Plays only what the equaliser changes (output minus input). Not saved; a band solo takes over from it. |
 | **Gain Match** | A slow (about 0.6 s) RMS match of the output to the input, never more than 12 dB either way, so a boost that is merely louder is not mistaken for better. Off by default; while it is on, the gain it is applying is read out above its button. |
 | **Solo a band** | Two ways, both on the band panel (and in the node's menu). **BAND** plays the output through a filter that matches the band, at its frequency and width (below a low shelf or low cut, above a high one): what the band is working on. **CURVE** plays only what the band adds or takes away: its own curve, nothing else. Press the same button again to release. |
-| **Solo a frequency region** | The strip along the bottom of the display is five switches: **Low, Low-Mid, Mid, High-Mid, High**, cut at four crossovers (120 Hz, 500 Hz, 2 kHz, 6 kHz by default). Click to solo a region, click more to add others, Alt-click to solo one alone. Drag a triangle between two regions to move the crossover (it cannot be dragged into the next one), double-click it to put it back. Linkwitz-Riley 4th order, and every region goes through the all-pass of the crossovers above it, so any combination of regions adds up exactly: soloing all five sounds like soloing none. The region solo works on whatever you hear, so it combines with Delta and with a band solo. |
+| **Solo a frequency region** | The strip along the bottom of the display is six switches: **Sub, Bass, Low-Mid, Mid, High-Mid, High**, cut at five crossovers (60 Hz, 120 Hz, 500 Hz, 2 kHz, 6 kHz by default; the first two are the edges of Themis' SUB and BASS audition ranges, so what Themis flags can be soloed here over the same part of the spectrum). Click to solo a region, click more to add others, Alt-click to solo one alone. Drag a triangle between two regions to move the crossover (it cannot be dragged into the next one), double-click it to put it back. Linkwitz-Riley 4th order, and every region goes through the all-pass of the crossovers above it, so any combination of regions adds up exactly: soloing all six sounds like soloing none. The region solo works on whatever you hear, so it combines with Delta and with a band solo. |
 | **Resonances** | Orange markers on the input trace where a narrow peak stands out of its neighbourhood for seconds (a ringing room mode, a boxy drum, a harsh formant), labelled with how far it stands out. **Double-click a marker** for a narrow *dynamic* bell at its frequency and width: it rests at 0 dB and cuts by as much as the peak stands out while the level there is at or above what was measured (threshold 3 dB under it), so it only works while the ring is there. A peak counts when it is the highest point within ±1/12 octave and at least 6 dB above the mean from 1/12 to 1/3 octave either side, averaged over about 3 s on a 1/24-octave grid (rules of thumb, in [ResonanceFinder.h](Source/DSP/ResonanceFinder.h)). Right-click the display to turn the markers off. |
 | **Masking (sidechain)** | Route another track to Iris' **sidechain** input (it is never heard, only measured) and the display adds its spectrum (teal) and shades every zone where the two **mask each other**: in a third-octave band both are within 24 dB of their own loudest band and within 6 dB of each other. Each zone is labelled with the cut that would put the other track 6 dB clear of this one there (at most 12 dB); **double-click the label** for a bell across the zone. Or cut the other track instead: the zones are the same from either side. Rules of thumb, in [Masking.h](Source/DSP/Masking.h). |
 | **Is the dynamics working?** | The DYNAMICS panel watches each dynamic band for about 8 s of playback and says so when it **never moves** (the level never reached the threshold) or is **always at its full range** (it acts like a static band), with the level it heard and a threshold to try (3 dB under the loudest moment, or above the quietest for a band that works below). |
@@ -164,7 +164,7 @@ auval -v aufx Irsp Irsa                                                         
 ```
 
 `docs/screenshot.png`, `dynamics.png`, `solo.png` and `masking.png` are the output of `IrisSnapshot` (arguments in the file's header), never
-edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=6 solo=2:curve`, `"Init" sidechain`. They are
+edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=12 solo=2:curve`, `"Init" sidechain`. They are
 regenerated after any change that touches the UI or what it shows. The rules for working on the code are in
 [CLAUDE.md](CLAUDE.md); the rules for the repository are in [the root CLAUDE.md](../../CLAUDE.md).
 
@@ -174,7 +174,7 @@ Source/DSP/Dynamics.h        the detector and the gain computer, and DynamicsUsa
 Source/DSP/ResonanceFinder.h narrow peaks that stand out of the input spectrum (the display's markers)
 Source/DSP/Masking.h         where this track and the sidechain mask each other (the display's clash zones)
 Source/DSP/Saturator.h       the SAT shaper: three curves, residual ADAA, DC block
-Source/DSP/Crossover.h       Linkwitz-Riley 4th order and the five-region splitter
+Source/DSP/Crossover.h       Linkwitz-Riley 4th order and the six-region splitter
 Source/DSP/Engine.h          bands in series, placements, dynamics, SAT, gain match, delta, solo, meters, analyzer taps
 Source/Parameters.h          parameter layout, presets, readParams(), band helpers  <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}       JUCE wrapper and editor
@@ -205,8 +205,9 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
 - **Delta** is the processed signal minus the input to 3e-8. **Gain Match**: a +9 dB low shelf on noise is 2.4 dB louder and 0.03 dB
   with the match on; it never takes off more than 12 dB.
 - **Solo.** A region passes a tone in the middle of its range within 1.7 dB (the crossovers are 4th order: a tone is -6 dB at its
-  crossover) and keeps the next range's tone at least 20.7 dB down and the others at least 68 dB; all five together are flat to
-  0.000 dB over ten tones including the crossover frequencies; releasing a solo restores the output bit for bit. BAND solo of a 1 kHz
+  crossover; the bass is only one octave wide, so its middle is 3.9 dB down) and keeps the next range's tone at least 20.7 dB down
+  (14.0 dB beside the bass) and the others at least 48.9 dB; all six together are flat to
+  0.000 dB over eleven tones including the crossover frequencies; releasing a solo restores the output bit for bit. BAND solo of a 1 kHz
   bell: +0.00 dB at 1 kHz, -64 dB at 100 Hz, -67 dB at 10 kHz. CURVE solo: a +6 dB bell adds 0.995 of the input at its centre (-0.04 dB).
 - **Robust.** The output is identical whether the host sends blocks of 4096, 37 or 1 samples; every band at its extreme with Sat,
   dynamics and a region solo stays finite at 22.05, 44.1, 48, 96 and 192 kHz; a NaN and an inf in the input do not leave the output broken;
