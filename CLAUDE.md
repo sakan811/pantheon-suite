@@ -41,10 +41,14 @@ plugins/<name>/  one self-contained plugin each: its own CMakeLists.txt, core/, 
 - What two or more plugins both need, and nothing a single plugin owns: today the double-precision [Biquad.h](shared/dsp/include/pantheon/dsp/Biquad.h)
   (RBJ designs including the parametric-EQ bell, shelves and notch, Butterworth cascades of 12 to 48 dB per octave, `magnitudeAt`
   for drawing and tests), [AnalyzerTap.h](shared/dsp/include/pantheon/dsp/AnalyzerTap.h) (the lock-free FIFOs from the audio thread to a display) and
-  [SpectrumAnalyzer.h](shared/dsp/include/pantheon/dsp/SpectrumAnalyzer.h) (the calibrated FFT analyzer, GUI-free). Used by Hephaestus and Iris.
+  [SpectrumAnalyzer.h](shared/dsp/include/pantheon/dsp/SpectrumAnalyzer.h) (the calibrated FFT analyzer, GUI-free), used by Hephaestus and Iris; and
+  [BandLink.h](shared/dsp/include/pantheon/dsp/BandLink.h) (`pdsp::link`: bands handed between plugins as clipboard text, plain C++), which
+  Themis writes (COPY, Copy EQ) and Iris and Hephaestus read (PASTE). Its format is versioned (`pantheon-bands 1`): add keys, never change
+  what one means, and keep the readers ignoring what they do not know.
 - It knows nothing about any plugin and has no GUI. The namespace is `pdsp` (not `dsp`, which would collide with `juce::dsp`).
 - **A change here changes every plugin that uses it.** Run each one's DSP tests (Hephaestus: `HephaestusTests`; Iris: `IrisTests`); the
-  analyzer's calibration is pinned by Hephaestus' test [10]. The files are tested through the plugins that use them, not on their own.
+  analyzer's calibration is pinned by Hephaestus' test [10]; BandLink by both `UiCheck`s (PASTE) and Themis' `ThemisSmoke` build. The files are
+  tested through the plugins that use them, not on their own.
 
 ## Licence and CI
 
