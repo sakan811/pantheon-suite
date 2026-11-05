@@ -41,7 +41,7 @@ private:
     ui::Knob thresholdKnob, ratioKnob, rangeKnob, attackKnob, releaseKnob;
     std::array<std::unique_ptr<ui::Choice>, iris::maxBands> typeBoxes, placeBoxes, slopeBoxes, dynModeBoxes;
     std::array<std::unique_ptr<ui::Toggle>, iris::maxBands> dynToggles;
-    juce::TextButton removeButton { "REMOVE" }, addButton { "ADD BAND" }, soloBandButton { "BAND" }, soloCurveButton { "CURVE" };
+    juce::TextButton removeButton { "REMOVE" }, addButton { "ADD BAND" }, pasteButton { "PASTE" }, soloBandButton { "BAND" }, soloCurveButton { "CURVE" };
     std::array<juce::Rectangle<int>, iris::maxBands> chipBounds;
     int shownSignature = -1;
 
@@ -54,6 +54,11 @@ private:
     ui::Toggle matchButton;
 
     float inLevel = 0.0f, outLevel = 0.0f;
+
+    // Whether each dynamic band is doing anything (fed by the timer; started over when its threshold, range or mode changes).
+    std::array<iris::DynamicsUsage, iris::maxBands> usage;
+    std::array<float, iris::maxBands> usageKey {};
+    void trackUsage();
     std::array<juce::Rectangle<int>, (size_t) Panel::count> panelBounds;
     juce::Rectangle<int> nameplate, meterArea, dynReadout;
     int lastProgram = -1;

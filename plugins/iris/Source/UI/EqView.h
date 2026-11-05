@@ -11,6 +11,9 @@
 #include <pantheon/dsp/SpectrumAnalyzer.h>
 #include <pantheon/ui/FreqAxis.h>
 
+#include "../DSP/Masking.h"
+#include "../DSP/ResonanceFinder.h"
+
 namespace iris::gui
 {
 using FreqAxis = ui::FreqAxis;
@@ -31,9 +34,10 @@ public:
     EqView (Engine& e, juce::AudioProcessorValueTreeState& s, const double& sampleRateRef)
         : engine (e), apvts (s), sampleRate (sampleRateRef)
     {
-        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale })
+        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale, &markers })
             setting->load (apvts.state);
         applyAnalyzerSettings();
+        resonances.reset();
 
         setTooltip ("Double-click to add a band. Drag a node to set its frequency and gain (Shift = fine), turn the wheel over it for Q. "
                     "Right-click a node for its menu. The strip along the bottom solos a part of the spectrum.");
@@ -41,6 +45,22 @@ public:
     }
 
     std::function<void (int)> onSelectionChanged;
+
+    juce::String getTooltip() override
+    {
+        if (const int r = resonanceAt (hover); r >= 0)
+            return resonanceTooltip (r);
+        if (const int c = clashLabelAt (hover); c >= 0)
+            return clashTooltip (c);
+        return juce::SettableTooltipClient::getTooltip();
+    }
+
+    // The tap that carries the sidechain input (another track) for the masking view; nullptr = none.
+    void setSidechain (pdsp::StereoTap* tap) { sidechain = tap; }
+    const std::vector<MaskingMeter::Clash>& currentClashes() const noexcept { return clashes; }
+
+    // The resonances found so far (for the snapshot and the checks).
+    const std::vector<ResonanceFinder::Resonance>& currentResonances() const noexcept { return found; }
 
     int getSelectedBand() const noexcept { return selected; }
 
@@ -103,7 +123,11 @@ public:
         drawGrid (g, plot);
         drawTrace (g, plot, inTrace, colours::dim.withAlpha (0.7f), colours::dim.withAlpha (0.12f));
         drawTrace (g, plot, outTrace, colours::text.withAlpha (0.85f), colours::text.withAlpha (0.10f));
+        if (masking.hasData())
+            drawTrace (g, plot, sideTrace, colours::accent.withAlpha (0.55f), juce::Colours::transparentBlack);
+        drawClashes (g, plot);
         drawCurves (g, plot, bands);
+        drawResonances (g);
         drawNodes (g, plot, bands);
         g.restoreState();
 
@@ -121,7 +145,8 @@ public:
         else if (pillArea().contains (e.position) && anySolo())
             setMouseCursor (juce::MouseCursor::PointingHandCursor);
         else
-            setMouseCursor (nodeAt (e.position) >= 0 ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
+            setMouseCursor (nodeAt (e.position) >= 0 ? juce::MouseCursor::DraggingHandCursor
+                            : resonanceAt (e.position) >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
         repaint();
     }
 
@@ -242,7 +267,13 @@ public:
                     setParameter (*p, p->getDefaultValue());
             return;
         }
-        if (nodeAt (e.position) < 0)
+        if (nodeAt (e.position) >= 0)
+            return;
+        if (const int r = resonanceAt (e.position); r >= 0)
+            addResonanceBand (found[(size_t) r]);
+        else if (const int c = clashLabelAt (e.position); c >= 0)
+            addClashBand (clashes[(size_t) c]);
+        else
             addBandAt (BandType::bell, e.position);
     }
 
@@ -791,7 +822,7 @@ private:
             menu.addItem (nextId++, "Add " + typeNames[t] + " here");
             actions.push_back ([this, at, t] { addBandAt ((BandType) t, at); });
         }
-        for (Setting* setting : { &gainScale, &spectrumRange, &speed, &tilt })
+        for (Setting* setting : { &gainScale, &spectrumRange, &speed, &tilt, &markers })
         {
             menu.addSeparator();
             menu.addSectionHeader (setting->title);
@@ -819,7 +850,7 @@ private:
             a->setTilt (tilt.value());
             a->setReleaseSeconds (speed.value());
         }
-        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale })
+        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale, &markers })
             apvts.state.setProperty (setting->property, setting->value(), nullptr);
     }
 
@@ -835,7 +866,151 @@ private:
 
         inTrace.update (engine.tapIn);
         outTrace.update (engine.tapOut);
+
+        // Twice a second is plenty for what is averaged over seconds.
+        const bool refresh = ++findTicks >= 15;
+        if (refresh)
+            findTicks = 0;
+
+        // Resonances are looked for in what goes in (what the bands are there to fix), without the display's tilt.
+        if (markers.value() > 0.5f)
+        {
+            for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
+                untilted[(size_t) i] = untilt (inTrace, i);
+            resonances.update (untilted.data(), pdsp::SpectrumAnalyzer::numBins, inTrace.binFrequency (1), 1.0f / 30.0f);
+            if (refresh)
+                found = resonances.find();
+        }
+        else
+            found.clear();
+
+        // Masking: this track against whatever arrives at the sidechain input, both without the display's tilt.
+        if (sidechain != nullptr)
+        {
+            sideTrace.setSampleRate (sampleRate);
+            sideTrace.setTilt (tilt.value());
+            sideTrace.setReleaseSeconds (speed.value());
+            sideTrace.update (*sidechain);
+            if (markers.value() <= 0.5f) // the resonance pass did not fill `untilted`
+                for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
+                    untilted[(size_t) i] = untilt (inTrace, i);
+            for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
+                sideUntilted[(size_t) i] = untilt (sideTrace, i);
+            masking.update (untilted.data(), sideUntilted.data(), pdsp::SpectrumAnalyzer::numBins, inTrace.binFrequency (1), 1.0f / 30.0f);
+            if (refresh)
+                clashes = masking.clashes();
+        }
         repaint();
+    }
+
+    static float untilt (const pdsp::SpectrumAnalyzer& a, int bin)
+    {
+        return a.levelDb (bin) - a.getTilt() * (float) std::log2 (std::max (a.binFrequency (bin), 1.0) / 1000.0);
+    }
+
+    // ---- masking -----------------------------------------------------------------------------------
+    // Each clash zone is shaded across the display with a label at the top saying how far to cut this track there.
+    juce::Rectangle<float> clashLabel (const MaskingMeter::Clash& c) const
+    {
+        const auto plot = plotArea();
+        return { xOf ((float) c.centreHz) - 34.0f, plot.getY() + 26.0f, 68.0f, 15.0f };
+    }
+
+    void drawClashes (juce::Graphics& g, juce::Rectangle<float> plot) const
+    {
+        for (const auto& c : clashes)
+        {
+            const float x0 = xOf ((float) c.loHz), x1 = xOf ((float) c.hiHz);
+            g.setColour (colours::accent.withAlpha (0.10f));
+            g.fillRect (x0, plot.getY(), x1 - x0, plot.getHeight());
+            const auto label = clashLabel (c);
+            g.setColour (colours::accent.withAlpha (0.85f));
+            g.drawRoundedRectangle (label, 3.0f, 1.0f);
+            g.setFont (ui::lcdFont (10.0f));
+            g.drawText ("MASK " + juce::String (c.cutDb, 1), label, juce::Justification::centred, false);
+        }
+    }
+
+    int clashLabelAt (juce::Point<float> at) const
+    {
+        for (size_t i = 0; i < clashes.size(); ++i)
+            if (clashLabel (clashes[i]).expanded (2.0f).contains (at))
+                return (int) i;
+        return -1;
+    }
+
+    // A bell across the zone that cuts this track far enough for the other one to sit clear of it there.
+    void addClashBand (const MaskingMeter::Clash& c)
+    {
+        const int slot = addBand (apvts, BandType::bell, c.centreHz, c.cutDb);
+        if (slot < 0)
+            return;
+        setParameterValue (apvts, bandIds (slot).q, (float) c.q);
+        setSelectedBand (slot);
+    }
+
+    juce::String clashTooltip (int i) const
+    {
+        const auto& c = clashes[(size_t) i];
+        return "This track and the sidechain are both loud from " + juce::String (juce::roundToInt (c.loHz)) + " to " + juce::String (juce::roundToInt (c.hiHz))
+               + " Hz and within " + juce::String (MaskingMeter::kCloseDb, 0) + " dB of each other (here " + juce::String (c.ownDb, 1) + " against "
+               + juce::String (c.otherDb, 1) + " dB), so they mask each other. Double-click to cut this track by " + juce::String (-c.cutDb, 1)
+               + " dB there, which leaves the other one " + juce::String (MaskingMeter::kClearDb, 0) + " dB clear. Or cut the other track instead.";
+    }
+
+    // ---- resonances ------------------------------------------------------------------------------
+    // A small marker on the input trace at each resonance, labelled with how far it stands out. Double-click one for a band.
+    void drawResonances (juce::Graphics& g) const
+    {
+        g.setFont (ui::lcdFont (10.0f));
+        for (const auto& r : found)
+        {
+            const auto p = resonancePoint (r);
+            juce::Path tri;
+            tri.addTriangle (p.x - 5.0f, p.y - 14.0f, p.x + 5.0f, p.y - 14.0f, p.x, p.y - 5.0f);
+            g.setColour (colours::warn.withAlpha (0.9f));
+            g.fillPath (tri);
+            g.drawText ("+" + juce::String (juce::roundToInt (r.prominenceDb)), juce::Rectangle<float> (p.x - 20.0f, p.y - 28.0f, 40.0f, 13.0f), juce::Justification::centred, false);
+        }
+    }
+
+    juce::Point<float> resonancePoint (const ResonanceFinder::Resonance& r) const
+    {
+        const float tiltDb = inTrace.getTilt() * (float) std::log2 (r.freqHz / 1000.0);
+        return { xOf ((float) r.freqHz), spectrumY (r.levelDb + tiltDb) };
+    }
+
+    int resonanceAt (juce::Point<float> at) const
+    {
+        for (size_t i = 0; i < found.size(); ++i)
+            if (at.getDistanceFrom (resonancePoint (found[i]).translated (0.0f, -12.0f)) < 11.0f)
+                return (int) i;
+        return -1;
+    }
+
+    // A narrow dynamic bell on the resonance: at rest it does nothing, and it cuts as far as the resonance stands out while the
+    // level at that frequency is at or above what was measured (threshold 3 dB under it), so it only works while the ring is there.
+    void addResonanceBand (const ResonanceFinder::Resonance& r)
+    {
+        const int slot = addBand (apvts, BandType::bell, r.freqHz, 0.0);
+        if (slot < 0)
+            return;
+        const auto& ids = bandIds (slot);
+        setParameterValue (apvts, ids.q, (float) r.q);
+        setParameterValue (apvts, ids.dyn, 1.0f);
+        setParameterValue (apvts, ids.dynMode, (float) (int) DynMode::above);
+        setParameterValue (apvts, ids.threshold, juce::jlimit (-60.0f, 0.0f, r.levelDb - 3.0f));
+        setParameterValue (apvts, ids.ratio, 4.0f);
+        setParameterValue (apvts, ids.range, -juce::jlimit (1.0f, 24.0f, r.prominenceDb));
+        setSelectedBand (slot);
+    }
+
+    std::string resonanceTooltip (int i) const
+    {
+        const auto& r = found[(size_t) i];
+        return juce::String ("Resonance at " + juce::String (juce::roundToInt (r.freqHz)) + " Hz: " + juce::String (r.prominenceDb, 1)
+                             + " dB above its neighbourhood for the last few seconds (Q about " + juce::String (r.q, 1)
+                             + "). Double-click for a narrow dynamic bell that cuts it only while it rings. Turn the markers off in the right-click menu.").toStdString();
     }
 
     static constexpr float topDb = -10.0f;
@@ -850,7 +1025,18 @@ private:
     Setting tilt  { "Analyzer tilt", "spectrumTilt", { { "0 dB/oct", 0.0f }, { "3 dB/oct", 3.0f }, { "4.5 dB/oct", pdsp::SpectrumAnalyzer::defaultTilt }, { "6 dB/oct", 6.0f } }, 2 };
     Setting gainScale { "Gain scale", "gainScale", { { "+/- 6 dB", 6.0f }, { "+/- 12 dB", 12.0f }, { "+/- 18 dB", 18.0f }, { "+/- 24 dB", 24.0f } }, 1 };
 
+    Setting markers { "Resonance markers", "resonanceMarkers", { { "Off", 0.0f }, { "On", 1.0f } }, 1 };
+
     pdsp::SpectrumAnalyzer inTrace, outTrace;
+    ResonanceFinder resonances;
+    std::array<float, (size_t) pdsp::SpectrumAnalyzer::numBins> untilted {};
+    std::vector<ResonanceFinder::Resonance> found;
+    int findTicks = 0;
+    pdsp::StereoTap* sidechain = nullptr;
+    pdsp::SpectrumAnalyzer sideTrace;
+    std::array<float, (size_t) pdsp::SpectrumAnalyzer::numBins> sideUntilted {};
+    MaskingMeter masking;
+    std::vector<MaskingMeter::Clash> clashes;
     int selected = 0;
     juce::Point<float> hover { -1.0f, -1.0f };
 };

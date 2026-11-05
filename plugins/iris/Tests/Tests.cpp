@@ -7,6 +7,8 @@
 
 #include "Check.h"
 #include "DSP/Engine.h"
+#include "DSP/Masking.h"
+#include "DSP/ResonanceFinder.h"
 #include "TestSignals.h"
 
 #include <chrono>
@@ -859,7 +861,102 @@ void testLiveChanges()
         check (ok, "a dynamic band reads a -20 dB sine as -20 dB on every placement:" + line);
     }
 }
+void testDynamicsUsage()
+{
+    std::printf ("\n[11] Dynamics usage: a dynamic band that never moves, or never lets go, is named\n");
+    const DynamicsParams d; // threshold -24, ratio 4, range -6
+    const auto run = [&] (auto levelAt)
+    {
+        DynamicsUsage u;
+        for (int i = 0; i < 30 * 10; ++i) // ten seconds of the editor's 30 Hz timer
+        {
+            const double level = levelAt (i);
+            u.push (level, dynamicOffsetDb (d, level), d.rangeDb, 1.0 / 30.0);
+        }
+        return u.summary();
+    };
+    const auto quiet = run ([] (int) { return -40.0; });
+    const auto loud = run ([] (int) { return 0.0; });
+    const auto bursts = run ([] (int i) { return i % 30 < 5 ? -10.0 : -40.0; });
+    const auto silent = run ([] (int) { return -120.0; });
+    check (quiet.verdict == DynamicsUsage::Verdict::idle && std::fabs (quiet.maxLevelDb + 40.0) < 1.0e-9,
+           fmt ("16 dB under the threshold all the time: idle, loudest %.1f dB", quiet.maxLevelDb));
+    check (loud.verdict == DynamicsUsage::Verdict::pinned, "24 dB over the threshold all the time: pinned at its range");
+    check (bursts.verdict == DynamicsUsage::Verdict::working, "bursts over the threshold between quiet passages: working");
+    check (silent.verdict == DynamicsUsage::Verdict::measuring, "digital silence (a stopped transport) gives no verdict");
+}
 } // namespace
+
+void testResonances()
+{
+    std::printf ("\n[12] Resonance finder: narrow peaks that stand out, not broad tilts or silence\n");
+    const double binHz = 48000.0 / 8192.0;
+    const auto spectrum = [&] (double f0, double peakDb, double q)
+    {
+        std::vector<float> db (4096);
+        for (size_t i = 0; i < db.size(); ++i)
+        {
+            const double f = std::max (1.0, (double) i * binHz);
+            const double x = q * (f / f0 - f0 / f);
+            db[i] = (float) (-40.0 - 3.0 * std::log2 (f / 1000.0) + peakDb / (1.0 + x * x)); // a pink-ish tilt plus the peak
+        }
+        return db;
+    };
+    const auto run = [&] (const std::vector<float>& db)
+    {
+        ResonanceFinder r;
+        r.reset();
+        for (int i = 0; i < 90; ++i)
+            r.update (db.data(), (int) db.size(), binHz, 1.0f / 30.0f);
+        return r.find();
+    };
+    const auto ring = run (spectrum (1000.0, 10.0, 8.0));
+    check (! ring.empty() && std::fabs (std::log2 (ring[0].freqHz / 1000.0)) < 1.0 / 24.0 && ring[0].prominenceDb > 7.0f && ring[0].q > 4.0 && ring[0].q < 16.0,
+           fmt ("a +10 dB, Q 8 peak at 1 kHz: found at %.0f Hz, %.1f dB above its neighbourhood, Q %.1f",
+                ring.empty() ? 0.0 : ring[0].freqHz, ring.empty() ? 0.0 : ring[0].prominenceDb, ring.empty() ? 0.0 : ring[0].q));
+    check (run (spectrum (1000.0, 6.0, 0.7)).empty(), "a broad +6 dB bump (Q 0.7) is tone, not a resonance");
+    check (run (spectrum (1000.0, 0.0, 1.0)).empty(), "a smooth spectrum has none");
+    std::vector<float> silent (4096, -140.0f);
+    check (run (silent).empty(), "silence (a stopped transport) reports none");
+}
+
+void testMasking()
+{
+    std::printf ("\n[13] Masking: where this track and the sidechain fight for the same frequencies\n");
+    const double binHz = 48000.0 / 8192.0;
+    // Levels per bin: a floor, plus +20 dB inside [lo, hi].
+    const auto shape = [&] (double lo, double hi, float floorDb, float boostDb)
+    {
+        std::vector<float> db (4096);
+        for (size_t i = 0; i < db.size(); ++i)
+        {
+            const double f = (double) i * binHz;
+            db[i] = floorDb + (f >= lo && f <= hi ? boostDb : 0.0f);
+        }
+        return db;
+    };
+    const auto run = [&] (const std::vector<float>& own, const std::vector<float>& other)
+    {
+        MaskingMeter m;
+        for (int i = 0; i < 90; ++i)
+            m.update (own.data(), other.data(), (int) own.size(), binHz, 1.0f / 30.0f);
+        return m.clashes();
+    };
+    // This track: loud 200 - 500 Hz and 3 - 6 kHz. The other: loud 200 - 500 Hz only, 2 dB louder there.
+    auto own = shape (200.0, 500.0, -70.0f, 30.0f);
+    const auto top = shape (3000.0, 6000.0, 0.0f, 30.0f);
+    for (size_t i = 0; i < own.size(); ++i)
+        own[i] = std::max (own[i], top[i] - 70.0f);
+    const auto other = shape (200.0, 500.0, -70.0f, 32.0f);
+    const auto c = run (own, other);
+    check (c.size() == 1 && c[0].loHz > 150.0 && c[0].hiHz < 700.0,
+           fmt ("one clash zone, in the shared low mids: %.0f - %.0f Hz (%d zones)", c.empty() ? 0.0 : c[0].loHz, c.empty() ? 0.0 : c[0].hiHz, (int) c.size()));
+    if (! c.empty())
+        check (std::fabs (c[0].cutDb + 4.0f) < 0.5f, fmt ("the cut puts the other track 6 dB clear: %.1f dB (2 dB louder already, so -4)", c[0].cutDb));
+    check (run (own, shape (8000.0, 12000.0, -70.0f, 30.0f)).empty(), "tracks loud in different ranges do not clash");
+    std::vector<float> silent (4096, -140.0f);
+    check (run (own, silent).empty(), "a silent sidechain reports nothing");
+}
 
 int main()
 {
@@ -873,5 +970,8 @@ int main()
     testSolo();
     testRobust();
     testLiveChanges();
+    testDynamicsUsage();
+    testResonances();
+    testMasking();
     return finish ("IrisTests");
 }

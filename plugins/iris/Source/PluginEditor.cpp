@@ -8,6 +8,7 @@ using namespace iris::gui;
 
 namespace
 {
+constexpr int kTimerHz = 30;
 constexpr int editorWidth = 1180, editorHeight = 676;
 constexpr int headerHeight = 84;   // the control panel along the top
 constexpr int viewHeight = 322;
@@ -93,6 +94,20 @@ IrisEditor::IrisEditor (IrisProcessor& p)
     soloCurveButton.onClick = [this] { view.toggleBandSolo (view.getSelectedBand(), SoloKind::curve); };
     for (auto* b : { &removeButton, &addButton, &soloBandButton, &soloCurveButton })
         addChildComponent (*b);
+    pasteButton.setTooltip ("Add the bands another plugin of the suite copied (Themis: COPY on a plan item, or Copy EQ for the tonal curve), "
+                            "each in the next free slot, with its type, frequency, gain, width and placement.");
+    pasteButton.onClick = [this]
+    {
+        int skipped = 0;
+        const auto slots = pasteBands (proc.apvts, juce::SystemClipboard::getTextFromClipboard(), skipped);
+        if (! slots.empty())
+            view.setSelectedBand (slots.front());
+        else
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Paste",
+                                                    skipped > 0 ? "No free slot, or nothing an equaliser can make (a harmonic-fill band goes to Hephaestus)."
+                                                                : "The clipboard holds no bands. Copy them in Themis first (COPY on a plan item, or Copy EQ).");
+    };
+    addAndMakeVisible (pasteButton);
 
     // Header.
     for (int i = 0; i < (int) presets().size(); ++i)
@@ -129,7 +144,8 @@ IrisEditor::IrisEditor (IrisProcessor& p)
 
     // Size last: resized() lays out the controls, which must all exist by then.
     setSize (editorWidth, editorHeight);
-    startTimerHz (30);
+    view.setSidechain (&p.sidechainTap);
+    startTimerHz (kTimerHz);
 }
 
 IrisEditor::~IrisEditor()
@@ -218,6 +234,19 @@ juce::String IrisEditor::dynamicsHint() const
         return "Dynamics move a band's gain, so they need a bell or a shelf.";
     if (proc.apvts.getRawParameterValue (bandIds (band).dyn)->load() < 0.5f)
         return "Switch DYNAMIC on to make this band follow the level of its own frequency region.";
+
+    // Measured over the last seconds: a band that never moves, or never lets go, is a static band with a detector.
+    const auto& ids = bandIds (band);
+    const auto value = [&] (const juce::String& id) { return proc.apvts.getRawParameterValue (id)->load(); };
+    const bool above = value (ids.dynMode) < 0.5f;
+    const auto s = usage[(size_t) band].summary();
+    const auto db = [] (double x) { return juce::String (x, 1) + " dB"; };
+    const auto suggestion = " Try THRESHOLD " + db (above ? s.maxLevelDb - 3.0 : s.minLevelDb + 3.0) + ".";
+    if (s.verdict == DynamicsUsage::Verdict::idle)
+        return "NEVER MOVES: the level stayed " + db (s.minLevelDb) + " to " + db (s.maxLevelDb) + ", THRESHOLD is "
+               + db (value (ids.threshold)) + "." + suggestion;
+    if (s.verdict == DynamicsUsage::Verdict::pinned)
+        return "ALWAYS AT FULL RANGE, so it acts as a static band (level " + db (s.minLevelDb) + " to " + db (s.maxLevelDb) + ")." + suggestion;
     return "GAIN is where the band rests. While the level is past the threshold the gain moves towards GAIN + RANGE. The display shows the range as a bar and the live gain as a white dot.";
 }
 
@@ -232,6 +261,7 @@ void IrisEditor::layoutBandPanel()
     const auto buttonSlot = juce::Rectangle<int> (panel.getRight() - 14 - 84, panel.getY() + 30, 84, chipHeight);
     removeButton.setBounds (buttonSlot);
     addButton.setBounds (buttonSlot);
+    pasteButton.setBounds (panel.getRight() - 14 - 64, panel.getY() + 6, 64, 20);
 
     const int boxY = panel.getY() + 78;
     typeBoxes[(size_t) band]->setBounds (panel.getX() + 14, boxY, 118, 26);
@@ -461,8 +491,30 @@ void IrisEditor::paint (juce::Graphics& g)
     hw::drawGlassOverlay (g, meterArea.toFloat(), 3.0f, false);
 }
 
+void IrisEditor::trackUsage()
+{
+    for (int b = 0; b < maxBands; ++b)
+    {
+        const auto& ids = bandIds (b);
+        const auto value = [&] (const juce::String& id) { return proc.apvts.getRawParameterValue (id)->load(); };
+        const bool dynamic = isBandOn (proc.apvts, b) && hasGain (bandType (proc.apvts, b)) && value (ids.dyn) > 0.5f;
+        const float key = dynamic ? value (ids.threshold) * 7.0f + value (ids.range) * 131.0f + value (ids.dynMode) * 977.0f
+                                    + value (ids.ratio) * 3.0f + std::log (value (ids.freq)) * 59.0f
+                                  : -1.0e9f;
+        if (std::fabs (key - usageKey[(size_t) b]) > 1.0e-3f)
+        {
+            usageKey[(size_t) b] = key;
+            usage[(size_t) b].reset();
+        }
+        if (dynamic)
+            usage[(size_t) b].push (proc.engine.detectedDb[b].load (std::memory_order_relaxed),
+                                    proc.engine.dynamicDb[b].load (std::memory_order_relaxed), value (ids.range), 1.0 / kTimerHz);
+    }
+}
+
 void IrisEditor::timerCallback()
 {
+    trackUsage();
     inLevel = proc.engine.inPeak.load (std::memory_order_relaxed);
     outLevel = proc.engine.outPeak.load (std::memory_order_relaxed);
 

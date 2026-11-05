@@ -7,7 +7,8 @@
 IrisProcessor::IrisProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                          .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+                          .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                          .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
       apvts (*this, nullptr, "STATE", iris::createLayout())
 {
 }
@@ -16,7 +17,9 @@ bool IrisProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto& in = layouts.getMainInputChannelSet();
     const auto& out = layouts.getMainOutputChannelSet();
-    return in == out && (in == juce::AudioChannelSet::stereo() || in == juce::AudioChannelSet::mono());
+    const auto side = layouts.inputBuses.size() > 1 ? layouts.getChannelSet (true, 1) : juce::AudioChannelSet::disabled();
+    const bool sideOk = side.isDisabled() || side == juce::AudioChannelSet::stereo() || side == juce::AudioChannelSet::mono();
+    return in == out && (in == juce::AudioChannelSet::stereo() || in == juce::AudioChannelSet::mono()) && sideOk;
 }
 
 void IrisProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -29,10 +32,20 @@ void IrisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
 {
     juce::ScopedNoDenormals noDenormals;
 
-    for (int c = getTotalNumInputChannels(); c < getTotalNumOutputChannels(); ++c)
-        buffer.clear (c, 0, buffer.getNumSamples());
+    // The sidechain is only listened to (the masking view); the equaliser works on the main bus alone.
+    if (getBusCount (true) > 1 && getBus (true, 1)->isEnabled())
+    {
+        const auto side = getBusBuffer (buffer, true, 1);
+        if (side.getNumChannels() > 0)
+            sidechainTap.push (side.getArrayOfReadPointers(), side.getNumChannels(), side.getNumSamples());
+    }
 
-    engine.process (buffer, iris::readParams (apvts));
+    auto main = getBusBuffer (buffer, false, 0);
+    const int mainIn = getMainBusNumInputChannels();
+    for (int c = mainIn; c < main.getNumChannels(); ++c)
+        main.clear (c, 0, main.getNumSamples());
+
+    engine.process (main, iris::readParams (apvts));
 }
 
 void IrisProcessor::setCurrentProgram (int index)

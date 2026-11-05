@@ -36,6 +36,8 @@ public:
 
     iris::Engine engine;
     juce::AudioProcessorValueTreeState apvts;
+    // What arrives at the sidechain input (another track), for the masking view only: it never reaches the audio.
+    pdsp::StereoTap sidechainTap;
     double currentSampleRate = 48000.0;
 
 private:

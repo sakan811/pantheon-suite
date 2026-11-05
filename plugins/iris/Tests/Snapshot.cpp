@@ -8,6 +8,7 @@
 //   band=N     select band N (1-based)
 //   region=M   solo the frequency regions in bit mask M (1 = low ... 16 = high)
 //   solo=N:k   solo band N, as its region (k = band) or its curve (k = curve)
+//   sidechain  feed a second track (a bass line over low-passed noise) to the sidechain input, for the masking view
 
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
@@ -31,6 +32,7 @@ int main (int argc, char** argv)
             if (proc.getProgramName (i) == argv[2])
                 proc.setCurrentProgram (i);
 
+    bool sidechain = false;
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
 
@@ -48,17 +50,36 @@ int main (int argc, char** argv)
         }
         else if (arg == "delta")
             proc.engine.monitor.delta = true;
+        else if (arg == "sidechain")
+            sidechain = true;
     }
 
     test::Programme programme;
     juce::AudioBuffer<float> buffer (2, 512);
     juce::MidiBuffer midi;
-    for (int block = 0; block < 260; ++block)
+    juce::AudioBuffer<float> other (2, 512);
+    test::PinkNoise otherNoise (33);
+    float lowpassed = 0.0f;
+    double otherT = 0.0;
+    for (int block = 0; block < 400; ++block)
     {
         programme.fill (buffer);
+        if (sidechain)
+        {
+            // Another track on the sidechain: a bass line (55 and 82.5 Hz) over noise low-passed at about 300 Hz.
+            for (int i = 0; i < other.getNumSamples(); ++i, ++otherT)
+            {
+                const double t = otherT / 48000.0;
+                lowpassed += 0.04f * (otherNoise.next() - lowpassed);
+                const float x = 1.6f * lowpassed + (float) (0.12 * std::sin (2 * M_PI * 55 * t) + 0.08 * std::sin (2 * M_PI * 82.5 * t));
+                other.setSample (0, i, x);
+                other.setSample (1, i, x);
+            }
+            proc.sidechainTap.push (other.getArrayOfReadPointers(), 2, other.getNumSamples());
+        }
         proc.processBlock (buffer, midi);
         if (block % 4 == 0)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (3);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (34); // about one display tick per 4 blocks, so the averaged views (resonances, masking) fill in
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
 
