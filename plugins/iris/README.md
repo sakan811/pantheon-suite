@@ -33,6 +33,13 @@ releasing after the sibilant burst), and the DYNAMICS panel reads the level the 
 **CURVE** solo, so what plays is only what that band adds. The pill at the top left says what is soloed; clicking it clears
 every solo.*
 
+![Masking and resonances](docs/masking.png)
+
+*The same programme with another track (a bass line over low-passed noise, teal trace) on the **sidechain** input. The two shaded
+zones are where they mask each other, each labelled with the cut that would leave the other track 6 dB clear (double-click a label
+for that band). The orange markers are **resonances** in this track: the steady tone at about 110 Hz and the 7 kHz burst stand out
+of their neighbourhood (double-click one for a narrow dynamic bell).*
+
 ## Core philosophy
 
 - **A band touches only what you give it.** A band on Left, Right, Mid or Side takes that signal out of the stereo pair, filters it
@@ -62,6 +69,10 @@ every solo.*
 | **Gain Match** | A slow (about 0.6 s) RMS match of the output to the input, never more than 12 dB either way, so a boost that is merely louder is not mistaken for better. Off by default; while it is on, the gain it is applying is read out above its button. |
 | **Solo a band** | Two ways, both on the band panel (and in the node's menu). **BAND** plays the output through a filter that matches the band, at its frequency and width (below a low shelf or low cut, above a high one): what the band is working on. **CURVE** plays only what the band adds or takes away: its own curve, nothing else. Press the same button again to release. |
 | **Solo a frequency region** | The strip along the bottom of the display is five switches: **Low, Low-Mid, Mid, High-Mid, High**, cut at four crossovers (120 Hz, 500 Hz, 2 kHz, 6 kHz by default). Click to solo a region, click more to add others, Alt-click to solo one alone. Drag a triangle between two regions to move the crossover (it cannot be dragged into the next one), double-click it to put it back. Linkwitz-Riley 4th order, and every region goes through the all-pass of the crossovers above it, so any combination of regions adds up exactly: soloing all five sounds like soloing none. The region solo works on whatever you hear, so it combines with Delta and with a band solo. |
+| **Resonances** | Orange markers on the input trace where a narrow peak stands out of its neighbourhood for seconds (a ringing room mode, a boxy drum, a harsh formant), labelled with how far it stands out. **Double-click a marker** for a narrow *dynamic* bell at its frequency and width: it rests at 0 dB and cuts by as much as the peak stands out while the level there is at or above what was measured (threshold 3 dB under it), so it only works while the ring is there. A peak counts when it is the highest point within ±1/12 octave and at least 6 dB above the mean from 1/12 to 1/3 octave either side, averaged over about 3 s on a 1/24-octave grid (rules of thumb, in [ResonanceFinder.h](Source/DSP/ResonanceFinder.h)). Right-click the display to turn the markers off. |
+| **Masking (sidechain)** | Route another track to Iris' **sidechain** input (it is never heard, only measured) and the display adds its spectrum (teal) and shades every zone where the two **mask each other**: in a third-octave band both are within 24 dB of their own loudest band and within 6 dB of each other. Each zone is labelled with the cut that would put the other track 6 dB clear of this one there (at most 12 dB); **double-click the label** for a bell across the zone. Or cut the other track instead: the zones are the same from either side. Rules of thumb, in [Masking.h](Source/DSP/Masking.h). |
+| **Is the dynamics working?** | The DYNAMICS panel watches each dynamic band for about 8 s of playback and says so when it **never moves** (the level never reached the threshold) or is **always at its full range** (it acts like a static band), with the level it heard and a threshold to try (3 dB under the loudest moment, or above the quietest for a band that works below). |
+| **Paste** | **PASTE** (top right of the band panel) adds the bands another plugin of the suite copied: Themis' COPY on a master-plan item or its *Copy EQ* for the tonal curve, each in the next free slot with its type, frequency, gain, width and placement. A harmonic-fill band is Hephaestus' and is left out. |
 | **Meters and output** | IN and OUT peak meters (a NaN or inf sample cannot pin them), output gain ±24 dB. |
 | **Presets** | Nine: *Init*, *Master Air*, *Mono Bass, Wide Air*, *Mud Duck*, *De-Esser*, *Open the Top*, *Tilt*, *Warm Tube Lift*, *Console Presence*. Output gain, Gain Match and the crossovers are kept when a preset loads. |
 | **Display** | The spectrum before (dim) and after (cream), calibrated in dBFS, 8192-point FFT, a 4.5 dB/oct tilt by default. Right-click empty space for Gain scale (±6 / 12 / 18 / 24 dB), Analyzer range, Speed and Tilt; the choice is saved with the project. |
@@ -152,14 +163,16 @@ cmake --build build --target IrisSnapshot && ./build/IrisSnapshot_artefacts/Rele
 auval -v aufx Irsp Irsa                                                                            # Apple's AU validator (the AU must be installed)
 ```
 
-`docs/screenshot.png`, `dynamics.png` and `solo.png` are the output of `IrisSnapshot` (arguments in the file's header), never
-edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=6 solo=2:curve`. They are
+`docs/screenshot.png`, `dynamics.png`, `solo.png` and `masking.png` are the output of `IrisSnapshot` (arguments in the file's header), never
+edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=6 solo=2:curve`, `"Init" sidechain`. They are
 regenerated after any change that touches the UI or what it shows. The rules for working on the code are in
 [CLAUDE.md](CLAUDE.md); the rules for the repository are in [the root CLAUDE.md](../../CLAUDE.md).
 
 ```
 Source/DSP/Band.h            band types, placements, BandParams, BandFilter (one band's filter), bandResponseDb (the drawn curve)
-Source/DSP/Dynamics.h        the detector and the gain computer
+Source/DSP/Dynamics.h        the detector and the gain computer, and DynamicsUsage (does a dynamic band move?)
+Source/DSP/ResonanceFinder.h narrow peaks that stand out of the input spectrum (the display's markers)
+Source/DSP/Masking.h         where this track and the sidechain mask each other (the display's clash zones)
 Source/DSP/Saturator.h       the SAT shaper: three curves, residual ADAA, DC block
 Source/DSP/Crossover.h       Linkwitz-Riley 4th order and the five-region splitter
 Source/DSP/Engine.h          bands in series, placements, dynamics, SAT, gain match, delta, solo, meters, analyzer taps
@@ -169,7 +182,7 @@ Source/UI/EqView.h           the display: spectrum, curves, nodes, region strip;
 ../../shared/dsp/            biquads (with the EQ designs), the analyzer taps and the FFT analyzer, shared with Hephaestus
 ../../shared/ui/             the drawing kit of the interface, shared with the other plugins of the repository
 Tests/                       DSP tests, UI check, VST3 host check, editor snapshot, shared helpers
-docs/                        the three screenshots (generated by IrisSnapshot)
+docs/                        the four screenshots (generated by IrisSnapshot)
 ```
 
 ### What has and hasn't been verified
@@ -210,8 +223,12 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
 
 - **Minimum phase only.** The bands are IIR filters (there is no linear-phase mode), so they have the phase of the analogue
   filters they model.
-- **The dynamics listen to themselves.** The detector is internal: there is no external side-chain, and a band's detector listens to
-  the signal entering it, after the bands before it.
+- **The dynamics listen to themselves.** The detector is internal: the sidechain input feeds only the masking view, never a band's
+  detector, and a band's detector listens to the signal entering it, after the bands before it.
+- **Resonances, masking and the dynamics check are rules of thumb on the display's analyzer** (an 8192-point FFT averaged over a few
+  seconds): tested on synthetic spectra (a Q 8 peak is found within 1/24 octave; a broad bump, a smooth spectrum and silence are not;
+  two tracks loud in the same range clash, in different ranges do not), not on a library of mixes. A note held for seconds is a
+  resonance to them; whether to cut it is your call. They need the editor open.
 - **Sat is not oversampled.** The anti-aliasing is first-order, and aliasing is reduced (about 10 dB on the tone tested), not
   removed. Drive the shaper hard on bright material and it will show.
 - **Sat only saturates boosts.** By design; a cut band is always clean.

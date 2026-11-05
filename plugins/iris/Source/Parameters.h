@@ -5,6 +5,8 @@
 
 #include "DSP/Engine.h"
 
+#include <pantheon/dsp/BandLink.h>
+
 #include <juce_audio_processors/juce_audio_processors.h>
 
 namespace iris
@@ -313,6 +315,42 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double
 }
 
 inline void removeBand (juce::AudioProcessorValueTreeState& s, int band) { setParameterValue (s, bandIds (band).on, 0.0f); }
+
+// Bands handed over as text by another plugin of the repository (pdsp::link, e.g. Themis' COPY), each into the next free slot.
+// A harmonic-fill band is not an equaliser band and is left out. Returns the slots used; `skipped` counts what did not fit.
+inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const juce::String& text, int& skipped)
+{
+    std::vector<int> slots;
+    skipped = 0;
+    std::vector<pdsp::LinkBand> bands;
+    if (! pdsp::link::decode (text.toStdString(), bands))
+        return slots;
+    using K = pdsp::LinkBand::Kind;
+    for (const auto& b : bands)
+    {
+        if (b.kind == K::fill)
+        {
+            ++skipped;
+            continue;
+        }
+        const auto type = b.kind == K::lowShelf ? BandType::lowShelf : b.kind == K::highShelf ? BandType::highShelf
+                        : b.kind == K::lowCut ? BandType::lowCut : b.kind == K::highCut ? BandType::highCut : BandType::bell;
+        const int slot = addBand (s, type, b.freq, b.gainDb);
+        if (slot < 0)
+        {
+            ++skipped;
+            continue;
+        }
+        const auto& ids = bandIds (slot);
+        setParameterValue (s, ids.place, (float) (int) b.place); // the same order: stereo, left, right, mid, side
+        if (isCut (type))
+            setParameterValue (s, ids.slope, (float) std::clamp ((int) std::lround (b.slopeDbPerOct / 12.0) - 1, 0, 3));
+        else
+            setParameterValue (s, ids.q, (float) b.q);
+        slots.push_back (slot);
+    }
+    return slots;
+}
 
 inline void applyPreset (juce::AudioProcessorValueTreeState& s, int index)
 {

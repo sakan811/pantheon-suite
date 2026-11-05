@@ -32,13 +32,15 @@ auval -v aufx Irsp Irsa                             # Apple's AU validator; the 
 ```
 Source/DSP/        no GUI dependencies; everything here is covered by Tests/Tests.cpp
   Band.h             BandType, Placement, BandParams, BandFilter (biquad or Butterworth cascade), bandResponseDb(): the curve the display draws
-  Dynamics.h         Detector (band-matched filter + smoothed mean square) and dynamicOffsetDb(): the gain computer
+  Dynamics.h         Detector (band-matched filter + smoothed mean square) and dynamicOffsetDb(): the gain computer; DynamicsUsage (the editor's "never moves / always at full range" check)
+  ResonanceFinder.h  narrow, lasting peaks in a spectrum (the display's markers); GUI-free, fed by the display's timer
+  Masking.h          MaskingMeter: where this track and the sidechain mask each other (the display's clash zones); GUI-free, fed by the display's timer
   Saturator.h        Shaper: three curves, residual ADAA, DC block
   Crossover.h        LR4, RegionSplitter (five regions, flat sum), regionName()
   Engine.h           the whole signal path, the tick, solo, delta, gain match, meters, analyzer taps
 Source/Parameters.h  parameter layout, presets, readParams(), band helpers                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/IrisUi.h` holds what is Iris' own; `UI/EqView.h` is the display)
-../../shared/dsp/    Biquad.h (with the EQ designs), AnalyzerTap.h, SpectrumAnalyzer.h: shared with Hephaestus, namespace `pdsp`
+../../shared/dsp/    Biquad.h (with the EQ designs), AnalyzerTap.h, SpectrumAnalyzer.h, BandLink.h (PASTE): shared with Hephaestus and Themis, namespace `pdsp`
 Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse events, editor panels), HostCheck.cpp (loads the VST3), Snapshot.cpp (editor -> PNG),
                      Check.h, TestSignals.h
 ```
@@ -94,6 +96,18 @@ out over 10 ms and its filters are reset when it starts; releasing one returns t
 **Region solo sums flat.** Every region goes through the all-pass of each crossover above it (`RegionSplitter`), so any combination adds
 to the input's magnitude (test [8]). Do not "save" the compensation filters: soloing two regions at once would then bump at the crossover.
 The crossovers are kept in order, at least a ratio of 1.2 apart, in `control()`; the display and the engine agree on that.
+
+**The sidechain is only measured.** The second input bus (`Sidechain`, off unless the host connects it) is pushed into
+`IrisProcessor::sidechainTap` for the masking view and never reaches the engine: `processBlock` hands the engine the main bus only
+(`getBusBuffer`). Do not feed it to a band's detector without making that a separate, tested feature. `HostCheck` builds its layouts
+with the sidechain bus in them; a layout with one input bus is not this plugin's.
+
+**Display analysis is not audio analysis.** The resonance markers, the masking zones and the dynamics-usage check read the display's
+analyzers on the editor's timer: nothing runs on the audio thread, they need the editor open, and their limits are rules of thumb
+(named constants in their headers, quoted in the README; tests [11] to [13]). A band they suggest is made with `addBand` like any other.
+
+**Paste.** `pasteBands` in `Parameters.h` turns the text other plugins copy (`pdsp::link`, `shared/dsp/BandLink.h`) into bands; the
+placement order there is the same as `Placement`'s. A harmonic-fill band is skipped (it is Hephaestus').
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`): an IIR filter keeps a NaN for good.
 

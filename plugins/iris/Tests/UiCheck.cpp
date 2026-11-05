@@ -239,5 +239,25 @@ int main()
         check (isBandOn (fresh.apvts, 0) == isBandOn (proc.apvts, 0) && value (fresh, bandIds (0).type) == value (proc, bandIds (0).type), "... and the bands come back");
     }
 
+    std::printf ("\nPaste bands from another plugin\n");
+    {
+        IrisProcessor fresh;
+        int skipped = 0;
+        const auto slots = pasteBands (fresh.apvts, "pantheon-bands 1\nbell freq=270 gain=-2.5 q=1.40 place=mid\n"
+                                                    "lowcut freq=150 slope=24 place=side\nfill lo=40 hi=90 place=mid", skipped);
+        check (slots.size() == 2 && skipped == 1, fmt ("two equaliser bands added, the fill band left for Hephaestus (%d added, %d skipped)", (int) slots.size(), skipped));
+        if (slots.size() == 2)
+        {
+            check (bandType (fresh.apvts, slots[0]) == BandType::bell && bandPlacement (fresh.apvts, slots[0]) == Placement::mid
+                       && std::fabs (value (fresh, bandIds (slots[0]).freq) - 270.0f) < 1.0f && std::fabs (value (fresh, bandIds (slots[0]).gain) + 2.5f) < 0.06f
+                       && std::fabs (value (fresh, bandIds (slots[0]).q) - 1.4f) < 0.02f,
+                   "the bell keeps its frequency, gain, width and placement");
+            check (bandType (fresh.apvts, slots[1]) == BandType::lowCut && bandPlacement (fresh.apvts, slots[1]) == Placement::side
+                       && (int) value (fresh, bandIds (slots[1]).slope) == 1,
+                   "the cut keeps its placement and its 24 dB/oct slope");
+        }
+        check (pasteBands (fresh.apvts, "some other text", skipped).empty(), "text that is not a band list adds nothing");
+    }
+
     return finish ("UI CHECK");
 }

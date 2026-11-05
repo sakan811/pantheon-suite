@@ -117,13 +117,18 @@ int main (int argc, char** argv)
     // A mono track. The bus layout is changed the way a host does it (setBusesLayout), and put back afterwards: changing only
     // the play config would leave the plugin's buses mono while the buffers are stereo.
     {
-        const auto layoutOf = [] (const juce::AudioChannelSet& set)
+        // The second input is the sidechain (for the masking view only), off unless the host connects it.
+        const auto layoutOf = [] (const juce::AudioChannelSet& set, const juce::AudioChannelSet& side = juce::AudioChannelSet::disabled())
         {
             juce::AudioProcessor::BusesLayout layout;
             layout.inputBuses.add (set);
+            layout.inputBuses.add (side);
             layout.outputBuses.add (set);
             return layout;
         };
+        check (plugin->getBusCount (true) == 2, "the plugin offers a sidechain input next to its main one");
+        check (plugin->checkBusesLayoutSupported (layoutOf (juce::AudioChannelSet::stereo(), juce::AudioChannelSet::stereo())),
+               "a stereo sidechain is accepted");
         const bool monoOk = plugin->checkBusesLayoutSupported (layoutOf (juce::AudioChannelSet::mono())) && plugin->setBusesLayout (layoutOf (juce::AudioChannelSet::mono()));
         check (monoOk, "a mono layout is accepted");
         plugin->setPlayConfigDetails (1, 1, 48000.0, 256);
