@@ -236,5 +236,20 @@ int main()
         check (std::lround (value (proc, id::stereo)) == 0, "\"s\" picks Stereo (L/R)");
     }
 
+    std::printf ("\nPaste bands from another plugin\n");
+    {
+        HephaestusProcessor fresh;
+        for (int i = 0; i < maxBands; ++i)
+            removeBand (fresh.apvts, i);
+        int skipped = 0;
+        const auto slots = pasteBands (fresh.apvts, "pantheon-bands 1\nfill lo=40 hi=90 place=mid\nbell freq=270 gain=-2.0 q=0.70 place=mid", skipped);
+        check (slots.size() == 1 && skipped == 1, fmt ("the fill band is added, the equaliser band left for Iris (%d added, %d skipped)", (int) slots.size(), skipped));
+        if (slots.size() == 1)
+            check (bandMode (fresh.apvts, slots[0]) == BandMode::fill
+                       && std::fabs (fresh.apvts.getRawParameterValue (bandIds (slots[0]).lo)->load() - 40.0f) < 0.5f
+                       && std::fabs (fresh.apvts.getRawParameterValue (bandIds (slots[0]).hi)->load() - 90.0f) < 0.5f,
+                   "... over the range it was given");
+    }
+
     return finish ("UI CHECK");
 }

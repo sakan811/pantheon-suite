@@ -121,6 +121,20 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
     removeButton.onClick = [this] { removeBand (proc.apvts, spectrum.getSelectedBand()); };
     addSaturateButton.onClick = [this] { addBand (proc.apvts, BandMode::saturate, 800.0, spectrum.getSelectedBand()); };
     addFillButton.onClick = [this] { addBand (proc.apvts, BandMode::fill, 80.0, spectrum.getSelectedBand()); };
+    pasteButton.setTooltip ("Add the harmonic-fill bands another plugin of the suite copied (Themis: COPY on a bass item), each in the next free "
+                            "slot, over the range it measured.");
+    pasteButton.onClick = [this]
+    {
+        int skipped = 0;
+        const auto slots = pasteBands (proc.apvts, juce::SystemClipboard::getTextFromClipboard(), skipped);
+        if (! slots.empty())
+            spectrum.setSelectedBand (slots.front());
+        else
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Paste",
+                                                    skipped > 0 ? "No free slot, or no harmonic-fill band to add (equaliser bands go to Iris)."
+                                                                : "The clipboard holds no bands. Copy them in Themis first (COPY on a plan item).");
+    };
+    addAndMakeVisible (pasteButton);
     for (auto* b : { &saturateModeButton, &fillModeButton, &removeButton, &addSaturateButton, &addFillButton })
         addChildComponent (b);
 
@@ -235,6 +249,7 @@ void HephaestusEditor::layoutBandPanel()
     for (int i = 0; i < maxBands; ++i)
         chipBounds[(size_t) i] = { panel.getX() + 14 + i * (chipWidth + chipGap), panel.getY() + 34, chipWidth, chipHeight };
 
+    pasteButton.setBounds (panel.getRight() - 14 - 64, panel.getY() + 6, 64, 20);
     auto buttons = juce::Rectangle<int> (panel.getX(), panel.getY() + 34, panel.getWidth() - 14, chipHeight);
     removeButton.setBounds (buttons.removeFromRight (76));
     buttons.removeFromRight (8);

@@ -94,6 +94,8 @@ public:
         fillRunning.fill (false);
         for (auto& a : bandActivity)
             a.store (0.0f);
+        for (auto& r : bandReachDb)
+            r.store ((float) FundamentalEngine::kReachFloorDb);
 
         currentOs = -1; // forces a latency refresh on the first block
         msDry = msWet = 1.0e-6;
@@ -129,6 +131,7 @@ public:
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     void clearMeters() noexcept { inPeak.store (0.0f, std::memory_order_relaxed); outPeak.store (0.0f, std::memory_order_relaxed); }
     std::atomic<float> bandActivity[maxBands]; // fill bands: how much of its Amount the adaptive fill is adding now (0..1)
+    std::atomic<float> bandReachDb[maxBands];  // fill bands: energy already above the band re the band's own (dB, the Amount scale)
     pdsp::StereoTap tapIn, tapOut; // pre (delay-aligned dry) and post signal, for the spectrum display
 
 private:
@@ -315,6 +318,7 @@ private:
                 engine.reset();
             fillRunning[(size_t) b] = false;
             bandActivity[b].store (0.0f, std::memory_order_relaxed);
+            bandReachDb[b].store ((float) FundamentalEngine::kReachFloorDb, std::memory_order_relaxed);
             return;
         }
         fillRunning[(size_t) b] = true;
@@ -337,6 +341,7 @@ private:
         });
         gain = target;
         bandActivity[b].store (want && band.fill.extGain > 0.0 ? (float) engine.currentAdaptGain() : 0.0f, std::memory_order_relaxed);
+        bandReachDb[b].store ((float) engine.currentReachDb(), std::memory_order_relaxed);
     }
 
     void smoothPeak (std::atomic<float>& meter, float peak, int n) noexcept

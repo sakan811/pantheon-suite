@@ -91,7 +91,9 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
 
 - parameter ranges, defaults, choice lists, "off" thresholds -> `Parameters.h` (the editor reads combo items from the parameter)
 - per-band parameter ids -> `bandIds()`; adding / removing a band and switching its mode -> `addBand`, `removeBand`, `setBandMode`
-  (the spectrum menu, the double-click menu and the band panel buttons all call these)
+  (the spectrum menu, the double-click menu and the band panel buttons all call these); bands pasted from another plugin
+  (`pdsp::link`, `shared/dsp/BandLink.h`) -> `pasteBands` (fill bands only)
+- what a fill band's ABOVE read-out shows -> `FundamentalEngine::currentReachDb()` (the same energies the adaptive fill compares), published per band as `Engine::bandReachDb`
 - where a band really sits (minimum width, the 2 kHz fill limit), where its harmonics land (the zone the display shades) and which harmonics
   fit below Nyquist -> `effectiveRange()` / `harmonicSpan()` / `highestHarmonic()` / `harmonicReach()` (the adaptive measurement region) in `Band.h`
   (engine, spectrum view and tests all call them; test [5f] pins the span against measured energy)
