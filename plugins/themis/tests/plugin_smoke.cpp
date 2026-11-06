@@ -114,7 +114,7 @@ static constexpr int kEditorWidth = 1440, kEditorHeight = 900; // the editor's d
 static void pump (int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil (ms); }
 
 // Every tab of the two history graphs, stacked: the level graph (BANDS, MID / SIDE looking at the low range, LEFT / RIGHT,
-// PEAKS) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
+// PEAKS, SPECTROGRAM) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
 static juce::Image renderGraphs (juce::Component& editor)
 {
     ui::HistoryPanel *level = nullptr, *fundamental = nullptr;
@@ -135,13 +135,13 @@ static juce::Image renderGraphs (juce::Component& editor)
         return panel.createComponentSnapshot (panel.getLocalBounds(), true, 1.0f);
     };
     constexpr int kGap = 8;
-    const int levelTabs[] = { 0, 1, 2, 3 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges };
+    const int levelTabs[] = { 0, 1, 2, 3, 4 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges };
     const int fundamentalTabs[] = { 0, 1, 2 };
     const int h = level->getHeight(), w = level->getWidth() + kGap + fundamental->getWidth();
-    juce::Image out (juce::Image::RGB, w, 4 * h + 3 * kGap, true);
+    juce::Image out (juce::Image::RGB, w, 5 * h + 4 * kGap, true);
     juce::Graphics g (out);
     g.fillAll (colours::background);
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
         g.drawImageAt (snapshot (*level, levelTabs[i], levelColumns[i]), 0, i * (h + kGap));
     for (int i = 0; i < 3; ++i)
         g.drawImageAt (snapshot (*fundamental, fundamentalTabs[i], themis::kAllRanges), level->getWidth() + kGap, i * (h + kGap));
@@ -609,6 +609,8 @@ int main (int argc, char** argv)
                     panel->selectTab (0);
                     clickAlong (*panel, 16.0f, 4.0f, tabs, columns); // the title row: the tabs on the left...
                     CHECK (tabs.count (1) == 1 && tabs.count (2) == 1, "clicking the tabs should select them");
+                    if (dynamic_cast<ui::LevelView*> (panel) != nullptr)
+                        CHECK (tabs.count (4) == 1, "the SPECTROGRAM tab can be clicked");
                     if (dynamic_cast<ui::LevelView*> (panel) != nullptr)
                     {
                         panel->selectTab (1); // ...and, on a tab that has them, the range chips on the right
