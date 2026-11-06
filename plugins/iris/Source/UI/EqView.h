@@ -12,6 +12,7 @@
 #include <pantheon/ui/FreqAxis.h>
 
 #include "../DSP/Masking.h"
+#include "../DSP/ReferenceMatch.h"
 #include "../DSP/ResonanceFinder.h"
 
 namespace iris::gui
@@ -34,10 +35,11 @@ public:
     EqView (Engine& e, juce::AudioProcessorValueTreeState& s, const double& sampleRateRef)
         : engine (e), apvts (s), sampleRate (sampleRateRef)
     {
-        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale, &markers })
+        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale, &markers, &referenceShown })
             setting->load (apvts.state);
         applyAnalyzerSettings();
         resonances.reset();
+        loadReference();
 
         setTooltip ("Double-click to add a band. Drag a node to set its frequency and gain (Shift = fine), turn the wheel over it for Q. "
                     "Right-click a node for its menu. The strip along the bottom solos a part of the spectrum.");
@@ -61,6 +63,103 @@ public:
 
     // The resonances found so far (for the snapshot and the checks).
     const std::vector<ResonanceFinder::Resonance>& currentResonances() const noexcept { return found; }
+
+    // ---- reference ------------------------------------------------------------------------------
+    // A reference is the long-term shape of another track (learned while it plays through Iris, or pasted from Themis' Copy EQ). It
+    // is drawn behind the spectrum, levelled to this track's average, and MATCH adds the bands that bring this track's shape to it.
+    // The display averages what goes into Iris on its timer, so these need the editor open and some seconds of audio.
+    bool isLearning() const noexcept { return learning; }
+    double learnedSeconds() const noexcept { return learnProfile.seconds(); }
+    bool hasReference() const noexcept { return haveReference; }
+    bool hasAverage() const noexcept { return liveProfile.hasData(); }
+    const juce::String& message() const noexcept { return note; }
+
+    // First press starts learning from what plays now, the second keeps it as the reference.
+    void toggleLearning()
+    {
+        if (! learning)
+        {
+            learnProfile.reset();
+            learning = true;
+            flash ("LEARNING: play the reference track, then press again");
+            return;
+        }
+        learning = false;
+        Shape s {};
+        ShapeMask valid {};
+        if (learnProfile.shape (usableMaxHz(), s, valid))
+        {
+            setReference (s, "learned");
+            flash ("REFERENCE KEPT: " + juce::String (learnProfile.seconds(), 0) + " s heard");
+        }
+        else
+            flash ("NOT ENOUGH AUDIO: play the reference for at least " + juce::String ((int) SpectrumProfile::kMinSeconds) + " s");
+    }
+
+    void clearReference()
+    {
+        learning = false;
+        haveReference = false;
+        referenceName.clear();
+        apvts.state.removeProperty ("referenceCurve", nullptr);
+        apvts.state.removeProperty ("referenceName", nullptr);
+        flash ("REFERENCE CLEARED");
+        repaint();
+    }
+
+    // Takes the curve another plugin copied along with its bands. False when the text holds none.
+    bool pasteReference (const juce::String& text)
+    {
+        Shape s {};
+        std::string name;
+        if (! iris::pasteReference (text, s, name))
+            return false;
+        setReference (s, name.empty() ? "pasted" : name);
+        flash ("REFERENCE PASTED" + (name.empty() ? juce::String() : ": " + juce::String (name)));
+        return true;
+    }
+
+    void restartAverage()
+    {
+        liveProfile.reset();
+        flash ("AVERAGE RESTARTED: play the track");
+    }
+
+    // The bands that bring this track's average shape to the reference, in free slots (what the stereo bands already on do is
+    // counted). Returns the slots used; empty with a message when there is nothing to do.
+    std::vector<int> matchToReference()
+    {
+        if (! haveReference)
+        {
+            flash ("NO REFERENCE: LEARN REF while the reference plays, or PASTE one from Themis");
+            return {};
+        }
+        Shape live {};
+        ShapeMask valid {};
+        if (! liveProfile.shape (usableMaxHz(), live, valid))
+        {
+            flash ("PLAY THE TRACK: MATCH needs " + juce::String ((int) SpectrumProfile::kMinSeconds) + " s of it");
+            return {};
+        }
+        if (freeBandSlots (apvts) == 0)
+        {
+            flash ("NO FREE BAND SLOT");
+            return {};
+        }
+        addExistingCurve (apvts, sampleRate, live);
+        const auto bands = match::matchBands (live, reference, valid, sampleRate, std::min (match::kMaxBands, freeBandSlots (apvts)));
+        if (bands.empty())
+        {
+            flash ("ALREADY WITHIN " + juce::String (match::kMinDb, 0) + " dB OF THE REFERENCE");
+            return {};
+        }
+        const float before = match::remainingDb (live, reference, valid, sampleRate, {}), after = match::remainingDb (live, reference, valid, sampleRate, bands);
+        const auto slots = addMatchedBands (apvts, bands);
+        if (! slots.empty())
+            setSelectedBand (slots.front());
+        flash ("MATCH: " + juce::String ((int) slots.size()) + " BAND(S), OFF BY " + juce::String (before, 1) + " DB -> " + juce::String (after, 1) + " DB");
+        return slots;
+    }
 
     int getSelectedBand() const noexcept { return selected; }
 
@@ -126,6 +225,7 @@ public:
         if (masking.hasData())
             drawTrace (g, plot, sideTrace, colours::accent.withAlpha (0.55f), juce::Colours::transparentBlack);
         drawClashes (g, plot);
+        drawReference (g, plot);
         drawCurves (g, plot, bands);
         drawResonances (g);
         drawNodes (g, plot, bands);
@@ -134,6 +234,7 @@ public:
         drawAxisLabels (g, plot);
         drawStrip (g, crossover);
         drawSoloPill (g, plot);
+        drawReferencePill (g, plot);
         ui::hw::drawGlassOverlay (g, window, 4.0f, true);
     }
 
@@ -822,7 +923,17 @@ private:
             menu.addItem (nextId++, "Add " + typeNames[t] + " here");
             actions.push_back ([this, at, t] { addBandAt ((BandType) t, at); });
         }
-        for (Setting* setting : { &gainScale, &spectrumRange, &speed, &tilt, &markers })
+        menu.addSeparator();
+        menu.addSectionHeader ("Reference");
+        menu.addItem (nextId++, learning ? "Keep what was learned" : "Learn a reference from what plays now");
+        actions.push_back ([this] { toggleLearning(); });
+        menu.addItem (nextId++, "Match to the reference", haveReference);
+        actions.push_back ([this] { matchToReference(); });
+        menu.addItem (nextId++, "Clear the reference", haveReference || learning);
+        actions.push_back ([this] { clearReference(); });
+        menu.addItem (nextId++, "Restart this track's average");
+        actions.push_back ([this] { restartAverage(); });
+        for (Setting* setting : { &gainScale, &spectrumRange, &speed, &tilt, &markers, &referenceShown })
         {
             menu.addSeparator();
             menu.addSectionHeader (setting->title);
@@ -850,7 +961,7 @@ private:
             a->setTilt (tilt.value());
             a->setReleaseSeconds (speed.value());
         }
-        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale, &markers })
+        for (Setting* setting : { &spectrumRange, &speed, &tilt, &gainScale, &markers, &referenceShown })
             apvts.state.setProperty (setting->property, setting->value(), nullptr);
     }
 
@@ -872,11 +983,18 @@ private:
         if (refresh)
             findTicks = 0;
 
+        // What goes in, without the display's tilt: the resonances, the masking and the reference are all read from it.
+        for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
+            untilted[(size_t) i] = untilt (inTrace, i);
+        liveProfile.update (untilted.data(), pdsp::SpectrumAnalyzer::numBins, inTrace.binFrequency (1), 1.0f / 30.0f);
+        if (learning)
+            learnProfile.update (untilted.data(), pdsp::SpectrumAnalyzer::numBins, inTrace.binFrequency (1), 1.0f / 30.0f);
+        if (noteTicks > 0 && --noteTicks == 0)
+            note.clear();
+
         // Resonances are looked for in what goes in (what the bands are there to fix), without the display's tilt.
         if (markers.value() > 0.5f)
         {
-            for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
-                untilted[(size_t) i] = untilt (inTrace, i);
             resonances.update (untilted.data(), pdsp::SpectrumAnalyzer::numBins, inTrace.binFrequency (1), 1.0f / 30.0f);
             if (refresh)
                 found = resonances.find();
@@ -891,9 +1009,6 @@ private:
             sideTrace.setTilt (tilt.value());
             sideTrace.setReleaseSeconds (speed.value());
             sideTrace.update (*sidechain);
-            if (markers.value() <= 0.5f) // the resonance pass did not fill `untilted`
-                for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
-                    untilted[(size_t) i] = untilt (inTrace, i);
             for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
                 sideUntilted[(size_t) i] = untilt (sideTrace, i);
             masking.update (untilted.data(), sideUntilted.data(), pdsp::SpectrumAnalyzer::numBins, inTrace.binFrequency (1), 1.0f / 30.0f);
@@ -906,6 +1021,100 @@ private:
     static float untilt (const pdsp::SpectrumAnalyzer& a, int bin)
     {
         return a.levelDb (bin) - a.getTilt() * (float) std::log2 (std::max (a.binFrequency (bin), 1.0) / 1000.0);
+    }
+
+    // ---- reference ---------------------------------------------------------------------------------
+    double usableMaxHz() const { return sampleRate * 0.45; }
+
+    void flash (const juce::String& text)
+    {
+        note = text;
+        noteTicks = 30 * 4;
+        repaint();
+    }
+
+    void setReference (const Shape& s, const juce::String& name)
+    {
+        reference = s;
+        haveReference = true;
+        referenceName = name.toStdString();
+        apvts.state.setProperty ("referenceCurve", juce::String (shapeToText (s)), nullptr);
+        apvts.state.setProperty ("referenceName", name, nullptr);
+        repaint();
+    }
+
+    void loadReference()
+    {
+        Shape s {};
+        if (shapeFromText (apvts.state.getProperty ("referenceCurve").toString().toStdString(), s))
+        {
+            reference = s;
+            haveReference = true;
+            referenceName = apvts.state.getProperty ("referenceName").toString().toStdString();
+        }
+    }
+
+    // The reference (dashed, levelled to this track's average) and the average itself (thin), so what MATCH compares can be seen.
+    void drawReference (juce::Graphics& g, juce::Rectangle<float> plot) const
+    {
+        (void) plot;
+        if (! haveReference || referenceShown.value() < 0.5f || ! liveProfile.hasData())
+            return;
+        const float anchor = liveProfile.anchorLevelDb();
+        const auto path = [&] (const std::function<float (int)>& levelOf)
+        {
+            juce::Path p;
+            bool pen = false;
+            for (int i = 0; i < ProfileGrid::kBands; ++i)
+            {
+                const float level = levelOf (i);
+                if (level < -150.0f)
+                {
+                    pen = false;
+                    continue;
+                }
+                const double hz = ProfileGrid::centreHz (i);
+                const float x = xOf ((float) hz), y = spectrumY (level + inTrace.getTilt() * (float) std::log2 (hz / 1000.0));
+                pen ? p.lineTo (x, y) : p.startNewSubPath (x, y);
+                pen = true;
+            }
+            return p;
+        };
+        g.setColour (colours::text.withAlpha (0.45f));
+        g.strokePath (path ([&] (int i) { return liveProfile.levelDb (i); }), juce::PathStrokeType (1.0f, juce::PathStrokeType::curved));
+        const auto line = path ([&] (int i) { return match::hasLevel (reference[(size_t) i]) ? reference[(size_t) i] + anchor : -200.0f; });
+        juce::Path dashed;
+        const float dashes[] = { 6.0f, 4.0f };
+        juce::PathStrokeType (1.8f).createDashedStroke (dashed, line, dashes, 2);
+        g.setColour (colours::accent.withAlpha (0.9f));
+        g.fillPath (dashed);
+    }
+
+    // Top right: what the reference is doing (learning, kept, pasted), or the message of the last action.
+    void drawReferencePill (juce::Graphics& g, juce::Rectangle<float> plot) const
+    {
+        juce::String text;
+        bool lit = false;
+        if (note.isNotEmpty())
+            text = note, lit = true;
+        else if (learning)
+            text = "LEARNING  " + juce::String (learnProfile.seconds(), 0) + " s", lit = true;
+        else if (haveReference && referenceShown.value() > 0.5f)
+            text = "REF  " + juce::String (referenceName).toUpperCase() + (liveProfile.hasData() ? juce::String() : "  (WAITS FOR AUDIO)");
+        if (text.isEmpty())
+            return;
+        const auto font = ui::labelFont (10.0f);
+        const float width = juce::jmin (plot.getWidth() - 12.0f, juce::GlyphArrangement::getStringWidth (font, text) + 30.0f);
+        const auto pill = juce::Rectangle<float> (plot.getRight() - width - 6.0f, plot.getY() + 5.0f, width, 18.0f);
+        const auto colour = lit ? colours::amber : colours::accent;
+        g.setColour (colours::glass.withAlpha (0.9f));
+        g.fillRoundedRectangle (pill, 9.0f);
+        g.setColour (colour.withAlpha (0.7f));
+        g.drawRoundedRectangle (pill, 9.0f, 1.0f);
+        ui::hw::drawLamp (g, { pill.getX() + 11.0f, pill.getCentreY() }, 3.5f, colour, lit);
+        g.setFont (font);
+        g.setColour (colour);
+        g.drawText (text, pill.withTrimmedLeft (22.0f).toNearestInt(), juce::Justification::centredLeft, false);
     }
 
     // ---- masking -----------------------------------------------------------------------------------
@@ -1026,6 +1235,7 @@ private:
     Setting gainScale { "Gain scale", "gainScale", { { "+/- 6 dB", 6.0f }, { "+/- 12 dB", 12.0f }, { "+/- 18 dB", 18.0f }, { "+/- 24 dB", 24.0f } }, 1 };
 
     Setting markers { "Resonance markers", "resonanceMarkers", { { "Off", 0.0f }, { "On", 1.0f } }, 1 };
+    Setting referenceShown { "Reference curve", "referenceShown", { { "Hidden", 0.0f }, { "Shown", 1.0f } }, 1 };
 
     pdsp::SpectrumAnalyzer inTrace, outTrace;
     ResonanceFinder resonances;
@@ -1037,6 +1247,12 @@ private:
     std::array<float, (size_t) pdsp::SpectrumAnalyzer::numBins> sideUntilted {};
     MaskingMeter masking;
     std::vector<MaskingMeter::Clash> clashes;
+    SpectrumProfile liveProfile, learnProfile;
+    bool learning = false, haveReference = false;
+    Shape reference {};
+    std::string referenceName;
+    juce::String note;
+    int noteTicks = 0;
     int selected = 0;
     juce::Point<float> hover { -1.0f, -1.0f };
 };

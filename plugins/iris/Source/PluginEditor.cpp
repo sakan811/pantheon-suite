@@ -95,14 +95,17 @@ IrisEditor::IrisEditor (IrisProcessor& p)
     for (auto* b : { &removeButton, &addButton, &soloBandButton, &soloCurveButton })
         addChildComponent (*b);
     pasteButton.setTooltip ("Add the bands another plugin of the suite copied (Themis: COPY on a plan item, or Copy EQ for the tonal curve), "
-                            "each in the next free slot, with its type, frequency, gain, width and placement.");
+                            "each in the next free slot, with its type, frequency, gain, width and placement. Copy EQ also hands over the target curve, which "
+                            "becomes the reference drawn behind the spectrum.");
     pasteButton.onClick = [this]
     {
         int skipped = 0;
-        const auto slots = pasteBands (proc.apvts, juce::SystemClipboard::getTextFromClipboard(), skipped);
+        const auto text = juce::SystemClipboard::getTextFromClipboard();
+        const bool curve = view.pasteReference (text); // Themis' Copy EQ hands over its target curve along with the bands
+        const auto slots = pasteBands (proc.apvts, text, skipped);
         if (! slots.empty())
             view.setSelectedBand (slots.front());
-        else
+        else if (! curve)
             juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Paste",
                                                     skipped > 0 ? "No free slot, or nothing an equaliser can make (a harmonic-fill band goes to Hephaestus)."
                                                                 : "The clipboard holds no bands. Copy them in Themis first (COPY on a plan item, or Copy EQ).");
@@ -116,10 +119,21 @@ IrisEditor::IrisEditor (IrisProcessor& p)
     presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); };
     presetBox.setTooltip ("Presets. Output gain, Gain Match and the region crossovers are kept.");
 
+    learnRefButton.setClickingTogglesState (false);
+    learnRefButton.setColour (juce::TextButton::buttonOnColourId, colours::amber);
     deltaButton.setClickingTogglesState (true);
     deltaButton.setTooltip ("Listen to only what the equaliser changes (output minus input). Not saved with the project; "
                             "a band solo takes over from it.");
     deltaButton.onClick = [this] { proc.engine.monitor.delta = deltaButton.getToggleState(); };
+
+    learnRefButton.setTooltip ("Press, play the track you want this one to sound like through Iris (a few seconds at least; the longer the better), "
+                               "press again: its long-term shape is kept as the reference and drawn as a dashed line behind the spectrum, levelled to "
+                               "this track's average. Needs the editor open. The reference is saved with the project.");
+    learnRefButton.onClick = [this] { view.toggleLearning(); };
+    matchEqButton.setTooltip ("Play the track you are working on, then press: adds up to six bands that bring its long-term shape (the thin line) to "
+                              "the reference (the dashed one), counting the stereo bands already on. A starting point to judge by ear and Delta, not a fix: "
+                              "a difference from another track is taste. Right-click the display for more (clear the reference, restart the average).");
+    matchEqButton.onClick = [this] { view.matchToReference(); };
 
     clearMetersButton.setTooltip ("Clear the IN and OUT level meters. Use it if a reading looks stuck.");
     clearMetersButton.onClick = [this]
@@ -129,7 +143,7 @@ IrisEditor::IrisEditor (IrisProcessor& p)
         repaint (meterArea.expanded (24, 4));
     };
 
-    for (auto* c : std::initializer_list<juce::Component*> { &presetBox, &modeBox, &deltaButton, &matchButton, &clearMetersButton,
+    for (auto* c : std::initializer_list<juce::Component*> { &presetBox, &modeBox, &deltaButton, &matchButton, &clearMetersButton, &learnRefButton, &matchEqButton,
                                                              &driveKnob, &outKnob, &styleBox })
         addAndMakeVisible (c);
 
@@ -303,7 +317,7 @@ void IrisEditor::resized()
         clearMetersButton.setBounds (h.removeFromRight (64));
         h.removeFromRight (10);
         for (auto [component, width, gap] : { std::tuple<juce::Component*, int, int> { &presetBox, 190, 14 }, { &modeBox, 96, 18 },
-                                              { &deltaButton, 70, 8 }, { &matchButton, 104, 0 } })
+                                              { &deltaButton, 70, 8 }, { &matchButton, 104, 12 }, { &learnRefButton, 86, 6 }, { &matchEqButton, 74, 0 } })
         {
             component->setBounds (h.removeFromLeft (width));
             h.removeFromLeft (gap);
@@ -523,6 +537,8 @@ void IrisEditor::timerCallback()
     soloBandButton.setToggleState (soloed == view.getSelectedBand() && kind == (int) SoloKind::band, juce::dontSendNotification);
     soloCurveButton.setToggleState (soloed == view.getSelectedBand() && kind == (int) SoloKind::curve, juce::dontSendNotification);
     deltaButton.setToggleState (proc.engine.monitor.delta.load(), juce::dontSendNotification);
+    learnRefButton.setButtonText (view.isLearning() ? "STOP  " + juce::String ((int) view.learnedSeconds()) + " s" : "LEARN REF");
+    learnRefButton.setToggleState (view.isLearning(), juce::dontSendNotification);
 
     if (bandSignature() != shownSignature)
     {

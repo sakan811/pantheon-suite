@@ -3,11 +3,13 @@
 
 #pragma once
 
+#include "BandGrid.h"
 #include "ClipMeter.h"
 #include "Common.h"
 #include "FFT.h"
 #include "FrameHistory.h"
 #include "Fundamental.h"
+#include "Spectrogram.h"
 
 #include <algorithm>
 #include <array>
@@ -19,35 +21,6 @@
 
 namespace themis
 {
-// Fixed analysis grid shared by the analyzer, target curves and EQ fitting:
-// 1/6-octave constant-Q bands from 20 Hz upward (61 bands, 20 Hz .. ~20.5 kHz).
-struct BandGrid
-{
-    static constexpr int kPerOctave = 6;
-    static constexpr int kNum = 61;
-    static constexpr double kF0 = 20.0;
-    static constexpr double kMaxHz = 20000.0; // top of the audible range: displays and device ranges span [kF0, kMaxHz]
-
-    // Bands above this share of the sampling rate sit at the analysis' roll-off: displays and checks leave them out.
-    static double usableMaxHz (double sampleRate) { return sampleRate * 0.47; }
-
-    static double centreHz (int i) { return kF0 * std::pow (2.0, static_cast<double> (i) / kPerOctave); }
-    static double lowEdgeHz (int i) { return centreHz (i) * std::pow (2.0, -0.5 / kPerOctave); }
-    static double highEdgeHz (int i) { return centreHz (i) * std::pow (2.0, 0.5 / kPerOctave); }
-
-    // Fractional band index for a frequency (clamped to the grid).
-    static double indexForHz (double f)
-    {
-        return std::clamp (std::log2 (std::max (f, 1.0) / kF0) * kPerOctave, 0.0, static_cast<double> (kNum - 1));
-    }
-
-    // Normalisation region: curves are shifted so their mean over this range is 0 dB.
-    static constexpr double kAnchorLoHz = 200.0;
-    static constexpr double kAnchorHiHz = 5000.0;
-};
-
-using BandArray = std::array<float, BandGrid::kNum>;
-
 // The frequency ranges of the energy-over-time graph and of the LOW / LOW-MID / HIGH-MID / HIGH readouts. A band
 // belongs to a range by its centre frequency.
 struct EnergyRange
@@ -176,6 +149,7 @@ public:
         for (auto* v : { &sidePower, &midRe, &midIm, &sideRe, &sideIm, &crossRe, &crossIm })
             v->assign (bins, 0.0f);
         history_.setFramePeriod (static_cast<double> (hop) / fs);
+        spectrum_.setFramePeriod (static_cast<double> (hop) / fs);
         clip_.prepare();
         clipEnabled = true;
         writeCount.store (0, std::memory_order_relaxed);
@@ -280,6 +254,7 @@ public:
 
     // Absolute energy, fundamental and clipping history, one entry per analysed frame (cleared by a reset).
     const FrameHistory& history() const { return history_; }
+    const SpectrumHistory& spectrum() const { return spectrum_; }
 
     // Peaks and clipping of everything pushed since the last reset.
     ClipTotals clipTotals() const { return clip_.totals(); }
@@ -384,6 +359,24 @@ private:
         return s;
     }
 
+    static BandLevels silentBands()
+    {
+        BandLevels s;
+        s.fill (kHistoryFloorDb);
+        return s;
+    }
+
+    // The spectrogram's column for a frame: the stereo level (mid + side) of every band the sample rate can carry.
+    BandLevels bandLevels (const std::array<double, BandGrid::kNum>& mid, const std::array<double, BandGrid::kNum>& side) const
+    {
+        BandLevels s = silentBands();
+        const double toMeanSquare = 2.0 / fftSize;
+        for (size_t b = 0; b < s.size(); ++b)
+            if (bandMap[b].valid)
+                s[b] = static_cast<float> (powerToDb ((mid[b] + side[b]) * toMeanSquare, 1.0e-12));
+        return s;
+    }
+
     // One history entry: the energy of the stereo, mid, side, left and right signals per range (from the band energies
     // of mid, side and their cross-spectrum), and the bass fundamental of the mid signal.
     FrameStats frameStats (const std::array<double, BandGrid::kNum>& mid, const std::array<double, BandGrid::kNum>& side,
@@ -439,6 +432,7 @@ private:
         if (powerToDb (meanPower) < kSilenceDb)
         {
             history_.push (silentFrame (clip));
+            spectrum_.push (silentBands());
             return;
         }
 
@@ -459,6 +453,7 @@ private:
         bandEnergies (crossRe, xRe);
         bandEnergies (crossIm, xIm);
         history_.push (frameStats (e, eSide, xRe, clip));
+        spectrum_.push (bandLevels (e, eSide));
 
         const float tau = avgSeconds.load (std::memory_order_relaxed);
         const double hopSec = static_cast<double> (hop) / fs;
@@ -554,6 +549,7 @@ private:
         foldCrossRe.fill (0.0);
         foldCrossIm.fill (0.0);
         history_.clear();
+        spectrum_.clear();
         clip_.take(); // drop what was measured before the reset
         frameCount = 0;
         foldCount = 0;
@@ -580,6 +576,7 @@ private:
     std::array<double, BandGrid::kNum> foldMid {}, foldSide {}; // per-band mid / side power as a share of the frame total
     std::array<double, BandGrid::kNum> foldCrossRe {}, foldCrossIm {}; // per-band Re / Im of M S*, on the same scale
     FrameHistory history_;
+    SpectrumHistory spectrum_;
     ClipMeter clip_;
     bool clipEnabled = true;
     uint64_t ringSize = 0;

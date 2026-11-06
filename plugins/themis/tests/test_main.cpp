@@ -1571,6 +1571,96 @@ TEST (analyzer_records_energy_per_range_and_silence)
     CHECK (a.history().sequence() <= 1);
 }
 
+TEST (spectrum_history_keeps_the_newest_frames_in_order)
+{
+    SpectrumHistory h;
+    BandLevels out[8];
+    CHECK (h.copyRecent (out, 8) == 0);
+    for (int i = 0; i < SpectrumHistory::kCapacity + 5; ++i)
+    {
+        BandLevels b;
+        b.fill (static_cast<float> (-i));
+        b[7] = static_cast<float> (i);
+        h.push (b);
+    }
+    CHECK (h.sequence() == static_cast<uint64_t> (SpectrumHistory::kCapacity + 5));
+    CHECK (h.copyRecent (out, 8) == 8);
+    for (int i = 0; i < 8; ++i)
+    {
+        const int expected = SpectrumHistory::kCapacity + 5 - 8 + i;
+        CHECK_NEAR (out[i][0], -expected, 0.0);
+        CHECK_NEAR (out[i][7], expected, 0.0);
+        CHECK_NEAR (out[i][BandGrid::kNum - 1], -expected, 0.0);
+    }
+    h.clear();
+    CHECK (h.copyRecent (out, 8) == 0 && h.sequence() == 0);
+}
+
+TEST (analyzer_publishes_the_level_of_every_band_for_the_spectrogram)
+{
+    const double fs = 48000;
+    TonalAnalyzer a;
+    a.prepare (fs);
+    const auto tone = sine (fs, 2000, -20.0, 5.0);
+    a.process (tone.data(), tone.data(), static_cast<int> (tone.size()));
+    const std::vector<float> silence (static_cast<size_t> (fs * 2), 0.0f);
+    a.process (silence.data(), silence.data(), static_cast<int> (silence.size()));
+
+    CHECK_NEAR (a.spectrum().framePeriodSeconds(), a.history().framePeriodSeconds(), 1.0e-12);
+    CHECK (a.spectrum().sequence() == a.history().sequence()); // one column per history frame
+    std::vector<BandLevels> frames (SpectrumHistory::kCapacity);
+    const int n = a.spectrum().copyRecent (frames.data(), SpectrumHistory::kCapacity);
+    CHECK (n > 40);
+    const auto& inTone = frames[static_cast<size_t> (n / 4)];
+    const int band = static_cast<int> (std::lround (BandGrid::indexForHz (2000.0)));
+    CHECK_NEAR (inTone[static_cast<size_t> (band)], -20.0 - 3.01, 1.0); // the mean-square level of the sine, as the history's range energy reads it
+    for (int b = 0; b < BandGrid::kNum; ++b)
+        if (std::abs (b - band) >= 3 && BandGrid::centreHz (b) < fs * 0.45)
+            CHECK (inTone[static_cast<size_t> (b)] < inTone[static_cast<size_t> (band)] - 30.0f);
+    for (const float v : frames[static_cast<size_t> (n - 1)]) // digital silence
+        CHECK_NEAR (v, kHistoryFloorDb, 1.0e-6);
+
+    a.requestReset();
+    a.process (silence.data(), silence.data(), 4096);
+    CHECK (a.spectrum().sequence() <= 1);
+}
+
+TEST (spectrogram_finds_the_sharpest_burst_and_ignores_the_noise_floor)
+{
+    constexpr int n = 100;
+    std::vector<BandLevels> frames (n);
+    for (auto& f : frames)
+        f.fill (-60.0f);
+    for (auto& f : frames)
+        f[10] = -20.0f; // a loud, steady band
+    for (auto& f : frames)
+        f[50] = -118.0f; // a band at the noise floor...
+    frames[40][50] = -80.0f; // ...with a huge relative jump: not worth reporting
+    frames[70][30] = -45.0f; // a 15 dB burst in an ordinary band
+    frames[80][20] = -52.0f; // a smaller one
+    const auto r = spectro::analyseBursts (frames.data(), n, 20000.0);
+    CHECK (r.have && r.band == 30 && r.framesAgo == n - 1 - 70);
+    CHECK_NEAR (r.excessDb, 15.0, 1.0e-4);
+    CHECK_NEAR (r.usualDb, -60.0, 1.0e-4);
+    CHECK_NEAR (r.levelDb, -45.0, 1.0e-4);
+
+    // Bands the sample rate cannot carry are left out; so is a window that is too short, or silent.
+    CHECK (spectro::analyseBursts (frames.data(), n, BandGrid::centreHz (29)).band != 30);
+    CHECK (!spectro::analyseBursts (frames.data(), spectro::kMinFrames - 1, 20000.0).have);
+    for (auto& f : frames)
+        f.fill (kHistoryFloorDb);
+    CHECK (!spectro::analyseBursts (frames.data(), n, 20000.0).have);
+}
+
+TEST (spectrogram_brightness_follows_the_tilted_level)
+{
+    // The tilt makes the same level brighter higher up, by 4.5 dB per octave around 1 kHz.
+    const float a = spectro::brightness (-70.0f, 1000.0), b = spectro::brightness (-70.0f, 2000.0);
+    CHECK_NEAR ((b - a) * spectro::kRangeDb, spectro::kTiltDbPerOctave, 1.0e-3);
+    CHECK (spectro::brightness (kHistoryFloorDb, 1000.0) == 0.0f);
+    CHECK (spectro::brightness (0.0f, 1000.0) == 1.0f && spectro::brightness (-200.0f + 1.0f, 1000.0) == 0.0f);
+}
+
 TEST (analyzer_tracks_a_bass_fundamental_over_time)
 {
     const double fs = 48000;
@@ -2396,6 +2486,64 @@ TEST (advisor_reads_the_low_end_dynamics_and_the_history)
     a = advise (in);
     const auto* bass = find (a, Topic::bass);
     CHECK (bass != nullptr && bass->headline.find ("under 40 Hz") != std::string::npos && bass->hear.solo == master::soloLow().solo);
+}
+
+TEST (advisor_names_the_range_whose_side_signal_a_mono_sum_loses)
+{
+    auto in = cleanMaster();
+    std::vector<FrameStats> frames (100);
+    for (auto& f : frames)
+        for (int s = 0; s < kNumSignals; ++s)
+            for (int c = 0; c < kNumEnergyColumns; ++c)
+                f.energy (static_cast<Signal> (s), c) = -30.0f;
+    for (auto& f : frames)
+        f.energy (Signal::side, 2) = -24.0f; // HIGH-MID: side 6 dB over mid, a mono sum loses 10 log10 (1 + 3.98) = 7 dB
+    in.frames = frames;
+    const auto a = advise (in);
+    const auto* w = find (a, Topic::width);
+    CHECK (w != nullptr && w->level == Level::bad);
+    CHECK (w != nullptr && w->headline.find ("HIGH-MID") != std::string::npos);
+    CHECK (w != nullptr && w->hear.solo == (Switches::bit (Source::side) | Switches::bit (Source::highMid)));
+    CHECK (std::count_if (a.items.begin(), a.items.end(), [] (const Advice& i) { return i.topic == Topic::width; }) == 1); // the other ranges are not wide
+
+    // The asked-for cut is enough: taking it off the side puts the loss at the warning limit or under, and half a dB less would not.
+    const auto report = history::analyseWidth (frames.data(), 100, 2);
+    const float cut = history::sideCutToMonoOkDb (report, 2);
+    CHECK (cut > 0.0f);
+    const auto after = [&] (float db) {
+        auto g = frames;
+        for (auto& f : g)
+            f.energy (Signal::side, 2) -= db;
+        return history::analyseWidth (g.data(), 100, 2);
+    };
+    CHECK (after (cut).level == Level::good && after (cut - 0.5f).level != Level::good);
+    CHECK_NEAR (after (cut).monoLossDb, translation::kBandMonoWarnDb, 0.01);
+
+    // The band to hand to Iris: a side bell across the range, cutting by that amount rounded up to the half dB.
+    CHECK (w != nullptr && w->moves.size() == 1);
+    if (w != nullptr && w->moves.size() == 1)
+    {
+        const auto& m = w->moves[0];
+        CHECK (m.kind == EqMove::Kind::bell && m.place == EqMove::Place::side);
+        CHECK_NEAR (m.freqHz, std::sqrt (1000.0 * 6000.0), 1.0);
+        CHECK (m.gainDb < 0.0f && -m.gainDb >= cut - 1.0e-4f && -m.gainDb < cut + 0.51f);
+    }
+
+    // The top range gets a shelf; the low end has its own item, so it is not named here; a window that is not wide has no item.
+    for (auto& f : frames)
+    {
+        f.energy (Signal::side, 2) = -30.0f;
+        f.energy (Signal::side, 3) = -24.0f;
+        f.energy (Signal::side, 0) = -20.0f;
+    }
+    in.frames = frames;
+    w = pick (in, Topic::width);
+    CHECK (w != nullptr && w->moves.size() == 1 && w->moves[0].kind == EqMove::Kind::highShelf && w->moves[0].freqHz == 6000.0f);
+    CHECK (w != nullptr && w->headline.find ("LOW") == std::string::npos);
+    for (auto& f : frames)
+        f.energy (Signal::side, 3) = -30.0f;
+    in.frames = frames;
+    CHECK (pick (in, Topic::width) == nullptr);
 }
 
 TEST (advisor_lists_faults_not_differences_from_the_reference_curve)

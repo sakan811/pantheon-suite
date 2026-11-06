@@ -19,6 +19,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
 
     void selectBand (int band);
+    iris::gui::EqView& display() noexcept { return view; } // for the checks and the snapshot tool
 
 private:
     enum class Panel { band, dynamics, output, count };
@@ -50,7 +51,7 @@ private:
     ui::Choice styleBox, modeBox;
 
     juce::ComboBox presetBox;
-    juce::TextButton deltaButton { "DELTA" }, clearMetersButton { "CLEAR" };
+    juce::TextButton deltaButton { "DELTA" }, clearMetersButton { "CLEAR" }, learnRefButton { "LEARN REF" }, matchEqButton { "MATCH EQ" };
     ui::Toggle matchButton;
 
     float inLevel = 0.0f, outLevel = 0.0f;

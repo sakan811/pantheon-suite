@@ -9,6 +9,7 @@
 //   region=M   solo the frequency regions in bit mask M (1 = sub ... 32 = high)
 //   solo=N:k   solo band N, as its region (k = band) or its curve (k = curve)
 //   sidechain  feed a second track (a bass line over low-passed noise) to the sidechain input, for the masking view
+//   reference  learn a brighter track as the reference first, then play the programme and press MATCH EQ: the reference curve and the match
 
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
@@ -32,7 +33,7 @@ int main (int argc, char** argv)
             if (proc.getProgramName (i) == argv[2])
                 proc.setCurrentProgram (i);
 
-    bool sidechain = false;
+    bool sidechain = false, reference = false;
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
 
@@ -52,6 +53,37 @@ int main (int argc, char** argv)
             proc.engine.monitor.delta = true;
         else if (arg == "sidechain")
             sidechain = true;
+        else if (arg == "reference")
+            reference = true;
+    }
+
+    const auto pump = [] (int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil (ms); };
+    if (reference)
+    {
+        // A brighter track plays first and is learned as the reference (what the LEARN REF button does).
+        auto& view = static_cast<IrisEditor&> (*editor).display();
+        view.toggleLearning();
+        test::PinkNoise referenceNoise (5);
+        float previous = 0.0f;
+        juce::AudioBuffer<float> played (2, 512);
+        juce::MidiBuffer ignored;
+        for (int block = 0; block < 330; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                // The same bass as the programme, under a brighter noise, so what is left to match is the tilt.
+                const double t = (double) (block * 512 + i) / 48000.0;
+                const float x = referenceNoise.next(), bright = 0.25f * x + 1.4f * (x - previous)
+                                                                 + (float) (0.10 * std::sin (2 * M_PI * 55 * t) + 0.05 * std::sin (2 * M_PI * 110 * t));
+                previous = x;
+                played.setSample (0, i, bright);
+                played.setSample (1, i, bright);
+            }
+            proc.processBlock (played, ignored);
+            if (block % 3 == 0)
+                pump (34);
+        }
+        view.toggleLearning();
     }
 
     test::Programme programme;
@@ -80,6 +112,16 @@ int main (int argc, char** argv)
         proc.processBlock (buffer, midi);
         if (block % 4 == 0)
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34); // about one display tick per 4 blocks, so the averaged views (resonances, masking) fill in
+    }
+    if (reference)
+    {
+        static_cast<IrisEditor&> (*editor).display().matchToReference();
+        for (int block = 0; block < 12; ++block)
+        {
+            programme.fill (buffer);
+            proc.processBlock (buffer, midi);
+            pump (34);
+        }
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
 

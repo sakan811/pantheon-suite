@@ -7,6 +7,7 @@
 #include "ThemisUi.h"
 
 #include <themis/HistoryChecks.h>
+#include <themis/Spectrogram.h>
 
 #include <array>
 #include <functional>
@@ -14,12 +15,22 @@
 
 namespace ui
 {
+// "50 ", "1k ", "2.5k " (a trailing space: the caller adds the unit).
+inline juce::String frequencyText (double hz)
+{
+    if (hz < 995.0)
+        return juce::String (juce::roundToInt (hz)) + " ";
+    const double k = hz / 1000.0;
+    return (std::abs (k - std::round (k)) < 0.05 ? juce::String (juce::roundToInt (k)) : juce::String (k, 1)) + "k ";
+}
+
 // A scrolling graph of the last minute of analysed frames (themis::FrameHistory) made to answer a question, not just to
 // plot numbers. A panel holds several tabs (views of the same history); each tab has
 //   * a header row with the tabs and, where it applies, a chip per frequency range to pick the range it looks at,
 //   * a legend that doubles as the readout (latest values, or those under the cursor); click an entry to hide its line,
 //   * a verdict line: a traffic-light summary of the window drawn from themis::history (the limits are rules of thumb),
 //   * the plot, with shaded zones that name what each region of the axis means.
+// A tab can instead be a spectrogram (themis::SpectrumHistory): frequency up the axis, time across, level as colour.
 class HistoryPanel : public juce::Component, public juce::TooltipClient
 {
 public:
@@ -36,6 +47,7 @@ public:
     {
         float top, bottom, step; // gridlines every `step` from the top
         std::function<juce::String (float)> tick;
+        std::vector<float> marks = {}; // gridlines at these values instead (a frequency axis is not evenly marked)
     };
     struct Zone // a labelled band of the axis
     {
@@ -47,6 +59,7 @@ public:
     {
         juce::String text; // empty: nothing to say yet
         themis::Level level = themis::Level::good;
+        bool lamp = true;  // false: a plain reading with no verdict lamp
     };
     struct Tab
     {
@@ -62,11 +75,35 @@ public:
         std::function<juce::String (float)> format;                                 // a legend value; default is dB
         std::function<Verdict (const themis::FrameStats*, int n, int column)> verdict; // the frames are the window shown, oldest first
         std::function<juce::String (const themis::FrameStats&)> detail;             // extra text for the frame shown
+        bool spectrogram = false;   // drawn from themis::SpectrumHistory instead of the frames; `spectrumVerdict` replaces `verdict`
+        std::function<Verdict (const themis::BandLevels*, int n, double periodSeconds, double usableMaxHz)> spectrumVerdict;
     };
 
     // Pull fresh frames (message thread, ~30 Hz). Repaints only when the analysis has produced something new.
     void update()
     {
+        const auto& t = tabs[static_cast<size_t> (tab)];
+        if (t.spectrogram)
+        {
+            const auto& history = proc.spectrumHistory();
+            const auto sequence = history.sequence();
+            if (sequence == lastSpectrumSequence && !dirty)
+                return;
+            if (sequence != lastSpectrumSequence)
+            {
+                lastSpectrumSequence = sequence;
+                period = std::max (history.framePeriodSeconds(), 1.0e-3);
+                const int wanted = std::min (themis::SpectrumHistory::kCapacity, static_cast<int> (std::ceil (kSpanSeconds / period)) + 1);
+                numFrames = history.copyRecent (bandFrames.data(), wanted);
+                spectrumStale = true;
+            }
+            dirty = false;
+            if (spectrumStale)
+                rebuildSpectrogram();
+            verdict = t.spectrumVerdict && numFrames > 0 ? t.spectrumVerdict (bandFrames.data(), numFrames, period, themis::BandGrid::usableMaxHz (proc.getSampleRate())) : Verdict {};
+            repaint();
+            return;
+        }
         const auto& history = proc.frameHistory();
         const auto sequence = history.sequence();
         if (sequence == lastSequence && !dirty)
@@ -79,7 +116,6 @@ public:
             numFrames = history.copyRecent (frames.data(), wanted);
         }
         dirty = false;
-        const auto& t = tabs[static_cast<size_t> (tab)];
         verdict = t.verdict && numFrames > 0 ? t.verdict (frames.data(), numFrames, column) : Verdict {};
         repaint();
     }
@@ -88,6 +124,8 @@ public:
     {
         tab = juce::jlimit (0, static_cast<int> (tabs.size()) - 1, index);
         hoverFrame = -1;
+        hoverBand = -1;
+        lastSequence = lastSpectrumSequence = ~uint64_t (0); // the two kinds of tab keep different frames: read again
         dirty = true;
         layout();
         repaint();
@@ -110,6 +148,8 @@ public:
         ui::hw::drawGlass (g, screen);
 
         const auto& t = tabs[static_cast<size_t> (tab)];
+        if (t.spectrogram && specImage.isValid())
+            g.drawImageAt (specImage, juce::roundToInt (plot.getX()), juce::roundToInt (plot.getY()));
         drawZones (g, t);
         drawGrid (g, t);
         if (t.marksClips)
@@ -136,21 +176,24 @@ public:
     void mouseMove (const juce::MouseEvent& e) override
     {
         setMouseCursor (hitAt (e.position) >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::CrosshairCursor);
-        int frame = -1;
+        int frame = -1, band = -1;
         if (numFrames > 0 && plot.contains (e.position))
         {
+            band = juce::jlimit (0, themis::BandGrid::kNum - 1, static_cast<int> (std::lround ((plot.getBottom() - e.position.y) / plot.getHeight() * (themis::BandGrid::kNum - 1))));
             const double secondsAgo = (plot.getRight() - e.position.x) / plot.getWidth() * kSpanSeconds;
             frame = juce::jlimit (0, numFrames - 1, numFrames - 1 - static_cast<int> (std::lround (secondsAgo / period)));
         }
-        if (frame != hoverFrame)
+        if (frame != hoverFrame || band != hoverBand)
         {
             hoverFrame = frame;
+            hoverBand = band;
             repaint();
         }
     }
     void mouseExit (const juce::MouseEvent&) override
     {
         hoverFrame = -1;
+        hoverBand = -1;
         repaint();
     }
 
@@ -238,6 +281,8 @@ private:
                 row1.removeFromRight (2.0f);
             }
         rangeLabelArea = row1;
+        spectrumStale = true;
+        dirty = true;
         auto legend = legendRow;
         for (int i = 0; i < static_cast<int> (t.series.size()); ++i)
             hits.push_back ({ Hit::legend, legend.removeFromLeft (kLegendWidth), i });
@@ -281,15 +326,20 @@ private:
     void drawGrid (juce::Graphics& g, const Tab& t) const
     {
         g.setFont (font (11.0f));
-        for (float v = t.axis.top; v >= t.axis.bottom - 0.01f; v -= t.axis.step)
-        {
+        const auto gridline = [&] (float v) {
             const float y = yFor (t.axis, v);
-            g.setColour (colours::glassGrid);
+            g.setColour (t.spectrogram ? colours::text.withAlpha (0.12f) : colours::glassGrid);
             g.drawHorizontalLine (juce::roundToInt (y), plot.getX(), plot.getRight());
             g.setColour (colours::dim);
             g.drawText (t.axis.tick ? t.axis.tick (v) : juce::String (juce::roundToInt (v)),
                         juce::Rectangle<float> (plot.getX() - 34.0f, y - 7.0f, 30.0f, 14.0f).toNearestInt(), juce::Justification::centredRight);
-        }
+        };
+        if (t.axis.marks.empty())
+            for (float v = t.axis.top; v >= t.axis.bottom - 0.01f; v -= t.axis.step)
+                gridline (v);
+        else
+            for (const float v : t.axis.marks)
+                gridline (v);
         for (int s = 0; s <= static_cast<int> (kSpanSeconds); s += 20)
         {
             const float x = plot.getRight() - plot.getWidth() * static_cast<float> (s) / static_cast<float> (kSpanSeconds);
@@ -371,7 +421,9 @@ private:
             hw::drawLabel (g, "RANGE", rangeLabelArea.toNearestInt(), juce::Justification::right, colours::dim, 9.0f);
         }
 
-        const themis::FrameStats* shown = numFrames > 0 ? &frames[static_cast<size_t> (hoverFrame >= 0 ? hoverFrame : numFrames - 1)] : nullptr;
+        if (t.spectrogram)
+            drawSpectrogramKey (g);
+        const themis::FrameStats* shown = numFrames > 0 && !t.spectrogram ? &frames[static_cast<size_t> (hoverFrame >= 0 ? hoverFrame : numFrames - 1)] : nullptr;
         g.setFont (font (11.0f));
         const auto format = t.format ? t.format : std::function<juce::String (float)> (defaultFormat);
         for (const auto& h : hits)
@@ -399,13 +451,21 @@ private:
             if (t.detail)
                 right += t.detail (*shown);
         }
+        if (t.spectrogram && hoverFrame >= 0 && hoverBand >= 0)
+        {
+            const double hz = themis::BandGrid::centreHz (hoverBand);
+            const float level = bandFrames[static_cast<size_t> (hoverFrame)][static_cast<size_t> (hoverBand)];
+            right = juce::String (static_cast<double> (numFrames - 1 - hoverFrame) * period, 1) + " s ago   " + frequencyText (hz) + "Hz   "
+                    + (themis::hasLevel (level) ? juce::String (level, 1) + " dB" : juce::String ("-"));
+        }
         const auto detailArea = right.isEmpty() ? juce::Rectangle<float>() : row.removeFromRight (std::min (190.0f, row.getWidth() * 0.4f));
         if (verdict.text.isNotEmpty())
         {
-            hw::drawLamp (g, { row.getX() + 9.0f, row.getCentreY() }, 3.6f, colours::forLevel (verdict.level));
+            if (verdict.lamp)
+                hw::drawLamp (g, { row.getX() + 9.0f, row.getCentreY() }, 3.6f, colours::forLevel (verdict.level));
             g.setColour (colours::text);
             g.setFont (font (11.5f));
-            g.drawFittedText (verdict.text, row.withTrimmedLeft (20.0f).reduced (0.0f, 2.0f).toNearestInt(), juce::Justification::centredLeft, 2, 1.0f);
+            g.drawFittedText (verdict.text, row.withTrimmedLeft (verdict.lamp ? 20.0f : 8.0f).reduced (0.0f, 2.0f).toNearestInt(), juce::Justification::centredLeft, 2, 1.0f);
         }
         else if (numFrames > 0)
         {
@@ -421,6 +481,68 @@ private:
         }
     }
 
+    // The spectrogram's colours: nothing, then teal phosphor, amber and the bright cream of the read-outs.
+    static juce::Colour ramp (float b)
+    {
+        struct Stop { float at; juce::Colour colour; };
+        static const Stop stops[] = { { 0.0f, colours::glass }, { 0.22f, juce::Colour (0xff0f3a40) }, { 0.5f, colours::accent.darker (0.2f) },
+                                      { 0.78f, colours::amber }, { 1.0f, colours::text } };
+        for (size_t i = 1; i < std::size (stops); ++i)
+            if (b <= stops[i].at)
+                return stops[i - 1].colour.interpolatedWith (stops[i].colour, (b - stops[i - 1].at) / (stops[i].at - stops[i - 1].at));
+        return stops[std::size (stops) - 1].colour;
+    }
+
+    void drawSpectrogramKey (juce::Graphics& g) const
+    {
+        constexpr float kBarWidth = 100.0f;
+        auto row = legendRow;
+        g.setColour (colours::dim);
+        g.setFont (font (10.5f));
+        g.drawText ("quiet", row.removeFromLeft (34.0f).toNearestInt(), juce::Justification::centredLeft);
+        const auto bar = row.removeFromLeft (kBarWidth).withSizeKeepingCentre (kBarWidth, 6.0f);
+        for (int i = 0; i < static_cast<int> (kBarWidth); ++i)
+        {
+            g.setColour (ramp (static_cast<float> (i) / (kBarWidth - 1.0f)));
+            g.fillRect (bar.getX() + static_cast<float> (i), bar.getY(), 1.0f, bar.getHeight());
+        }
+        g.setColour (colours::dim);
+        g.drawText ("loud", row.removeFromLeft (34.0f).toNearestInt(), juce::Justification::centredRight);
+        g.drawText ("levels tilted +" + juce::String (themis::spectro::kTiltDbPerOctave, 1) + " dB / octave around 1 kHz, as in the other plugins' displays",
+                    row.withTrimmedLeft (10.0f).toNearestInt(), juce::Justification::centredLeft);
+    }
+
+    // One pixel column per moment, one row per position up the frequency axis (between two bands the colour is blended).
+    void rebuildSpectrogram()
+    {
+        spectrumStale = false;
+        const int w = juce::roundToInt (plot.getWidth()), h = juce::roundToInt (plot.getHeight());
+        if (w < 2 || h < 2)
+        {
+            specImage = {};
+            return;
+        }
+        specImage = juce::Image (juce::Image::ARGB, w, h, true);
+        juce::Image::BitmapData bits (specImage, juce::Image::BitmapData::writeOnly);
+        std::array<float, themis::BandGrid::kNum> shade {};
+        for (int x = 0; x < w; ++x)
+        {
+            const double secondsAgo = static_cast<double> (w - 1 - x) / static_cast<double> (w) * kSpanSeconds;
+            const int frame = numFrames - 1 - static_cast<int> (std::lround (secondsAgo / period));
+            if (frame < 0 || frame >= numFrames)
+                continue;
+            for (int b = 0; b < themis::BandGrid::kNum; ++b)
+                shade[static_cast<size_t> (b)] = themis::spectro::brightness (bandFrames[static_cast<size_t> (frame)][static_cast<size_t> (b)], themis::BandGrid::centreHz (b));
+            for (int y = 0; y < h; ++y)
+            {
+                const float pos = static_cast<float> (h - 1 - y) / static_cast<float> (h - 1) * static_cast<float> (themis::BandGrid::kNum - 1);
+                const int lo = std::min (static_cast<int> (pos), themis::BandGrid::kNum - 2);
+                const float f = pos - static_cast<float> (lo);
+                bits.setPixelColour (x, y, ramp (shade[static_cast<size_t> (lo)] * (1.0f - f) + shade[static_cast<size_t> (lo) + 1] * f));
+            }
+        }
+    }
+
     juce::String title;
     std::vector<Tab> tabs;
     std::vector<std::vector<char>> hidden; // per tab, per series: hidden by a click on the legend
@@ -428,11 +550,14 @@ private:
     std::array<themis::FrameStats, themis::FrameHistory::kCapacity> frames {};
     Verdict verdict;
     int numFrames = 0;
-    int hoverFrame = -1;
+    int hoverFrame = -1, hoverBand = -1;
     int tab = 0;
     int column = themis::kAllRanges;
     bool dirty = true;
-    uint64_t lastSequence = ~uint64_t (0);
+    uint64_t lastSequence = ~uint64_t (0), lastSpectrumSequence = ~uint64_t (0);
+    std::vector<themis::BandLevels> bandFrames = std::vector<themis::BandLevels> (themis::SpectrumHistory::kCapacity);
+    juce::Image specImage;
+    bool spectrumStale = true;
     double period = 0.1;
     juce::Rectangle<float> plot, screen, titleArea, legendRow, verdictRow, rangeLabelArea;
 };
@@ -459,7 +584,7 @@ inline juce::String percentText (float share) { return juce::String (juce::round
 class LevelView : public HistoryPanel
 {
 public:
-    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks() }) {}
+    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks(), spectrogram() }) {}
 
 private:
     using Verdict = HistoryPanel::Verdict;
@@ -536,6 +661,33 @@ private:
             const juce::String text = d < 0.05f ? juce::String (": left and right match.")
                                                 : ": " + juce::String (r.leftMinusRightDb > 0.0f ? "left" : "right") + " is " + juce::String (d, 1) + " dB louder.";
             return Verdict { rangeText (c) + text, r.level };
+        };
+        return t;
+    }
+
+    static Tab spectrogram()
+    {
+        std::vector<float> marks;
+        for (const double hz : { 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0 })
+            marks.push_back (static_cast<float> (themis::BandGrid::indexForHz (hz)));
+        Tab t { "SPECTROGRAM",
+                "The spectrum over the last minute: frequency up the side (20 Hz to 20 kHz, a logarithmic axis), time across, and the level of "
+                "every 1/6-octave band of the stereo signal as colour, from dark (quiet) through teal and amber to cream (loud). Levels are absolute "
+                "and tilted by 4.5 dB per octave around 1 kHz, like the spectrum displays of the other plugins, so a typical programme looks about "
+                "even instead of sloping down towards the highs.\n\n"
+                "Use it to find when a problem happens: a harsh burst in the high mids, a sibilant spike, a ringing note that stays lit as a "
+                "horizontal line, a section where the low end drops out. The verdict names the sharpest burst: the band and the moment where "
+                "the level rose furthest above that band's usual (median) level. Drums make big bursts by nature, so it points at where to "
+                "look and is never a fault. Hover for the band, the level and how long ago.",
+                { 60.0f, 0.0f, 6.0f, [] (float v) { return frequencyText (themis::BandGrid::kF0 * std::pow (2.0, static_cast<double> (v) / themis::BandGrid::kPerOctave)).trimEnd(); }, marks } };
+        t.spectrogram = true;
+        t.spectrumVerdict = [] (const themis::BandLevels* f, int n, double period, double maxHz) -> Verdict {
+            const auto r = themis::spectro::analyseBursts (f, n, maxHz);
+            if (!r.have)
+                return Verdict {};
+            return Verdict { "Sharpest burst: " + frequencyText (themis::BandGrid::centreHz (r.band)) + "Hz, " + juce::String (r.excessDb, 1) + " dB above that band's usual level, "
+                                 + juce::String (static_cast<double> (r.framesAgo) * period, 1) + " s ago. Where to look, not a fault.",
+                             themis::Level::good, false };
         };
         return t;
     }

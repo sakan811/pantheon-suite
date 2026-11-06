@@ -79,10 +79,12 @@ static void runAudio (ThemisProcessor& proc, double seconds, double fs, int bloc
 // over pink noise whose right channel is `delaySeconds` late and 1 dB quieter, with a loud "chorus" driven into a hard
 // clipper at -1 dBFS, so the phase check, the mono fold, the fundamental, the left/right balance, the clipping check
 // and the level graph all have something to show.
+static constexpr float kAirGain = 0.02f; // the widened top of the demo programme
 static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, int block, double delaySeconds)
 {
     const size_t total = static_cast<size_t> (seconds * fs), delay = static_cast<size_t> (delaySeconds * fs);
     const auto noise = pinkNoise (total, 9, 0.05f);
+    const auto air = pinkNoise (total, 21, kAirGain); // differenced twice below, so it sits in the top ranges; opposite on the two sides, so it is all side
     constexpr double notes[] = { 49.0, 55.0, 41.2, 61.7 }, kNoteSeconds = 5.0, kSoundingSeconds = 4.2;
     constexpr double kChorusStart = 33.0, kChorusEnd = 39.0;
     constexpr float kChorusGain = 2.6f, kCeiling = 0.891f /* -1 dBFS */, kRightTrim = 0.891f /* -1 dB */;
@@ -93,8 +95,9 @@ static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, 
         const bool sounding = std::fmod (t, kNoteSeconds) < kSoundingSeconds;
         const float bass = sounding ? static_cast<float> (0.30 * std::sin (phase) + 0.12 * std::sin (2.0 * phase) + 0.05 * std::sin (3.0 * phase)) : 0.0f;
         const float gain = t >= kChorusStart && t < kChorusEnd ? kChorusGain : 1.0f;
-        l[i] = std::clamp (gain * (bass + noise[i]), -kCeiling, kCeiling);
-        r[i] = std::clamp (gain * kRightTrim * (bass + noise[i >= delay ? i - delay : 0]), -kCeiling, kCeiling);
+        const float wide = i > 1 ? air[i] - 2.0f * air[i - 1] + air[i - 2] : 0.0f;
+        l[i] = std::clamp (gain * (bass + noise[i] + wide), -kCeiling, kCeiling);
+        r[i] = std::clamp (gain * kRightTrim * (bass + noise[i >= delay ? i - delay : 0] - wide), -kCeiling, kCeiling);
     }
     // Fed in slices with a pause after each, so the analysis thread keeps up and the history graphs fill like in a host
     // (it skips frames when audio arrives much faster than real time).
@@ -111,7 +114,7 @@ static constexpr int kEditorWidth = 1440, kEditorHeight = 900; // the editor's d
 static void pump (int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil (ms); }
 
 // Every tab of the two history graphs, stacked: the level graph (BANDS, MID / SIDE looking at the low range, LEFT / RIGHT,
-// PEAKS) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
+// PEAKS, SPECTROGRAM) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
 static juce::Image renderGraphs (juce::Component& editor)
 {
     ui::HistoryPanel *level = nullptr, *fundamental = nullptr;
@@ -132,13 +135,13 @@ static juce::Image renderGraphs (juce::Component& editor)
         return panel.createComponentSnapshot (panel.getLocalBounds(), true, 1.0f);
     };
     constexpr int kGap = 8;
-    const int levelTabs[] = { 0, 1, 2, 3 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges };
+    const int levelTabs[] = { 0, 1, 2, 3, 4 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges };
     const int fundamentalTabs[] = { 0, 1, 2 };
     const int h = level->getHeight(), w = level->getWidth() + kGap + fundamental->getWidth();
-    juce::Image out (juce::Image::RGB, w, 4 * h + 3 * kGap, true);
+    juce::Image out (juce::Image::RGB, w, 5 * h + 4 * kGap, true);
     juce::Graphics g (out);
     g.fillAll (colours::background);
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
         g.drawImageAt (snapshot (*level, levelTabs[i], levelColumns[i]), 0, i * (h + kGap));
     for (int i = 0; i < 3; ++i)
         g.drawImageAt (snapshot (*fundamental, fundamentalTabs[i], themis::kAllRanges), level->getWidth() + kGap, i * (h + kGap));
@@ -328,6 +331,17 @@ int main (int argc, char** argv)
                "an unknown key with a non-numeric value does not drop the band");
         CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=abc gain=1 q=1", back) && back.empty(),
                "a known key with a bad number still drops the band");
+        // Copy EQ hands the target curve over with its bands (Iris draws it as its reference); a reader without curves still gets the bands.
+        const auto target = proc.activeTarget();
+        pdsp::LinkCurve curve;
+        CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back, &curve) && back.size() == 1 && curve.valid()
+                   && curve.db.size() == static_cast<size_t> (themis::BandGrid::kNum) && curve.name == target.name,
+               "a copied target curve travels with the bands");
+        bool curveOk = true;
+        for (size_t i = 0; i < curve.db.size(); ++i)
+            curveOk = curveOk && std::abs (curve.db[i] - static_cast<double> (target.medianDb[i])) < 0.06;
+        CHECK (curveOk && std::abs (curve.frequency (10) - themis::BandGrid::centreHz (10)) < 1.0e-6, "... point for point, on the analysis grid");
+        CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back) && back.size() == 1, "... and a reader without curves skips it");
     }
 
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");
@@ -548,6 +562,11 @@ int main (int argc, char** argv)
             const auto peaks = themis::history::analysePeaks (frames.data(), static_cast<int> (frames.size()));
             const auto width = themis::history::analyseWidth (frames.data(), static_cast<int> (frames.size()), 0);
             const auto balance = themis::history::analyseBalance (frames.data(), static_cast<int> (frames.size()), themis::kAllRanges);
+            for (int c = 1; c < themis::kNumEnergyRanges; ++c)
+            {
+                const auto w = themis::history::analyseWidth (frames.data(), static_cast<int> (frames.size()), c);
+                std::printf ("    %s width: side %+.1f dB against mid, a mono sum loses %.1f dB\n", themis::energyColumnName (c), w.sideMinusMidDb, w.monoLossDb);
+            }
             std::printf ("    bass %.0f-%.0f Hz, %d clipped frames, low-end width S-M %.1f dB, left-right %.2f dB\n", bass.lowHz, bass.highHz,
                          peaks.clippedFrames, width.sideMinusMidDb, balance.leftMinusRightDb);
             CHECK (bass.have && peaks.have && peaks.clippedFrames > 3 && peaks.clippedFrames < 90 && peaks.level == themis::Level::bad);
@@ -576,6 +595,7 @@ int main (int argc, char** argv)
                 CHECK (!advice.measuring && !advice.items.empty());
                 const auto has = [&] (themis::Topic t) { return std::any_of (advice.items.begin(), advice.items.end(), [t] (const themis::Advice& a) { return a.topic == t; }); };
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
+                CHECK (has (themis::Topic::width), "the demo programme has a widened top");
                 CHECK (advice.level() == themis::Level::bad && advice.items.front().level == themis::Level::bad);
 
                 // The HEAR chip of the first item that has one: click it, the buttons follow; click again, they release.
@@ -600,6 +620,8 @@ int main (int argc, char** argv)
                     panel->selectTab (0);
                     clickAlong (*panel, 16.0f, 4.0f, tabs, columns); // the title row: the tabs on the left...
                     CHECK (tabs.count (1) == 1 && tabs.count (2) == 1, "clicking the tabs should select them");
+                    if (dynamic_cast<ui::LevelView*> (panel) != nullptr)
+                        CHECK (tabs.count (4) == 1, "the SPECTROGRAM tab can be clicked");
                     if (dynamic_cast<ui::LevelView*> (panel) != nullptr)
                     {
                         panel->selectTab (1); // ...and, on a tab that has them, the range chips on the right

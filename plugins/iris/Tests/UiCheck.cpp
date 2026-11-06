@@ -10,6 +10,9 @@
 #include "Check.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
+#include "TestSignals.h"
+
+#include <functional>
 
 using namespace iris;
 using namespace test;
@@ -277,6 +280,87 @@ int main()
                    "the cut keeps its placement and its 24 dB/oct slope");
         }
         check (pasteBands (fresh.apvts, "some other text", skipped).empty(), "text that is not a band list adds nothing");
+    }
+
+    std::printf ("\nReference and match\n");
+    {
+        // The display averages what goes in on its timer, so these run in (about) real time: audio in blocks, the message loop between.
+        const auto feed = [&] (IrisProcessor& p, float seconds, const std::function<float (test::PinkNoise&, float&)>& sample)
+        {
+            test::PinkNoise noise (7);
+            float memory = 0.0f;
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            for (int block = 0; block < (int) (seconds * 48000.0f / 512.0f); ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float x = 0.4f * sample (noise, memory);
+                    buffer.setSample (0, i, x);
+                    buffer.setSample (1, i, x);
+                }
+                p.processBlock (buffer, midi);
+                if (block % 3 == 0)
+                    pump (34);
+            }
+        };
+        const auto pink = [] (test::PinkNoise& n, float&) { return n.next(); };
+        const auto bright = [] (test::PinkNoise& n, float& m) { const float x = n.next(); const float d = x - m; m = x; return 4.0f * d; }; // differenced: +3 dB/octave over the pink
+
+        IrisProcessor a;
+        a.setPlayConfigDetails (2, 2, 48000.0, 512);
+        a.prepareToPlay (48000.0, 512);
+        gui::EqView v (a.engine, a.apvts, a.currentSampleRate);
+        v.setBounds (0, 0, viewWidth, viewHeight);
+        check (! v.hasReference() && v.matchToReference().empty(), "with no reference, MATCH does nothing and says so");
+
+        v.toggleLearning();
+        check (v.isLearning(), "LEARN REF starts learning");
+        feed (a, 4.5f, bright);
+        check (v.learnedSeconds() >= 2.5, fmt ("... counting what it hears (%.1f s)", v.learnedSeconds()));
+        v.toggleLearning();
+        check (! v.isLearning() && v.hasReference(), "pressing it again keeps the reference");
+
+        check (v.matchToReference().empty(), "MATCH before the track has played for a few seconds adds nothing");
+        feed (a, 4.5f, pink);
+        check (v.hasAverage(), "the track's own average builds up while it plays");
+        const auto first = v.matchToReference();
+        bool brightens = false;
+        for (const int slot : first)
+            brightens |= value (a, bandIds (slot).gain) > 1.0f && value (a, bandIds (slot).freq) > 1000.0f;
+        check (! first.empty() && (int) first.size() <= match::kMaxBands && brightens,
+               fmt ("a track 3 dB/octave duller than the reference gets %d band(s), a lift in the highs among them", (int) first.size()));
+        for (const int slot : first)
+            check (bandPlacement (a.apvts, slot) == Placement::stereo && value (a, bandIds (slot).gain) <= match::kMaxDb + 0.1f, fmt ("band %d: Stereo, %+.1f dB", slot + 1, value (a, bandIds (slot).gain)));
+        const auto again = v.matchToReference();
+        check (again.size() < first.size(), fmt ("matching again counts the bands already there (%d more, after %d)", (int) again.size(), (int) first.size()));
+
+        // The reference is saved with the project and comes back with the editor.
+        juce::MemoryBlock saved;
+        a.getStateInformation (saved);
+        IrisProcessor b;
+        b.setStateInformation (saved.getData(), (int) saved.getSize());
+        gui::EqView restored (b.engine, b.apvts, b.currentSampleRate);
+        check (restored.hasReference(), "the reference comes back with the project");
+        v.clearReference();
+        check (! v.hasReference(), "CLEAR removes it");
+        juce::MemoryBlock cleared;
+        a.getStateInformation (cleared);
+        IrisProcessor c;
+        c.setStateInformation (cleared.getData(), (int) cleared.getSize());
+        gui::EqView none (c.engine, c.apvts, c.currentSampleRate);
+        check (! none.hasReference(), "... also from the saved state");
+
+        // A curve pasted along with Themis' bands.
+        std::string curve = "pantheon-bands 1\nbell freq=270 gain=-2.5 q=1.40 place=mid\ncurve f0=20 oct=6 name=Modern_Pop db=";
+        for (int i = 0; i < 61; ++i)
+            curve += (i ? "," : "") + std::to_string (3.0 - 0.1 * i).substr (0, 5);
+        check (v.pasteReference (curve) && v.hasReference(), "a curve in the clipboard becomes the reference");
+        int skipped = 0;
+        check (pasteBands (a.apvts, curve, skipped).size() == 1, "... and its bands are pasted as before");
+        check (! v.pasteReference ("pantheon-bands 1\nbell freq=270 gain=-2.5 q=1.40 place=mid") && ! v.pasteReference ("some other text"),
+               "text without a curve changes nothing");
+        v.clearReference();
     }
 
     return finish ("UI CHECK");

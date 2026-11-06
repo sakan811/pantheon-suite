@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The Pantheon authors
+
+name: iris
+
+# This repository is source only: CI checks that the code builds and passes its tests. It never packages, uploads or
+# publishes a compiled plugin (see NOTICE.md). Iris' checks need JUCE, which CMake fetches (git + network); they run headless.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/iris/**'
+      - 'shared/**'
+      - 'cmake/**'
+      - '.github/workflows/iris.yml'
+  pull_request:
+    paths:
+      - 'plugins/iris/**'
+      - 'shared/**'
+      - 'cmake/**'
+      - '.github/workflows/iris.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: plugins/iris
+
+# A newer push to the same branch or pull request makes the older run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    # The DSP tests (IrisTests), the display driven with synthetic mouse events and audio (IrisUiCheck), and the built VST3 loaded
+    # and fuzzed through JUCE's plugin host (IrisHostCheck). A macOS build, universal binaries and auval are not covered here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev \
+            libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --target IrisTests IrisUiCheck Iris_VST3 IrisHostCheck -j 4
+      - name: DSP tests
+        run: ./build/IrisTests_artefacts/Release/IrisTests
+      - name: Display and editor check
+        run: ./build/IrisUiCheck_artefacts/Release/IrisUiCheck
+      - name: VST3 host check
+        run: ./build/IrisHostCheck_artefacts/Release/IrisHostCheck "build/Iris_artefacts/Release/VST3/Iris Prism.vst3"
