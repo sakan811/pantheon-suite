@@ -8,10 +8,12 @@
 #include "Check.h"
 #include "DSP/Engine.h"
 #include "DSP/Masking.h"
+#include "DSP/ReferenceMatch.h"
 #include "DSP/ResonanceFinder.h"
 #include "TestSignals.h"
 
 #include <chrono>
+#include <functional>
 
 using namespace iris;
 using namespace test;
@@ -959,6 +961,158 @@ void testMasking()
     check (run (own, silent).empty(), "a silent sidechain reports nothing");
 }
 
+void testReferenceMatch()
+{
+    std::printf ("\n[14] Reference: the long-term shape of a track, and the bands that make one follow another\n");
+    const double fs = 48000.0, binHz = fs / 8192.0;
+    // A spectrum in dB per bin: a slope of `slopeDbPerOct` around 1 kHz plus an offset, and whatever `extra` adds at that frequency.
+    const auto spectrum = [&] (float slopeDbPerOct, float offsetDb, const std::function<float (double)>& extra = {})
+    {
+        std::vector<float> db (4096);
+        for (size_t i = 1; i < db.size(); ++i)
+        {
+            const double f = (double) i * binHz;
+            db[i] = offsetDb + slopeDbPerOct * (float) std::log2 (f / 1000.0) + (extra ? extra (f) : 0.0f);
+        }
+        db[0] = db[1];
+        return db;
+    };
+    const auto profileOf = [&] (const std::vector<float>& db, float seconds)
+    {
+        SpectrumProfile p;
+        for (int i = 0; i < (int) (seconds * 30.0f); ++i)
+            p.update (db.data(), (int) db.size(), binHz, 1.0f / 30.0f);
+        return p;
+    };
+    const auto shapeOf = [&] (const SpectrumProfile& p, ShapeMask& valid)
+    {
+        Shape s {};
+        check (p.shape (fs * 0.45, s, valid), "a profile with enough audio gives a shape");
+        return s;
+    };
+
+    // The shape has the level taken out and keeps the slope.
+    ShapeMask valid {}, valid2 {};
+    const auto quiet = shapeOf (profileOf (spectrum (-3.0f, -60.0f), 5.0f), valid);
+    const auto loud = shapeOf (profileOf (spectrum (-3.0f, -40.0f), 5.0f), valid2);
+    float worst = 0.0f;
+    for (size_t i = 0; i < quiet.size(); ++i)
+        if (valid[i] && valid2[i])
+            worst = std::max (worst, std::fabs (quiet[i] - loud[i]));
+    check (worst < 0.01f, fmt ("the same shape at two levels agrees to %.4f dB", worst));
+    double anchor = 0.0;
+    int na = 0;
+    for (int i = 0; i < ProfileGrid::kBands; ++i)
+        if (ProfileGrid::inAnchor (i))
+        {
+            anchor += quiet[(size_t) i];
+            ++na;
+        }
+    check (std::fabs (anchor / na) < 0.01, fmt ("the mean over 200 Hz - 5 kHz is 0 dB: %.4f", anchor / na));
+    const double slope = quiet[(size_t) ProfileGrid::kBands - 10] - quiet[(size_t) ProfileGrid::kBands - 22]; // two octaves apart
+    check (std::fabs (slope + 6.0) < 0.7, fmt ("a -3 dB/octave tilt reads -6 dB over two octaves: %.2f dB", slope));
+    check (! valid[(size_t) ProfileGrid::kBands - 1] || ProfileGrid::centreHz (ProfileGrid::kBands - 1) <= fs * 0.45, "bands the sample rate cannot carry are not valid");
+
+    // Silence is not averaged, and a short listen is not a profile.
+    SpectrumProfile p;
+    const std::vector<float> silent (4096, -140.0f);
+    for (int i = 0; i < 300; ++i)
+        p.update (silent.data(), (int) silent.size(), binHz, 1.0f / 30.0f);
+    check (! p.hasData() && p.seconds() < 1.0e-9, "silence adds nothing");
+    Shape sh {};
+    ShapeMask vm {};
+    p = profileOf (spectrum (0.0f, -50.0f), 2.0f);
+    check (! p.hasData() && ! p.shape (fs * 0.45, sh, vm), "two seconds is not enough");
+
+    // The reference as text, and a curve from another plugin on another grid.
+    Shape round {};
+    check (shapeFromText (shapeToText (quiet), round), "the reference survives the session text");
+    float roundWorst = 0.0f;
+    for (size_t i = 0; i < round.size(); ++i)
+        roundWorst = std::max (roundWorst, std::fabs (round[i] - quiet[i]));
+    check (roundWorst <= 0.05f, fmt ("... to the one decimal it keeps: %.3f dB", roundWorst));
+    check (! shapeFromText ("1,2,3", round) && ! shapeFromText ("", round), "text with the wrong number of points is refused");
+    pdsp::LinkCurve curve;
+    curve.f0Hz = 25.0;
+    curve.perOctave = 3.0;
+    curve.name = "Modern Pop";
+    for (int i = 0; i < 30; ++i)
+        curve.db.push_back (4.0 - 0.5 * i + (i == 15 ? 3.0 : 0.0));
+    std::vector<pdsp::LinkBand> bands;
+    pdsp::LinkBand b;
+    b.kind = pdsp::LinkBand::Kind::bell;
+    b.freq = 300.0;
+    b.gainDb = -2.0;
+    bands.push_back (b);
+    const auto text = pdsp::link::encode (bands, &curve);
+    std::vector<pdsp::LinkBand> back;
+    pdsp::LinkCurve backCurve;
+    check (pdsp::link::decode (text, back, &backCurve) && back.size() == 1 && backCurve.valid() && backCurve.name == "Modern Pop"
+               && backCurve.db.size() == curve.db.size() && std::fabs (backCurve.f0Hz - 25.0) < 1.0e-9 && std::fabs (backCurve.perOctave - 3.0) < 1.0e-9,
+           "a curve line travels with the bands, name and grid included");
+    check (pdsp::link::decode (text, back) && back.size() == 1, "a reader that does not know curves reads the bands and skips the line");
+    check (pdsp::link::decode (pdsp::link::kHeader + std::string ("\ncurve f0=20 oct=6 db=1,2,x"), back, &backCurve) && ! backCurve.valid(), "a curve with a bad number is dropped");
+    Shape fromCurve {};
+    check (shapeFromCurve (curve, fromCurve), "a curve becomes a shape");
+    double ca = 0.0;
+    for (int i = 0; i < ProfileGrid::kBands; ++i)
+        if (ProfileGrid::inAnchor (i))
+            ca += fromCurve[(size_t) i];
+    check (std::fabs (ca / na) < 1.0e-4, "... levelled at the anchor");
+
+    // Matching. The reference differs from the track by a bell at 3 kHz and a low shelf; the match finds both.
+    const auto live = shapeOf (profileOf (spectrum (-3.0f, -50.0f), 5.0f), valid);
+    const auto withBands = [&] (const std::vector<match::Band>& made)
+    {
+        std::vector<float> db;
+        Shape ref = live;
+        for (int i = 0; i < ProfileGrid::kBands; ++i)
+            for (const auto& m : made)
+            {
+                BandParams bp;
+                bp.type = m.type;
+                bp.freq = m.freqHz;
+                bp.q = m.q;
+                bp.gainDb = m.gainDb;
+                ref[(size_t) i] += (float) bandResponseDb (bp, 0.0, fs, ProfileGrid::centreHz (i));
+            }
+        return ref;
+    };
+    const auto bellRef = withBands ({ { BandType::bell, 3000.0, 6.0, 1.4 } });
+    const auto found = match::matchBands (live, bellRef, valid, fs);
+    check (! found.empty() && found[0].type == BandType::bell && std::fabs (std::log2 (found[0].freqHz / 3000.0)) < 0.35 && found[0].gainDb > 4.0 && found[0].gainDb < 7.5,
+           fmt ("a +6 dB bell at 3 kHz is found: %s at %.0f Hz, %+.1f dB, Q %.2f", found.empty() ? "nothing" : found[0].type == BandType::bell ? "bell" : "other",
+                found.empty() ? 0.0 : found[0].freqHz, found.empty() ? 0.0 : found[0].gainDb, found.empty() ? 0.0 : found[0].q));
+    const float before = match::remainingDb (live, bellRef, valid, fs, {}), after = match::remainingDb (live, bellRef, valid, fs, found);
+    check (before > 1.5f && after < 0.5f * before, fmt ("it takes the difference from %.2f dB to %.2f dB (RMS over 30 Hz - 18 kHz)", before, after));
+
+    const auto shelfRef = withBands ({ { BandType::lowShelf, 120.0, -5.0, 0.7071 }, { BandType::bell, 800.0, -3.0, 1.0 } });
+    const auto two = match::matchBands (live, shelfRef, valid, fs);
+    bool shelf = false, dip = false;
+    for (const auto& m : two)
+    {
+        shelf |= m.type == BandType::lowShelf && m.gainDb < -3.0 && m.gainDb > -7.0;
+        dip |= m.type == BandType::bell && m.gainDb < -1.5 && std::fabs (std::log2 (m.freqHz / 800.0)) < 0.4;
+    }
+    const float afterTwo = match::remainingDb (live, shelfRef, valid, fs, two);
+    check (shelf && dip, fmt ("a low shelf of -5 dB and a -3 dB dip at 800 Hz are both found (%d bands)", (int) two.size()));
+    check (afterTwo < 0.8f, fmt ("... leaving %.2f dB", afterTwo));
+    check (std::is_sorted (two.begin(), two.end(), [] (const match::Band& x, const match::Band& y) { return x.freqHz < y.freqHz; }), "bands come back in frequency order");
+
+    // Nothing to match, nothing past the limits.
+    check (match::matchBands (live, live, valid, fs).empty(), "the same shape needs no bands");
+    Shape wild = live;
+    for (int i = 0; i < ProfileGrid::kBands; ++i)
+        wild[(size_t) i] += (i % 2 ? 9.0f : -9.0f) * (i % 7 == 0 ? 2.0f : 1.0f);
+    const auto many = match::matchBands (live, wild, valid, fs, 4);
+    bool inLimits = (int) many.size() <= 4;
+    for (const auto& m : many)
+        inLimits &= std::fabs (m.gainDb) <= match::kMaxDb + 0.05 && m.freqHz >= match::kLoHz && m.freqHz <= match::kHiHz && m.q >= match::kMinQ && m.q <= match::kMaxQ;
+    check (inLimits, fmt ("a ragged reference gives at most the bands asked for (%d), each inside the limits", (int) many.size()));
+    ShapeMask none {};
+    check (match::matchBands (live, bellRef, none, fs).empty(), "no valid band, no match");
+}
+
 int main()
 {
     testTransparent();
@@ -974,5 +1128,6 @@ int main()
     testDynamicsUsage();
     testResonances();
     testMasking();
+    testReferenceMatch();
     return finish ("IrisTests");
 }

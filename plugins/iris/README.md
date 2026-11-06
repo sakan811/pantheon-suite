@@ -3,8 +3,9 @@
 A **dynamic equaliser** (VST3 + AU + Standalone) for mixing and mastering: eight bands that each work on both channels, on
 left or right alone, or on the mid or the side of the stereo image; any band can follow the level of its own frequency
 region; a **Clean** mode that is a plain equaliser and a **Sat** mode that warms up the boosts; **Delta** and **Gain Match**
-to judge what you did; and **solo** for a band, for what a band adds, and for the sub, bass, low-mid, mid, high-mid and high parts
-of the spectrum.
+to judge what you did; **solo** for a band, for what a band adds, and for the sub, bass, low-mid, mid, high-mid and high parts
+of the spectrum; and a **reference**: learn the long-term shape of another track (or take Themis' target curve), see it behind the
+spectrum, and let **MATCH EQ** add the bands that bring yours to it.
 
 ## Name origin
 
@@ -40,6 +41,14 @@ zones are where they mask each other, each labelled with the cut that would leav
 for that band). The orange markers are **resonances** in this track: the steady tone at about 110 Hz and the 7 kHz burst stand out
 of their neighbourhood (double-click one for a narrow dynamic bell).*
 
+![A reference and a match](docs/reference.png)
+
+*The "Init" preset with a **reference**: a brighter track with more bass was learned first (LEARN REF, then again to keep it), then the programme
+played and MATCH EQ was pressed. The dashed teal line is the reference, levelled to this track's average; the thin cream line is that average (the
+dim and cream traces are the spectrum going in and out). The six bands are what MATCH EQ made: a lift in the highs and the two bass notes brought
+up to the reference's. The pill at the top right says what the last action did (six bands, the shape was 3.8 dB off the reference on average and
+1.5 dB after). Regenerate with the command under "Development".*
+
 ## Core philosophy
 
 - **A band touches only what you give it.** A band on Left, Right, Mid or Side takes that signal out of the stereo pair, filters it
@@ -72,7 +81,8 @@ of their neighbourhood (double-click one for a narrow dynamic bell).*
 | **Resonances** | Orange markers on the input trace where a narrow peak stands out of its neighbourhood for seconds (a ringing room mode, a boxy drum, a harsh formant), labelled with how far it stands out. **Double-click a marker** for a narrow *dynamic* bell at its frequency and width: it rests at 0 dB and cuts by as much as the peak stands out while the level there is at or above what was measured (threshold 3 dB under it), so it only works while the ring is there. A peak counts when it is the highest point within ±1/12 octave and at least 6 dB above the mean from 1/12 to 1/3 octave either side, averaged over about 3 s on a 1/24-octave grid (rules of thumb, in [ResonanceFinder.h](Source/DSP/ResonanceFinder.h)). Right-click the display to turn the markers off. |
 | **Masking (sidechain)** | Route another track to Iris' **sidechain** input (it is never heard, only measured) and the display adds its spectrum (teal) and shades every zone where the two **mask each other**: in a third-octave band both are within 24 dB of their own loudest band and within 6 dB of each other. Each zone is labelled with the cut that would put the other track 6 dB clear of this one there (at most 12 dB); **double-click the label** for a bell across the zone. Or cut the other track instead: the zones are the same from either side. Rules of thumb, in [Masking.h](Source/DSP/Masking.h). |
 | **Is the dynamics working?** | The DYNAMICS panel watches each dynamic band for about 8 s of playback and says so when it **never moves** (the level never reached the threshold) or is **always at its full range** (it acts like a static band), with the level it heard and a threshold to try (3 dB under the loudest moment, or above the quietest for a band that works below). |
-| **Paste** | **PASTE** (top right of the band panel) adds the bands another plugin of the suite copied: Themis' COPY on a master-plan item or its *Copy EQ* for the tonal curve, each in the next free slot with its type, frequency, gain, width and placement. A harmonic-fill band is Hephaestus' and is left out. |
+| **Reference and match** | **LEARN REF** (header): press it, play the track you want this one to sound like through Iris (three seconds at least, the longer the better), press it again. Its long-term shape (a 1/6-octave average, with the level taken out) is kept as the **reference**, saved with the project, and drawn as a dashed line behind the spectrum, levelled to this track's own average (the thin line). **MATCH EQ** adds up to six bands in free slots that bring this track's average to the reference: the difference is smoothed over about two thirds of an octave and taken apart one band at a time, largest first, each band as wide as the difference stays above half its peak (a bell, or a shelf when the difference runs to the end of the range and is wider than an octave), with each one's own response taken off before the next is found, and none asking for more than 12 dB. Stereo bands that are already on are counted, so pressing it again asks only for what is still missing. The pill says how far off the shape was before and after (RMS, 30 Hz to 18 kHz). The reference can also come from Themis: its **Copy EQ** puts its target curve on the clipboard with the bands, and **PASTE** here takes the curve as the reference. Right-click the display for *Clear the reference*, *Restart this track's average* and *Reference curve: Hidden / Shown*. It matches the broad shape, not individual notes, and a difference from another track is taste: judge the bands with Delta and your ears. See [ReferenceMatch.h](Source/DSP/ReferenceMatch.h). |
+| **Paste** | **PASTE** (top right of the band panel) adds the bands another plugin of the suite copied: Themis' COPY on a master-plan item or its *Copy EQ* for the tonal curve, each in the next free slot with its type, frequency, gain, width and placement; if the text also carries a curve (Copy EQ does), the curve becomes the reference. A harmonic-fill band is Hephaestus' and is left out. |
 | **Meters and output** | IN and OUT peak meters (a NaN or inf sample cannot pin them), output gain ±24 dB. |
 | **Presets** | Nine: *Init*, *Master Air*, *Mono Bass, Wide Air*, *Mud Duck*, *De-Esser*, *Open the Top*, *Tilt*, *Warm Tube Lift*, *Console Presence*. Output gain, Gain Match and the crossovers are kept when a preset loads. |
 | **Display** | The spectrum before (dim) and after (cream), calibrated in dBFS, 8192-point FFT, a 4.5 dB/oct tilt by default. Right-click empty space for Gain scale (±6 / 12 / 18 / 24 dB), Analyzer range, Speed and Tilt; the choice is saved with the project. |
@@ -131,7 +141,8 @@ in -+-> [band 1] -> [band 2] -> ... -> [band 8] -+-> gain match -+-> output gain
 4. **Keep the centre solid**: put a low cut on **Side** only; widen the top with a high shelf on **Side**.
 5. **Judge it**: **DELTA** to hear what you changed, **GAIN MATCH** to compare at equal loudness, a region solo to check one part of the
    spectrum at a time. Close the plugin (or click CLEAR in the pill) and every solo and Delta end.
-6. **Warm the boosts**: switch the mode to **Sat**, pick a Style, and raise Drive until the loud boosts start to round off.
+6. **Follow a reference**: play the track you want to sound like through Iris and press **LEARN REF** at the start and again after a while, then play your own track and press **MATCH EQ**. Check what it added with **DELTA** and **GAIN MATCH**; remove what you do not want.
+7. **Warm the boosts**: switch the mode to **Sat**, pick a Style, and raise Drive until the loud boosts start to round off.
 
 ## Build
 
@@ -163,8 +174,8 @@ cmake --build build --target IrisSnapshot && ./build/IrisSnapshot_artefacts/Rele
 auval -v aufx Irsp Irsa                                                                            # Apple's AU validator (the AU must be installed)
 ```
 
-`docs/screenshot.png`, `dynamics.png`, `solo.png` and `masking.png` are the output of `IrisSnapshot` (arguments in the file's header), never
-edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=12 solo=2:curve`, `"Init" sidechain`. They are
+`docs/screenshot.png`, `dynamics.png`, `solo.png`, `masking.png` and `reference.png` are the output of `IrisSnapshot` (arguments in the file's header), never
+edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=12 solo=2:curve`, `"Init" sidechain`, `"Init" reference`. They are
 regenerated after any change that touches the UI or what it shows. The rules for working on the code are in
 [CLAUDE.md](CLAUDE.md); the rules for the repository are in [the root CLAUDE.md](../../CLAUDE.md).
 
@@ -173,6 +184,7 @@ Source/DSP/Band.h            band types, placements, BandParams, BandFilter (one
 Source/DSP/Dynamics.h        the detector and the gain computer, and DynamicsUsage (does a dynamic band move?)
 Source/DSP/ResonanceFinder.h narrow peaks that stand out of the input spectrum (the display's markers)
 Source/DSP/Masking.h         where this track and the sidechain mask each other (the display's clash zones)
+Source/DSP/ReferenceMatch.h  the long-term shape of a spectrum, a reference taken from text or a pasted curve, and the bands that make one shape follow another
 Source/DSP/Saturator.h       the SAT shaper: three curves, residual ADAA, DC block
 Source/DSP/Crossover.h       Linkwitz-Riley 4th order and the six-region splitter
 Source/DSP/Engine.h          bands in series, placements, dynamics, SAT, gain match, delta, solo, meters, analyzer taps
@@ -182,8 +194,12 @@ Source/UI/EqView.h           the display: spectrum, curves, nodes, region strip;
 ../../shared/dsp/            biquads (with the EQ designs), the analyzer taps and the FFT analyzer, shared with Hephaestus
 ../../shared/ui/             the drawing kit of the interface, shared with the other plugins of the repository
 Tests/                       DSP tests, UI check, VST3 host check, editor snapshot, shared helpers
-docs/                        the four screenshots (generated by IrisSnapshot)
+docs/                        the five screenshots (generated by IrisSnapshot)
 ```
+
+### Continuous integration
+
+[.github/workflows/iris.yml](../../.github/workflows/iris.yml) builds `IrisTests`, `IrisUiCheck`, the VST3 and `IrisHostCheck` on Linux and runs the three checks on every push and pull request that touches Iris, `shared/` or `cmake/`. It publishes nothing. A macOS build (universal binary, AU, `auval`) is not in CI yet.
 
 ### What has and hasn't been verified
 
@@ -209,6 +225,7 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
   (14.0 dB beside the bass) and the others at least 48.9 dB; all six together are flat to
   0.000 dB over eleven tones including the crossover frequencies; releasing a solo restores the output bit for bit. BAND solo of a 1 kHz
   bell: +0.00 dB at 1 kHz, -64 dB at 100 Hz, -67 dB at 10 kHz. CURVE solo: a +6 dB bell adds 0.995 of the input at its centre (-0.04 dB).
+- **Reference.** A profile averages the display's spectrum with the level taken out: the same shape at two levels agrees to 0.0000 dB, the mean over 200 Hz - 5 kHz is 0 dB, a -3 dB/octave tilt reads -6.00 dB over two octaves, silence and under three seconds are not a profile. The reference survives its session text to the 0.1 dB it keeps, and a curve from Themis (another grid) is resampled and levelled the same way. Matching: a +6 dB bell at 3 kHz Q 1.4 is found as a bell at 2874 Hz, +5.3 dB, Q 1.20, taking the difference from 1.72 dB to 0.20 dB; a -5 dB low shelf at 120 Hz with a -3 dB dip at 800 Hz are both found (0.31 dB left); the same shape needs no bands; a ragged reference gives no more than the bands asked for, each inside 12 dB and Q 0.4 - 2. `IrisUiCheck` runs the whole flow in about real time on noise: learn, keep, match (a lift in the highs among the bands, all on Stereo), match again (fewer bands, because the first ones are counted), the reference coming back with the project and going when cleared, a pasted curve, and text without one changing nothing.
 - **Robust.** The output is identical whether the host sends blocks of 4096, 37 or 1 samples; every band at its extreme with Sat,
   dynamics and a region solo stays finite at 22.05, 44.1, 48, 96 and 192 kHz; a NaN and an inf in the input do not leave the output broken;
   a 12 dB jump, an off/on and a frequency jump never step the output by more than 0.0104 (a click would be over 0.05). Eight dynamic
@@ -222,6 +239,7 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
 
 ### Limitations
 
+- **The reference** is the long-term average of what the display's analyzer sees (a 30 s running average, fast attack and slow release as the display, on the editor's timer), so it needs the editor open, the track has to play in real time (it is not an offline analysis), and loud passages count for more. A short or a looped excerpt gives that excerpt's shape. Two masters differ in more than their EQ (dynamics, stereo image, what is in the mix), so MATCH EQ is a starting point, not a fix; it matches the broad shape (about two thirds of an octave) and leaves single notes alone. Bands on one channel, mid or side, and the dynamics of a band, are not counted as what is already done.
 - **Minimum phase only.** The bands are IIR filters (there is no linear-phase mode), so they have the phase of the analogue
   filters they model.
 - **The dynamics listen to themselves.** The detector is internal: the sidechain input feeds only the masking view, never a band's
@@ -237,7 +255,7 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
   one region soloed you are hearing a band-pass, which is the point.
 - **BAND solo of a Left, Right or Mid band plays in both ears** (a Side band plays as a side signal, opposite in the two), so you can hear it.
 - **Eight bands**, and a minimum spacing of a ratio of 1.2 between crossovers.
-- **Not saved on purpose:** solos and Delta.
+- **Not saved on purpose:** solos and Delta. (The reference is saved; the averages are not.)
 
 ## License and terms
 

@@ -38,7 +38,8 @@ inline juce::String hzText (double hz) { return juce::String (themis::hzText (hz
 
 // Suggested bands as the text the other plugins of the repository paste (pdsp::link): equaliser bands go to the equaliser,
 // a harmonic-fill band to the harmonic generator.
-inline juce::String linkText (const themis::EqMoves& moves)
+// The band list for the other plugins, with the target curve the bands were fitted to when there is one (Iris draws it as its reference).
+inline juce::String linkText (const themis::EqMoves& moves, const themis::TargetCurve* target = nullptr)
 {
     using K = themis::EqMove::Kind;
     std::vector<pdsp::LinkBand> bands;
@@ -57,7 +58,15 @@ inline juce::String linkText (const themis::EqMoves& moves)
         b.hiHz = m.kind == K::harmonicFill ? m.hiHz : b.hiHz;
         bands.push_back (b);
     }
-    return juce::String (pdsp::link::encode (bands));
+    pdsp::LinkCurve curve;
+    if (target != nullptr)
+    {
+        curve.f0Hz = themis::BandGrid::kF0;
+        curve.perOctave = themis::BandGrid::kPerOctave;
+        curve.name = target->name;
+        curve.db.assign (target->medianDb.begin(), target->medianDb.end());
+    }
+    return juce::String (pdsp::link::encode (bands, target != nullptr ? &curve : nullptr));
 }
 
 // Where a copied fix goes, for the status line.

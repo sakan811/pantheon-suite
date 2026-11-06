@@ -23,7 +23,7 @@ auval -v aufx Irsp Irsa                             # Apple's AU validator; the 
   bundles from `build/`.
 - `IrisTests`, `UiCheck`, `HostCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `IrisTests` needs no GUI.
 - Definition of done for a DSP change: `IrisTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes, the three screenshots in `docs/` are regenerated and looked at
+- Definition of done for a UI or parameter change: `UiCheck` passes, the screenshots in `docs/` are regenerated and looked at
   (commands in the README), and `HostCheck` + `auval` after rebuilding the plugin.
 - pluginval is not available; `HostCheck` + `auval` are the substitutes.
 
@@ -35,6 +35,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   Dynamics.h         Detector (band-matched filter + smoothed mean square) and dynamicOffsetDb(): the gain computer; DynamicsUsage (the editor's "never moves / always at full range" check)
   ResonanceFinder.h  narrow, lasting peaks in a spectrum (the display's markers); GUI-free, fed by the display's timer
   Masking.h          MaskingMeter: where this track and the sidechain mask each other (the display's clash zones); GUI-free, fed by the display's timer
+  ReferenceMatch.h   SpectrumProfile (the display's spectrum averaged on a 1/6-octave grid), Shape (a profile with the level taken out), the reference as text, match::matchBands; GUI-free, fed by the display's timer
   Saturator.h        Shaper: three curves, residual ADAA, DC block
   Crossover.h        LR4, RegionSplitter (six regions, flat sum), regionName()
   Engine.h           the whole signal path, the tick, solo, delta, gain match, meters, analyzer taps
@@ -104,10 +105,12 @@ with the sidechain bus in them; a layout with one input bus is not this plugin's
 
 **Display analysis is not audio analysis.** The resonance markers, the masking zones and the dynamics-usage check read the display's
 analyzers on the editor's timer: nothing runs on the audio thread, they need the editor open, and their limits are rules of thumb
-(named constants in their headers, quoted in the README; tests [11] to [13]). A band they suggest is made with `addBand` like any other.
+(named constants in their headers, quoted in the README; tests [11] to [14]). A band they suggest is made with `addBand` like any other.
+
+**Reference and match.** Everything runs on the display's timer (`EqView`), never the audio thread: the input spectrum without the display's tilt is averaged into `liveProfile` (always) and `learnProfile` (while LEARN REF is on). The reference is a `Shape` kept in `apvts.state` as the properties `referenceCurve` / `referenceName` (so it is saved with the project like the display settings, with no processor code); a band with no level is `kNoLevelDb`, not 0, so a silent top of a lowpassed track is not matched. `match::matchBands` is pure and tested without a UI; `addExistingCurve` (Parameters.h) adds what the stereo bands already on do before matching, so matching twice does not stack bands. Do not make a match more eager than the smoothing and the Q limits: matching single notes was tried first and cut 11 dB notches into a bass line.
 
 **Paste.** `pasteBands` in `Parameters.h` turns the text other plugins copy (`pdsp::link`, `shared/dsp/BandLink.h`) into bands; the
-placement order there is the same as `Placement`'s. A harmonic-fill band is skipped (it is Hephaestus').
+placement order there is the same as `Placement`'s. A harmonic-fill band is skipped (it is Hephaestus'). A `curve` line in the same text is the reference (`pasteReference`).
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`): an IIR filter keeps a NaN for good.
 
