@@ -79,10 +79,12 @@ static void runAudio (ThemisProcessor& proc, double seconds, double fs, int bloc
 // over pink noise whose right channel is `delaySeconds` late and 1 dB quieter, with a loud "chorus" driven into a hard
 // clipper at -1 dBFS, so the phase check, the mono fold, the fundamental, the left/right balance, the clipping check
 // and the level graph all have something to show.
+static constexpr float kAirGain = 0.02f; // the widened top of the demo programme
 static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, int block, double delaySeconds)
 {
     const size_t total = static_cast<size_t> (seconds * fs), delay = static_cast<size_t> (delaySeconds * fs);
     const auto noise = pinkNoise (total, 9, 0.05f);
+    const auto air = pinkNoise (total, 21, kAirGain); // differenced twice below, so it sits in the top ranges; opposite on the two sides, so it is all side
     constexpr double notes[] = { 49.0, 55.0, 41.2, 61.7 }, kNoteSeconds = 5.0, kSoundingSeconds = 4.2;
     constexpr double kChorusStart = 33.0, kChorusEnd = 39.0;
     constexpr float kChorusGain = 2.6f, kCeiling = 0.891f /* -1 dBFS */, kRightTrim = 0.891f /* -1 dB */;
@@ -93,8 +95,9 @@ static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, 
         const bool sounding = std::fmod (t, kNoteSeconds) < kSoundingSeconds;
         const float bass = sounding ? static_cast<float> (0.30 * std::sin (phase) + 0.12 * std::sin (2.0 * phase) + 0.05 * std::sin (3.0 * phase)) : 0.0f;
         const float gain = t >= kChorusStart && t < kChorusEnd ? kChorusGain : 1.0f;
-        l[i] = std::clamp (gain * (bass + noise[i]), -kCeiling, kCeiling);
-        r[i] = std::clamp (gain * kRightTrim * (bass + noise[i >= delay ? i - delay : 0]), -kCeiling, kCeiling);
+        const float wide = i > 1 ? air[i] - 2.0f * air[i - 1] + air[i - 2] : 0.0f;
+        l[i] = std::clamp (gain * (bass + noise[i] + wide), -kCeiling, kCeiling);
+        r[i] = std::clamp (gain * kRightTrim * (bass + noise[i >= delay ? i - delay : 0] - wide), -kCeiling, kCeiling);
     }
     // Fed in slices with a pause after each, so the analysis thread keeps up and the history graphs fill like in a host
     // (it skips frames when audio arrives much faster than real time).
@@ -548,6 +551,11 @@ int main (int argc, char** argv)
             const auto peaks = themis::history::analysePeaks (frames.data(), static_cast<int> (frames.size()));
             const auto width = themis::history::analyseWidth (frames.data(), static_cast<int> (frames.size()), 0);
             const auto balance = themis::history::analyseBalance (frames.data(), static_cast<int> (frames.size()), themis::kAllRanges);
+            for (int c = 1; c < themis::kNumEnergyRanges; ++c)
+            {
+                const auto w = themis::history::analyseWidth (frames.data(), static_cast<int> (frames.size()), c);
+                std::printf ("    %s width: side %+.1f dB against mid, a mono sum loses %.1f dB\n", themis::energyColumnName (c), w.sideMinusMidDb, w.monoLossDb);
+            }
             std::printf ("    bass %.0f-%.0f Hz, %d clipped frames, low-end width S-M %.1f dB, left-right %.2f dB\n", bass.lowHz, bass.highHz,
                          peaks.clippedFrames, width.sideMinusMidDb, balance.leftMinusRightDb);
             CHECK (bass.have && peaks.have && peaks.clippedFrames > 3 && peaks.clippedFrames < 90 && peaks.level == themis::Level::bad);
@@ -576,6 +584,7 @@ int main (int argc, char** argv)
                 CHECK (!advice.measuring && !advice.items.empty());
                 const auto has = [&] (themis::Topic t) { return std::any_of (advice.items.begin(), advice.items.end(), [t] (const themis::Advice& a) { return a.topic == t; }); };
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
+                CHECK (has (themis::Topic::width), "the demo programme has a widened top");
                 CHECK (advice.level() == themis::Level::bad && advice.items.front().level == themis::Level::bad);
 
                 // The HEAR chip of the first item that has one: click it, the buttons follow; click again, they release.
