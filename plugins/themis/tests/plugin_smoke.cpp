@@ -331,6 +331,17 @@ int main (int argc, char** argv)
                "an unknown key with a non-numeric value does not drop the band");
         CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=abc gain=1 q=1", back) && back.empty(),
                "a known key with a bad number still drops the band");
+        // Copy EQ hands the target curve over with its bands (Iris draws it as its reference); a reader without curves still gets the bands.
+        const auto target = proc.activeTarget();
+        pdsp::LinkCurve curve;
+        CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back, &curve) && back.size() == 1 && curve.valid()
+                   && curve.db.size() == static_cast<size_t> (themis::BandGrid::kNum) && curve.name == target.name,
+               "a copied target curve travels with the bands");
+        bool curveOk = true;
+        for (size_t i = 0; i < curve.db.size(); ++i)
+            curveOk = curveOk && std::abs (curve.db[i] - static_cast<double> (target.medianDb[i])) < 0.06;
+        CHECK (curveOk && std::abs (curve.frequency (10) - themis::BandGrid::centreHz (10)) < 1.0e-6, "... point for point, on the analysis grid");
+        CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back) && back.size() == 1, "... and a reader without curves skips it");
     }
 
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");

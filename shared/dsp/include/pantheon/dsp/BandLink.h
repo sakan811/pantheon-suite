@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,11 @@ namespace pdsp
 //   pantheon-bands 1
 //   bell freq=270 gain=-2.0 q=0.70 place=mid
 //   fill lo=40 hi=90
+//   curve f0=20 oct=6 name=Modern_Pop db=-1.2,0.0,0.8,...
+//
+// A curve line carries a spectrum shape (not a band): the dB of each point of a log-frequency grid (f0 is the first point's
+// frequency, oct the points per octave, name has its spaces written as underscores), relative to the level around the middle of
+// the spectrum. A reader that does not know curves skips the line like any other kind it does not know.
 //
 // Unknown keys are ignored and a band with an unknown kind is skipped, so a newer writer does not break an older reader.
 struct LinkBand
@@ -30,6 +36,30 @@ struct LinkBand
     double freq = 1000.0, gainDb = 0.0, q = 0.7071; // equaliser bands; a cut's q is unused, its slope is `slopeDbPerOct`
     double slopeDbPerOct = 24.0;
     double loHz = 40.0, hiHz = 120.0;                  // a fill band's range
+};
+
+// A spectrum shape handed over with the bands: `db[i]` is the level at f0Hz * 2^(i / perOctave).
+struct LinkCurve
+{
+    static constexpr size_t kMaxPoints = 512;
+
+    double f0Hz = 20.0, perOctave = 6.0;
+    std::vector<double> db;
+    std::string name;
+
+    bool valid() const { return f0Hz > 0.0 && perOctave > 0.0 && db.size() >= 2 && db.size() <= kMaxPoints; }
+    double frequency (size_t i) const { return f0Hz * std::pow (2.0, static_cast<double> (i) / perOctave); }
+
+    // The level at any frequency, linearly interpolated on the log-frequency axis and held beyond the ends.
+    double at (double hz) const
+    {
+        if (db.empty())
+            return 0.0;
+        const double pos = std::clamp (std::log2 (std::max (hz, 1.0e-3) / f0Hz) * perOctave, 0.0, static_cast<double> (db.size() - 1));
+        const size_t i = std::min (static_cast<size_t> (pos), db.size() - 2);
+        const double t = pos - static_cast<double> (i);
+        return db[i] + t * (db[i + 1] - db[i]);
+    }
 };
 
 namespace link
@@ -63,7 +93,27 @@ inline const char* placeName (LinkBand::Place p)
     return "stereo";
 }
 
-inline std::string encode (const std::vector<LinkBand>& bands)
+inline std::string encodeCurve (const LinkCurve& c)
+{
+    std::string name = c.name;
+    for (auto& ch : name)
+        if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t' || ch == '=')
+            ch = '_';
+    char buf[64];
+    std::snprintf (buf, sizeof (buf), "\ncurve f0=%.4g oct=%.4g", c.f0Hz, c.perOctave);
+    std::string out = buf;
+    if (!name.empty())
+        out += " name=" + name;
+    out += " db=";
+    for (size_t i = 0; i < c.db.size(); ++i)
+    {
+        std::snprintf (buf, sizeof (buf), i == 0 ? "%.1f" : ",%.1f", c.db[i]);
+        out += buf;
+    }
+    return out;
+}
+
+inline std::string encode (const std::vector<LinkBand>& bands, const LinkCurve* curve = nullptr)
 {
     std::string out = kHeader;
     char line[160];
@@ -77,13 +127,58 @@ inline std::string encode (const std::vector<LinkBand>& bands)
             std::snprintf (line, sizeof (line), "\n%s freq=%.0f gain=%.1f q=%.2f place=%s", kindName (b.kind), b.freq, b.gainDb, b.q, placeName (b.place));
         out += line;
     }
+    if (curve != nullptr && curve->valid())
+        out += encodeCurve (*curve);
     return out;
 }
 
+// The words after "curve": f0=, oct=, name= and db=; an invalid curve (a bad number, too few or too many points) comes back empty.
+inline LinkCurve parseCurve (std::istringstream& words)
+{
+    LinkCurve c;
+    std::string pair;
+    while (words >> pair)
+    {
+        const auto eq = pair.find ('=');
+        if (eq == std::string::npos)
+            continue;
+        const auto key = pair.substr (0, eq), value = pair.substr (eq + 1);
+        if (key == "name")
+        {
+            c.name = value;
+            std::replace (c.name.begin(), c.name.end(), '_', ' ');
+        }
+        else if (key == "f0" || key == "oct")
+        {
+            char* end = nullptr;
+            const double v = std::strtod (value.c_str(), &end);
+            if (end == value.c_str() || !std::isfinite (v))
+                return {};
+            (key == "f0" ? c.f0Hz : c.perOctave) = v;
+        }
+        else if (key == "db")
+        {
+            std::istringstream list (value);
+            std::string item;
+            while (std::getline (list, item, ','))
+            {
+                char* end = nullptr;
+                const double v = std::strtod (item.c_str(), &end);
+                if (end == item.c_str() || !std::isfinite (v) || c.db.size() >= LinkCurve::kMaxPoints)
+                    return {};
+                c.db.push_back (v);
+            }
+        }
+    }
+    return c.valid() ? c : LinkCurve {};
+}
+
 // False when the text is not a band list (no header); otherwise the bands it could read, in order.
-inline bool decode (const std::string& text, std::vector<LinkBand>& out)
+inline bool decode (const std::string& text, std::vector<LinkBand>& out, LinkCurve* curve = nullptr)
 {
     out.clear();
+    if (curve != nullptr)
+        *curve = {};
     std::istringstream in (text);
     std::string line;
     bool header = false;
@@ -104,6 +199,12 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out)
         std::string kind;
         if (!(words >> kind))
             continue;
+        if (kind == "curve")
+        {
+            if (curve != nullptr)
+                *curve = parseCurve (words);
+            continue;
+        }
         LinkBand b;
         bool known = false;
         for (auto k : { LinkBand::Kind::bell, LinkBand::Kind::lowShelf, LinkBand::Kind::highShelf, LinkBand::Kind::lowCut,

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "DSP/Engine.h"
+#include "DSP/ReferenceMatch.h"
 
 #include <pantheon/dsp/BandLink.h>
 
@@ -350,6 +351,72 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
         slots.push_back (slot);
     }
     return slots;
+}
+
+// The spectrum shape another plugin of the repository handed over with its bands (a "curve" line of pdsp::link, e.g. Themis'
+// Copy EQ: its target curve). False, and `out` untouched, when the text holds none.
+inline bool pasteReference (const juce::String& text, Shape& out, std::string& name)
+{
+    std::vector<pdsp::LinkBand> ignored;
+    pdsp::LinkCurve curve;
+    if (! pdsp::link::decode (text.toStdString(), ignored, &curve) || ! shapeFromCurve (curve, out))
+        return false;
+    name = curve.name;
+    return true;
+}
+
+inline int freeBandSlots (juce::AudioProcessorValueTreeState& s)
+{
+    int n = 0;
+    for (int i = 0; i < maxBands; ++i)
+        n += isBandOn (s, i) ? 0 : 1;
+    return n;
+}
+
+// Adds a stereo band for each of a match's bands, in the next free slots. Returns the slots used.
+inline std::vector<int> addMatchedBands (juce::AudioProcessorValueTreeState& s, const std::vector<match::Band>& bands)
+{
+    std::vector<int> slots;
+    for (const auto& b : bands)
+    {
+        const int slot = addBand (s, b.type, b.freqHz, b.gainDb);
+        if (slot < 0)
+            break;
+        setParameterValue (s, bandIds (slot).q, (float) b.q);
+        slots.push_back (slot);
+    }
+    return slots;
+}
+
+// What the stereo bands that are on already do, added to a shape (and the shape levelled again), so that matching a track that
+// has been equalised already asks only for what is still missing. Bands on one channel, a mid or a side, and dynamics, are not counted.
+inline void addExistingCurve (juce::AudioProcessorValueTreeState& s, double sampleRate, Shape& shape)
+{
+    std::array<double, ProfileGrid::kBands> total {};
+    for (int i = 0; i < maxBands; ++i)
+    {
+        auto b = bandParamsOf (s, i);
+        if (! b.on || b.place != Placement::stereo)
+            continue;
+        for (int k = 0; k < ProfileGrid::kBands; ++k)
+            total[(size_t) k] += bandResponseDb (b, 0.0, sampleRate, ProfileGrid::centreHz (k));
+    }
+    double anchor = 0.0;
+    int n = 0;
+    for (int k = 0; k < ProfileGrid::kBands; ++k)
+    {
+        if (shape[(size_t) k] <= kNoLevelDb + 1.0f)
+            continue;
+        shape[(size_t) k] += (float) total[(size_t) k];
+        if (ProfileGrid::inAnchor (k))
+        {
+            anchor += shape[(size_t) k];
+            ++n;
+        }
+    }
+    for (auto& v : shape)
+        if (v > kNoLevelDb + 1.0f)
+            v -= (float) (anchor / std::max (n, 1));
 }
 
 inline void applyPreset (juce::AudioProcessorValueTreeState& s, int index)

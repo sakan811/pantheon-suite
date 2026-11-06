@@ -44,7 +44,8 @@ plugins/<name>/  one self-contained plugin each: its own CMakeLists.txt, core/, 
   [SpectrumAnalyzer.h](shared/dsp/include/pantheon/dsp/SpectrumAnalyzer.h) (the calibrated FFT analyzer, GUI-free), used by Hephaestus and Iris; and
   [BandLink.h](shared/dsp/include/pantheon/dsp/BandLink.h) (`pdsp::link`: bands handed between plugins as clipboard text, plain C++), which
   Themis writes (COPY, Copy EQ) and Iris and Hephaestus read (PASTE). Its format is versioned (`pantheon-bands 1`): add keys, never change
-  what one means, and keep the readers ignoring what they do not know.
+  what one means, and keep the readers ignoring what they do not know. It also carries one `curve` line (a spectrum shape on a log-frequency
+  grid: Themis' Copy EQ writes its target, Iris reads it as its reference; a reader without curves skips the line like any unknown kind).
 - It knows nothing about any plugin and has no GUI. The namespace is `pdsp` (not `dsp`, which would collide with `juce::dsp`).
 - **A change here changes every plugin that uses it.** Run each one's DSP tests (Hephaestus: `HephaestusTests`; Iris: `IrisTests`); the
   analyzer's calibration is pinned by Hephaestus' test [10]; BandLink by both `UiCheck`s (PASTE) and Themis' `ThemisSmoke` build. The files are
@@ -70,7 +71,7 @@ Delete an item here when it is done; this list is the only place that says what 
 
 - **Installing on build.** Both set `COPY_PLUGIN_AFTER_BUILD TRUE` unconditionally, so building a plugin target copies it into
   `~/Library/Audio/Plug-Ins`. Themis makes this an option (`THEMIS_INSTALL_AFTER_BUILD`), which CI relies on.
-- **CI** builds and tests Themis only. Iris' tests (`IrisTests`, `IrisUiCheck`, `IrisHostCheck`) need JUCE and a macOS runner and are not in a workflow yet.
+- **CI** builds and tests Themis (macOS and Linux) and runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)). Iris has no macOS job yet (universal binary, AU, `auval`), and Hephaestus and Harmonia are in no workflow.
 - **Harmonia has no CLAUDE.md.** Its architecture, invariants and gotchas are not written down yet; its README is the only description.
 - **Shared DSP.** Only what a second plugin actually needed has been extracted (see shared/dsp). Themis' FFT, band grid and target
   curves, and Harmonia's pitch tracking, are used by one plugin each and stay there; Themis' `TonalAnalyzer` is not the same code as
