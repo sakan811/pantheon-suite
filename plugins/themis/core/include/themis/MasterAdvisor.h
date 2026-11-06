@@ -25,7 +25,7 @@ namespace themis
 // rule of thumb (the ones in `translation::`, `history::`, `lowcrest::` and the few below), not measured data.
 //
 // Only objective faults are listed: clipping, a peak over the ceiling, loudness away from the delivery target, phase
-// cancellation, a low end or image that does not survive mono, an unbalanced image, a squashed or spiky low end, a bass
+// cancellation, a low end or image that does not survive mono (as a whole and range by range), an unbalanced image, a squashed or spiky low end, a bass
 // that small speakers lose. How the spectrum differs from the reference curve (and how it would sound on a device, which
 // is measured against that curve too) is a matter of taste and genre, not a fault, so it is shown on the tonal view and
 // never turned into a to-do.
@@ -40,7 +40,7 @@ inline constexpr float kStreamingLufs = -14.0f; // what Spotify, YouTube and Tid
 } // namespace master
 
 // What an item is about; the order is the order of priority among items of the same severity.
-enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, lowCrest, balance, bass, swing };
+enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, swing };
 
 struct Advice
 {
@@ -99,6 +99,7 @@ inline EqMove fillAround (double medianHz)
     return m;
 }
 inline constexpr float kMaxBoostDb = 6.0f; // the most a suggested bell asks for; past that the problem is not an EQ move
+inline constexpr float kMaxCutDb = 6.0f;   // the most a suggested side cut asks for
 inline constexpr float kMinBoostDb = 0.5f; // the least: under it a suggested bell is not worth handing over
 
 inline Advice make (Level level, Topic topic, std::string headline, std::string why, Switches hear = {})
@@ -110,6 +111,29 @@ inline Advice make (Level level, Topic topic, std::string headline, std::string 
 inline Switches soloLow() { return { Switches::bit (Source::sub) | Switches::bit (Source::bass), 0u }; }
 inline Switches soloSideLow() { return { Switches::bit (Source::side) | soloLow().solo, 0u }; }
 inline Switches soloSide() { return { Switches::bit (Source::side), 0u }; }
+// The side signal of one audition range (a width item: the part of the image a mono sum loses).
+inline Switches soloSideOf (Source range) { return { Switches::bit (Source::side) | Switches::bit (range), 0u }; }
+
+// The band that takes `cutDb` off the side signal over an energy range (a column of `kEnergyRanges`): a shelf for the top
+// range, a bell across the others, at the geometric centre and as wide as the range (Q from its width in octaves).
+inline EqMove sideCutOver (int column, float cutDb)
+{
+    const auto& r = kEnergyRanges[column];
+    EqMove m;
+    m.place = EqMove::Place::side;
+    m.gainDb = -cutDb;
+    if (column == kNumEnergyRanges - 1)
+    {
+        m.kind = EqMove::Kind::highShelf;
+        m.freqHz = static_cast<float> (r.loHz);
+        return m;
+    }
+    const double octaves = std::log2 (r.hiHz / r.loHz), span = std::pow (2.0, octaves);
+    m.kind = EqMove::Kind::bell;
+    m.freqHz = static_cast<float> (std::sqrt (r.loHz * r.hiHz));
+    m.q = static_cast<float> (std::sqrt (span) / (span - 1.0)); // the bell's Q for a bandwidth of that many octaves
+    return m;
+}
 } // namespace master
 
 // The list of things to do.
@@ -274,6 +298,27 @@ inline MasterAdvice advise (const MasterInputs& in)
                                            format ("%s is %.1f dB louder than %s over the last stretch. Look for a panned element, a one-sided effect or an unbalanced master bus.", leftLouder ? "Left" : "Right",
                                                    static_cast<double> (std::abs (balance.leftMinusRightDb)), leftLouder ? "right" : "left")));
             }
+        }
+
+        // A range other than the low end (that has its own item above) that loses too much in a mono sum: the amount is how far
+        // its side signal has to come down for the loss to reach the warning limit, from the same window as the MID / SIDE graph.
+        for (int column = 1; column < kNumEnergyRanges; ++column)
+        {
+            const auto w = history::analyseWidth (frames, numFrames, column);
+            if (!w.have)
+                continue;
+            check (w.level);
+            if (w.level == Level::good)
+                continue;
+            const float cut = std::ceil (history::sideCutToMonoOkDb (w, column) * 2.0f) / 2.0f; // to the next half dB, so the cut is enough
+            const auto& range = kEnergyRanges[column];
+            const std::string where = hzText (range.loHz) + " - " + hzText (range.hiHz);
+            out.items.push_back (make (w.level, Topic::width,
+                                       format ("Narrow %s (%s): take about %s dB off its side signal", range.name, where.c_str(), master::rounded (cut).c_str()),
+                                       format ("A mono sum loses %.1f dB there (side %s against mid; the limit is %.1f dB). Reduce the widening on the elements in this range, or cut its side channel.",
+                                               static_cast<double> (w.monoLossDb), signedDbText (w.sideMinusMidDb).c_str(), static_cast<double> (history::monoWarnDb (column))),
+                                       master::soloSideOf (static_cast<Source> (kFirstBandSource + 1 + column))));
+            out.items.back().moves = { master::sideCutOver (column, std::min (master::kMaxCutDb, cut)) };
         }
 
         const auto bass = history::analyseBass (frames, numFrames);

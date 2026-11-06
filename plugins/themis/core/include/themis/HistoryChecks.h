@@ -134,12 +134,15 @@ struct WidthReport
 
 // The mono-loss limits are the ones the mono-fold readouts use: the low range is held to the tighter low-end limits, the
 // whole spectrum to the overall ones, and the other ranges to the single-band ones.
-inline Level monoLossLevel (int column, float lossDb)
+inline float monoWarnDb (int column)
 {
-    return column == 0 ? translation::classify (lossDb, translation::kLowMonoWarnDb, translation::kLowMonoBadDb)
-           : column == kAllRanges ? translation::classify (lossDb, translation::kMonoWarnDb, translation::kMonoBadDb)
-                                  : translation::classify (lossDb, translation::kBandMonoWarnDb, translation::kBandMonoBadDb);
+    return column == 0 ? translation::kLowMonoWarnDb : column == kAllRanges ? translation::kMonoWarnDb : translation::kBandMonoWarnDb;
 }
+inline float monoBadDb (int column)
+{
+    return column == 0 ? translation::kLowMonoBadDb : column == kAllRanges ? translation::kMonoBadDb : translation::kBandMonoBadDb;
+}
+inline Level monoLossLevel (int column, float lossDb) { return translation::classify (lossDb, monoWarnDb (column), monoBadDb (column)); }
 
 inline WidthReport analyseWidth (const FrameStats* frames, int n, int column)
 {
@@ -153,6 +156,16 @@ inline WidthReport analyseWidth (const FrameStats* frames, int n, int column)
     r.monoLossDb = static_cast<float> (10.0 * std::log10 (1.0 + dbToPower (r.sideMinusMidDb)));
     r.level = monoLossLevel (column, r.monoLossDb);
     return r;
+}
+
+// How far the side signal of this column has to come down for a sum to mono to lose no more than the warning limit: the
+// amount a width item asks for, computed from the measurement (0 when it is already inside the limit).
+inline float sideCutToMonoOkDb (const WidthReport& r, int column)
+{
+    if (!r.have)
+        return 0.0f;
+    const double okRatio = std::pow (10.0, static_cast<double> (monoWarnDb (column)) / 10.0) - 1.0; // the side-to-mid power ratio at the limit
+    return std::max (0.0f, r.sideMinusMidDb - static_cast<float> (10.0 * std::log10 (okRatio)));
 }
 
 // ---- left / right (balance) ------------------------------------------------------------------

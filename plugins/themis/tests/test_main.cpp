@@ -2398,6 +2398,64 @@ TEST (advisor_reads_the_low_end_dynamics_and_the_history)
     CHECK (bass != nullptr && bass->headline.find ("under 40 Hz") != std::string::npos && bass->hear.solo == master::soloLow().solo);
 }
 
+TEST (advisor_names_the_range_whose_side_signal_a_mono_sum_loses)
+{
+    auto in = cleanMaster();
+    std::vector<FrameStats> frames (100);
+    for (auto& f : frames)
+        for (int s = 0; s < kNumSignals; ++s)
+            for (int c = 0; c < kNumEnergyColumns; ++c)
+                f.energy (static_cast<Signal> (s), c) = -30.0f;
+    for (auto& f : frames)
+        f.energy (Signal::side, 2) = -24.0f; // HIGH-MID: side 6 dB over mid, a mono sum loses 10 log10 (1 + 3.98) = 7 dB
+    in.frames = frames;
+    const auto a = advise (in);
+    const auto* w = find (a, Topic::width);
+    CHECK (w != nullptr && w->level == Level::bad);
+    CHECK (w != nullptr && w->headline.find ("HIGH-MID") != std::string::npos);
+    CHECK (w != nullptr && w->hear.solo == (Switches::bit (Source::side) | Switches::bit (Source::highMid)));
+    CHECK (std::count_if (a.items.begin(), a.items.end(), [] (const Advice& i) { return i.topic == Topic::width; }) == 1); // the other ranges are not wide
+
+    // The asked-for cut is enough: taking it off the side puts the loss at the warning limit or under, and half a dB less would not.
+    const auto report = history::analyseWidth (frames.data(), 100, 2);
+    const float cut = history::sideCutToMonoOkDb (report, 2);
+    CHECK (cut > 0.0f);
+    const auto after = [&] (float db) {
+        auto g = frames;
+        for (auto& f : g)
+            f.energy (Signal::side, 2) -= db;
+        return history::analyseWidth (g.data(), 100, 2);
+    };
+    CHECK (after (cut).level == Level::good && after (cut - 0.5f).level != Level::good);
+    CHECK_NEAR (after (cut).monoLossDb, translation::kBandMonoWarnDb, 0.01);
+
+    // The band to hand to Iris: a side bell across the range, cutting by that amount rounded up to the half dB.
+    CHECK (w != nullptr && w->moves.size() == 1);
+    if (w != nullptr && w->moves.size() == 1)
+    {
+        const auto& m = w->moves[0];
+        CHECK (m.kind == EqMove::Kind::bell && m.place == EqMove::Place::side);
+        CHECK_NEAR (m.freqHz, std::sqrt (1000.0 * 6000.0), 1.0);
+        CHECK (m.gainDb < 0.0f && -m.gainDb >= cut - 1.0e-4f && -m.gainDb < cut + 0.51f);
+    }
+
+    // The top range gets a shelf; the low end has its own item, so it is not named here; a window that is not wide has no item.
+    for (auto& f : frames)
+    {
+        f.energy (Signal::side, 2) = -30.0f;
+        f.energy (Signal::side, 3) = -24.0f;
+        f.energy (Signal::side, 0) = -20.0f;
+    }
+    in.frames = frames;
+    w = pick (in, Topic::width);
+    CHECK (w != nullptr && w->moves.size() == 1 && w->moves[0].kind == EqMove::Kind::highShelf && w->moves[0].freqHz == 6000.0f);
+    CHECK (w != nullptr && w->headline.find ("LOW") == std::string::npos);
+    for (auto& f : frames)
+        f.energy (Signal::side, 3) = -30.0f;
+    in.frames = frames;
+    CHECK (pick (in, Topic::width) == nullptr);
+}
+
 TEST (advisor_lists_faults_not_differences_from_the_reference_curve)
 {
     // The device preview is measured against the reference curve, so even a bad DEVICE LOSS is not a to-do; the same goes
