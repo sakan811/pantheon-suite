@@ -103,6 +103,7 @@ public:
 
     // Energy per range and bass fundamental of every analysed frame, for the time graphs.
     const themis::FrameHistory& frameHistory() const { return analyzer.history(); }
+    const themis::SpectrumHistory& spectrumHistory() const { return analyzer.spectrum(); }
 
     // The playback device selected for the translation preview, or nullptr when it is "Off".
     const themis::DeviceProfile* activeDevice() const;
