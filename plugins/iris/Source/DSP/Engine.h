@@ -6,6 +6,7 @@
 #include "Band.h"
 #include "Crossover.h"
 #include "Dynamics.h"
+#include "LinearPhase.h"
 #include "Saturator.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -24,6 +25,7 @@ struct EngineParams
     double outGainDb = 0.0;
     bool match = false;
     std::array<double, numCrossovers> crossover = defaultCrossoverHz;
+    PhaseMode phase = PhaseMode::zeroLatency;
 };
 
 // What is being listened to instead of the plain output. These are monitoring aids, not settings: they are not parameters,
@@ -38,7 +40,8 @@ struct Monitor
     std::atomic<unsigned> regions { 0 };                    // bit r = region r is soloed
 };
 
-// The equaliser. Zero latency in both modes. All bands run in series in double precision on the left/right pair; a band that
+// The equaliser. Zero Latency runs all bands in series in double precision on the left/right pair; the linear-phase modes (LinearPhase.h)
+// filter the whole curve at once with a symmetric FIR and delay everything by `latencySamples`. In either, a band that
 // works on Mid or Side takes that signal out of the pair, filters it, and puts only the *difference* back, so everything it
 // does not touch is bit-for-bit what went in.
 //
@@ -50,9 +53,10 @@ class Engine
 public:
     static constexpr int tick = 32;
 
-    void prepare (double sampleRate, int maxBlockSize)
+    void prepare (double sampleRate, int maxBlockSize, PhaseMode initialPhase = PhaseMode::zeroLatency)
     {
         fs = sampleRate;
+        linear.prepare();
         maxBlock = std::max (maxBlockSize, 1);
 
         const double tickSeconds = tick / fs;
@@ -73,6 +77,7 @@ public:
                 s.setSampleRate (fs);
         }
         reset();
+        applyPhase (initialPhase);
         for (auto& a : dynamicDb)
             a.store (0.0f);
     }
@@ -95,6 +100,8 @@ public:
         shownIndex = -1;
         lastRegionMask = 0;
         matchGain = matchPrev = 1.0;
+        linear.start (phaseMode);
+        kernelsDirty = soloKernelDirty = true;
         outGain = outPrev = 0.0;
         outInitialised = false;
         msDry = msWet = 1.0e-6;
@@ -133,6 +140,7 @@ public:
     std::atomic<float> detectedDb[maxBands];
     std::atomic<float> matchDb { 0.0f };   // the gain Gain Match is applying
     Monitor monitor;
+    std::atomic<int> latencySamples { 0 }; // what the host has to be told: 0 in Zero Latency, the linear modes' delay otherwise
     pdsp::StereoTap tapIn, tapOut;         // the signal before and after the equaliser, for the display
 
 private:
@@ -156,6 +164,8 @@ private:
     void control()
     {
         const auto& p = params;
+        if (p.phase != phaseMode)
+            applyPhase (p.phase);
 
         const double wantSat = p.sat ? 1.0 : 0.0;
         satPrev = satAmount;
@@ -217,6 +227,8 @@ private:
                 for (auto& chain : soloFilters)
                     for (auto& bq : chain)
                         bq.reset();
+            if (shownIndex != soloIndex || shownKind != soloKind)
+                soloKernelDirty = true;
             shownIndex = soloIndex;
             shownKind = soloKind;
         }
@@ -228,8 +240,26 @@ private:
             configureBandSolo (params.bands[(size_t) soloIndex]);
     }
 
+    // A new phase mode starts every band from clean memory (the delay in front of the filters is a different length) and the
+    // linear filter from silence.
+    void applyPhase (PhaseMode m)
+    {
+        phaseMode = m;
+        latencySamples.store (latencyFor (m), std::memory_order_relaxed);
+        linear.start (m);
+        for (auto& b : bands)
+        {
+            for (auto& f : b.filter) f.reset();
+            for (auto& d : b.det) d.reset();
+            for (auto& sh : b.shaper) sh.reset (satStyle);
+            b.appliedGain = 1.0e9;
+        }
+        kernelsDirty = soloKernelDirty = true;
+    }
+
     void startBand (BandState& s, const BandParams& t)
     {
+        kernelsDirty = soloKernelDirty = true;
         s.running = true;
         s.type = t.type;
         s.place = t.place;
@@ -267,9 +297,12 @@ private:
             s.mix = 0.0;
             s.running = s.active = false;
             s.mixStep = -s.mixPrev / tick;
+            kernelsDirty = soloKernelDirty = true;
             return;
         }
         s.mixStep = (s.mix - s.mixPrev) / tick;
+        if (std::fabs (s.mixStep) > 0.0)
+            kernelsDirty = soloKernelDirty = true;
 
         // A placement or type change would leave the filters' memory meaningless: start them again.
         if (t.type != s.type || t.place != s.place)
@@ -327,6 +360,7 @@ private:
             s.appliedFreq = f;
             s.appliedQ = q;
             s.appliedOrder = order;
+            kernelsDirty = soloKernelDirty = true;
         }
 
         // A bell or shelf at 0 dB is the identity, so it costs nothing until it has something to do.
@@ -352,13 +386,16 @@ private:
 
         // While a band solo fades out the band that was soloed is still the one shown.
         const bool curveShown = shownIndex >= 0 && shownKind == SoloKind::curve;
-        for (int b = 0; b < maxBands; ++b)
-        {
-            auto& s = bands[(size_t) b];
-            const bool capture = b == shownIndex && curveShown;
-            if (s.running && (s.active || s.dynamic))
-                runBand (s, L, R, n, capture ? soloL : nullptr, capture ? soloR : nullptr);
-        }
+        if (phaseMode != PhaseMode::zeroLatency)
+            runLinear (L, R, dryL, dryR, soloL, soloR, n);
+        else
+            for (int b = 0; b < maxBands; ++b)
+            {
+                auto& s = bands[(size_t) b];
+                const bool capture = b == shownIndex && curveShown;
+                if (s.running && (s.active || s.dynamic))
+                    runBand (s, L, R, n, capture ? soloL : nullptr, capture ? soloR : nullptr);
+            }
 
         const bool bandSolo = soloIndex >= 0;
         const bool regionSolo = regionMask != 0;
@@ -427,6 +464,64 @@ private:
         }
 
         phase = (phase + n) % tick;
+    }
+
+    // The linear-phase modes over a segment: the input goes into the filter and what comes out is the sound of `latencySamples` ago, so
+    // the dry signal (for Delta and Gain Match) is replaced by its delayed copy. The detectors listen to the input, which is
+    // ahead of the sound they act on: a dynamic band reacts before the level it has measured arrives (look-ahead, by the latency).
+    void runLinear (double* L, double* R, double* dryL, double* dryR, double* soloL, double* soloR, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            for (auto& s : bands)
+                if (s.running && s.dynamic)
+                    feedDetectors (s, L[i], R[i]);
+
+            const auto f = linear.step (L[i], R[i]);
+            if (linear.hopDue())
+                runLinearHop();
+            L[i] = f.l;
+            R[i] = f.r;
+            dryL[i] = f.dryL;
+            dryR[i] = f.dryR;
+            soloL[i] = f.soloL;
+            soloR[i] = f.soloR;
+        }
+    }
+
+    static void feedDetectors (BandState& s, double l, double r) noexcept
+    {
+        switch (s.place)
+        {
+            case Placement::stereo: s.det[0].push (l); s.det[1].push (r); break;
+            case Placement::left:   s.det[0].push (l); break;
+            case Placement::right:  s.det[0].push (r); break;
+            case Placement::mid:    s.det[0].push (0.5 * (l + r)); break;
+            case Placement::side:   s.det[0].push (0.5 * (l - r)); break;
+        }
+    }
+
+    // A block of the linear filter has been collected: rebuild its curve if anything in it moved since the last one.
+    void runLinearHop()
+    {
+        const auto working = [] (const BandState& s) { return s.running && (s.active || s.dynamic); };
+        const bool filtering = std::any_of (bands.begin(), bands.end(), working);
+        const bool curve = shownIndex >= 0 && shownKind == SoloKind::curve && (soloIndex >= 0 || soloAmount > 0.0);
+        if (filtering && kernelsDirty)
+        {
+            linear.beginKernels();
+            for (const auto& s : bands)
+                if (working (s))
+                    linear.addBand (s.filter[0], touchesLeft (s.place), touchesRight (s.place), touchesMid (s.place), touchesSide (s.place), s.mix);
+            linear.finishKernels();
+            kernelsDirty = false;
+        }
+        if (curve && soloKernelDirty)
+        {
+            linear.setSoloBand (bands[(size_t) shownIndex].filter[0], bands[(size_t) shownIndex].mix);
+            soloKernelDirty = false;
+        }
+        linear.processHop (filtering, curve, curve ? bands[(size_t) shownIndex].place : Placement::stereo);
     }
 
     // One band over a segment. It adds its difference to L and R, so what it does not touch stays exactly as it was.
@@ -554,6 +649,9 @@ private:
     int maxBlock = 512;
     EngineParams params;
     int phase = 0;
+    PhaseMode phaseMode = PhaseMode::zeroLatency;
+    LinearFilter linear;
+    bool kernelsDirty = true, soloKernelDirty = true;
 
     std::array<BandState, maxBands> bands;
     double glideK = 0.1, mixK = 0.1, satK = 0.1, outK = 0.1, matchEnergyK = 0.001, matchGainK = 0.01, soloStep = 0.002;
