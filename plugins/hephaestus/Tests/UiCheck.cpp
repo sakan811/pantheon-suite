@@ -277,8 +277,26 @@ int main()
                    "SOLO BAND switches it to the band's region");
             check (pressed (editor, "SOLO BAND") && m.soloBand.load() == -1, "pressing the same button again releases it");
             pressed (editor, "SOLO ADDS");
+
+            // The band solo strip: the six main bands, lined up with the display's axis.
+            namespace mb = pdsp::bands;
+            bool named = true, ordered = true;
+            for (int k = 0; k < mb::kCount; ++k)
+            {
+                auto& rb = editor.regionButton (k);
+                named = named && rb.getButtonText() == juce::String (mb::kBands[(size_t) k].name).toUpperCase() && rb.isVisible() && rb.getWidth() > 20;
+                if (k > 0)
+                    ordered = ordered && rb.getX() >= editor.regionButton (k - 1).getRight();
+            }
+            check (named && ordered, "the strip has a switch per main band (SUB ... HIGH), left to right, wide enough to click");
+            check (pressed (editor, "BASS") && m.regions.load() == 0b10u, "BASS solos the 60 - 250 Hz band");
+            check (pressed (editor, "UPPER-MID") && m.regions.load() == 0b10010u && editor.regionButton (4).getToggleState() && editor.regionButton (1).getToggleState(),
+                   "another band adds to it, and both switches are lit");
+            check (pressed (editor, "BASS") && m.regions.load() == 0b10000u, "pressing a lit band again takes it out");
+            pressed (editor, "SUB");
         }
         check (host.engine.monitor.soloBand.load() == -1, "closing the editor ends the solo (it is not saved state)");
+        check (host.engine.monitor.regions.load() == 0u, "... and the band solo strip");
     }
 
     return finish ("UI CHECK");

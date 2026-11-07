@@ -19,6 +19,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
 
     void selectBand (int band);
+    juce::TextButton& regionButton (int band) { return regionButtons[(size_t) band]; } // the band solo strip, for UiCheck
 
 private:
     enum class Panel { band, character, master, count };
@@ -49,6 +50,10 @@ private:
     std::array<juce::Rectangle<int>, hep::maxBands> chipBounds;
     int shownBandSignature = -1, shownSolo = -1;
     void toggleSolo (hep::SoloKind kind);
+
+    // The band solo strip: one switch per main band of music (pdsp::bands), under the display and lined up with its axis.
+    std::array<juce::TextButton, pdsp::bands::kCount> regionButtons;
+    void toggleRegion (int band, bool alone);
 
     float inLevel = 0.0f, outLevel = 0.0f;
     std::array<juce::Rectangle<int>, (size_t) Panel::count> panelBounds;

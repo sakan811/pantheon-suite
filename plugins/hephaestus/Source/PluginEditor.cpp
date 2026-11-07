@@ -8,11 +8,14 @@ using namespace hep::gui;
 
 namespace
 {
-constexpr int editorWidth = 1040, editorHeight = 624;
+constexpr int editorWidth = 1040, editorHeight = 652;
 constexpr int headerHeight = 84;   // the control panel along the top
 constexpr int cellHeight = 104;    // a knob: name, knob, read-out
 constexpr int panelRowHeight = 284;
 constexpr int chipWidth = 34, chipHeight = 26, chipGap = 6;
+constexpr int stripHeight = 22;    // the band solo strip under the display
+
+juce::String hzName (double hz) { return hz >= 1000.0 ? juce::String (hz / 1000.0, hz < 10000.0 && std::fmod (hz, 1000.0) != 0.0 ? 1 : 0) + " kHz" : juce::String ((int) hz) + " Hz"; }
 
 // Everything that varies between the fixed panels, in one place.
 struct PanelSpec
@@ -149,6 +152,21 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
     for (auto* b : { &saturateModeButton, &fillModeButton, &removeButton, &addSaturateButton, &addFillButton, &soloBandButton, &soloAddsButton })
         addChildComponent (b);
 
+    // The band solo strip: the main bands of music, the same as Themis' AUDITION ranges and Iris' regions.
+    for (int b = 0; b < pdsp::bands::kCount; ++b)
+    {
+        const auto& band = pdsp::bands::kBands[(size_t) b];
+        auto& button = regionButtons[(size_t) b];
+        button.setButtonText (juce::String (band.name).toUpperCase());
+        button.setClickingTogglesState (false);
+        button.setColour (juce::TextButton::buttonOnColourId, colours::amber);
+        button.setTooltip ("Solo the " + juce::String (band.title) + " band, " + hzName (band.loHz) + " - " + hzName (band.hiHz) + ": " + band.role
+                           + ". Click more bands to add them, Alt-click to hear this one alone, click again to release. It works on whatever you hear "
+                             "(with DELTA or a band solo too). Not saved with the session.");
+        button.onClick = [this, b] { toggleRegion (b, juce::ModifierKeys::currentModifiers.isAltDown()); };
+        addAndMakeVisible (button);
+    }
+
     // Header.
     for (int i = 0; i < (int) presets().size(); ++i)
         presetBox.addItem (presets()[(size_t) i].name, i + 1);
@@ -185,6 +203,7 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
 HephaestusEditor::~HephaestusEditor()
 {
     proc.engine.monitor.soloBand = -1; // monitoring never outlives the window that asked for it
+    proc.engine.monitor.regions = 0u;
     setLookAndFeel (nullptr);
 }
 
@@ -200,6 +219,15 @@ void HephaestusEditor::toggleSolo (SoloKind kind)
         m.soloBand = band;
     }
     repaint (panelBounds[(size_t) Panel::band]);
+}
+
+void HephaestusEditor::toggleRegion (int band, bool alone)
+{
+    auto& m = proc.engine.monitor;
+    const unsigned bit = 1u << band;
+    m.regions = alone ? (m.regions.load() == bit ? 0u : bit) : (m.regions.load() ^ bit);
+    for (int b = 0; b < pdsp::bands::kCount; ++b)
+        regionButtons[(size_t) b].setToggleState ((m.regions.load() >> b) & 1u, juce::dontSendNotification);
 }
 
 void HephaestusEditor::addKnob (const char* paramId, const char* caption, const char* tooltip)
@@ -343,6 +371,19 @@ void HephaestusEditor::resized()
 
     bounds.removeFromTop (10);
     spectrum.setBounds (bounds.removeFromTop (224));
+    bounds.removeFromTop (6);
+    {
+        // Each switch spans its band on the display's own axis (the plot is the display less 6 px each side).
+        const auto strip = bounds.removeFromTop (stripHeight);
+        const float x0 = (float) spectrum.getX() + 6.0f, w = (float) spectrum.getWidth() - 12.0f;
+        const auto xOf = [&] (double hz) { return juce::roundToInt (x0 + gui::FreqAxis::toNormalised ((float) hz) * w); };
+        for (int b = 0; b < pdsp::bands::kCount; ++b)
+        {
+            const auto& band = pdsp::bands::kBands[(size_t) b];
+            const int left = xOf (band.loHz), right = xOf (band.hiHz);
+            regionButtons[(size_t) b].setBounds (juce::Rectangle<int> (left, strip.getY(), right - left, strip.getHeight()).reduced (1, 0));
+        }
+    }
     bounds.removeFromTop (10);
 
     // Panels: the selected band | character over master.
@@ -476,6 +517,13 @@ void HephaestusEditor::timerCallback()
     inLevel = proc.engine.inPeak.load (std::memory_order_relaxed);
     outLevel = proc.engine.outPeak.load (std::memory_order_relaxed);
     repaint (meterArea.expanded (24, 4));
+
+    // The band solo strip shows what is soloed, whoever asked.
+    {
+        const unsigned regions = proc.engine.monitor.regions.load();
+        for (int b = 0; b < pdsp::bands::kCount; ++b)
+            regionButtons[(size_t) b].setToggleState ((regions >> b) & 1u, juce::dontSendNotification);
+    }
 
     // The solo buttons show what is soloed, whoever asked; the label says which band when it is not the selected one.
     {

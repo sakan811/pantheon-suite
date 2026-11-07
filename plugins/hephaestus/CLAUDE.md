@@ -36,7 +36,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   FundamentalEngine.h  Chebyshev "extend" (+ adaptive gain) + difference-tone "rebuild", GapDetector, harmonicsForTone()
   Engine.h           BandParams, latency alignment, band mixing, M/S, gain match, delta, meters, analyzer taps
 ../../shared/dsp/       Biquad.h (double-precision biquads, Butterworth, Bandpass pair), AnalyzerTap.h (lock-free sample FIFOs, audio thread -> editor) and
-                     SpectrumAnalyzer.h (EQ-style FFT analyzer, GUI-free so its calibration is testable; test [10]), namespace `pdsp`, shared with Iris
+                     SpectrumAnalyzer.h (EQ-style FFT analyzer, GUI-free so its calibration is testable; test [10]) and MusicBands.h (the six main bands and their splitter, the band solo strip; test [12b]), namespace `pdsp`, shared with Iris (and Themis)
 Source/Parameters.h  parameter layout, presets, readParams(), band helpers, legacy migration  <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/HephaestusUi.h` holds what is Hephaestus' own)
 Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse drags, slots, legacy sessions), HostCheck.cpp (loads the VST3),
@@ -67,7 +67,7 @@ non-zero bias clicks at start).
 ADAA state, oversampler and fill engine are reset (`startBand`, `runFillBand`). The fade is one block. Band edges
 glide towards their target so dragging doesn't zipper.
 
-**Band solo is monitoring, not state.** `Engine::monitor` (atomics: band, and BAND or ADDS) is not a parameter, so a host cannot record or restore it, and the editor clears it in its destructor. It replaces the output (Mix and Delta) just before the output gain and fades over 10 ms; released, the output is the plain output bit for bit (test [12]). ADDS takes each band's own contribution from where it is made (`Saturator::process`'s `soloOut`, `runFillBand`'s capture) and lines the fill's up with `soloDelay`; the bands keep running while one is soloed, so nothing jumps on release. BAND is a band-pass over `effectiveRange` of the delayed dry signal.
+**Band solo is monitoring, not state.** `Engine::monitor` (atomics: band, and BAND or ADDS) is not a parameter, so a host cannot record or restore it, and the editor clears it in its destructor. It replaces the output (Mix and Delta) just before the output gain and fades over 10 ms; released, the output is the plain output bit for bit (test [12]). ADDS takes each band's own contribution from where it is made (`Saturator::process`'s `soloOut`, `runFillBand`'s capture) and lines the fill's up with `soloDelay`; the bands keep running while one is soloed, so nothing jumps on release. BAND is a band-pass over `effectiveRange` of the delayed dry signal. The band solo strip (`Monitor::regions`, a mask over `pdsp::bands`, the six main bands of music shared with Themis and Iris) runs after it, on whatever is heard and before the output gain, through the shared `pdsp::BandSplitter` (all six sum flat; it fades like the band solo and starts from clean filters; released, the output is bit for bit the plain output, test [12b]); the editor's strip lines each switch up with its band on the display's axis.
 
 **Fundamental engine.** Harmonic weights are exact only while the normalised amplitude `a` is ~1 (the k-th Chebyshev
 harmonic scales as `a^k`), so the envelope release is deliberately slow (`6 / lo`). Shortening it costs accuracy at
