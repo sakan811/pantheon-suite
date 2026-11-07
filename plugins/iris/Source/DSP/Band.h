@@ -4,6 +4,7 @@
 #pragma once
 
 #include <pantheon/dsp/Biquad.h>
+#include <pantheon/dsp/MusicBands.h>
 
 #include <algorithm>
 #include <array>
@@ -12,11 +13,11 @@
 namespace iris
 {
 constexpr int maxBands = 8;
-constexpr int numRegions = 6;               // sub, bass, low-mid, mid, high-mid, high
+constexpr int numRegions = pdsp::bands::kCount; // the six main frequency bands of music: sub, bass, low-mid, midrange, upper-mid, high
 constexpr int numCrossovers = numRegions - 1;
-// Where the regions are cut by default. The first two are Themis' SUB / BASS and BASS / LOW-MID edges (its kSubBassHz and the top of
-// its LOW range), so a region here and a range there cover the same part of the spectrum.
-constexpr std::array<double, numCrossovers> defaultCrossoverHz { 60.0, 120.0, 500.0, 2000.0, 6000.0 };
+// Where the regions are cut by default: the edges of the six main bands (shared/dsp MusicBands.h), the same as Themis' AUDITION ranges
+// and Hephaestus' band solo strip, so a region soloed here and a range soloed there are the same part of the spectrum.
+constexpr std::array<double, numCrossovers> defaultCrossoverHz = pdsp::bands::defaultCrossovers();
 constexpr double minHz = 20.0, maxHz = 20000.0;
 
 enum class BandType { bell, lowShelf, highShelf, lowCut, highCut, notch };

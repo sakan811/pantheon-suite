@@ -157,11 +157,11 @@ int main()
     click (view, strip (35.0));
     check (monitor.regions.load() == 1u, "clicking SUB solos it");
     click (view, strip (1000.0));
-    check (monitor.regions.load() == 9u, "clicking MID adds it: regions are additive");
+    check (monitor.regions.load() == 9u, "clicking MIDRANGE adds it: regions are additive");
     click (view, strip (35.0));
     check (monitor.regions.load() == 8u, "clicking SUB again releases it");
     click (view, strip (85.0));
-    check (monitor.regions.load() == 10u, "clicking BASS (60 to 120 Hz) adds it");
+    check (monitor.regions.load() == 10u, "clicking BASS (60 to 250 Hz) adds it");
     click (view, strip (85.0));
     click (view, strip (12000.0), juce::ModifierKeys (juce::ModifierKeys::altModifier));
     check (monitor.regions.load() == 32u, "Alt-click solos HIGH alone");
@@ -170,25 +170,25 @@ int main()
 
     click (view, strip (300.0));
     click (view, strip (3500.0));
-    check (monitor.regions.load() == 20u, "LOW-MID and HIGH-MID (bits 2 and 4)");
+    check (monitor.regions.load() == 20u, "LOW-MID and UPPER-MID (bits 2 and 4)");
     click (view, { 20.0f, 6.0f + 14.0f });
     check (monitor.regions.load() == 0u && monitor.soloBand.load() == -1, "clicking the SOLO pill clears every solo");
 
     // The crossover handles.
-    check (std::fabs (value (proc, id::crossover[0]) - 60.0f) < 0.5f && std::fabs (value (proc, id::crossover[1]) - 120.0f) < 0.5f,
-          "the first two crossovers start at 60 Hz (sub / bass, Themis' split) and 120 Hz");
-    dragFrom (view, strip (120.0), strip (300.0));
-    check (std::fabs (value (proc, id::crossover[1]) / 300.0f - 1.0f) < 0.03f && monitor.regions.load() == 0u,
+    check (std::fabs (value (proc, id::crossover[0]) - 60.0f) < 0.5f && std::fabs (value (proc, id::crossover[1]) - 250.0f) < 0.5f,
+          "the first two crossovers start at the main bands' edges, 60 Hz (sub / bass) and 250 Hz (bass / low-mid)");
+    dragFrom (view, strip (250.0), strip (150.0));
+    check (std::fabs (value (proc, id::crossover[1]) / 150.0f - 1.0f) < 0.03f && monitor.regions.load() == 0u,
            fmt ("dragging the handle moves the crossover to %.0f Hz without soloing anything", value (proc, id::crossover[1])));
-    dragFrom (view, strip (300.0), strip (2500.0));
+    dragFrom (view, strip (150.0), strip (2500.0));
     check (value (proc, id::crossover[1]) <= value (proc, id::crossover[2]) / 1.24f, fmt ("a handle cannot be dragged into the next one (stops at %.0f Hz, the next is at %.0f Hz)", value (proc, id::crossover[1]), value (proc, id::crossover[2])));
     view.mouseDoubleClick (mouse (view, strip (value (proc, id::crossover[1])), strip (value (proc, id::crossover[1])), false));
-    check (std::fabs (value (proc, id::crossover[1]) - 120.0f) < 0.5f, "double-clicking a handle puts it back");
+    check (std::fabs (value (proc, id::crossover[1]) - 250.0f) < 0.5f, "double-clicking a handle puts it back");
 
     // A session saved before the sub / bass crossover existed has xo1 ... xo4 and no xo0: they keep their values, the new one is its default.
     {
         IrisProcessor before;
-        setParameterValue (before.apvts, id::crossover[1], 250.0f);
+        setParameterValue (before.apvts, id::crossover[1], 300.0f);
         auto state = before.apvts.copyState();
         for (int i = state.getNumChildren(); --i >= 0;)
             if (state.getChild (i).getProperty ("id").toString() == id::crossover[0])
@@ -198,7 +198,7 @@ int main()
             juce::AudioProcessor::copyXmlToBinary (*xml, block);
         IrisProcessor after;
         after.setStateInformation (block.getData(), (int) block.getSize());
-        check (std::fabs (value (after, id::crossover[1]) - 250.0f) < 0.5f && std::fabs (value (after, id::crossover[0]) - 60.0f) < 0.5f,
+        check (std::fabs (value (after, id::crossover[1]) - 300.0f) < 0.5f && std::fabs (value (after, id::crossover[0]) - 60.0f) < 0.5f,
                fmt ("an older session loads: its crossover stays at %.0f Hz and the new first split at %.0f Hz", value (after, id::crossover[1]), value (after, id::crossover[0])));
     }
 

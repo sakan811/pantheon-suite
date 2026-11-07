@@ -431,12 +431,16 @@ void testDelta()
 void testSolo()
 {
     std::printf("\n[8] Solo: frequency regions, bands and curves\n");
-    const double mids[numRegions] = { 35.0, 85.0, 245.0, 1000.0, 3500.0, 12000.0 }; // about the middle of each range, in octaves
+    // The middle of each band in octaves; Low-Mid (250 - 500 Hz) is the one band only an octave wide.
+    double mids[numRegions];
+    for (int r = 0; r < numRegions; ++r)
+        mids[r] = std::sqrt (pdsp::bands::kBands[(size_t) r].loHz * pdsp::bands::kBands[(size_t) r].hiHz);
+    constexpr int narrow = 2;
     constexpr unsigned allRegions = (1u << numRegions) - 1u;
 
     // Each region lets its own range through and keeps the others out.
     bool ownOk = true, othersOk = true;
-    double worstOwn = 0.0, worstBass = 0.0, loudestOther = -200.0, loudestNeighbour = -200.0, loudestBassNeighbour = -200.0;
+    double worstOwn = 0.0, worstNarrow = 0.0, loudestOther = -200.0, loudestNeighbour = -200.0, loudestNarrowNeighbour = -200.0;
     for (int region = 0; region < numRegions; ++region)
         for (int tone = 0; tone < numRegions; ++tone)
         {
@@ -448,13 +452,14 @@ void testSolo()
             const double g = toDb (amplitudeAt (out.l, mids[tone], 12000, oneSecond) / amplitudeAt (in, mids[tone], 12000, oneSecond));
             if (region == tone)
             {
-                (region == 1 ? worstBass : worstOwn) = std::max (region == 1 ? worstBass : worstOwn, std::fabs (g));
-                ownOk = ownOk && std::fabs (g) < (region == 1 ? 4.3 : 2.5); // the bass is one octave wide: its middle is 1.9 dB down at each crossover
+                (region == narrow ? worstNarrow : worstOwn) = std::max (region == narrow ? worstNarrow : worstOwn, std::fabs (g));
+                ownOk = ownOk && std::fabs (g) < (region == narrow ? 4.3 : 2.5); // an octave-wide band's middle is 1.9 dB down at each crossover
             }
             else if (std::abs (region - tone) == 1)
             {
-                (tone == 1 || region == 1 ? loudestBassNeighbour : loudestNeighbour) = std::max (tone == 1 || region == 1 ? loudestBassNeighbour : loudestNeighbour, g);
-                othersOk = othersOk && g < (tone == 1 || region == 1 ? -13.0 : -15.0); // a tone in the one-octave bass leaks 14 dB into the regions beside it
+                const bool besideNarrow = tone == narrow || region == narrow;
+                (besideNarrow ? loudestNarrowNeighbour : loudestNeighbour) = std::max (besideNarrow ? loudestNarrowNeighbour : loudestNeighbour, g);
+                othersOk = othersOk && g < (besideNarrow ? -13.0 : -15.0); // a tone in the octave-wide band leaks 14 dB into the bands beside it
             }
             else
             {
@@ -462,12 +467,12 @@ void testSolo()
                 othersOk = othersOk && g < -35.0;
             }
         }
-    check (ownOk, fmt ("a region passes a tone in the middle of its own range (within %.2f dB; %.2f dB for the one-octave bass)", worstOwn, worstBass));
-    check (othersOk, fmt ("... and keeps the next range's tone %.1f dB down at most (%.1f dB beside the bass), and the others %.1f dB", loudestNeighbour, loudestBassNeighbour, loudestOther));
+    check (ownOk, fmt ("a region passes a tone in the middle of its own range (within %.2f dB; %.2f dB for the octave-wide low-mid)", worstOwn, worstNarrow));
+    check (othersOk, fmt ("... and keeps the next range's tone %.1f dB down at most (%.1f dB beside the low-mid), and the others %.1f dB", loudestNeighbour, loudestNarrowNeighbour, loudestOther));
 
     // All six together are the original magnitude.
     double worst = 0.0;
-    for (double f : { 30.0, 60.0, 100.0, 120.0, 300.0, 500.0, 1200.0, 2000.0, 4500.0, 6000.0, 15000.0 })
+    for (double f : { 30.0, 60.0, 100.0, 250.0, 350.0, 500.0, 1200.0, 2000.0, 4500.0, 6000.0, 15000.0 })
     {
         Engine e;
         e.prepare (fs, 512);

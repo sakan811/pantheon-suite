@@ -89,7 +89,7 @@ public:
             for (auto& s : f)
                 s.reset();
         phase = 0;
-        appliedCrossover = { 0.0, 0.0, 0.0, 0.0 }; // the splitter's coefficients belong to the old sample rate
+        appliedCrossover = {}; // the splitter's coefficients belong to the old sample rate
         satAmount = satPrev = 0.0;
         soloAmount = regionAmount = 0.0;
         shownIndex = -1;
