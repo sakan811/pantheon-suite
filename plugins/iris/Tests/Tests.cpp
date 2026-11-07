@@ -70,7 +70,7 @@ Stereo runMono (Engine& e, const EngineParams& p, const std::vector<float>& in, 
 Stereo runBoth (const EngineParams& p, const std::vector<float>& inL, const std::vector<float>& inR, int block = 512)
 {
     Engine e;
-    e.prepare (fs, block);
+    e.prepare (fs, block, p.phase);
     return run (e, p, inL, inR, block);
 }
 
@@ -1118,6 +1118,290 @@ void testReferenceMatch()
     check (match::matchBands (live, bellRef, none, fs).empty(), "no valid band, no match");
 }
 
+// ----------------------------------------------------------------------------------------------
+// The linear-phase modes.
+EngineParams withPhase (EngineParams p, PhaseMode m)
+{
+    p.phase = m;
+    return p;
+}
+
+// Gain of a band arrangement in a phase mode, for a sine of a whole number of Hz, measured after the delay and the glides have settled.
+double phaseGainAt (const EngineParams& p, PhaseMode m, double freq, double amp = 0.1)
+{
+    const int n = oneSecond * 2;
+    const auto in = sine (freq, amp, n);
+    const auto out = runSame (withPhase (p, m), in);
+    return toDb (amplitudeAt (out.l, freq, 30000, oneSecond) / amplitudeAt (in, freq, 30000, oneSecond));
+}
+
+void testLinearPhase()
+{
+    std::printf ("\n[15] Linear phase\n");
+    const auto l = noise (31, 0.5, 40000), r = noise (32, 0.5, 40000);
+
+    // Latency, and a plugin with nothing to do is the input delayed, exactly.
+    for (auto m : { PhaseMode::linear, PhaseMode::linearHq })
+    {
+        const int lat = latencyFor (m);
+        Engine e;
+        e.prepare (fs, 512, m);
+        EngineParams none;
+        none.phase = m;
+        const auto out = run (e, none, l, r);
+        bool same = true;
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            const float wantL = i >= (size_t) lat ? l[i - (size_t) lat] : 0.0f, wantR = i >= (size_t) lat ? r[i - (size_t) lat] : 0.0f;
+            same = same && out.l[i] == wantL && out.r[i] == wantR;
+        }
+        check (e.latencySamples.load() == lat && same, fmt ("%s: reports %d samples (%.0f ms at 48 kHz); with no bands the output is the input delayed by exactly that",
+                                                           m == PhaseMode::linear ? "LINEAR" : "LINEAR HQ", lat, 1000.0 * lat / fs));
+
+        auto zeroDb = none;
+        setBand (zeroDb, 0, BandType::bell, 1000.0, 0.0);
+        setBand (zeroDb, 1, BandType::highShelf, 5000.0, 0.0, 0.7, Placement::side);
+        const auto still = runBoth (zeroDb, l, r);
+        bool stillSame = true;
+        for (size_t i = (size_t) lat; i < l.size(); ++i)
+            stillSame = stillSame && still.l[i] == l[i - (size_t) lat] && still.r[i] == r[i - (size_t) lat];
+        check (stillSame, "... also with bands on at 0 dB");
+    }
+    {
+        Engine z;
+        z.prepare (fs, 512);
+        EngineParams none;
+        run (z, none, l, r);
+        check (z.latencySamples.load() == 0, "ZERO LATENCY reports 0 samples");
+    }
+
+    // The magnitude is the one the display draws (the zero-latency filter's), at every frequency.
+    EngineParams eq;
+    setBand (eq, 0, BandType::bell, 1000.0, 9.0, 1.0);
+    setBand (eq, 1, BandType::highShelf, 8000.0, -6.0, 0.7);
+    setBand (eq, 2, BandType::lowCut, 180.0, 0.0, 1.0, Placement::stereo, 3);
+    setBand (eq, 3, BandType::notch, 3000.0, 0.0, 6.0);
+    for (auto m : { PhaseMode::linear, PhaseMode::linearHq })
+    {
+        double worst = 0.0;
+        std::string line;
+        for (double f : { 150.0, 220.0, 400.0, 800.0, 1000.0, 1500.0, 2900.0, 5000.0, 12000.0, 17000.0 })
+        {
+            const double want = phaseGainAt (eq, PhaseMode::zeroLatency, f), got = phaseGainAt (eq, m, f);
+            worst = std::isfinite (got - want) ? std::max (worst, std::fabs (got - want)) : 1.0e9;
+            line += fmt (" %.0f:%+.2f", f, got - want);
+        }
+        // The steep cut is the hard part: its edge is sharper than the shorter kernel can draw, an octave below it.
+        const double allowed = m == PhaseMode::linear ? 1.0 : 0.3;
+        check (worst < allowed, fmt ("%s: a bell, a shelf, a 48 dB/oct low cut and a notch together are within %.2f dB of the zero-latency curve (error by Hz:%s)",
+                                     m == PhaseMode::linear ? "LINEAR" : "LINEAR HQ", worst, line.c_str()));
+    }
+
+    // Linear means symmetric: the impulse response mirrors around the delay.
+    for (auto m : { PhaseMode::linear, PhaseMode::linearHq })
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 1500.0, 12.0, 3.0);
+        setBand (p, 1, BandType::lowShelf, 120.0, 6.0, 0.7);
+        const int lat = latencyFor (m), at = 20000, total = at + lat + 12000;
+        std::vector<float> imp ((size_t) total, 0.0f);
+        imp[(size_t) at] = 1.0f;
+        const auto out = runSame (withPhase (p, m), imp);
+        int peak = 0;
+        for (int i = 0; i < total; ++i)
+            if (std::fabs (out.l[(size_t) i]) > std::fabs (out.l[(size_t) peak]))
+                peak = i;
+        double asym = 0.0, scale = std::fabs (out.l[(size_t) peak]);
+        for (int k = 1; k < 3000; ++k)
+            asym = std::max (asym, (double) std::fabs (out.l[(size_t) (at + lat + k)] - out.l[(size_t) (at + lat - k)]));
+        check (peak == at + lat && asym < 2.0e-5 * std::max (scale, 1.0), fmt ("%s: the impulse response peaks at the delay (%d) and mirrors around it (largest asymmetry %.1e of a peak %.2f)",
+                                                                                 m == PhaseMode::linear ? "LINEAR" : "LINEAR HQ", peak - at, asym, scale));
+    }
+
+    // The resolution: a narrow bass bell is only right in HQ.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 60.0, 12.0, 2.0);
+        const double want = phaseGainAt (p, PhaseMode::zeroLatency, 60.0), lo = phaseGainAt (p, PhaseMode::linear, 60.0), hi = phaseGainAt (p, PhaseMode::linearHq, 60.0);
+        check (std::fabs (hi - want) < 0.6 && std::fabs (hi - want) < std::fabs (lo - want),
+               fmt ("a +12 dB bell at 60 Hz, Q 2: zero latency %+.2f dB, LINEAR %+.2f dB, LINEAR HQ %+.2f dB (HQ is the one that resolves it)", want, lo, hi));
+    }
+
+    // Placement: a Side band leaves the mid alone and the other way round.
+    for (auto m : { PhaseMode::linear, PhaseMode::linearHq })
+    {
+        const int lat = latencyFor (m);
+        const auto mono = noise (33, 0.4, 40000);
+        EngineParams side;
+        setBand (side, 0, BandType::bell, 1200.0, 12.0, 1.0, Placement::side);
+        setBand (side, 1, BandType::highShelf, 6000.0, 6.0, 0.7, Placement::side);
+        const auto a = runSame (withPhase (side, m), mono);
+        double leak = 0.0;
+        for (size_t i = (size_t) lat; i < mono.size(); ++i)
+            leak = std::max (leak, (double) std::fabs (a.l[i] - a.r[i]));
+
+        std::vector<float> negated = mono;
+        for (auto& v : negated) v = -v;
+        EngineParams mid;
+        setBand (mid, 0, BandType::bell, 1200.0, 12.0, 1.0, Placement::mid);
+        const auto b = runBoth (withPhase (mid, m), mono, negated); // L = -R: pure side
+        double moved = 0.0;
+        for (size_t i = (size_t) lat; i < mono.size(); ++i)
+            moved = std::max (moved, (double) std::fabs (b.l[i] - mono[i - (size_t) lat]));
+
+        const auto tone = sine (1200.0, 0.1, oneSecond * 2);
+        std::vector<float> toneNeg = tone;
+        for (auto& v : toneNeg) v = -v;
+        const auto c = runBoth (withPhase (side, m), tone, toneNeg);
+        const double sideGain = toDb (amplitudeAt (c.l, 1200.0, 30000, oneSecond) / amplitudeAt (tone, 1200.0, 30000, oneSecond));
+        check (leak < 2.0e-5 && moved < 2.0e-5 && std::fabs (sideGain - 12.0) < 0.2,
+               fmt ("%s: a Side band changes the side only (mid residue %.1e), a Mid band leaves a pure side alone (%.1e), the side gets %+.2f dB",
+                    m == PhaseMode::linear ? "LINEAR" : "LINEAR HQ", leak, moved, sideGain));
+    }
+
+    // Left and right on their own.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 1000.0, 9.0, 1.0, Placement::left);
+        setBand (p, 1, BandType::bell, 1000.0, -6.0, 1.0, Placement::right);
+        const auto tone = sine (1000.0, 0.1, oneSecond * 2);
+        const auto out = runBoth (withPhase (p, PhaseMode::linear), tone, tone);
+        const double gl = toDb (amplitudeAt (out.l, 1000.0, 30000, oneSecond) / amplitudeAt (tone, 1000.0, 30000, oneSecond));
+        const double gr = toDb (amplitudeAt (out.r, 1000.0, 30000, oneSecond) / amplitudeAt (tone, 1000.0, 30000, oneSecond));
+        check (std::fabs (gl - 9.0) < 0.2 && std::fabs (gr + 6.0) < 0.2, fmt ("LINEAR: a band on Left (+9 dB) and one on Right (-6 dB): %+.2f dB and %+.2f dB", gl, gr));
+    }
+
+    // Dynamics: the band follows the level, a little ahead of it.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 1000.0, 0.0, 1.5);
+        p.bands[0].dynamic = true;
+        p.bands[0].dyn.thresholdDb = -30.0;
+        p.bands[0].dyn.ratio = 10.0;
+        p.bands[0].dyn.rangeDb = -12.0;
+        const double quietZ = phaseGainAt (p, PhaseMode::zeroLatency, 1000, 0.01), loudZ = phaseGainAt (p, PhaseMode::zeroLatency, 1000, 0.3);
+        const double quietL = phaseGainAt (p, PhaseMode::linear, 1000, 0.01), loudL = phaseGainAt (p, PhaseMode::linear, 1000, 0.3);
+        check (std::fabs (quietL - quietZ) < 0.3 && std::fabs (loudL - loudZ) < 0.5 && loudL < -8.0,
+               fmt ("LINEAR: a dynamic bell does what it does in zero latency: quiet %+.2f dB (%+.2f), loud %+.2f dB (%+.2f)", quietL, quietZ, loudL, loudZ));
+
+        // A burst after silence: the cut has already started when the burst reaches the output (the detector hears the input).
+        std::vector<float> burst (oneSecond, 0.0f);
+        const auto tone = sine (1000.0, 0.3, 24000);
+        for (int i = 0; i < 24000; ++i)
+            burst[(size_t) (12000 + i)] = tone[(size_t) i];
+        const auto zl = runSame (p, burst);
+        const auto ll = runSame (withPhase (p, PhaseMode::linear), burst);
+        const int lat = latencyFor (PhaseMode::linear);
+        const auto peakOf = [] (const std::vector<float>& x, int from, int n) { return maxAbs (x, from, n); };
+        const double earlyZ = peakOf (zl.l, 12000, 480), earlyL = peakOf (ll.l, 12000 + lat, 480);
+        check (earlyL < earlyZ, fmt ("... and ahead of the level: the first 10 ms of a burst peak at %.3f here, %.3f without the look-ahead of zero latency", earlyL, earlyZ));
+    }
+
+    // The monitoring aids line up with the delayed sound.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 2000.0, 6.0, 1.2);
+        const auto in = noise (34, 0.3, 40000);
+        Engine d;
+        d.prepare (fs, 512, PhaseMode::linear);
+        d.monitor.delta = true;
+        const auto delta = run (d, withPhase (p, PhaseMode::linear), in, in);
+        const auto wet = runSame (withPhase (p, PhaseMode::linear), in);
+        const int lat = latencyFor (PhaseMode::linear);
+        double dWorst = 0.0;
+        for (size_t i = (size_t) lat; i < in.size(); ++i)
+            dWorst = std::max (dWorst, (double) std::fabs (delta.l[i] - (wet.l[i] - in[i - (size_t) lat])));
+
+        Engine c;
+        c.prepare (fs, 512, PhaseMode::linear);
+        c.monitor.soloKind = (int) SoloKind::curve;
+        c.monitor.soloBand = 0;
+        const auto curve = run (c, withPhase (p, PhaseMode::linear), in, in);
+        double cWorst = 0.0;
+        for (size_t i = 8000; i < in.size(); ++i)
+            cWorst = std::max (cWorst, (double) std::fabs (curve.l[i] - delta.l[i]));
+        check (dWorst < 1.0e-5 && cWorst < 1.0e-4, fmt ("LINEAR: DELTA is the output minus the delayed input (%.1e); the CURVE solo of a lone band is the same signal (%.1e)", dWorst, cWorst));
+    }
+
+    // The output does not depend on how the host cuts the audio.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 700.0, 6.0, 1.0);
+        setBand (p, 1, BandType::highShelf, 5000.0, -5.0, 0.7, Placement::mid);
+        setBand (p, 2, BandType::bell, 2500.0, 4.0, 2.0, Placement::side);
+        p.bands[2].dynamic = true;
+        p.bands[2].dyn.thresholdDb = -28.0;
+        p.bands[1].gainDb = -5.0;
+        const auto ref = runBoth (withPhase (p, PhaseMode::linear), l, r, 512);
+        bool ok = true;
+        for (int block : { 1, 37, 64, 480, 1000 })
+            ok = ok && identical (runBoth (withPhase (p, PhaseMode::linear), l, r, block), ref);
+        check (ok, "LINEAR: identical output for host blocks of 1, 37, 64, 480, 512 and 1000 samples");
+    }
+
+    // Switching mode while playing, and back.
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 1000.0, 9.0, 1.0);
+        Engine e;
+        e.prepare (fs, 512);
+        const auto tone = sine (1000.0, 0.1, oneSecond);
+        const auto a = run (e, withPhase (p, PhaseMode::zeroLatency), tone, tone);
+        const auto b = run (e, withPhase (p, PhaseMode::linearHq), tone, tone);
+        const int latHq = e.latencySamples.load();
+        const auto c = run (e, withPhase (p, PhaseMode::linear), tone, tone);
+        const int latLin = e.latencySamples.load();
+        const auto d = run (e, withPhase (p, PhaseMode::zeroLatency), tone, tone);
+        const auto gain = [&] (const Stereo& s) { return toDb (amplitudeAt (s.l, 1000.0, 20000, 24000) / 0.1); };
+        check (allFinite (a) && allFinite (b) && allFinite (c) && allFinite (d) && latHq == 9216 && latLin == 2304 && e.latencySamples.load() == 0
+                   && std::fabs (gain (b) - 9.0) < 0.2 && std::fabs (gain (c) - 9.0) < 0.2 && std::fabs (gain (d) - 9.0) < 0.2,
+               fmt ("switching zero latency -> HQ -> linear -> zero latency: finite, the latency follows (%d, %d, 0), +9 dB in each (%+.2f, %+.2f, %+.2f)",
+                    latHq, latLin, gain (b), gain (c), gain (d)));
+    }
+
+    // Odd input: NaN, a mono track, and every band at once.
+    {
+        EngineParams p;
+        for (int i = 0; i < maxBands; ++i)
+        {
+            setBand (p, i, (BandType) (i % 6), 100.0 * std::pow (1.9, i), 6.0, 1.5, (Placement) (i % 5), i % 4);
+            p.bands[(size_t) i].dynamic = i % 2 == 0;
+        }
+        auto bad = l;
+        bad[5000] = std::numeric_limits<float>::quiet_NaN();
+        bad[5001] = std::numeric_limits<float>::infinity();
+        const auto out = runBoth (withPhase (p, PhaseMode::linearHq), bad, r);
+        Engine monoEngine;
+        monoEngine.prepare (fs, 512, PhaseMode::linear);
+        const auto mono = runMono (monoEngine, withPhase (p, PhaseMode::linear), l);
+        check (allFinite (out, 100.0) && allFinite (mono, 100.0), "LINEAR HQ with a NaN and an inf in the input, eight bands of every type and placement, and a mono track in LINEAR: all finite");
+    }
+
+    // What it costs.
+    {
+        EngineParams p;
+        for (int i = 0; i < maxBands; ++i)
+        {
+            setBand (p, i, BandType::bell, 150.0 * std::pow (1.8, i), 4.0, 1.2, (Placement) (i % 5));
+            p.bands[(size_t) i].dynamic = true;
+            p.bands[(size_t) i].dyn.thresholdDb = -40.0;
+        }
+        const int n = oneSecond * 6;
+        const auto big = noise (35, 0.2, n), big2 = noise (36, 0.2, n);
+        for (auto m : { PhaseMode::zeroLatency, PhaseMode::linear, PhaseMode::linearHq })
+        {
+            Engine e;
+            e.prepare (fs, 512, m);
+            const auto t0 = std::chrono::steady_clock::now();
+            run (e, withPhase (p, m), big, big2);
+            const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+            const double load = 100.0 * seconds / (n / fs);
+            std::printf ("    %-12s eight dynamic bands, all moving: %.1f %% of one core\n", m == PhaseMode::zeroLatency ? "ZERO LATENCY" : m == PhaseMode::linear ? "LINEAR" : "LINEAR HQ", load);
+            check (load < 60.0, fmt ("... under 60 %% (%.1f %%)", load));
+        }
+    }
+}
+
 int main()
 {
     testTransparent();
@@ -1134,5 +1418,6 @@ int main()
     testResonances();
     testMasking();
     testReferenceMatch();
+    testLinearPhase();
     return finish ("IrisTests");
 }

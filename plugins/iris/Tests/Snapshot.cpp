@@ -8,6 +8,7 @@
 //   band=N     select band N (1-based)
 //   region=M   solo the frequency regions in bit mask M (1 = sub ... 32 = high)
 //   solo=N:k   solo band N, as its region (k = band) or its curve (k = curve)
+//   phase=N    the phase mode: 0 = Zero Latency, 1 = Linear, 2 = Linear HQ
 //   sidechain  feed a second track (a bass line over low-passed noise) to the sidechain input, for the masking view
 //   reference  learn a brighter track as the reference first, then play the programme and press MATCH EQ: the reference curve and the match
 
@@ -19,7 +20,7 @@ int main (int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::printf ("usage: IrisSnapshot <out.png> [preset name] [band=N] [region=MASK] [solo=N:band|curve] [delta]\n");
+        std::printf ("usage: IrisSnapshot <out.png> [preset name] [band=N] [region=MASK] [solo=N:band|curve] [phase=N] [delta]\n");
         return 2;
     }
 
@@ -49,6 +50,8 @@ int main (int argc, char** argv)
             proc.engine.monitor.soloBand = arg.fromFirstOccurrenceOf ("=", false, false).upToFirstOccurrenceOf (":", false, false).getIntValue() - 1;
             proc.engine.monitor.soloKind = arg.endsWith ("curve") ? (int) iris::SoloKind::curve : (int) iris::SoloKind::band;
         }
+        else if (arg.startsWith ("phase="))
+            proc.apvts.getParameter (iris::id::phase)->setValueNotifyingHost ((float) arg.fromFirstOccurrenceOf ("=", false, false).getIntValue() / 2.0f);
         else if (arg == "delta")
             proc.engine.monitor.delta = true;
         else if (arg == "sidechain")
