@@ -151,12 +151,70 @@ int main (int argc, char** argv)
         check (plugin->setBusesLayout (layoutOf (juce::AudioChannelSet::stereo())), "and the stereo layout comes back");
     }
 
-    // --- state + presets ---------------------------------------------------------------------------------------
-    std::printf ("\nState and presets\n");
+    // --- latency follows the phase mode ------------------------------------------------------------------------
+    std::printf ("\nLatency reporting\n");
+    if (auto* bypass = plugin->getBypassParameter()) // the fuzzing randomised the host's own Bypass too
+        bypass->setValue (0.0f);
     plugin->setPlayConfigDetails (2, 2, 48000.0, 512);
     plugin->prepareToPlay (48000.0, 512);
     juce::AudioBuffer<float> buffer (2, 512);
     juce::MidiBuffer midi;
+    {
+        // A hosted VST3 exposes wrapper parameters: find the Phase choice by name, and put every band and the output stage back to rest.
+        juce::AudioProcessorParameter* phase = nullptr;
+        for (auto* p : plugin->getParameters())
+        {
+            const auto name = p->getName (100);
+            if (name == "Phase")
+                phase = p;
+            else if (name.contains ("On") && name.startsWith ("Band"))
+                p->setValue (0.0f);
+            else if (name == "Gain Match")
+                p->setValue (0.0f);
+            else if (name == "Output Gain")
+                p->setValue (0.5f);
+        }
+        check (phase != nullptr, "phase parameter found");
+        if (phase != nullptr)
+            for (int mode : { 0, 2, 1, 0 })
+            {
+                phase->setValueNotifyingHost ((float) mode / 2.0f);
+                for (int i = 0; i < 3; ++i)
+                {
+                    buffer.clear();
+                    plugin->processBlock (buffer, midi);
+                    pump (100); // the latency is pushed to the host from the message thread
+                }
+                const int expected = mode == 0 ? 0 : mode == 1 ? 2304 : 9216;
+                std::printf ("    phase='%s' -> reported latency %d samples\n", phase->getCurrentValueAsText().toRawUTF8(), plugin->getLatencySamples());
+                check (plugin->getLatencySamples() == expected, "the reported latency is " + juce::String (expected));
+
+                // What the audio really does: an impulse comes out exactly `latency` samples later, in blocks of any size.
+                juce::AudioBuffer<float> long_ (2, 512);
+                int peakAt = -1, seen = 0;
+                float peakValue = 0.0f;
+                for (int block = 0; block < (expected + 700) / 512 + 2; ++block)
+                {
+                    long_.clear();
+                    if (block == 0)
+                        long_.setSample (0, 100, 0.5f), long_.setSample (1, 100, 0.5f);
+                    plugin->processBlock (long_, midi);
+                    for (int i = 0; i < 512; ++i)
+                        if (std::fabs (long_.getSample (0, i)) > peakValue)
+                        {
+                            peakValue = std::fabs (long_.getSample (0, i));
+                            peakAt = seen + i;
+                        }
+                    seen += 512;
+                }
+                check (peakAt - 100 == expected, "an impulse comes out exactly " + juce::String (expected) + " samples later (measured " + juce::String (peakAt - 100) + ")");
+            }
+    }
+
+    // --- state + presets ---------------------------------------------------------------------------------------
+    std::printf ("\nState and presets\n");
+    plugin->setPlayConfigDetails (2, 2, 48000.0, 512);
+    plugin->prepareToPlay (48000.0, 512);
 
     for (auto* p : plugin->getParameters()) p->setValue (u (rng));
     // Compare displayed values: normalised floats are quantised differently by stepped parameters.

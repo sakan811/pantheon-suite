@@ -87,7 +87,7 @@ int main()
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
 
     std::printf ("\nParameters\n");
-    check (proc.getParameters().size() == 5 + numCrossovers + 14 * maxBands, fmt ("%d parameters: %d global (five settings and the %d region crossovers) and 14 for each of %d bands", proc.getParameters().size(), 5 + numCrossovers, numCrossovers, maxBands));
+    check (proc.getParameters().size() == 6 + numCrossovers + 14 * maxBands, fmt ("%d parameters: %d global (six settings and the %d region crossovers) and 14 for each of %d bands", proc.getParameters().size(), 6 + numCrossovers, numCrossovers, maxBands));
     bool presetsOk = true;
     for (auto& preset : presets())
         for (auto& [pid, v] : preset.values)
@@ -361,6 +361,36 @@ int main()
         check (! v.pasteReference ("pantheon-bands 1\nbell freq=270 gain=-2.5 q=1.40 place=mid") && ! v.pasteReference ("some other text"),
                "text without a curve changes nothing");
         v.clearReference();
+    }
+
+    std::printf ("\nLatency follows the phase mode (processor level)\n");
+    {
+        IrisProcessor p2;
+        p2.setPlayConfigDetails (2, 2, 48000.0, 512);
+        p2.prepareToPlay (48000.0, 512);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        std::string line;
+        bool ok = true;
+        for (int mode : { 0, 2, 1, 0 })
+        {
+            setParameterValue (p2.apvts, id::phase, (float) mode);
+            for (int i = 0; i < 3; ++i)
+            {
+                buffer.clear();
+                p2.processBlock (buffer, midi);
+                pump (50);
+            }
+            line += fmt (" %s:%d", phaseNames[mode].toRawUTF8(), p2.getLatencySamples());
+            ok = ok && p2.getLatencySamples() == latencyFor ((PhaseMode) mode);
+        }
+        check (ok, "reported latency by phase mode:" + line);
+
+        // A session saved with a linear mode is prepared with it, so the host hears the latency before the first block.
+        setParameterValue (p2.apvts, id::phase, 1.0f);
+        p2.prepareToPlay (48000.0, 512);
+        check (p2.getLatencySamples() == latencyFor (PhaseMode::linear), "prepared with LINEAR already set, the latency is reported at once");
+        setParameterValue (p2.apvts, id::phase, 0.0f);
     }
 
     return finish ("UI CHECK");
