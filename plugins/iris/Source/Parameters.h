@@ -19,6 +19,7 @@ namespace id
     inline const juce::String mode { "mode" };       // 0 = Clean, 1 = Sat
     inline const juce::String drive { "drive" };
     inline const juce::String style { "style" };
+    inline const juce::String phase { "phase" };     // 0 = Zero Latency, 1 = Linear, 2 = Linear HQ (version 3: it came after the crossover)
 
     // xo1 ... xo4 were the four crossovers of the first layout (the five regions); xo0, the sub / bass split at the front, came after
     // them, so a session saved before it has the other four exactly where they were.
@@ -55,6 +56,9 @@ inline const juce::StringArray slopeNames { "12 dB/oct", "24 dB/oct", "36 dB/oct
 inline const juce::StringArray dynModeNames { "Above", "Below" };
 inline const juce::StringArray modeNames { "Clean", "Sat" };
 inline const juce::StringArray styleNames { "Tape", "Tube", "Console" };
+// Zero Latency: minimum-phase bands, no delay. Linear: no phase shift at all, delayed by 2304 samples. Linear HQ: the same at a resolution
+// fine enough for the bass, delayed by 9216 samples (DSP/LinearPhase.h).
+inline const juce::StringArray phaseNames { "Zero Latency", "Linear", "Linear HQ" };
 
 inline constexpr float minGainDb = -24.0f, maxGainDb = 24.0f;
 inline constexpr float defaultDriveDb = 12.0f;
@@ -69,7 +73,7 @@ inline constexpr float defaultFreq (int band) noexcept
 // Session-wide controls: presets leave these alone.
 inline bool isGlobalParameter (const juce::String& paramId)
 {
-    if (paramId == id::out || paramId == id::match)
+    if (paramId == id::out || paramId == id::match || paramId == id::phase)
         return true;
     return std::any_of (id::crossover.begin(), id::crossover.end(), [&] (const juce::String& x) { return paramId == x; });
 }
@@ -110,14 +114,14 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         return t.containsIgnoreCase ("ms") || ! t.containsIgnoreCase ("s") ? v : v * 1000.0f;
     };
 
-    // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover, version 2.
+    // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover, version 2; the phase mode, 3.
     const auto F = [&] (const String& pid, const String& name, NormalisableRange<float> r, float def, Attr a, int version = 1)
     {
         p.push_back (std::make_unique<Float> (ParameterID { pid, version }, name, r, def, a));
     };
-    const auto Choice = [&] (const String& pid, const String& name, StringArray items, int def)
+    const auto Choice = [&] (const String& pid, const String& name, StringArray items, int def, int version = 1)
     {
-        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { pid, 1 }, name, items, def));
+        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { pid, version }, name, items, def));
     };
     const auto Bool = [&] (const String& pid, const String& name, bool def)
     {
@@ -130,6 +134,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     Choice (id::mode, "Mode", modeNames, 0);
     F (id::drive, "Drive", { 0.0f, 30.0f, 0.1f }, defaultDriveDb, Attr().withStringFromValueFunction (plainDb));
     Choice (id::style, "Saturation Style", styleNames, 0);
+    Choice (id::phase, "Phase", phaseNames, 0, 3);
     for (int k = 0; k < numCrossovers; ++k)
         F (id::crossover[(size_t) k], "Region Split " + String (k + 1), freq (800.0f), (float) defaultCrossoverHz[(size_t) k],
            Attr().withStringFromValueFunction (hzText).withValueFromStringFunction (hzValue), k == 0 ? 2 : 1);
@@ -170,6 +175,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.sat = (int) v (id::mode) == 1;
     e.driveDb = v (id::drive);
     e.style = (SatStyle) std::clamp ((int) v (id::style), 0, 2);
+    e.phase = (PhaseMode) std::clamp ((int) v (id::phase), 0, 2);
     for (int k = 0; k < numCrossovers; ++k)
         e.crossover[(size_t) k] = v (id::crossover[(size_t) k]);
 
