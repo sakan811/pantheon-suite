@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Iris Prism: a JUCE dynamic equaliser (VST3 / AU / Standalone, macOS). Eight bands, each on Stereo / Left / Right / Mid / Side,
-optionally dynamic; a Clean and a Sat mode; Delta, Gain Match; solo for a band, for what a band adds, and for six frequency
+optionally dynamic; a Clean and a Sat mode; a Phase mode (Zero Latency, Linear, Linear HQ); Delta, Gain Match; solo for a band, for what a band adds, and for six frequency
 regions. See `README.md` for what it does and what has been measured; this file is what you need to change it safely.
 
 ## Build and verify
@@ -36,6 +36,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   ResonanceFinder.h  narrow, lasting peaks in a spectrum (the display's markers); GUI-free, fed by the display's timer
   Masking.h          MaskingMeter: where this track and the sidechain mask each other (the display's clash zones); GUI-free, fed by the display's timer
   ReferenceMatch.h   SpectrumProfile (the display's spectrum averaged on a 1/6-octave grid), Shape (a profile with the level taken out), the reference as text, match::matchBands; GUI-free, fed by the display's timer
+  LinearPhase.h      LinearFilter: the linear-phase modes (kernels from the bands' |H|^2, FFT overlap-save, the delay line, the solo curve); PhaseMode, LinearSpec, latencyFor()
   Saturator.h        Shaper: three curves, residual ADAA, DC block
   Crossover.h        RegionSplitter (the shared pdsp::BandSplitter: six regions, flat sum), regionName()
   Engine.h           the whole signal path, the tick, solo, delta, gain match, meters, analyzer taps
@@ -50,10 +51,26 @@ Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse events, editor panels),
 
 **Real time.** `Engine::process` and everything under it must not allocate, lock or log. `readParams` is called per block: look
 parameters up through the cached `bandIds()` table and the `juce::String` ids in `iris::id` (a `const char*` would build a
-`String` on the audio thread). The engine needs no buffers of its own.
+`String` on the audio thread). Zero Latency needs no buffers of its own; the linear modes' are sized once in `prepare()` (below).
 
-**Zero latency, in both modes.** Clean and Sat add no latency, so there is no delay line and no `setLatencySamples`. Do not add
-oversampling to Sat without adding all of that (the dry path for Delta, the compensation, the reporting from the message thread).
+**Phase modes and latency.** In Zero Latency (`PhaseMode::zeroLatency`, the default) Clean and Sat add no latency and the bands run as
+minimum-phase biquads in series. In the two linear modes (`linear`, `linearHq`; `LinearSpec` in `LinearPhase.h`) the bands are not run: `Engine::runLinear`
+feeds the input to `LinearFilter`, which hands back the sound `latencySamples` (= half + hop) late, together with the input delayed by the same amount (it replaces
+`dryL`/`dryR`, so Delta and Gain Match stay aligned) and the soloed band's curve. The latency is `Engine::latencySamples` (an atomic the audio thread writes when
+`control()` sees a new mode) and reaches the host through `IrisProcessor::handleAsyncUpdate` from the message thread, as Hephaestus does with its oversampling; `prepareToPlay`
+passes the saved mode to `Engine::prepare` so the host hears the right latency before the first block. Rules:
+- **No allocation after `prepare()`.** `LinearFilter::prepare` sizes everything for the larger mode; a switch only clears and re-points (`start`).
+- **Hops are counted in samples from the start**, like the tick, and a hop is a multiple of the tick (256, 1024), so the output is the same for any host block (test [15]).
+  The kernels are rebuilt at a hop only if something moved (`kernelsDirty`, set wherever a filter is reconfigured, a band fades, starts or stops, or the mode changes);
+  anything new that changes a band's curve has to set it too, or the linear modes will not follow it.
+- **The curve comes from `BandFilter::powerAt`** (the same filter the display draws, from cos w and cos 2w, no trigonometry per bin), never from a second design. Clamp it at 0:
+  rounding leaves -1e-17 at a high-pass's DC and `sqrt` of that is NaN.
+- **Placements are a 2 x 2 matrix of kernels** (`LinearFilter::finishKernels`), not a kernel and then M/S on its output: a second kernel applied to the delayed signal would need
+  its own delay (a zero-phase kernel wraps in the overlap-save frame). Do not "simplify" it back.
+- **Without bands the filter is skipped**, and the block is copied out of the input history, so the output is the input delayed exactly (tests [15]); do not run the FFT for an
+  identity. Detectors are fed the input in `runLinear`, because the bands are not run.
+- **SAT is ignored in the linear modes** (the shaper is a nonlinearity on a band's difference, which a kernel does not have); the editor says SAT OFF.
+- The FFT is JUCE's single-precision one: the floor is about -130 dB, and the README says so. The kernels are packed two to a transform (real and imaginary parts), as are left and right.
 
 **Bands add their difference.** A band filters the signal it works on and adds `filtered - input` back to L and R
 (Mid: to both, Side: to L and minus to R). That is what makes everything a band does not touch bit-exact (tests [1] and [4]).
@@ -114,7 +131,7 @@ placement order there is the same as `Placement`'s. A harmonic-fill band is skip
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`): an IIR filter keeps a NaN for good.
 
-**Parameters.** Global ids (`iris::id`) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`) are stored in sessions and automation: never
+**Parameters.** Global ids (`iris::id`, `phase` included: version 3) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`) are stored in sessions and automation: never
 rename or remove one. A new parameter needs a `ParameterID` version above 1 (every parameter in the first layout is 1), an entry in
 `readParams()` and, if it has a control, a place in the editor. Session-wide controls go in `isGlobalParameter()` so presets leave them
 alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arrive as 0.000002: anything that has to be exactly zero
@@ -127,13 +144,14 @@ alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arriv
 - per-band parameter ids -> `bandIds()`; adding and removing a band -> `addBand`, `removeBand` (the display's double-click, its menu and the
   ADD BAND / REMOVE buttons all call them)
 - which channels a placement touches -> `touchesLeft` / `touchesRight` / `touchesMid` / `touchesSide` in `Band.h`
-- the curve of a band -> `BandFilter` (the engine runs it, the display draws it through `magnitudeAt`, the tests measure it: all three agree)
+- the curve of a band -> `BandFilter` (the engine runs it, the display draws it through `magnitudeAt`, the linear modes sample it with `powerAt`, the tests measure it: all agree)
+- the phase mode's latency and sizes -> `LinearSpec` / `latencyFor()` in `DSP/LinearPhase.h` (the README, the editor and the tests read them; the choice list is `phaseNames` in `Parameters.h`)
 - the plugin's name ("Iris Prism") -> `IRIS_PLUGIN_NAME` in `CMakeLists.txt`, which reaches the code as `JucePlugin_Name`; the nameplate's
   two words are `iris::gui::kProjectWord` / `kPluginWord` in `UI/IrisUi.h` (`UiCheck` checks they agree)
 - placement colours -> `iris::gui::forPlacement()` in `UI/IrisUi.h`
 - every pixel of the interface and the parameter-bound controls -> `shared/ui`, shared with the other plugins (see the repository's
   [CLAUDE.md](../../CLAUDE.md)); the editor calls it and does not draw its own. The log-frequency axis is `ui::FreqAxis`.
-- biquad designs, the analyzer -> `shared/dsp`, shared with Hephaestus: a change there is a change for both (run `HephaestusTests` too)
+- biquad designs, the analyzer -> `shared/dsp`, shared with Hephaestus: a change there is a change for both (run `HephaestusTests` too); `Biquad::powerAt` was added for the linear modes
 - test signals and `check()` -> `Tests/TestSignals.h`, `Tests/Check.h`
 
 ## Gotchas already paid for

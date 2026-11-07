@@ -2,7 +2,8 @@
 
 A **dynamic equaliser** (VST3 + AU + Standalone) for mixing and mastering: eight bands that each work on both channels, on
 left or right alone, or on the mid or the side of the stereo image; any band can follow the level of its own frequency
-region; a **Clean** mode that is a plain equaliser and a **Sat** mode that warms up the boosts; **Delta** and **Gain Match**
+region; a **Clean** mode that is a plain equaliser and a **Sat** mode that warms up the boosts; a **Phase** choice between **Zero Latency**
+(minimum-phase bands, no delay) and two **Linear** modes (no phase shift at all, delayed); **Delta** and **Gain Match**
 to judge what you did; **solo** for a band, for what a band adds, and for the sub, bass, low-mid, midrange, upper-mid and high parts
 of the spectrum; and a **reference**: learn the long-term shape of another track (or take Themis' target curve), see it behind the
 spectrum, and let **MATCH EQ** add the bands that bring yours to it.
@@ -21,6 +22,12 @@ centre; band 2 (violet, selected) is a high shelf on the Side; band 3 (teal) is 
 channel that has a band of its own, in the band's colour (Mid teal, Side violet; Left blue and Right rose when a band is placed on one
 channel); the dim trace is the spectrum going in, the cream one coming out. Along the bottom, the six frequency regions are the solo
 switches, and the triangles between them move the crossovers. Regenerate with the command under "Development".*
+
+![Linear phase](docs/linear.png)
+
+*The "Warm Tube Lift" preset with **Phase** on Linear HQ. The curves are the same as in Zero Latency; what changed is the sound's phase (none is added) and its
+delay: the panel reads 9216 samples (192 ms), which the host is told so that it lines the track up. The lamp says SAT OFF: SAT only runs in Zero Latency.
+Regenerate with the command under "Development" (`phase=2`).*
 
 ![A dynamic band](docs/dynamics.png)
 
@@ -53,7 +60,12 @@ up to the reference's. The pill at the top right says what the last action did (
 
 - **A band touches only what you give it.** A band on Left, Right, Mid or Side takes that signal out of the stereo pair, filters it
   and puts back only the *difference*. Everything it does not touch is bit for bit what went in (this is tested), so a Side band
-  cannot change the mid, and a plugin with nothing switched on is exactly transparent, with zero latency.
+  cannot change the mid, and a plugin with nothing switched on is exactly transparent (in Zero Latency, with no latency; in a Linear mode, the input delayed by
+  exactly the reported latency).
+- **Only modes with a reason.** Two things decide how an equaliser treats phase, and each has one right answer for a kind of work: Zero Latency for
+  tracking, live use and mixing, where delay is unacceptable and the phase shift of a gentle band is how every analogue equaliser behaves; Linear for mastering, stems
+  and parallel processing, where a filter must not move the waveform's timing. There is no "natural phase" mode: that is a better biquad design (it removes the
+  cramping towards Nyquist), which would belong in the filters of every mode, not in a mode of its own. See [Phase modes](#phase-modes).
 - **Clean means clean.** In Clean mode the equaliser adds no harmonics at any level (below -160 dB in the tests). Sat is a
   deliberate, separate mode with its own controls.
 - **Listen to the thing you are changing.** A band, the curve a band draws, one part of the spectrum, or only what the whole
@@ -74,6 +86,7 @@ up to the reference's. The pill at the top right says what the last action did (
 | **Curves** | The display sums the bands into one curve per channel that has a band of its own: Left (blue), Right (rose), Mid (teal), Side (violet), and a single amber curve when every band is on Stereo. The selected band's own curve is filled. The dynamic bands' curves move live. |
 | **Dynamic** | Any bell or shelf can be dynamic. The band listens to its own frequency region (a band-pass for a bell, a low-pass below a low shelf, a high-pass above a high shelf) on what goes *into* the band, so its own boost cannot feed back. **Threshold** (dB, as the peak of a sine), **Ratio**, **Range** (the most the gain moves; negative cuts further, positive boosts), **Attack**, **Release**, and **Above** or **Below** (engage while the level is over, or under, the threshold). The band rests at its **Gain** and moves towards Gain + Range; a 6 dB soft knee smooths the start. On a Stereo band the two channels are linked. See [How the dynamics work](#how-the-dynamics-work). |
 | **Clean / Sat** | **Clean** is a plain equaliser. **Sat** passes what a *boosting* band adds through a soft curve, so a boost that gets loud warms up and rounds off instead of staying perfectly linear: small signals stay linear, cuts and cut filters stay clean. **Drive** (0 – 30 dB) is how far below full scale the knee sits; **Style** is the curve: **Tape** (tanh, odd harmonics), **Tube** (asymmetric, adds the even ones, DC-blocked) or **Console** (arctan, open and gentle). No latency and no oversampling: the shaper is anti-aliased (see [How Sat works](#how-sat-works)). |
+| **Phase** | **Zero Latency** (default): the bands are minimum-phase filters, no delay. **Linear**: no phase shift, delayed by 2304 samples (48 ms at 48 kHz). **Linear HQ**: the same at four times the frequency resolution, delayed by 9216 samples (192 ms). The latency is reported to the host, which compensates it. SAT works in Zero Latency only. A session-wide setting: presets leave it alone. See [Phase modes](#phase-modes). |
 | **Delta** | Plays only what the equaliser changes (output minus input). Not saved; a band solo takes over from it. |
 | **Gain Match** | A slow (about 0.6 s) RMS match of the output to the input, never more than 12 dB either way, so a boost that is merely louder is not mistaken for better. Off by default; while it is on, the gain it is applying is read out above its button. |
 | **Solo a band** | Two ways, both on the band panel (and in the node's menu). **BAND** plays the output through a filter that matches the band, at its frequency and width (below a low shelf or low cut, above a high one): what the band is working on. **CURVE** plays only what the band adds or takes away: its own curve, nothing else. Press the same button again to release. |
@@ -86,6 +99,43 @@ up to the reference's. The pill at the top right says what the last action did (
 | **Meters and output** | IN and OUT peak meters (a NaN or inf sample cannot pin them), output gain ±24 dB. |
 | **Presets** | Nine: *Init*, *Master Air*, *Mono Bass, Wide Air*, *Mud Duck*, *De-Esser*, *Open the Top*, *Tilt*, *Warm Tube Lift*, *Console Presence*. Output gain, Gain Match and the crossovers are kept when a preset loads. |
 | **Display** | The spectrum before (dim) and after (cream), calibrated in dBFS, 8192-point FFT, a 4.5 dB/oct tilt by default. Right-click empty space for Gain scale (±6 / 12 / 18 / 24 dB), Analyzer range, Speed and Tilt; the choice is saved with the project. |
+
+### Phase modes
+
+```
+Zero Latency   each band is a minimum-phase filter (an RBJ biquad, a Butterworth cascade for the cuts), run in series      delay 0
+Linear         one symmetric FIR for the whole curve, 4097 taps, Kaiser window, FFT overlap-save of 256 samples          delay 2304
+Linear HQ      the same with 16385 taps and blocks of 1024 samples                                                       delay 9216
+```
+
+A minimum-phase filter has the least delay a given magnitude can have, which is none, and pays for it in phase: a boost or a cut turns the phase around
+its frequency. That is inaudible in most mixing and is why equalisers sound the way they do, but it moves the low end of a kick against its click, and
+it makes two copies of a signal (an equalised stem and the original, or a band and its sibling) comb against each other. A linear-phase filter has the
+same magnitude and a phase that is a pure delay, so none of that happens; in exchange the whole sound is late (the plugin reports the delay) and a sharp boost
+rings on both sides of a transient, **before** it as well as after (pre-ringing). For a gentle curve it cannot be heard; for a narrow, high-gain band it can.
+
+How the linear modes work, and what follows from it:
+
+- **The same curves.** Every band is evaluated as its Zero Latency filter's magnitude, on the FFT's frequency grid, and the product over the bands is turned into a kernel
+  (inverse transform, Kaiser window, delay by half its length). So the display, the bands, the dynamics and the Mid/Side placements are the same in every mode. With a bell,
+  a high shelf, a 48 dB/oct low cut and a notch on at once the two modes agree to within 0.05 dB from 220 Hz to 17 kHz (Linear HQ: to 0.06 dB at 150 Hz, under the cut's edge; Linear: 0.79 dB there).
+- **Resolution is the kernel's length.** A kernel of 4097 taps cannot draw a feature narrower than about 60 Hz (the window's main lobe, at 48 kHz); 16385 taps, about 16 Hz.
+  A +12 dB bell at 60 Hz with a Q of 2 reads +12.00 dB in Zero Latency, +9.29 dB in Linear and +11.60 dB in Linear HQ. Use Linear HQ for narrow bass bands, steep low cuts and anything
+  under 100 Hz; Linear is for broad curves, and the shorter delay.
+- **Left, right, mid, side.** The bands work as they do in series: left and right first, then the mid and the side of that. Written out that is a 2 x 2 matrix of
+  zero-phase responses, and each of its four entries is one kernel (a cascade of two kernels would need twice the delay). A Side band leaves a mono signal's mid alone
+  (residue 2e-7, float rounding) and gives +12.01 dB where it should. The order of the bands does not matter in the linear modes, because linear filters commute.
+- **Dynamics look ahead.** The detectors listen to the input, which is ahead of the sound by the delay, so a dynamic band has begun to move when the loud part reaches the
+  output (a 1 kHz burst after silence peaks at 0.137 in Linear, 0.300 in Zero Latency). The Attack time is measured from the input, not from the output. The levels and the
+  steady-state gains are the same: a -12 dB range reads -11.98 dB in Linear, -12.00 dB in Zero Latency. A detector hears the input rather than the output of the bands before it.
+- **Delta, Gain Match and the solos follow the delay.** Delta is the output minus the input *delayed*, so it is still exactly what the equaliser changes; the CURVE solo of a lone
+  band is the same signal as the Delta (1.7e-7). The BAND solo and the regions listen to the output, as before.
+- **SAT is off.** The saturator is not a linear filter; making a linear-phase "saturating" kernel is a contradiction. In the linear modes the SAT switch has no effect (the lamp says SAT OFF).
+- **Single precision.** The transform is JUCE's, in single precision, so the floor of these modes is about -130 dB, not the -160 dB of Zero Latency. With no band on, the output is the
+  input delayed bit for bit (the filter is skipped, the delay line is exact), and so it is with bands on at 0 dB.
+- **Cost.** A kernel is rebuilt every block while something in the curve moves (a dynamic band, a glide, a fade) and not otherwise. Eight dynamic bands, all moving, on this machine
+  (Linux, JUCE's own FFT): Zero Latency 0.6 % of a core, Linear 24 %, Linear HQ 27 %; with nothing moving it is a fraction of that.
+- **Switching** the mode while playing starts the bands from clean memory (the delay in front of them is a different length) and the host is told the new latency; expect a short gap.
 
 ### How the dynamics work
 
@@ -174,8 +224,8 @@ cmake --build build --target IrisSnapshot && ./build/IrisSnapshot_artefacts/Rele
 auval -v aufx Irsp Irsa                                                                            # Apple's AU validator (the AU must be installed)
 ```
 
-`docs/screenshot.png`, `dynamics.png`, `solo.png`, `masking.png` and `reference.png` are the output of `IrisSnapshot` (arguments in the file's header), never
-edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=12 solo=2:curve`, `"Init" sidechain`, `"Init" reference`. They are
+`docs/screenshot.png`, `dynamics.png`, `solo.png`, `masking.png`, `reference.png` and `linear.png` are the output of `IrisSnapshot` (arguments in the file's header), never
+edited by hand: `"Mono Bass, Wide Air" band=2`, `"De-Esser" band=1`, `"Warm Tube Lift" band=1 region=12 solo=2:curve`, `"Init" sidechain`, `"Init" reference`, `"Warm Tube Lift" band=1 phase=2`. They are
 regenerated after any change that touches the UI or what it shows. The rules for working on the code are in
 [CLAUDE.md](CLAUDE.md); the rules for the repository are in [the root CLAUDE.md](../../CLAUDE.md).
 
@@ -185,6 +235,7 @@ Source/DSP/Dynamics.h        the detector and the gain computer, and DynamicsUsa
 Source/DSP/ResonanceFinder.h narrow peaks that stand out of the input spectrum (the display's markers)
 Source/DSP/Masking.h         where this track and the sidechain mask each other (the display's clash zones)
 Source/DSP/ReferenceMatch.h  the long-term shape of a spectrum, a reference taken from text or a pasted curve, and the bands that make one shape follow another
+Source/DSP/LinearPhase.h     the linear-phase modes: kernels from the bands' magnitudes, FFT overlap-save, the delay
 Source/DSP/Saturator.h       the SAT shaper: three curves, residual ADAA, DC block
 Source/DSP/Crossover.h       the six regions: the shared band splitter (shared/dsp MusicBands.h) and their names
 Source/DSP/Engine.h          bands in series, placements, dynamics, SAT, gain match, delta, solo, meters, analyzer taps
@@ -194,7 +245,7 @@ Source/UI/EqView.h           the display: spectrum, curves, nodes, region strip;
 ../../shared/dsp/            biquads (with the EQ designs), the analyzer taps and the FFT analyzer, shared with Hephaestus
 ../../shared/ui/             the drawing kit of the interface, shared with the other plugins of the repository
 Tests/                       DSP tests, UI check, VST3 host check, editor snapshot, shared helpers
-docs/                        the five screenshots (generated by IrisSnapshot)
+docs/                        the six screenshots (generated by IrisSnapshot)
 ```
 
 ### Continuous integration
@@ -206,7 +257,7 @@ docs/                        the five screenshots (generated by IrisSnapshot)
 Everything in this README that is a number comes from `IrisTests` (headless, 48 kHz unless stated); all of it passes.
 
 - **Transparent.** With no band on, with bands on at 0 dB, and at the default settings in a hosted VST3, the output is the input bit for bit; the
-  latency is 0. An output gain of 0.000001 dB (what a host's 0.0 looks like after JUCE snaps it) is treated as exactly 0.
+  latency is 0 (in a Linear mode, the input delayed by the reported 2304 or 9216 samples, bit for bit, and a hosted impulse arrives exactly that late). An output gain of 0.000001 dB (what a host's 0.0 looks like after JUCE snaps it) is treated as exactly 0.
 - **The curves are the designed ones.** A +6 dB bell reads +6.000 dB at its centre; shelves and the notch match the design; the
   display's curve (`bandResponseDb`) agrees with the measured response to 0.000 dB at six more frequencies. The cuts are -12.3, -24.1,
   -36.1 and -48.2 dB at half the corner frequency (Butterworth: -12.30, -24.08, -36.12, -48.16) and -3.01 dB at the corner. (A digital
