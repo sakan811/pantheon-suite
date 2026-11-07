@@ -8,7 +8,7 @@
 
 #include <array>
 
-// Solo / Mute for the stereo image, the channels and the five ranges (SUB and BASS are the readouts' LOW range, split): the only controls that change what you hear.
+// Solo / Mute for the stereo image, the channels and the six main bands of music (shared with the other plugins): the only controls that change what you hear.
 // With nothing pressed the audio passes through untouched. State lives in the processor (not saved with the session);
 // this panel only mirrors it, so the master plan's "hear it" rows and the buttons stay in step.
 class AuditionPanel : public juce::Component
@@ -159,8 +159,10 @@ private:
             return "what differs between the channels, (L - R) / 2: what a mono sum loses (silent for a mono signal)";
         if (s == themis::Source::left || s == themis::Source::right)
             return s == themis::Source::left ? "the left channel (played on both sides)" : "the right channel (played on both sides)";
-        const auto& range = themis::kAuditionRanges[static_cast<int> (s) - themis::kFirstBandSource];
-        return "the " + juce::String (range.name) + " range, " + ui::hzText (range.loHz) + " - " + ui::hzText (range.hiHz);
+        const int band = static_cast<int> (s) - themis::kFirstBandSource;
+        const auto& range = themis::kAuditionRanges[band];
+        return "the " + juce::String (pdsp::bands::kBands[static_cast<size_t> (band)].title) + " band, " + ui::hzText (range.loHz) + " - "
+               + ui::hzText (range.hiHz) + ": " + pdsp::bands::kBands[static_cast<size_t> (band)].role;
     }
 
     void setup (juce::TextButton& b, const juce::String& text, juce::Colour on, const juce::String& tip, std::function<void()> onClick)

@@ -107,12 +107,16 @@ inline Advice make (Level level, Topic topic, std::string headline, std::string 
     return { level, topic, std::move (headline), std::move (why), hear, {} };
 }
 
-// The low end of the checks (the readouts' LOW range) is two audition ranges, the sub and the bass.
-inline Switches soloLow() { return { Switches::bit (Source::sub) | Switches::bit (Source::bass), 0u }; }
+// What a check about one of the readouts' ranges (a column of kEnergyRanges) plays: every audition band that overlaps it.
+// The readouts keep their own four ranges (their limits were set on them), so this is a superset: the LOW range (up to
+// 120 Hz) plays SUB and BASS (up to 250 Hz).
+inline uint32_t soloBitsOf (int column) { return auditionBitsOver (kEnergyRanges[column].loHz, kEnergyRanges[column].hiHz); }
+// The low end of the checks (the readouts' LOW range): the sub and the bass.
+inline Switches soloLow() { return { soloBitsOf (0), 0u }; }
 inline Switches soloSideLow() { return { Switches::bit (Source::side) | soloLow().solo, 0u }; }
 inline Switches soloSide() { return { Switches::bit (Source::side), 0u }; }
-// The side signal of one audition range (a width item: the part of the image a mono sum loses).
-inline Switches soloSideOf (Source range) { return { Switches::bit (Source::side) | Switches::bit (range), 0u }; }
+// The side signal of one readout range (a width item: the part of the image a mono sum loses).
+inline Switches soloSideOf (int column) { return { Switches::bit (Source::side) | soloBitsOf (column), 0u }; }
 
 // The band that takes `cutDb` off the side signal over an energy range (a column of `kEnergyRanges`): a shelf for the top
 // range, a bell across the others, at the geometric centre and as wide as the range (Q from its width in octaves).
@@ -317,7 +321,7 @@ inline MasterAdvice advise (const MasterInputs& in)
                                        format ("Narrow %s (%s): take about %s dB off its side signal", range.name, where.c_str(), master::rounded (cut).c_str()),
                                        format ("A mono sum loses %.1f dB there (side %s against mid; the limit is %.1f dB). Reduce the widening on the elements in this range, or cut its side channel.",
                                                static_cast<double> (w.monoLossDb), signedDbText (w.sideMinusMidDb).c_str(), static_cast<double> (history::monoWarnDb (column))),
-                                       master::soloSideOf (static_cast<Source> (kFirstBandSource + 1 + column))));
+                                       master::soloSideOf (column)));
             out.items.back().moves = { master::sideCutOver (column, std::min (master::kMaxCutDb, cut)) };
         }
 

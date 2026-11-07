@@ -20,7 +20,8 @@ option(THEMIS_INSTALL_AFTER_BUILD "Copy the plugin into the user plugin folders 
 
 # ---- DSP core: header-only, no dependencies ---------------------------------------------------
 add_library(themis_core INTERFACE)
-target_include_directories(themis_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/core/include)
+target_include_directories(themis_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/dsp/include) # MusicBands.h and Biquad.h: plain C++, no JUCE
 target_compile_features(themis_core INTERFACE cxx_std_17)
 
 if(THEMIS_BUILD_TESTS)

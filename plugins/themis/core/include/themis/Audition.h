@@ -3,9 +3,10 @@
 
 #pragma once
 
-#include "Biquad.h"
 #include "Common.h"
 #include "TonalAnalyzer.h"
+
+#include <pantheon/dsp/MusicBands.h>
 
 #include <array>
 #include <atomic>
@@ -15,20 +16,43 @@
 
 namespace themis
 {
-// Solo / mute for listening to what the checks flag: the stereo image (mid, side), the channels (left, right) and five
-// ranges: the energy ranges of the readouts (LOW .. HIGH) with LOW split in two at kSubBassHz, so the sub and the bass can
-// be heard apart (they are what small speakers lose and what a bass line carries). Audition is the one thing in Themis
-// that changes the output, and only while a button is down: with nothing engaged the audio is left untouched, bit for bit.
-enum class Source { mid, side, left, right, sub, bass, lowMid, highMid, high };
-inline constexpr int kNumSources = 9;
+// Solo / mute for listening to what the checks flag: the stereo image (mid, side), the channels (left, right) and the six main
+// frequency bands of music (SUB, BASS, LOW-MID, MIDRANGE, UPPER-MID, HIGH: pdsp::bands in shared/dsp MusicBands.h, the same
+// bands the other plugins of the suite solo). Audition is the one thing in Themis that changes the output, and only while a
+// button is down: with nothing engaged the audio is left untouched, bit for bit.
+enum class Source { mid, side, left, right, sub, bass, lowMid, midrange, upperMid, high };
+inline constexpr int kNumSources = 10;
 inline constexpr int kFirstBandSource = 4; // sub .. high are the audition ranges, in kAuditionRanges order
 
-// The boundary between SUB and BASS, inside the readouts' LOW range. Iris' lowest crossover is at the same frequency.
-inline constexpr double kSubBassHz = 60.0;
-inline constexpr int kNumAuditionRanges = kNumEnergyRanges + 1;
-inline constexpr EnergyRange kAuditionRanges[kNumAuditionRanges] = { { "SUB", kEnergyRanges[0].loHz, kSubBassHz },
-                                                                     { "BASS", kSubBassHz, kEnergyRanges[0].hiHz },
-                                                                     kEnergyRanges[1], kEnergyRanges[2], kEnergyRanges[3] };
+inline constexpr int kNumAuditionRanges = pdsp::bands::kCount;
+namespace detail
+{
+constexpr bool sameLetters (const char* upper, const char* name)
+{
+    for (; *upper != 0 || *name != 0; ++upper, ++name)
+        if (*upper != (*name >= 'a' && *name <= 'z' ? static_cast<char> (*name - 'a' + 'A') : *name))
+            return false;
+    return true;
+}
+constexpr EnergyRange auditionRange (const char* upperName, int band)
+{
+    return { upperName, pdsp::bands::kBands[static_cast<size_t> (band)].loHz, pdsp::bands::kBands[static_cast<size_t> (band)].hiHz };
+}
+} // namespace detail
+inline constexpr EnergyRange kAuditionRanges[kNumAuditionRanges] = { detail::auditionRange ("SUB", 0),      detail::auditionRange ("BASS", 1),
+                                                                     detail::auditionRange ("LOW-MID", 2),  detail::auditionRange ("MIDRANGE", 3),
+                                                                     detail::auditionRange ("UPPER-MID", 4), detail::auditionRange ("HIGH", 5) };
+static_assert (detail::sameLetters (kAuditionRanges[0].name, pdsp::bands::kBands[0].name) && detail::sameLetters (kAuditionRanges[1].name, pdsp::bands::kBands[1].name)
+                   && detail::sameLetters (kAuditionRanges[2].name, pdsp::bands::kBands[2].name) && detail::sameLetters (kAuditionRanges[3].name, pdsp::bands::kBands[3].name)
+                   && detail::sameLetters (kAuditionRanges[4].name, pdsp::bands::kBands[4].name) && detail::sameLetters (kAuditionRanges[5].name, pdsp::bands::kBands[5].name),
+               "the audition ranges are the shared bands, by name");
+
+// The audition ranges that overlap a frequency range (e.g. one of the readouts' kEnergyRanges), as solo bits: what a check
+// about that range plays.
+inline uint32_t auditionBitsOver (double loHz, double hiHz)
+{
+    return static_cast<uint32_t> (pdsp::bands::bandsOverlapping (loHz, hiHz)) << kFirstBandSource;
+}
 
 // Which sources are soloed / muted, as bit masks (bit = static_cast<int> (Source)). Plain data so the message thread can
 // publish it in one atomic and the audio thread read it.
@@ -51,7 +75,7 @@ struct Switches
 struct Audible
 {
     bool mid = true, side = true, left = true, right = true;
-    std::array<bool, kNumAuditionRanges> band { true, true, true, true, true };
+    std::array<bool, kNumAuditionRanges> band = allOn();
     bool leftSoloed = false, rightSoloed = false; // a soloed channel is played on both sides, like a solo in a DAW
 
     bool bandsAll() const
@@ -62,6 +86,13 @@ struct Audible
         return true;
     }
     bool untouched() const { return mid && side && left && right && bandsAll(); }
+
+    static std::array<bool, kNumAuditionRanges> allOn()
+    {
+        std::array<bool, kNumAuditionRanges> on {};
+        on.fill (true);
+        return on;
+    }
 };
 
 inline Audible resolve (const Switches& sw)
@@ -88,8 +119,9 @@ inline Audible resolve (const Switches& sw)
 
 inline const char* sourceName (Source s)
 {
-    constexpr const char* names[kNumSources] = { "MID", "SIDE", "LEFT", "RIGHT", "SUB", "BASS", "LOW-MID", "HIGH-MID", "HIGH" };
-    return names[static_cast<int> (s)];
+    constexpr const char* names[kFirstBandSource] = { "MID", "SIDE", "LEFT", "RIGHT" };
+    const int i = static_cast<int> (s);
+    return i < kFirstBandSource ? names[i] : kAuditionRanges[i - kFirstBandSource].name;
 }
 static_assert (kNumSources == kFirstBandSource + kNumAuditionRanges, "one source per audition range");
 
@@ -109,9 +141,9 @@ inline std::string soloText (const Switches& sw)
 // Signal flow: ranges (crossovers) -> channel mix (L / R) -> stereo image (M / S). All three are linear, so their order
 // only matters for the copy that a soloed channel makes onto the other side.
 //
-// The ranges are split with Linkwitz-Riley 4th-order crossovers at the edges of kAuditionRanges. Each lower range is run
-// through the all-pass of the crossovers above it, so the five ranges sum back to a flat-magnitude signal and muting one
-// removes just that range.
+// The ranges are split by the shared pdsp::BandSplitter (Linkwitz-Riley 4th-order crossovers at the edges of the six
+// bands, each lower range run through the all-pass of the crossovers above it), so the ranges sum back to a flat-magnitude
+// signal and muting one removes just that range.
 class Audition
 {
 public:
@@ -121,15 +153,7 @@ public:
     {
         fs = sampleRate;
         rampStep = 1.0f / static_cast<float> (std::max (1.0, kRampSeconds * fs));
-        for (int c = 0; c < 2; ++c)
-        {
-            for (int x = 0; x < kNumCrossovers; ++x)
-                xo[c][x].design (fs, crossoverHz (x));
-            for (int k = 0, a = 0; k < kNumCrossovers; ++k)
-                for (int j = k + 1; j < kNumCrossovers; ++j, ++a)
-                    ap[c][a].design (fs, crossoverHz (j));
-        }
-        resetFilters();
+        splitter.prepare (fs);
         filtersCold = true;
         snapToTarget();
     }
@@ -168,59 +192,18 @@ public:
     }
 
     // Crossover between range x and x + 1.
-    static double crossoverHz (int x) { return kAuditionRanges[x].hiHz; }
+    static double crossoverHz (int x) { return pdsp::bands::crossoverHz (x); }
 
 private:
-    static constexpr int kNumCrossovers = kNumAuditionRanges - 1;
-    // Range k has to pass the all-pass of every crossover above it (k + 1 ... last): one per pair.
-    static constexpr int kNumAllpasses = kNumCrossovers * (kNumCrossovers - 1) / 2;
-
-    // One Linkwitz-Riley 4th-order low / high pair (two Butterworth biquads each).
-    struct Crossover
-    {
-        Biquad lowA, lowB, highA, highB;
-        void design (double sampleRate, double hz)
-        {
-            const auto lp = BiquadCoeffs::lowPass (sampleRate, hz, 0.7071), hp = BiquadCoeffs::highPass (sampleRate, hz, 0.7071);
-            lowA.setCoeffs (lp);
-            lowB.setCoeffs (lp);
-            highA.setCoeffs (hp);
-            highB.setCoeffs (hp);
-        }
-        float low (float x) { return lowB.process (lowA.process (x)); }
-        float high (float x) { return highB.process (highA.process (x)); }
-        float allpass (float x) { return low (x) + high (x); }
-        void reset()
-        {
-            lowA.reset();
-            lowB.reset();
-            highA.reset();
-            highB.reset();
-        }
-    };
-
     // Splits one channel into the ranges and adds the audible ones.
     float splitAndMix (int ch, float x)
     {
-        auto& c = xo[ch];
-        // Each crossover splits what is left above the one before it; the all-pass copies keep the lower ranges in phase
-        // with the upper ones.
-        float part[kNumAuditionRanges];
-        float rest = x;
-        for (int k = 0; k < kNumCrossovers; ++k)
-        {
-            part[k] = c[k].low (rest);
-            rest = c[k].high (rest);
-        }
-        part[kNumCrossovers] = rest;
-        float sum = gain[kNumCrossovers] * rest;
-        for (int k = 0, a = 0; k < kNumCrossovers; ++k)
-        {
-            for (int j = k + 1; j < kNumCrossovers; ++j, ++a)
-                part[k] = ap[ch][a].allpass (part[k]);
-            sum += gain[static_cast<size_t> (k)] * part[k];
-        }
-        return sum;
+        std::array<double, kNumAuditionRanges> part;
+        splitter.split (ch, static_cast<double> (x), part);
+        double sum = 0.0;
+        for (size_t k = 0; k < part.size(); ++k)
+            sum += static_cast<double> (gain[k]) * part[k];
+        return static_cast<float> (sum);
     }
 
     void setTarget (const Audible& a)
@@ -281,16 +264,7 @@ private:
         settledAtUnity = true;
     }
 
-    void resetFilters()
-    {
-        for (int c = 0; c < 2; ++c)
-        {
-            for (auto& x : xo[c])
-                x.reset();
-            for (auto& a : ap[c])
-                a.reset();
-        }
-    }
+    void resetFilters() { splitter.reset(); }
 
     double fs = 48000.0;
     float rampStep = 0.02f;
@@ -300,10 +274,16 @@ private:
     bool settledAtUnity = true, filtersCold = true;
 
     float m[4] = { 1.0f, 0.0f, 0.0f, 1.0f }, mTarget[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
-    std::array<float, kNumAuditionRanges> gain { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f }, gainTarget { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    std::array<float, kNumAuditionRanges> gain = ones(), gainTarget = ones();
     float bandMix = 0.0f, bandMixTarget = 0.0f;
 
-    Crossover xo[2][kNumCrossovers];
-    Crossover ap[2][kNumAllpasses];
+    pdsp::BandSplitter splitter;
+
+    static std::array<float, kNumAuditionRanges> ones()
+    {
+        std::array<float, kNumAuditionRanges> v {};
+        v.fill (1.0f);
+        return v;
+    }
 };
 } // namespace themis
