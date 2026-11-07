@@ -2072,10 +2072,10 @@ TEST (audition_resolves_solo_and_mute_within_each_group)
     both.mute = Switches::bit (Source::mid);
     a = resolve (both);
     CHECK (!a.mid && !a.side); // soloed and muted: silent, and the solo still silences the rest of the group
-    a = resolve (solo ({ Source::highMid }));
-    CHECK (!a.band[0] && !a.band[1] && !a.band[2] && a.band[3] && !a.band[4] && a.mid && a.left); // other groups are not touched
+    a = resolve (solo ({ Source::upperMid }));
+    CHECK (!a.band[0] && !a.band[1] && !a.band[2] && !a.band[3] && a.band[4] && !a.band[5] && a.mid && a.left); // other groups are not touched
     a = resolve (mute ({ Source::sub, Source::high }));
-    CHECK (!a.band[0] && a.band[1] && a.band[2] && a.band[3] && !a.band[4]);
+    CHECK (!a.band[0] && a.band[1] && a.band[2] && a.band[3] && a.band[4] && !a.band[5]);
     CHECK (Switches::unpack (solo ({ Source::side, Source::high }).pack()) == solo ({ Source::side, Source::high }));
     CHECK (Switches::unpack (mute ({ Source::left }).pack()) == mute ({ Source::left }));
 }
@@ -2147,8 +2147,10 @@ TEST (audition_solos_and_mutes_the_channels)
 TEST (audition_isolates_the_energy_ranges)
 {
     const double fs = 48000.0;
-    // A tone in the middle of each range: 30 Hz, 85 Hz, 400 Hz, 2.5 kHz, 12 kHz.
-    const double tones[kNumAuditionRanges] = { 30.0, 85.0, 400.0, 2500.0, 12000.0 };
+    // A tone in the middle of each range, in octaves: 35 Hz, 122 Hz, 354 Hz, 1 kHz, 3.5 kHz, 11 kHz.
+    double tones[kNumAuditionRanges];
+    for (int b = 0; b < kNumAuditionRanges; ++b)
+        tones[b] = std::sqrt (kAuditionRanges[b].loHz * kAuditionRanges[b].hiHz);
     for (int soloed = 0; soloed < kNumAuditionRanges; ++soloed)
         for (int t = 0; t < kNumAuditionRanges; ++t)
         {
@@ -2156,7 +2158,7 @@ TEST (audition_isolates_the_energy_ranges)
             const auto out = audition (solo ({ static_cast<Source> (kFirstBandSource + soloed) }), x, x);
             const double dB = tailDb (out.l) - tailDb (x);
             if (t == soloed)
-                CHECK_NEAR (dB, soloed == 1 ? -3.9 : 0.0, 0.7); // BASS is one octave wide: even its middle is 1.9 dB down at each crossover
+                CHECK_NEAR (dB, soloed == 2 ? -3.9 : -0.9, soloed == 2 ? 0.7 : 0.9); // the crossovers' skirts reach into each band (a 2-octave band's middle is about 1 dB down); LOW-MID is one octave wide, so its middle is 1.9 dB down at each crossover
             else
                 CHECK (dB < (std::abs (t - soloed) == 1 ? -12.0 : -18.0)); // 4th-order crossovers: neighbours that are an octave apart are at least 12 dB down
         }
@@ -2165,7 +2167,7 @@ TEST (audition_isolates_the_energy_ranges)
 TEST (audition_muting_a_range_removes_only_that_range)
 {
     const double fs = 48000.0;
-    // Muting SUB and HIGH leaves the middle three ranges intact (flat magnitude through the crossovers and their all-passes).
+    // Muting SUB and HIGH leaves the middle four ranges intact (flat magnitude through the crossovers and their all-passes).
     // (A 4th-order crossover is 0.5 dB down half an octave from its corner; the tones are at least that far in.)
     for (double hz : { 200.0, 300.0, 500.0, 2000.0, 3000.0 })
     {
@@ -2173,9 +2175,10 @@ TEST (audition_muting_a_range_removes_only_that_range)
         const auto out = audition (mute ({ Source::sub, Source::high }), x, x);
         CHECK_NEAR (tailDb (out.l) - tailDb (x), 0.0, 0.8);
     }
-    // The five ranges add back up to a flat-magnitude signal: at each corner, where the neighbours overlap most.
-    for (double hz : { kSubBassHz, 120.0, 1000.0, 6000.0 })
+    // The six ranges add back up to a flat-magnitude signal: at each corner, where the neighbours overlap most.
+    for (int corner = 0; corner < kNumAuditionRanges - 1; ++corner)
     {
+        const double hz = Audition::crossoverHz (corner);
         const auto x = sine (fs, hz, -12, 1.0);
         std::vector<float> sum (x.size(), 0.0f);
         for (int r = 0; r < kNumAuditionRanges; ++r)
@@ -2224,8 +2227,13 @@ TEST (audition_follows_the_switches_in_both_directions)
     };
     CHECK (tailDb (run (solo ({ Source::side }))) < -120.0);
     CHECK_NEAR (tailDb (run ({})), tailDb (x), 1.0e-6);
-    CHECK (tailDb (run (mute ({ Source::lowMid }))) < -18.0);
+    CHECK (tailDb (run (mute ({ Source::lowMid }))) < tailDb (x) - 0.5); // 500 Hz is the LOW-MID / MIDRANGE corner: half of it goes
     CHECK_NEAR (tailDb (run ({})), tailDb (x), 0.01);
+    const auto k = sine (fs, 1000, -12, 1.0); // the middle of MIDRANGE
+    a.setSwitches (mute ({ Source::midrange }));
+    auto kl = k, kr = k;
+    a.process (kl.data(), kr.data(), static_cast<int> (kl.size()));
+    CHECK (tailDb (kl) < tailDb (k) - 18.0);
 }
 
 // ---- loudness monitor --------------------------------------------------------------------------------------------
@@ -2503,7 +2511,7 @@ TEST (advisor_names_the_range_whose_side_signal_a_mono_sum_loses)
     const auto* w = find (a, Topic::width);
     CHECK (w != nullptr && w->level == Level::bad);
     CHECK (w != nullptr && w->headline.find ("HIGH-MID") != std::string::npos);
-    CHECK (w != nullptr && w->hear.solo == (Switches::bit (Source::side) | Switches::bit (Source::highMid)));
+    CHECK (w != nullptr && w->hear.solo == (Switches::bit (Source::side) | Switches::bit (Source::midrange) | Switches::bit (Source::upperMid))); // 1 - 6 kHz
     CHECK (std::count_if (a.items.begin(), a.items.end(), [] (const Advice& i) { return i.topic == Topic::width; }) == 1); // the other ranges are not wide
 
     // The asked-for cut is enough: taking it off the side puts the loss at the warning limit or under, and half a dB less would not.
