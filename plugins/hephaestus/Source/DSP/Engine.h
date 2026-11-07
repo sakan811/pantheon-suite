@@ -4,6 +4,7 @@
 #pragma once
 
 #include <pantheon/dsp/AnalyzerTap.h>
+#include <pantheon/dsp/MusicBands.h>
 #include "FundamentalEngine.h"
 #include "Saturator.h"
 #include <atomic>
@@ -57,12 +58,15 @@ struct BandParams
 // record, save or restore it, and the editor ends it when it closes.
 //   band: the band's own region, the signal through a band-pass over its range (what the band works on)
 //   adds: only what the band adds (its distortion, or its filled harmonics), nothing else
+// and, on top of whatever that is, the main frequency bands of music (pdsp::bands: sub, bass, low-mid, midrange, upper-mid,
+// high), the same bands the other plugins of the suite solo.
 enum class SoloKind { band, adds };
 
 struct Monitor
 {
     std::atomic<int> soloBand { -1 }; // -1 = none
     std::atomic<int> soloKind { (int) SoloKind::band };
+    std::atomic<unsigned> regions { 0 }; // bit b = pdsp::bands::kBands[b] is soloed; 0 = none
 };
 
 struct EngineParams
@@ -115,6 +119,7 @@ public:
         soloStep = 1.0 / (0.010 * fs);
         soloAmount = 0.0;
         shownBand = -1;
+        regionSplitter.setCrossovers (fs, pdsp::bands::defaultCrossovers());
         inGainLast = outGainLast = 1.0f;
         reset();
 
@@ -133,6 +138,9 @@ public:
         for (auto& f : soloFilter)
             f.reset();
         soloAmount = 0.0;
+        regionSplitter.reset();
+        regionAmount = 0.0;
+        lastRegionMask = 0;
     }
 
     int getLatency() const noexcept { return latency; }
@@ -343,7 +351,7 @@ private:
             }
         }
 
-        // 5. Mix / delta, then the solo (it wins over both), then output gain.
+        // 5. Mix / delta, then the solo (it wins over both), then the band solo strip, then output gain.
         float gMatch = 1.0f;
         if (p.match) gMatch = (float) matchGainFor (dry, wet, nCh, n);
         else         matchGain = 1.0;
@@ -361,6 +369,28 @@ private:
                 for (int c = 0; c < nCh; ++c)
                     io[(size_t) c][i] += (float) soloAmount * (solo[(size_t) c][i] - io[(size_t) c][i]);
             }
+
+        // The band solo strip: the main bands of music, out of whatever is heard (so it combines with Delta and a band solo).
+        // Every band goes through the all-pass of the crossovers above it, so any combination sums flat; it fades like the
+        // band solo, and starts from clean filters.
+        const unsigned regionMask = monitor.regions.load (std::memory_order_relaxed) & pdsp::bands::kAllBands;
+        if (regionMask != 0 && regionAmount <= 0.0)
+            regionSplitter.reset();
+        if (regionMask != 0 || regionAmount > 0.0)
+        {
+            const unsigned mask = regionMask != 0 ? regionMask : lastRegionMask;
+            for (int i = 0; i < n; ++i)
+            {
+                regionAmount = std::clamp (regionAmount + (regionMask != 0 ? soloStep : -soloStep), 0.0, 1.0);
+                for (int c = 0; c < nCh; ++c)
+                {
+                    const double x = io[(size_t) c][i];
+                    io[(size_t) c][i] = (float) (x + regionAmount * (regionSplitter.process (c, x, mask) - x));
+                }
+            }
+        }
+        if (regionMask != 0)
+            lastRegionMask = regionMask;
 
         const float outGain = juce::Decibels::decibelsToGain (p.outGainDb);
         smoothPeak (outPeak, rampGain (io, nCh, n, outGainLast, outGain), n);
@@ -440,6 +470,11 @@ private:
     int shownBand = -1, captureBand = -1;
     SoloKind shownKind = SoloKind::band;
     double soloAmount = 0.0, soloStep = 0.002;
+
+    // Band solo strip state (audio thread): how far it has faded in, and the bands it was playing (kept while it fades out).
+    pdsp::BandSplitter regionSplitter;
+    double regionAmount = 0.0;
+    unsigned lastRegionMask = 0;
 
     double msDry = 1.0e-6, msWet = 1.0e-6, matchGain = 1.0;
     float inGainLast = 1.0f, outGainLast = 1.0f;

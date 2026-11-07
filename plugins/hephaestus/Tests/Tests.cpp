@@ -954,6 +954,80 @@ void testBandSolo()
     }
 }
 
+void testBandSoloStrip()
+{
+    std::printf ("\n[12b] Band solo strip: the six main bands of music (pdsp::bands); each passes its own range, all six are flat, releasing is bit-exact\n");
+    namespace mb = pdsp::bands;
+    // Half a second of a settled tone, the frequencies on even hertz so the window holds whole cycles (no leakage).
+    const auto wholeCycles = [] (const std::vector<float>& x, double f) { return amplitudeAt (x, 24000, 24000, f); };
+    double worstOwn = 0.0, worstNarrow = 0.0, loudestNeighbour = -200.0, loudestOther = -200.0;
+    bool ok = true;
+    for (int band = 0; band < mb::kCount; ++band)
+        for (int tone = 0; tone < mb::kCount; ++tone)
+        {
+            const double f = 2.0 * std::round (std::sqrt (mb::kBands[(size_t) tone].loHz * mb::kBands[(size_t) tone].hiHz) / 2.0); // the middle, in octaves (whole cycles in the window)
+            Rig rig, plain;
+            rig.eng.monitor.regions = 1u << band;
+            const auto x = sines ({ { f, 0.2 } }, 48000);
+            const double g = db (wholeCycles (rig.runMono (x), f) / wholeCycles (plain.runMono (x), f)); // against the plain output
+            if (band == tone)
+            {
+                const bool narrow = mb::kBands[(size_t) band].hiHz / mb::kBands[(size_t) band].loHz <= 2.01; // Low-Mid: one octave
+                (narrow ? worstNarrow : worstOwn) = std::max (narrow ? worstNarrow : worstOwn, std::fabs (g));
+                ok = ok && std::fabs (g) < (narrow ? 4.3 : 2.0);
+            }
+            else if (std::abs (band - tone) == 1)
+                loudestNeighbour = std::max (loudestNeighbour, g), ok = ok && g < -13.0;
+            else
+                loudestOther = std::max (loudestOther, g), ok = ok && g < -35.0;
+        }
+    check (ok, fmt ("a band passes a tone in its middle within %.2f dB (%.2f dB for the octave-wide low-mid); the next band's tone is %.1f dB down at most, the others %.1f dB",
+                    worstOwn, worstNarrow, loudestNeighbour, loudestOther));
+
+    double worst = 0.0;
+    for (double f : { 30.0, 60.0, 150.0, 250.0, 500.0, 1000.0, 2000.0, 6000.0, 12000.0 })
+    {
+        Rig soloed, plain;
+        soloed.eng.monitor.regions = mb::kAllBands;
+        const auto x = sines ({ { f, 0.2 } }, 48000);
+        worst = std::max (worst, std::fabs (db (wholeCycles (soloed.runMono (x), f) / wholeCycles (plain.runMono (x), f))));
+    }
+    check (worst < 0.05, fmt ("all six together are flat against the plain output (largest deviation %.3f dB over nine tones, the crossovers included)", worst));
+
+    // It works on what is heard, so it combines with a band solo; releasing it returns the plain output exactly.
+    {
+        const auto in = noise (48000, 11, 0.3f);
+        Rig soloed, plain;
+        soloed.p.bands[0] = plain.p.bands[0] = saturateBand (60.0, 300.0, 8.0);
+        soloed.eng.monitor.regions = 0b000110u;
+        const std::vector<float> first (in.begin(), in.begin() + 24000), second (in.begin() + 24000, in.end());
+        soloed.runMono (first);
+        plain.runMono (first);
+        soloed.eng.monitor.regions = 0u;
+        const auto a = soloed.runMono (second), b = plain.runMono (second);
+        float fading = 0.0f, after = 0.0f;
+        for (size_t i = 0; i < 400; ++i)
+            fading = std::max (fading, std::fabs (a[i] - b[i]));
+        for (size_t i = 1000; i < a.size(); ++i)
+            after = std::max (after, std::fabs (a[i] - b[i]));
+        check (fading > 0.001f && after == 0.0f, fmt ("while it fades out the output differs (%.3f), once it has, it equals the plain output (max difference %.1e)", fading, after));
+    }
+
+    // A mono buffer (one channel) is soloed too, and stays finite.
+    {
+        Engine e;
+        e.prepare (fs, 512);
+        e.monitor.regions = 1u << 5;
+        juce::AudioBuffer<float> mono (1, 24000);
+        const auto x = sines ({ { 100.0, 0.3 }, { 10000.0, 0.3 } }, 24000);
+        std::copy (x.begin(), x.end(), mono.getWritePointer (0));
+        e.process (mono, cleanParams());
+        std::vector<float> out (mono.getReadPointer (0), mono.getReadPointer (0) + 24000);
+        const double hi = db (amplitudeAt (out, 12000, 12000, 10000.0) / 0.3), lo = db (amplitudeAt (out, 12000, 12000, 100.0) / 0.3);
+        check (hi > -2.0 && lo < -60.0, fmt ("a mono buffer: High solo keeps 10 kHz at %+.1f dB (the crossover's skirt, 0.7 octave above 6 kHz) and takes 100 Hz to %.0f dB", hi, lo));
+    }
+}
+
 void benchmark()
 {
     std::printf ("\n[11] CPU: 10 s of stereo @ 48 kHz, all six bands on (4 saturate, 2 adaptive fill with rebuild)\n");
@@ -1001,6 +1075,7 @@ int main()
     testRobustness();
     testMetersRecover();
     testBandSolo();
+    testBandSoloStrip();
     testSpectrumAnalyzer();
     benchmark();
     return finish ("ALL TESTS");
