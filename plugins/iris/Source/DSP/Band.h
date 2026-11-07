@@ -20,6 +20,10 @@ constexpr int numCrossovers = numRegions - 1;
 constexpr std::array<double, numCrossovers> defaultCrossoverHz = pdsp::bands::defaultCrossovers();
 constexpr double minHz = 20.0, maxHz = 20000.0;
 
+// How the equaliser treats phase. Zero Latency runs the bands as minimum-phase filters (no delay, phase shift around each band);
+// the linear modes give every band the same magnitude with no phase shift at all, at the price of a fixed delay (LinearPhase.h).
+enum class PhaseMode { zeroLatency, linear, linearHq };
+
 enum class BandType { bell, lowShelf, highShelf, lowCut, highCut, notch };
 
 // Which signal a band works on. Left/Right/Mid/Side leave the rest of the stereo image exactly as it was.
@@ -87,6 +91,12 @@ public:
     double magnitudeAt (double fs, double f) const noexcept
     {
         return isCut (type) ? cut.magnitudeAt (fs, f) : bell.magnitudeAt (fs, f);
+    }
+
+    // |H|^2 from cos(w) and cos(2w): the same curve as magnitudeAt, for a whole grid at once.
+    double powerAt (double cosW, double cos2W) const noexcept
+    {
+        return isCut (type) ? cut.powerAt (cosW, cos2W) : bell.powerAt (cosW, cos2W);
     }
 
 private:

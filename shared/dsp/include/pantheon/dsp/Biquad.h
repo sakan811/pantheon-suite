@@ -86,6 +86,15 @@ struct Biquad
         return std::abs ((b0 + b1 * z1i + b2 * z2i) / (1.0 + a1 * z1i + a2 * z2i));
     }
 
+    // |H|^2 from cos(w) and cos(2w) alone: a handful of multiplications, no trigonometry, so a whole frequency grid is cheap
+    // (the linear-phase mode builds its filter from this).
+    double powerAt (double cosW, double cos2W) const noexcept
+    {
+        const double num = b0 * b0 + b1 * b1 + b2 * b2 + 2.0 * (b0 * b1 + b1 * b2) * cosW + 2.0 * b0 * b2 * cos2W;
+        const double den = 1.0 + a1 * a1 + a2 * a2 + 2.0 * (a1 + a1 * a2) * cosW + 2.0 * a2 * cos2W;
+        return num / den;
+    }
+
     void set (double nb0, double nb1, double nb2, double a0, double na1, double na2) noexcept
     {
         b0 = nb0 / a0; b1 = nb1 / a0; b2 = nb2 / a0; a1 = na1 / a0; a2 = na2 / a0;
@@ -128,6 +137,14 @@ public:
         for (int i = 0; i < sections; ++i)
             m *= bq[(size_t) i].magnitudeAt (fs, f);
         return m;
+    }
+
+    double powerAt (double cosW, double cos2W) const noexcept
+    {
+        double p = 1.0;
+        for (int i = 0; i < sections; ++i)
+            p *= bq[(size_t) i].powerAt (cosW, cos2W);
+        return p;
     }
 
 private:
