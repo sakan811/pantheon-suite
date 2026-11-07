@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 The Pantheon authors
 
-# DSP that more than one plugin uses: double-precision biquads (with the parametric-EQ designs), and the lock-free taps and the
+# DSP that more than one plugin uses: double-precision biquads (with the parametric-EQ designs), the six main bands of music and
+# their splitter (MusicBands.h), and the lock-free taps and the
 # FFT analyzer behind the spectrum displays. Header-only, namespace `pdsp`, and nothing from any plugin. The analyzer needs
 # JUCE's dsp module (its FFT); the biquads need nothing.
 add_library(pantheon_dsp INTERFACE)

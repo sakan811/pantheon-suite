@@ -46,8 +46,12 @@ plugins/<name>/  one self-contained plugin each: its own CMakeLists.txt, core/, 
   Themis writes (COPY, Copy EQ) and Iris and Hephaestus read (PASTE). Its format is versioned (`pantheon-bands 1`): add keys, never change
   what one means, and keep the readers ignoring what they do not know. It also carries one `curve` line (a spectrum shape on a log-frequency
   grid: Themis' Copy EQ writes its target, Iris reads it as its reference; a reader without curves skips the line like any unknown kind).
+  And [MusicBands.h](shared/dsp/include/pantheon/dsp/MusicBands.h) (`pdsp::bands`: the six main frequency bands of music, Sub 20–60 Hz, Bass 60–250 Hz,
+  Low-Mid 250–500 Hz, Midrange 500 Hz–2 kHz, Upper-Mid 2–6 kHz, High 6–20 kHz, and `pdsp::BandSplitter`, the LR4 splitter whose bands sum flat), which every
+  plugin but Harmonia solos by: Themis' AUDITION ranges, Iris' regions (their default crossovers) and Hephaestus' band solo strip. A new plugin with a band solo uses it
+  too; Themis' readouts keep their own four `kEnergyRanges` (their limits were set on them). It is plain C++, so Themis' JUCE-free core includes it.
 - It knows nothing about any plugin and has no GUI. The namespace is `pdsp` (not `dsp`, which would collide with `juce::dsp`).
-- **A change here changes every plugin that uses it.** Run each one's DSP tests (Hephaestus: `HephaestusTests`; Iris: `IrisTests`); the
+- **A change here changes every plugin that uses it.** Run each one's DSP tests (Hephaestus: `HephaestusTests`; Iris: `IrisTests`; Themis: `make test`, for MusicBands.h); the
   analyzer's calibration is pinned by Hephaestus' test [10]; BandLink by both `UiCheck`s (PASTE) and Themis' `ThemisSmoke` build. The files are
   tested through the plugins that use them, not on their own.
 
