@@ -48,7 +48,7 @@ private:
 
     // Output and saturation.
     ui::Knob driveKnob, outKnob;
-    ui::Choice styleBox, modeBox;
+    ui::Choice styleBox, modeBox, phaseBox;
 
     juce::ComboBox presetBox;
     juce::TextButton deltaButton { "DELTA" }, clearMetersButton { "CLEAR" }, learnRefButton { "LEARN REF" }, matchEqButton { "MATCH EQ" };

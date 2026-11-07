@@ -25,7 +25,15 @@ bool IrisProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void IrisProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    engine.prepare (sampleRate, samplesPerBlock);
+    engine.prepare (sampleRate, samplesPerBlock, iris::readParams (apvts).phase);
+    reportedLatency = engine.latencySamples.load();
+    setLatencySamples (reportedLatency.load());
+}
+
+void IrisProcessor::handleAsyncUpdate()
+{
+    reportedLatency = engine.latencySamples.load();
+    setLatencySamples (reportedLatency.load());
 }
 
 void IrisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -46,6 +54,8 @@ void IrisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         main.clear (c, 0, main.getNumSamples());
 
     engine.process (main, iris::readParams (apvts));
+    if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
+        triggerAsyncUpdate();
 }
 
 void IrisProcessor::setCurrentProgram (int index)

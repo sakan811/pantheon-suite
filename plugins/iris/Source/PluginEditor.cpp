@@ -9,11 +9,11 @@ using namespace iris::gui;
 namespace
 {
 constexpr int kTimerHz = 30;
-constexpr int editorWidth = 1180, editorHeight = 676;
+constexpr int editorWidth = 1180, editorHeight = 704;
 constexpr int headerHeight = 84;   // the control panel along the top
 constexpr int viewHeight = 322;
 constexpr int cellHeight = 104;    // a knob: name, knob, read-out
-constexpr int panelRowHeight = 232;
+constexpr int panelRowHeight = 260;
 constexpr int chipWidth = 34, chipHeight = 26, chipGap = 5;
 constexpr int bandPanelWidth = 440, dynPanelWidth = 480;
 
@@ -33,7 +33,11 @@ IrisEditor::IrisEditor (IrisProcessor& p)
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after the equaliser and Gain Match.", ui::Knob::Layout::below),
       styleBox (p.apvts, id::style, "The curve SAT uses.\nTape: smooth, odd harmonics.\nTube: asymmetric, adds even harmonics (the 2nd).\nConsole: open and gentle."),
       modeBox (p.apvts, id::mode, "CLEAN: a plain equaliser, no harmonics, whatever the level.\nSAT: what a boosting band adds is passed through a soft curve, so a loud "
-                                  "boost warms up (see Drive and Style). Cuts stay clean. No latency in either mode."),
+                                  "boost warms up (see Drive and Style). Cuts stay clean. SAT works in the Zero Latency phase mode only."),
+      phaseBox (p.apvts, id::phase, "ZERO LATENCY: every band is a minimum-phase filter, the way an analogue equaliser is: no delay, and the phase turns around each band. "
+                                    "For tracking, live, and mixing.\nLINEAR: no phase shift at all, so a boost and a cut leave the waveform's shape alone and parallel or "
+                                    "stem processing stays in phase; the whole sound is delayed (the host compensates) and a sharp boost can ring before the beat. For mastering.\n"
+                                    "LINEAR HQ: the same with four times the resolution for narrow bass bands, at four times the delay. SAT works in Zero Latency only."),
       matchButton (p.apvts, id::match, "GAIN MATCH", "Matches the output loudness to the input, so a boost that is merely louder doesn't sound better. Slow, and never more than 12 dB.")
 {
     (void) g_unused;
@@ -144,7 +148,7 @@ IrisEditor::IrisEditor (IrisProcessor& p)
     };
 
     for (auto* c : std::initializer_list<juce::Component*> { &presetBox, &modeBox, &deltaButton, &matchButton, &clearMetersButton, &learnRefButton, &matchEqButton,
-                                                             &driveKnob, &outKnob, &styleBox })
+                                                             &driveKnob, &outKnob, &styleBox, &phaseBox })
         addAndMakeVisible (c);
 
     // The first band that exists is the one to show.
@@ -336,10 +340,11 @@ void IrisEditor::resized()
     panelBounds[(size_t) Panel::output] = row;
 
     const auto out = panelBounds[(size_t) Panel::output];
-    styleBox.setBounds (out.getX() + 14, out.getY() + 78, out.getWidth() - 28, 26);
+    phaseBox.setBounds (out.getX() + 14, out.getY() + 52, out.getWidth() - 28, 26);
+    styleBox.setBounds (out.getX() + 14, out.getY() + 112, out.getWidth() - 28, 26);
     const int cell = (out.getWidth() - 16) / 2;
-    driveKnob.setBounds (out.getX() + 8, out.getY() + 112, cell, cellHeight);
-    outKnob.setBounds (out.getX() + 8 + cell, out.getY() + 112, cell, cellHeight);
+    driveKnob.setBounds (out.getX() + 8, out.getY() + 146, cell, cellHeight);
+    outKnob.setBounds (out.getX() + 8 + cell, out.getY() + 146, cell, cellHeight);
 
     layoutBandPanel();
 }
@@ -474,14 +479,19 @@ void IrisEditor::paint (juce::Graphics& g)
     // Output panel.
     {
         const auto out = panelBounds[(size_t) Panel::output];
-        const bool sat = proc.apvts.getRawParameterValue (id::mode)->load() > 0.5f;
+        const bool satChosen = proc.apvts.getRawParameterValue (id::mode)->load() > 0.5f;
+        const int latency = proc.engine.latencySamples.load (std::memory_order_relaxed);
+        const bool linear = latency > 0;
+        const bool sat = satChosen && ! linear; // SAT only runs in Zero Latency (the shaper is not a linear filter)
+        hw::drawLabel (g, "Phase", { phaseBox.getX() + 2, phaseBox.getY() - 14, 100, 12 }, juce::Justification::left, colours::dim, 9.0f);
         hw::drawLabel (g, "Style", { styleBox.getX() + 2, styleBox.getY() - 14, 100, 12 }, juce::Justification::left, colours::dim, 9.0f);
         hw::drawLamp (g, { (float) out.getRight() - 24.0f, (float) out.getY() + 17.0f }, 4.0f, colours::amber, sat);
-        hw::drawLabel (g, sat ? "SAT" : "CLEAN", { out.getRight() - 90, out.getY() + 10, 56, 14 }, juce::Justification::right, sat ? colours::amber : colours::dim, 9.5f);
+        hw::drawLabel (g, sat ? "SAT" : satChosen ? "SAT OFF" : "CLEAN", { out.getRight() - 90, out.getY() + 10, 56, 14 }, juce::Justification::right, sat ? colours::amber : colours::dim, 9.5f);
         g.setColour (colours::dim);
         g.setFont (juce::FontOptions (11.5f));
-        g.drawFittedText (sat ? "SAT shapes what a boost adds. Cuts stay clean." : "CLEAN: a plain equaliser. Switch the mode to SAT for Drive and Style.",
-                          out.getX() + 18, out.getY() + 34, out.getWidth() - 36, 36, juce::Justification::topLeft, 3);
+        const auto hint = linear ? "Delay " + juce::String (latency) + " samples, " + juce::String (juce::roundToInt (1000.0 * latency / proc.currentSampleRate)) + " ms"
+                                 : juce::String ("No delay");
+        g.drawFittedText (hint, out.getX() + 18, out.getY() + 80, out.getWidth() - 36, 14, juce::Justification::topLeft, 1);
     }
 
     // Level meters: two bars in one window of glass, green until -6 dBFS, amber to -0.5, red above.

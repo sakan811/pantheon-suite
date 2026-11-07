@@ -6,11 +6,11 @@
 #include "Parameters.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
-class IrisProcessor : public juce::AudioProcessor
+class IrisProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
 public:
     IrisProcessor();
-    ~IrisProcessor() override = default;
+    ~IrisProcessor() override { cancelPendingUpdate(); }
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -41,6 +41,11 @@ public:
     double currentSampleRate = 48000.0;
 
 private:
+    // The latency changes with the phase mode, which a host or the editor can change at any time; setLatencySamples belongs to the
+    // message thread, so the audio thread only asks for it.
+    void handleAsyncUpdate() override;
+    std::atomic<int> reportedLatency { 0 };
+
     int currentProgram = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (IrisProcessor)
