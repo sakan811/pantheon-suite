@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Rules for the repository as a whole. Each plugin has its own CLAUDE.md in `plugins/<name>/` (Claude Code reads it when you
+Rules for the repository as a whole. Each plugin has its own CLAUDE.md in `plugins/<name>/`, and each app in `apps/<name>/` (Claude Code reads it when you
 work in that folder; Harmonia's is still missing, see the end of this file); it owns that plugin's architecture, commands and invariants. This file owns only what crosses plugins.
 The same rule as in the plugins applies here: every fact lives in one place, the others link to it.
 
@@ -10,25 +10,27 @@ The same rule as in the plugins applies here: every fact lives in one place, the
 shared/ui/       the hardware-style interface kit (JUCE GUI only, header-only), target `pantheon_ui`
 shared/dsp/      DSP that more than one plugin uses (header-only, namespace `pdsp`), target `pantheon_dsp`
 plugins/<name>/  one self-contained plugin each: its own CMakeLists.txt, core/, tests, README, CLAUDE.md
+apps/<name>/     one self-contained standalone application each (no plugin formats, no host): the same files as a plugin; today Orpheus, the pitch editor
 .github/         CI for the whole repository (workflows run per plugin with `working-directory`)
 ```
 
-- Dependencies point one way: `plugins/*` → `shared/*`, never the reverse, and never from one plugin to another. If two
-  plugins need the same code, it moves to `shared/` first and both use it from there.
+- Dependencies point one way: `plugins/*` and `apps/*` → `shared/*`, never the reverse, and never from one plugin or app to another. If two
+  of them need the same code, it moves to `shared/` first and both use it from there.
 - `shared/` knows nothing about any plugin: no plugin types, parameters, verdicts or words in it. What a plugin adds on top
   (its name, its number formats, its verdict colours) lives in that plugin; Themis' is `plugin/Source/ThemisUi.h`.
-- A plugin builds from its own folder with the commands in its README (`cmake -S . -B build` there); it pulls `shared/` in
+- A plugin or app builds from its own folder with the commands in its README (`cmake -S . -B build` there); it pulls `shared/` in
   by relative path. There is no root CMake project: each plugin fetches its own JUCE, and they pin different versions (see
   below), which a single root project could not.
 
 ## shared/ui
 
-- All the plugins draw with it (Themis, Hephaestus, Harmonia, Iris); nothing in a plugin draws its own panel, lamp, knob, button,
+- All the plugins and apps draw with it (Themis, Hephaestus, Harmonia, Iris, Orpheus); nothing in one draws its own panel, lamp, knob, button,
   selector or nameplate. What a plugin adds on top is small and lives in it (`ThemisUi.h`, `HephaestusUi.h`, `HarmoniaUi.h`, `IrisUi.h`: its
   words, its verdict, mode or placement colours). A plugin's own namespaces must not be called `ui`, which is the kit's.
 - It owns every pixel of the interface: [Hardware.h](shared/ui/include/pantheon/ui/Hardware.h) (`colours::`, fonts, `ui::hw`
   panels, glass, lamps, buttons, knobs, the header plate and the nameplate), [HardwareLookAndFeel.h](shared/ui/include/pantheon/ui/HardwareLookAndFeel.h),
-  [Controls.h](shared/ui/include/pantheon/ui/Controls.h) (the parameter-bound `Knob`, `Choice` and `Toggle`; a choice takes its items from the parameter, so a plugin never lists them twice; clicking a `Knob`'s read-out opens it for typing a value) and
+  [Controls.h](shared/ui/include/pantheon/ui/Controls.h) (the parameter-bound `Knob`, `Choice` and `Toggle`; a choice takes its items from the parameter, so a plugin never lists them twice; clicking a `Knob`'s read-out opens it for typing a value),
+  [ValueKnob.h](shared/ui/include/pantheon/ui/ValueKnob.h) (the same knob for a value that is not a plugin parameter, such as the setting of the selected note in an editor: it holds its own value and calls back; Orpheus is its only user) and
   [MeterCell.h](shared/ui/include/pantheon/ui/MeterCell.h), plus [FreqAxis.h](shared/ui/include/pantheon/ui/FreqAxis.h) (the logarithmic frequency axis every spectrum display uses). Plugins call them; they do not draw their own panels, lamps or
   buttons. The namespaces (`colours`, `ui`, `ui::hw`) are kept short on purpose.
 - Everything is drawn from code: no image or font files, nothing random at run time.
@@ -75,8 +77,8 @@ Delete an item here when it is done; this list is the only place that says what 
 
 - **Installing on build.** Both set `COPY_PLUGIN_AFTER_BUILD TRUE` unconditionally, so building a plugin target copies it into
   `~/Library/Audio/Plug-Ins`. Themis makes this an option (`THEMIS_INSTALL_AFTER_BUILD`), which CI relies on.
-- **CI** builds and tests Themis (macOS and Linux) and runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)). Iris has no macOS job yet (universal binary, AU, `auval`), and Hephaestus and Harmonia are in no workflow.
+- **CI** builds and tests Themis (macOS and Linux), runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)) and Orpheus' `OrpheusTests` and `OrpheusUiCheck` on Linux ([orpheus.yml](.github/workflows/orpheus.yml)). Iris and Orpheus have no macOS job yet (universal binary, AU and `auval` for Iris), the Orpheus workflow has not run yet, and Hephaestus and Harmonia are in no workflow.
 - **Harmonia has no CLAUDE.md.** Its architecture, invariants and gotchas are not written down yet; its README is the only description.
 - **Shared DSP.** Only what a second plugin actually needed has been extracted (see shared/dsp). Themis' FFT, band grid and target
-  curves, and Harmonia's pitch tracking, are used by one plugin each and stay there; Themis' `TonalAnalyzer` is not the same code as
+  curves, and Harmonia's pitch tracking, are used by one plugin each and stay there; so are Orpheus' offline pitch tracker and PSOLA ([apps/orpheus/Source/Dsp](apps/orpheus/Source/Dsp)), which are whole-file and share no code with Harmonia's real-time ones (if a second consumer needs either, extract then); Themis' `TonalAnalyzer` is not the same code as
   the shared spectrum analyser (it differs in precision and JUCE dependence). Extract when a second plugin needs the same code.
