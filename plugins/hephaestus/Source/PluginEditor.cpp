@@ -142,6 +142,14 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
                                "Press again to release. Not saved with the session.");
     soloAddsButton.setTooltip ("Listen to only what this band adds (its distortion, or its filled harmonics), nothing else. "
                                "Press again to release. Not saved with the session.");
+    cleanButton.setTooltip ("Off (warm): the harmonics come from a waveshaper, so they follow the level and dynamics of the band and anything else "
+                            "in it is bent into new frequencies too. On (clean): the strongest note in the band is followed and its harmonics are built "
+                            "as pure sines locked to it. Nothing but that note makes harmonics, and the level cannot change their balance. It "
+                            "needs one dominant note (an 808, a sub or a bass line), takes about 100 ms to lock onto a new one, and adds nothing "
+                            "while the band holds several notes of similar level.");
+    cleanButton.setClickingTogglesState (true);
+    cleanButton.setColour (juce::TextButton::buttonOnColourId, forMode (BandMode::fill));
+    addChildComponent (cleanButton);
     for (auto* b : { &soloBandButton, &soloAddsButton })
     {
         b->setClickingTogglesState (false);
@@ -274,6 +282,13 @@ void HephaestusEditor::refreshBandPanel()
         knob.setVisible (k < bandKnobCount);
     }
 
+    // Warm / Clean belongs to a fill band only; elsewhere the button is hidden and bound to nothing.
+    if (on && mode == BandMode::fill)
+        cleanAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, bandIds (band).clean, cleanButton);
+    else
+        cleanAttachment.reset();
+    cleanButton.setVisible (on && mode == BandMode::fill);
+
     saturateModeButton.setToggleState (mode == BandMode::saturate, juce::dontSendNotification);
     fillModeButton.setToggleState (mode == BandMode::fill, juce::dontSendNotification);
     for (auto* b : { &saturateModeButton, &fillModeButton, &removeButton, &soloBandButton, &soloAddsButton })
@@ -293,7 +308,8 @@ juce::String HephaestusEditor::bandHint() const
                "Anything outside the band is left exactly as it is.";
 
     return "Adds harmonics above the band (the shaded zone, 2nd to 5th harmonic), but only as many as are missing: the energy just above the band is "
-           "measured against the band's own, and only the shortfall to AMOUNT is generated. FILL % on the band shows how much is being added.";
+           "measured against the band's own, and only the shortfall to AMOUNT is generated. FILL % on the band shows how much is being added. "
+           "CLEAN builds them as pure sines locked to the band's one strong note instead of shaping the signal.";
 }
 
 void HephaestusEditor::layoutBandPanel()
@@ -306,6 +322,7 @@ void HephaestusEditor::layoutBandPanel()
     pasteButton.setBounds (panel.getRight() - 14 - 64, panel.getY() + 6, 64, 20);
     soloAddsButton.setBounds (pasteButton.getX() - 8 - 86, panel.getY() + 6, 86, 20);
     soloBandButton.setBounds (soloAddsButton.getX() - 6 - 86, panel.getY() + 6, 86, 20);
+    cleanButton.setBounds (soloBandButton.getX() - 14 - 78, panel.getY() + 6, 78, 20);
     auto buttons = juce::Rectangle<int> (panel.getX(), panel.getY() + 34, panel.getWidth() - 14, chipHeight);
     removeButton.setBounds (buttons.removeFromRight (76));
     buttons.removeFromRight (8);
