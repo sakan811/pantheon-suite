@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Band.h"
+#include "PartialTracker.h"
 #include <pantheon/dsp/Biquad.h>
 #include <algorithm>
 #include <array>
@@ -164,6 +165,7 @@ public:
         double fill = 0.7;                   // 0..1 how strongly an existing fundamental ducks RESTORE
         double target = 0.0;                 // energy ratio (harmonic reach : band) ADAPT aims to keep
         double adapt = 0.0;                  // 0 = EXTEND at its fixed level, 1 = generate only the shortfall to `target`
+        bool clean = false;                  // EXTEND from a tracked partial (PartialTracker) instead of a waveshaper
     };
 
     void prepare (double sampleRate)
@@ -185,6 +187,7 @@ public:
         envBand.reset();
         envRestore.reset();
         gaps.reset();
+        tracker.reset();
         duck = 1.0;
         energyBand = energyReach = 0.0;
         adaptGain = 1.0;
@@ -209,6 +212,9 @@ public:
     {
         updateCoefficients (p);
         nCh = std::min (nCh, maxChannels);
+        if (p.clean && ! wasClean)
+            tracker.reset(); // it has not been running: start from nothing, not from what it last heard
+        wasClean = p.clean;
 
         for (int i = 0; i < n; ++i)
         {
@@ -223,7 +229,7 @@ public:
             const double envelope = std::max (envBand.process (peak), 1.0e-6);
             trackAdaptiveGain (x, b, nCh, p);
 
-            const Frame extended = p.extGain > 0.0 ? extend (b, envelope, nCh, p) : Frame {};
+            const Frame extended = p.extGain <= 0.0 ? Frame {} : p.clean ? extendClean (b, nCh, p) : extend (b, envelope, nCh, p);
             const Frame restored = p.resGain > 0.0 ? restore (x, b, nCh, p) : Frame {};
 
             for (int c = 0; c < nCh; ++c)
@@ -248,6 +254,32 @@ private:
 
             // Removes the DC / sub terms that appear whenever |x| < 1, and band-limits.
             result[(size_t) c] = ext[(size_t) c].process (h) * p.extGain * adaptGain;
+        }
+        return result;
+    }
+
+    // Clean EXTEND: the strongest partial of the band is followed (PartialTracker) and each harmonic is a sine of its
+    // amplitude at k times its phase, so nothing the band holds besides that partial is bent into new frequencies, and
+    // the level and the dynamics of the input cannot change what is added but its amplitude.
+    Frame extendClean (const Frame& b, int nCh, const Params& p) noexcept
+    {
+        tracker.process (b, nCh);
+        const double gain = tracker.gate();
+
+        Frame result {};
+        for (int c = 0; c < nCh; ++c)
+        {
+            const auto& t = tracker.partial (c);
+            double powerRe = t.re * t.re - t.im * t.im, powerIm = 2.0 * t.re * t.im; // the 2nd power of the phase vector
+            double h = 0.0;
+            for (int k = 0; k < 4; ++k)
+            {
+                h += p.harmonic[k] * usable[k] * powerRe;
+                const double next = powerRe * t.re - powerIm * t.im;
+                powerIm = powerRe * t.im + powerIm * t.re;
+                powerRe = next;
+            }
+            result[(size_t) c] = ext[(size_t) c].process (t.amp * h) * p.extGain * adaptGain * gain;
         }
         return result;
     }
@@ -328,6 +360,7 @@ private:
             region[c].setup (fs, 2, reach.lo, 2, reach.hi);    // what is already there, above the band
         }
         gaps.setup (fs, lo, hi);
+        tracker.setup (fs, lo, hi);
 
         // A harmonic that would land too close to Nyquist would alias, so it is dropped.
         const int highest = highestHarmonic (hi, fs);
@@ -353,6 +386,8 @@ private:
 
     std::array<pdsp::Bandpass, maxChannels> band, ext, restoreIn, restoreOut, region;
     GapDetector<maxChannels> gaps;
+    PartialTracker<maxChannels> tracker;
+    bool wasClean = false;
     EnvelopeFollower envBand, envRestore;
 };
 }
