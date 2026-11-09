@@ -4,11 +4,13 @@
 #pragma once
 
 #include "Band.h"
+#include "OctaveGenerator.h"
 #include "PartialTracker.h"
 #include <pantheon/dsp/Biquad.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <vector>
 
 namespace hep
 {
@@ -149,6 +151,11 @@ private:
 // Everything runs at the host sample rate: a fill band's range stops at fillMaxHz, so its
 // harmonics stay clear of Nyquist (the 5th is dropped if it would not) and there is nothing to
 // alias and no need to oversample.
+// How a fill band makes its harmonics. Warm: a waveshaper (Chebyshev polynomials of the band over its envelope). Clean: sines locked to
+// the one strongest note in the band (PartialTracker). Octave: sines locked to every resolved partial in the band, made in the spectrum
+// (OctaveGenerator), which is the only one with a latency of its own.
+enum class Character { warm = 0, clean = 1, octave = 2 };
+
 class FundamentalEngine
 {
 public:
@@ -165,13 +172,20 @@ public:
         double fill = 0.7;                   // 0..1 how strongly an existing fundamental ducks RESTORE
         double target = 0.0;                 // energy ratio (harmonic reach : band) ADAPT aims to keep
         double adapt = 0.0;                  // 0 = EXTEND at its fixed level, 1 = generate only the shortfall to `target`
-        bool clean = false;                  // EXTEND from a tracked partial (PartialTracker) instead of a waveshaper
+        Character character = Character::warm; // how EXTEND makes its harmonics (see Character)
     };
 
     void prepare (double sampleRate)
     {
         fs = sampleRate;
         lastLo = lastHi = lastCeiling = -1.0;
+        octaveGen.prepare (sampleRate);
+        restoreRing.assign ((size_t) maxChannels * (size_t) (OctaveGenerator::latencyFor (sampleRate) + 1), 0.0);
+        restorePos = 0;
+        alignSize = (size_t) (OctaveGenerator::latencyFor (sampleRate) + 1);
+        alignRing.assign ((size_t) maxChannels * alignSize, 0.0);
+        alignPos = 0;
+        guardCoeff = 1.0 - std::exp (-1.0 / (0.008 * sampleRate));
         reset();
     }
 
@@ -188,6 +202,13 @@ public:
         envRestore.reset();
         gaps.reset();
         tracker.reset();
+        octaveGen.reset();
+        std::fill (restoreRing.begin(), restoreRing.end(), 0.0);
+        std::fill (alignRing.begin(), alignRing.end(), 0.0);
+        guardIn.fill (0.0);
+        guardOut.fill (0.0);
+        octaveRunning = false;
+        lastCharacter = Character::warm;
         duck = 1.0;
         energyBand = energyReach = 0.0;
         adaptGain = 1.0;
@@ -212,9 +233,23 @@ public:
     {
         updateCoefficients (p);
         nCh = std::min (nCh, maxChannels);
-        if (p.clean && ! wasClean)
-            tracker.reset(); // it has not been running: start from nothing, not from what it last heard
-        wasClean = p.clean;
+
+        // A generator that has not been running starts from nothing, not from what it last heard.
+        const bool octave = p.character == Character::octave, clean = p.character == Character::clean;
+        if (clean && lastCharacter != Character::clean)
+            tracker.reset();
+        const bool octaveWanted = octave && p.extGain > 0.0;
+        if (octaveWanted && ! octaveRunning)
+        {
+            octaveGen.reset();
+            std::fill (alignRing.begin(), alignRing.end(), 0.0);
+            guardIn.fill (0.0);
+            guardOut.fill (0.0);
+        }
+        if (octave && lastCharacter != Character::octave)
+            std::fill (restoreRing.begin(), restoreRing.end(), 0.0);
+        octaveRunning = octaveWanted;
+        lastCharacter = p.character;
 
         for (int i = 0; i < n; ++i)
         {
@@ -229,8 +264,12 @@ public:
             const double envelope = std::max (envBand.process (peak), 1.0e-6);
             trackAdaptiveGain (x, b, nCh, p);
 
-            const Frame extended = p.extGain <= 0.0 ? Frame {} : p.clean ? extendClean (b, nCh, p) : extend (b, envelope, nCh, p);
-            const Frame restored = p.resGain > 0.0 ? restore (x, b, nCh, p) : Frame {};
+            Frame extended {};
+            if (p.extGain > 0.0)
+                extended = clean ? extendClean (b, nCh, p) : octave ? extendOctave (x, b, nCh, p) : extend (b, envelope, nCh, p);
+            Frame restored = p.resGain > 0.0 ? restore (x, b, nCh, p) : Frame {};
+            if (octave)
+                restored = delayRestored (restored, nCh); // the spectral generator is late; what it is summed with must be too
 
             for (int c = 0; c < nCh; ++c)
                 out[c][i] = (float) (extended[(size_t) c] + restored[(size_t) c]);
@@ -256,6 +295,49 @@ private:
             result[(size_t) c] = ext[(size_t) c].process (h) * p.extGain * adaptGain;
         }
         return result;
+    }
+
+    // Octave EXTEND: a sine at k times the frequency and phase of every resolved partial in the band, made in the spectrum
+    // (OctaveGenerator), with the same weights, Amount and adaptive gain as the others. Its output is latency() samples late.
+    Frame extendOctave (const Frame& x, const Frame& b, int nCh, const Params& p) noexcept
+    {
+        const double weights[OctaveGenerator::kHarmonics] = { p.harmonic[0] * usable[0], p.harmonic[1] * usable[1],
+                                                              p.harmonic[2] * usable[2], p.harmonic[3] * usable[3] };
+        Frame made {}, result {};
+        octaveGen.process (x, made, nCh, curLo, curHi, weights);
+
+        // A frame's sines last the whole frame, so before a note starts and after it stops there is a short echo of it. What the band
+        // holds at that moment (its own signal, held back by the same latency) bounds what may be added: the harmonics, which carry
+        // at most the band's energy, are not let past twice its level (a margin for the band's edges, where its filter lets less
+        // through than the spectrum sees). In steady playing the bound is never reached.
+        for (int c = 0; c < nCh; ++c)
+        {
+            const size_t at = (size_t) c * alignSize + alignPos;
+            const double held = alignRing[at];
+            alignRing[at] = b[(size_t) c];
+            guardIn[(size_t) c] += guardCoeff * (held * held - guardIn[(size_t) c]);
+            guardOut[(size_t) c] += guardCoeff * (made[(size_t) c] * made[(size_t) c] - guardOut[(size_t) c]);
+            const double allowed = kGuardMargin * kGuardMargin * guardIn[(size_t) c];
+            const double g = guardOut[(size_t) c] > allowed ? std::sqrt (allowed / guardOut[(size_t) c]) : 1.0;
+            result[(size_t) c] = made[(size_t) c] * g * p.extGain * adaptGain;
+        }
+        alignPos = (alignPos + 1) % alignSize;
+        return result;
+    }
+
+    // Rebuild's output, held back by the octave generator's latency so that the two sum in step.
+    Frame delayRestored (const Frame& v, int nCh) noexcept
+    {
+        Frame out {};
+        for (int c = 0; c < nCh; ++c)
+        {
+            auto& ring = restoreRing;
+            const size_t size = ring.size() / (size_t) maxChannels, base = (size_t) c * size;
+            ring[base + restorePos] = v[(size_t) c];
+            out[(size_t) c] = ring[base + (restorePos + 1) % size];
+        }
+        restorePos = (restorePos + 1) % (restoreRing.size() / (size_t) maxChannels);
+        return out;
     }
 
     // Clean EXTEND: the strongest partial of the band is followed (PartialTracker) and each harmonic is a sine of its
@@ -387,7 +469,16 @@ private:
     std::array<pdsp::Bandpass, maxChannels> band, ext, restoreIn, restoreOut, region;
     GapDetector<maxChannels> gaps;
     PartialTracker<maxChannels> tracker;
-    bool wasClean = false;
+    OctaveGenerator octaveGen;
+    Character lastCharacter = Character::warm;
+    bool octaveRunning = false;
+    std::vector<double> restoreRing; // maxChannels rings of latency + 1
+    size_t restorePos = 0;
+    std::vector<double> alignRing;   // the band signal held back by the octave generator's latency, per channel
+    size_t alignSize = 1, alignPos = 0;
+    std::array<double, maxChannels> guardIn {}, guardOut {};
+    double guardCoeff = 0.0;
+    static constexpr double kGuardMargin = 2.0;
     EnvelopeFollower envBand, envRestore;
 };
 }

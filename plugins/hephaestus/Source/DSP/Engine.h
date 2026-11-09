@@ -80,13 +80,24 @@ struct EngineParams
     std::array<BandParams, maxBands> bands;
 };
 
+// True when a band that is on makes its harmonics in the spectrum (Character::octave). That is what adds a latency of its own, and it
+// depends on nothing but the parameters (not on a fade, not on Amount), so the latency does not move while a knob does.
+inline bool usesOctave (const EngineParams& p) noexcept
+{
+    for (const auto& b : p.bands)
+        if (b.on && b.mode == BandMode::fill && b.fill.character == Character::octave)
+            return true;
+    return false;
+}
+
 class Engine
 {
 public:
     static constexpr int maxChannels = 2;
 
-    // `initialOsMode` (if given) sets the reported latency right away; otherwise it is only known after the first block.
-    void prepare (double sampleRate, int maxBlockSize, int initialOsMode = -1)
+    // `initialOsMode` (if given) sets the reported latency right away (with `initialOctave`: the octave generator's too); otherwise it
+    // is only known after the first block.
+    void prepare (double sampleRate, int maxBlockSize, int initialOsMode = -1, bool initialOctave = false)
     {
         fs = sampleRate;
         maxBlock = maxBlockSize;
@@ -102,8 +113,8 @@ public:
             maxLatency = std::max (maxLatency, latencyTable[(size_t) m]);
         }
 
-        forEachDelay ([&] (IntDelay& d) { d.prepare (maxLatency + 8); });
-        for (auto* b : { &dryBuf, &wetBuf, &fundBuf, &satBuf, &tmpBuf, &soloBuf, &soloFillBuf, &soloSatBuf })
+        forEachDelay ([&] (IntDelay& d) { d.prepare (maxLatency + OctaveGenerator::latencyFor (sampleRate) + 8); });
+        for (auto* b : { &dryBuf, &wetBuf, &fundBuf, &octBuf, &satBuf, &tmpBuf, &soloBuf, &soloFillBuf, &soloFillOctBuf, &soloSatBuf })
             b->setSize (maxChannels, maxBlockSize, false, false, true);
 
         fillGain.fill (0.0f);
@@ -113,7 +124,7 @@ public:
         for (auto& r : bandReachDb)
             r.store ((float) FundamentalEngine::kReachFloorDb);
 
-        currentOs = -1; // forces a latency refresh on the first block
+        currentOs = currentOct = -1; // forces a latency refresh on the first block
         msDry = msWet = 1.0e-6;
         matchGain = 1.0;
         soloStep = 1.0 / (0.010 * fs);
@@ -124,7 +135,7 @@ public:
         reset();
 
         if (initialOsMode >= 0)
-            applyLatencyFor (std::clamp (initialOsMode, 0, Saturator::numOsModes - 1));
+            applyLatencyFor (std::clamp (initialOsMode, 0, Saturator::numOsModes - 1), initialOctave ? OctaveGenerator::latencyFor (fs) : 0);
     }
 
     void reset()
@@ -173,7 +184,7 @@ private:
     template <class Fn>
     void forEachDelay (Fn&& fn)
     {
-        for (auto* set : { &dryDelay, &fundDelay, &bypassDelay, &soloDelay })
+        for (auto* set : { &dryDelay, &fundDelay, &bypassDelay, &soloDelay, &octDelay, &satDelay, &soloOctDelay, &soloSatDelay })
             for (auto& d : *set)
                 fn (d);
     }
@@ -227,12 +238,24 @@ private:
         }
     }
 
-    void applyLatencyFor (int osMode)
+    // Every path is brought to one latency: the oversampling's (`osLatency`, which the saturate bands have natively) plus the octave
+    // generator's when a band uses it (`octLatency`, which only an octave band has natively).
+    //   plain fill bands, the dry signal and the clean copy:  both, by delay
+    //   octave fill bands:                                    the oversampling's, by delay
+    //   saturate bands:                                       the octave generator's, by delay
+    void applyLatencyFor (int osMode, int octaveLatency)
     {
         currentOs = osMode;
-        latency = latencyTable[(size_t) osMode];
+        currentOct = octaveLatency;
+        const int osLatency = latencyTable[(size_t) osMode];
+        latency = osLatency + octaveLatency;
         saturator.onOversamplingChanged();
-        forEachDelay ([&] (IntDelay& d) { d.setDelay (latency); d.reset(); });
+        for (auto* set : { &dryDelay, &fundDelay, &bypassDelay, &soloDelay })
+            for (auto& d : *set) { d.setDelay (latency); d.reset(); }
+        for (auto* set : { &octDelay, &soloOctDelay })
+            for (auto& d : *set) { d.setDelay (osLatency); d.reset(); }
+        for (auto* set : { &satDelay, &soloSatDelay })
+            for (auto& d : *set) { d.setDelay (octaveLatency); d.reset(); }
     }
 
     // Slow RMS ratio of dry to wet, so loudness differences don't masquerade as tone.
@@ -256,11 +279,12 @@ private:
     void processChunk (juce::AudioBuffer<float>& buffer, int start, int n, int nCh, const EngineParams& p)
     {
         const int os = std::clamp (p.osMode, 0, Saturator::numOsModes - 1);
-        if (os != currentOs)
-            applyLatencyFor (os);
+        const int oct = usesOctave (p) ? OctaveGenerator::latencyFor (fs) : 0;
+        if (os != currentOs || oct != currentOct)
+            applyLatencyFor (os, oct);
 
         const auto io = pointersOf (buffer, start);
-        const auto dry = pointersOf (dryBuf), wet = pointersOf (wetBuf), add = pointersOf (fundBuf);
+        const auto dry = pointersOf (dryBuf), wet = pointersOf (wetBuf), add = pointersOf (fundBuf), addOct = pointersOf (octBuf);
         const auto shaped = pointersOf (satBuf);
         const bool ms = p.midSide && nCh == 2;
 
@@ -292,22 +316,32 @@ private:
         }
         const bool soloShown = shownBand >= 0 && (soloWant >= 0 || soloAmount > 0.0);
         captureBand = soloShown && shownKind == SoloKind::adds ? shownBand : -1;
-        const auto solo = pointersOf (soloBuf), soloFill = pointersOf (soloFillBuf), soloSat = pointersOf (soloSatBuf);
+        const auto solo = pointersOf (soloBuf), soloFill = pointersOf (soloFillBuf), soloSat = pointersOf (soloSatBuf),
+                   soloFillOct = pointersOf (soloFillOctBuf);
         for (auto& c : { 0, 1 })
+        {
             std::fill_n (soloFill[(size_t) c], n, 0.0f);
+            std::fill_n (soloFillOct[(size_t) c], n, 0.0f);
+        }
 
         // 3. Fill bands on the clean signal. In mid/side only the mid channel feeds them, so bass
         //    stays centred.
         for (auto& c : { 0, 1 })
+        {
             std::fill_n (add[(size_t) c], n, 0.0f);
+            std::fill_n (addOct[(size_t) c], n, 0.0f);
+        }
         for (int b = 0; b < maxBands; ++b)
-            runFillBand (b, wet, add, soloFill, nCh, n, ms, p.bands[(size_t) b]);
+            runFillBand (b, wet, add, addOct, soloFill, soloFillOct, nCh, n, ms, p.bands[(size_t) b]);
 
-        // Always run the delay so its ring buffer keeps flowing when a fill band is switched on later.
+        // Always run the delays so their ring buffers keep flowing when a fill band is switched on later. A band of the octave kind is
+        // already late by its generator's latency, so it is held back by the rest only (see applyLatencyFor).
         forEachSample (nCh, n, [&] (int c, int i)
         {
             add[(size_t) c][i] = fundDelay[(size_t) c].process (add[(size_t) c][i]);
-            soloFill[(size_t) c][i] = soloDelay[(size_t) c].process (soloFill[(size_t) c][i]); // the soloed fill band, aligned the same way
+            addOct[(size_t) c][i] = octDelay[(size_t) c].process (addOct[(size_t) c][i]);
+            soloFill[(size_t) c][i] = soloDelay[(size_t) c].process (soloFill[(size_t) c][i]) // the soloed fill band, aligned the same way
+                                      + soloOctDelay[(size_t) c].process (soloFillOct[(size_t) c][i]);
         });
 
         // 4. Saturate bands add their distortion to the clean signal, which is delayed to match.
@@ -325,8 +359,10 @@ private:
 
         forEachSample (nCh, n, [&] (int c, int i)
         {
+            shaped[(size_t) c][i] = satDelay[(size_t) c].process (shaped[(size_t) c][i]);
+            soloSat[(size_t) c][i] = soloSatDelay[(size_t) c].process (soloSat[(size_t) c][i]);
             wet[(size_t) c][i] = bypassDelay[(size_t) c].process (wet[(size_t) c][i])
-                                 + shaped[(size_t) c][i] + add[(size_t) c][i];
+                                 + shaped[(size_t) c][i] + add[(size_t) c][i] + addOct[(size_t) c][i];
         });
 
         if (ms) midSideDecode (wet, n);
@@ -405,8 +441,12 @@ private:
 
     // Runs one fill band and accumulates its (faded) output into `add`. A band that is off and has
     // faded out is left alone, and starts from clean history when it comes back.
-    void runFillBand (int b, const Ptrs& wet, const Ptrs& add, const Ptrs& soloFill, int nCh, int n, bool ms, const BandParams& band)
+    void runFillBand (int b, const Ptrs& wet, const Ptrs& addPlain, const Ptrs& addOctave, const Ptrs& soloPlain, const Ptrs& soloOctave,
+                      int nCh, int n, bool ms, const BandParams& band)
     {
+        const bool octave = band.fill.character == Character::octave;
+        const auto& add = octave ? addOctave : addPlain;
+        const auto& soloFill = octave ? soloOctave : soloPlain;
         auto& engine = fillEngine[(size_t) b];
         auto& gain = fillGain[(size_t) b];
         const bool want = band.on && band.mode == BandMode::fill && (band.fill.extGain > 0.0 || band.fill.resGain > 0.0);
@@ -454,15 +494,15 @@ private:
     }
 
     double fs = 48000.0;
-    int maxBlock = 512, currentOs = -1, latency = 0;
+    int maxBlock = 512, currentOs = -1, currentOct = -1, latency = 0;
     std::array<int, Saturator::numOsModes> latencyTable {};
 
     Saturator saturator;
     std::array<FundamentalEngine, maxBands> fillEngine;
     std::array<float, maxBands> fillGain {};
     std::array<bool, maxBands> fillRunning {};
-    std::array<IntDelay, maxChannels> dryDelay, fundDelay, bypassDelay, soloDelay;
-    juce::AudioBuffer<float> dryBuf, wetBuf, fundBuf, satBuf, tmpBuf, soloBuf, soloFillBuf, soloSatBuf;
+    std::array<IntDelay, maxChannels> dryDelay, fundDelay, bypassDelay, soloDelay, octDelay, satDelay, soloOctDelay, soloSatDelay;
+    juce::AudioBuffer<float> dryBuf, wetBuf, fundBuf, octBuf, satBuf, tmpBuf, soloBuf, soloFillBuf, soloFillOctBuf, soloSatBuf;
 
     // Band solo state (audio thread): the band shown (kept while it fades out), its way, how far it has faded in, and the
     // band whose additions are being captured this chunk.
