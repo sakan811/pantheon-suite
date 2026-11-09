@@ -299,5 +299,49 @@ int main()
         check (host.engine.monitor.regions.load() == 0u, "... and the band solo strip");
     }
 
+    std::printf ("\nClean fill (per band: Warm is off)\n");
+    {
+        HephaestusProcessor host;
+        host.setPlayConfigDetails (2, 2, 48000.0, 512);
+        host.prepareToPlay (48000.0, 512);
+
+        check (value (host, bandIds (0).clean) < 0.5f && value (host, bandIds (3).clean) < 0.5f,
+               "every band starts Warm, so a session saved before the switch existed sounds as it did");
+        const auto clean = [&] (int band) { return readParams (host.apvts).bands[(size_t) band].fill.clean; };
+
+        int cleanIndex = -1;
+        for (int i = 0; i < (int) presets().size(); ++i)
+            if (juce::String (presets()[(size_t) i].name) == "Clean Sub Fill")
+                cleanIndex = i;
+        applyPreset (host.apvts, cleanIndex);
+        check (cleanIndex >= 0 && bandMode (host.apvts, 0) == BandMode::fill && clean (0), "the Clean Sub Fill preset makes band 1 a Clean fill band");
+        applyPreset (host.apvts, 0);
+        check (! clean (0), "a preset starts every control from its default, Clean included");
+
+        // The switch in the band panel: only for a fill band, and it follows (and drives) the band's own parameter.
+        HephaestusEditor editor (host);
+        check (! editor.cleanSwitch().isVisible(), "a saturate band shows no Warm / Clean switch");
+        setBandMode (host.apvts, 0, BandMode::fill);
+        editor.selectBand (0);
+        check (editor.cleanSwitch().isVisible() && ! editor.cleanSwitch().getToggleState(), "a fill band shows it, unlit while Warm");
+
+        setParameterValue (host.apvts, bandIds (0).clean, 1.0f);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        check (editor.cleanSwitch().getToggleState() && clean (0), "turning the parameter on lights the switch and reaches the engine's parameters");
+
+        editor.cleanSwitch().triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        check (! clean (0), "clicking the switch turns it back to Warm");
+
+        addBand (host.apvts, BandMode::fill, 80.0, 1);
+        setParameterValue (host.apvts, bandIds (1).clean, 1.0f);
+        removeBand (host.apvts, 1);
+        addBand (host.apvts, BandMode::fill, 80.0, 1);
+        check (value (host, bandIds (1).clean) < 0.5f, "a band added into a used slot starts Warm again");
+
+        editor.selectBand (1);
+        check (editor.cleanSwitch().isVisible() && ! editor.cleanSwitch().getToggleState(), "selecting another fill band re-binds the switch to that band");
+    }
+
     return finish ("UI CHECK");
 }

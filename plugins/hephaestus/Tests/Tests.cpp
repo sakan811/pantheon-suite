@@ -320,6 +320,280 @@ void testExtendNoteOff()
     }
 }
 
+// Energy of x over [start, start + len) that is not on a multiple of f0 (up to the 5th), in dB re everything in the window. len must hold
+// whole periods of f0, or the fitted sines are not orthogonal and the window leaks into its own residual.
+double offHarmonicDb (const std::vector<float>& x, int start, int len, double f0)
+{
+    std::vector<double> rest (x.begin() + start, x.begin() + start + len);
+    double total = 0.0;
+    for (double v : rest) total += v * v;
+    for (int k = 1; k <= 5; ++k)
+    {
+        double c = 0, s = 0;
+        for (int i = 0; i < len; ++i)
+        {
+            const double ph = 2.0 * M_PI * k * f0 * (start + i) / fs;
+            c += rest[(size_t) i] * std::cos (ph);
+            s += rest[(size_t) i] * std::sin (ph);
+        }
+        c *= 2.0 / len;
+        s *= 2.0 / len;
+        for (int i = 0; i < len; ++i)
+            rest[(size_t) i] -= c * std::cos (2.0 * M_PI * k * f0 * (start + i) / fs) + s * std::sin (2.0 * M_PI * k * f0 * (start + i) / fs);
+    }
+    double left = 0.0;
+    for (double v : rest) left += v * v;
+    return 10.0 * std::log10 (std::max (left, 1.0e-30) / std::max (total, 1.0e-30));
+}
+
+// A window of whole periods of f0 that starts at `startSec`.
+int wholePeriods (double f0, double seconds) { return (int) std::floor (f0 * seconds) / f0 * fs; }
+
+// Energy at the frequencies that are not multiples of either tone, in dB re the energy at those that are, over a window of whole 10 Hz periods.
+double intermodDb (const std::vector<float>& x, int start, double f1, double f2)
+{
+    constexpr int len = 48000;
+    double wanted = 0.0, other = 0.0;
+    for (int k = 1; k <= 60; ++k)
+    {
+        const double f = 10.0 * k;
+        double c = 0, s = 0;
+        for (int i = 0; i < len; ++i)
+        {
+            c += x[(size_t) (start + i)] * std::cos (2.0 * M_PI * f * (start + i) / fs);
+            s += x[(size_t) (start + i)] * std::sin (2.0 * M_PI * f * (start + i) / fs);
+        }
+        const double e = (c * c + s * s) * 4.0 / ((double) len * len);
+        const bool onTone = std::fabs (std::remainder (f, f1)) < 1.0e-6 || std::fabs (std::remainder (f, f2)) < 1.0e-6;
+        (onTone ? wanted : other) += e;
+    }
+    return 10.0 * std::log10 (std::max (other, 1.0e-30) / std::max (wanted, 1.0e-30));
+}
+
+double rmsOf (const std::vector<float>& x, int from, int to)
+{
+    double s = 0;
+    for (int i = from; i < to; ++i) s += (double) x[(size_t) i] * x[(size_t) i];
+    return std::sqrt (s / (to - from));
+}
+
+std::vector<float> runFundAt (const std::vector<float>& in, const FundamentalEngine::Params& p, double rate)
+{
+    FundamentalEngine fe;
+    fe.prepare (rate);
+    std::vector<float> out (in.size());
+    for (size_t pos = 0; pos < in.size(); pos += 480)
+    {
+        const int n = (int) std::min<size_t> (480, in.size() - pos);
+        const float* inp[1] = { in.data() + pos };
+        float* outp[1] = { out.data() + pos };
+        fe.process (inp, outp, 1, n, p);
+    }
+    return out;
+}
+
+void testCleanFill()
+{
+    std::printf ("\n[5g] Clean fill: harmonics built as sines locked to the band's strongest note, not shaped from the signal (band 40-120 Hz)\n");
+    auto clean = extendParams();
+    clean.clean = true;
+    const auto warm = extendParams();
+    const double expected[4] = { -6.0, -9.0, -15.0, -22.0 };
+
+    // The same weights as Warm, and nothing besides them in the output.
+    for (double f0 : { 45.0, 60.0, 90.0 })
+        for (double amp : { 0.5, 0.005 })
+        {
+            const auto in = sines ({ { f0, amp } }, 144000);
+            const auto add = runFund (in, clean);
+            const double ref = amplitudeAt (in, 72000, 32000, f0) * rangeGain (f0, clean);
+            double worst = 0;
+            std::string line;
+            for (int h = 0; h < 4; ++h)
+            {
+                const double g = db (amplitudeAt (add, 72000, 32000, f0 * (h + 2)) / ref);
+                worst = std::max (worst, std::fabs (g - expected[h]));
+                line += fmt (" H%d:%+.1f", h + 2, g);
+            }
+            const int len = wholePeriods (f0, 1.0);
+            const double leftover = offHarmonicDb (add, 72000, len, f0), warmLeftover = offHarmonicDb (runFund (in, warm), 72000, len, f0);
+            check (worst < 1.5 && leftover < -45.0 && leftover < warmLeftover - 12.0,
+                   fmt ("%3.0f Hz @ %.3f: max deviation %.2f dB |", f0, amp, worst) + line
+                       + fmt (" | not a harmonic: %.0f dB (Warm %.0f dB)", leftover, warmLeftover));
+        }
+
+    // A note that decays (an 808): the balance of the harmonics does not move with the level.
+    {
+        std::vector<float> in (144000);
+        for (size_t i = 0; i < in.size(); ++i)
+            in[i] = (float) (0.6 * std::exp (-(double) i / fs / 0.5) * std::sin (2.0 * M_PI * 60.0 * (double) i / fs));
+        const auto add = runFund (in, clean);
+        const auto ratio = [&] (int at)
+        {
+            return db (amplitudeAt (add, at, 4800, 120.0) / amplitudeAt (in, at, 4800, 60.0));
+        };
+        const double early = ratio (14400), late = ratio (96000);
+        check (std::fabs (early - late) < 1.0,
+               fmt ("decaying note: 2nd harmonic re fundamental %+.2f dB at 0.3 s and %+.2f dB at 2 s (%.0f dB lower)", early, late,
+                    db (amplitudeAt (in, 14400, 4800, 60.0) / amplitudeAt (in, 96000, 4800, 60.0))));
+    }
+
+    // A level that moves faster than Warm's envelope follows (a 3 Hz tremolo, 30 - 100 %): its harmonics fall away when the level falls,
+    // because the k-th Chebyshev harmonic scales as a^k when the envelope is above the peak. Clean's follow the level.
+    {
+        std::vector<float> in (192000);
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            const double t = (double) i / fs;
+            in[i] = (float) (0.5 * (0.65 + 0.35 * std::sin (2.0 * M_PI * 3.0 * t)) * std::sin (2.0 * M_PI * 60.0 * t));
+        }
+        const auto spread = [&] (const FundamentalEngine::Params& p)
+        {
+            const auto add = runFund (in, p);
+            double lowest = 1.0e9, highest = -1.0e9;
+            for (int at = 48000; at + 2400 < (int) in.size(); at += 1200)
+            {
+                const double r = db (amplitudeAt (add, at, 2400, 120.0) / amplitudeAt (in, at, 2400, 60.0));
+                lowest = std::min (lowest, r);
+                highest = std::max (highest, r);
+            }
+            return highest - lowest;
+        };
+        const double cleanSpread = spread (clean), warmSpread = spread (warm);
+        check (cleanSpread < 12.0 && cleanSpread < warmSpread - 30.0,
+               fmt ("a 3 Hz tremolo (30 - 100 %%): the 2nd harmonic re the fundamental moves %.1f dB over the cycle (Warm %.1f dB)", cleanSpread, warmSpread));
+    }
+
+    // A note that arrives at full level: no overshoot while the harmonics settle.
+    {
+        std::vector<float> in (144000, 0.0f);
+        for (size_t i = 24000; i < in.size(); ++i)
+            in[i] = (float) (0.6 * std::sin (2.0 * M_PI * 60.0 * (double) i / fs));
+        const auto add = runFund (in, clean);
+        double steadyPeak = 0, earlyPeak = 0, finalRms = rmsOf (add, 120000, 144000);
+        for (int i = 120000; i < 144000; ++i) steadyPeak = std::max (steadyPeak, (double) std::fabs (add[(size_t) i]));
+        for (int i = 24000; i < 24000 + 9600; ++i) earlyPeak = std::max (earlyPeak, (double) std::fabs (add[(size_t) i]));
+        int reached = -1;
+        for (int i = 24000; i + 240 < 144000 && reached < 0; i += 240)
+            if (rmsOf (add, i, i + 240) >= 0.9 * finalRms)
+                reached = (i - 24000) * 1000 / (int) fs;
+        check (earlyPeak < 1.1 * steadyPeak && reached >= 0 && reached <= 150,
+               fmt ("note on at full level: peak of the first 200 ms %.3f vs %.3f settled; reaches 90%% of its level after %d ms", earlyPeak, steadyPeak, reached));
+    }
+
+    // Two notes in the band: with one far louder it is the only one filled and nothing else appears; with two alike it backs off
+    // instead of intermodulating (the Warm path adds as much between the notes as it does on them).
+    {
+        const auto lone = runFund (sines ({ { 50.0, 0.3 } }, 144000), clean);
+        const double loneRms = rmsOf (lone, 72000, 144000);
+        const auto dominant = sines ({ { 50.0, 0.3 }, { 70.0, 0.03 } }, 144000);
+        const auto alike = sines ({ { 50.0, 0.3 }, { 70.0, 0.3 } }, 144000);
+
+        const double cleanMix = intermodDb (runFund (dominant, clean), 72000, 50.0, 70.0), warmMix = intermodDb (runFund (dominant, warm), 72000, 50.0, 70.0);
+        check (cleanMix < -20.0 && cleanMix < warmMix - 8.0,
+               fmt ("a note and a 20 dB quieter one a minor third up: energy between the notes %.0f dB re the harmonics (Warm %.0f dB)", cleanMix, warmMix));
+
+        const double cleanLevel = db (rmsOf (runFund (alike, clean), 72000, 144000) / loneRms), warmLevel = db (rmsOf (runFund (alike, warm), 72000, 144000) / loneRms);
+        check (cleanLevel < -6.0 && cleanLevel < warmLevel - 8.0,
+               fmt ("two notes of equal level: output %+.1f dB re a lone note (Warm %+.1f dB)", cleanLevel, warmLevel));
+    }
+
+    // The note can move: a glide across the band, then holding, is followed.
+    {
+        std::vector<float> in (144000);
+        double phase = 0;
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            const double t = (double) i / fs;
+            phase += 2.0 * M_PI * (t < 1.0 ? 100.0 - 50.0 * t : 50.0) / fs;
+            in[i] = (float) (0.5 * std::sin (phase));
+        }
+        const auto add = runFund (in, clean);
+        const double ref = amplitudeAt (in, 72000, 32000, 50.0) * rangeGain (50.0, clean);
+        const double h2 = db (amplitudeAt (add, 72000, 32000, 100.0) / ref);
+        const double glideLevel = db (rmsOf (add, 24000, 48000) / rmsOf (add, 100000, 144000));
+        check (std::fabs (h2 - expected[0]) < 1.5 && offHarmonicDb (add, 72000, wholePeriods (50.0, 1.0), 50.0) < -45.0 && std::fabs (glideLevel) < 3.0,
+               fmt ("100 -> 50 Hz glide, then held: H2 %+.1f dB (expected %.1f), not a harmonic %.0f dB, level during the glide %+.1f dB re held",
+                    h2, expected[0], offHarmonicDb (add, 72000, wholePeriods (50.0, 1.0), 50.0), glideLevel));
+    }
+
+    // Stereo: a partial in one channel only is filled in that channel only.
+    {
+        const auto left = sines ({ { 60.0, 0.4 } }, 96000);
+        const std::vector<float> silent (left.size(), 0.0f);
+        Rig rig;
+        rig.p.bands[0] = fillBand (clean);
+        const auto out = rig.run (left, &silent);
+        const double l = rmsOf (out.l, 48000, 96000), r = rmsOf (out.r, 48000, 96000);
+        check (l > 0.01 && db (r / l) < -90.0, fmt ("a left-only note: left %.3f rms, right %.1e (%.0f dB)", l, r, db (r / l)));
+    }
+
+    // The engine around it: what the band adds is what its solo plays, and silence adds nothing.
+    {
+        const auto in = sines ({ { 60.0, 0.4 }, { 1000.0, 0.1 } }, 96000);
+        Rig deltaRig, soloRig;
+        for (auto* r : { &deltaRig, &soloRig })
+            r->p.bands[0] = fillBand (clean);
+        deltaRig.p.delta = true;
+        soloRig.eng.monitor.soloKind = (int) SoloKind::adds;
+        soloRig.eng.monitor.soloBand = 0;
+        const auto whole = deltaRig.runMono (in), solo = soloRig.runMono (in);
+        float worst = 0, peak = 0;
+        for (size_t i = 48000; i < in.size(); ++i)
+        {
+            worst = std::max (worst, std::fabs (whole[i] - solo[i]));
+            peak = std::max (peak, std::fabs (whole[i]));
+        }
+        check (peak > 0.05f && worst < 1.0e-4f, fmt ("delta equals the band's ADDS solo (peak %.3f, max difference %.1e)", peak, worst));
+
+        const auto quiet = runFund (std::vector<float> (48000, 0.0f), clean);
+        check (rmsOf (quiet, 0, 48000) < 1.0e-12, "silence in, silence out");
+    }
+
+    // Other host rates (the harmonics must still fit below Nyquist; the pitch bank is tuned in Hz).
+    for (double rate : { 44100.0, 96000.0, 192000.0 })
+    {
+        std::vector<float> in ((size_t) (3.0 * rate));
+        for (size_t i = 0; i < in.size(); ++i)
+            in[i] = (float) (0.4 * std::sin (2.0 * M_PI * 60.0 * (double) i / rate));
+        const auto add = runFundAt (in, clean, rate);
+        double re = 0, im = 0;
+        const size_t from = (size_t) (1.5 * rate), count = (size_t) (rate); // 60 whole periods: 60 Hz * 1 s
+        for (size_t i = from; i < from + count; ++i)
+        {
+            re += add[i] * std::cos (2.0 * M_PI * 120.0 * (double) i / rate);
+            im += add[i] * std::sin (2.0 * M_PI * 120.0 * (double) i / rate);
+        }
+        const double ref = 0.4 * rangeGain (60.0, clean);
+        const double h2 = db (2.0 * std::sqrt (re * re + im * im) / (double) count / ref);
+        check (std::fabs (h2 - expected[0]) < 1.5, fmt ("%6.0f Hz host: H2 of a 60 Hz note %+.1f dB (expected %.1f)", rate, h2, expected[0]));
+    }
+
+    // Switching Warm <-> Clean while playing stays finite and within bounds.
+    {
+        const auto in = sines ({ { 60.0, 0.5 }, { 95.0, 0.2 } }, 96000);
+        FundamentalEngine fe;
+        fe.prepare (fs);
+        std::vector<float> out (in.size());
+        bool finite = true;
+        float peak = 0;
+        for (size_t pos = 0, block = 0; pos < in.size(); pos += 480, ++block)
+        {
+            auto p = extendParams();
+            p.clean = (block / 7) % 2 == 1;
+            const float* inp[1] = { in.data() + pos };
+            float* outp[1] = { out.data() + pos };
+            fe.process (inp, outp, 1, 480, p);
+            for (size_t i = pos; i < pos + 480; ++i)
+            {
+                finite = finite && std::isfinite (out[i]);
+                peak = std::max (peak, std::fabs (out[i]));
+            }
+        }
+        check (finite && peak < 2.0f, fmt ("switching Warm / Clean every 7 blocks: finite, peak %.2f", peak));
+    }
+}
+
 void testBandsActOnTheirRange()
 {
     std::printf("\n[4b] Saturate bands act on their own range: 100 Hz sine, +24 dB drive\n");
@@ -624,6 +898,7 @@ void testRobustness()
             band.fill.extGain = u (rng) > 0.3f ? 2.0 : 0.0;
             band.fill.target = band.fill.extGain * band.fill.extGain;
             band.fill.adapt = u (rng);
+            band.fill.clean = u (rng) > 0.5f;
             band.fill.ceiling = 10.0 * band.hi;
         }
 
@@ -1064,6 +1339,7 @@ int main()
     testBandsActOnTheirRange();
     testExtend();
     testExtendNoteOff();
+    testCleanFill();
     testToneWeights();
     testNyquistGuard();
     testHarmonicSpan();
