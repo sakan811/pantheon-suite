@@ -20,6 +20,7 @@ public:
 
     void selectBand (int band);
     juce::TextButton& regionButton (int band) { return regionButtons[(size_t) band]; } // the band solo strip, for UiCheck
+    juce::TextButton& cleanSwitch() { return cleanButton; }                           // Warm / Clean of the shown fill band, for UiCheck
 
 private:
     enum class Panel { band, character, master, count };
@@ -45,6 +46,10 @@ private:
     ui::Choice stereoBox, osBox, curveBox;
     ui::Toggle deltaButton, matchButton;
     juce::TextButton clearMetersButton { "CLEAR" };
+
+    // Warm / Clean of the selected fill band: bound to that band's parameter while one is shown, and to nothing otherwise.
+    juce::TextButton cleanButton { "CLEAN" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> cleanAttachment;
 
     juce::TextButton saturateModeButton, fillModeButton, removeButton, addSaturateButton, addFillButton, pasteButton { "PASTE" }, soloBandButton { "SOLO BAND" }, soloAddsButton { "SOLO ADDS" };
     std::array<juce::Rectangle<int>, hep::maxBands> chipBounds;

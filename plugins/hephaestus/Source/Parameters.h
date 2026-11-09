@@ -31,6 +31,7 @@ struct BandIds
     juce::String on, mode, lo, hi;   // every band
     juce::String drive;              // saturate
     juce::String amount, tone, adapt, rebuild; // fill
+    juce::String clean;                        // fill: Warm (off) or Clean (on)
 };
 
 inline const BandIds& bandIds (int band)
@@ -42,7 +43,8 @@ inline const BandIds& bandIds (int band)
         {
             const auto name = [i] (const char* field) { return "b" + juce::String (i + 1) + "_" + field; };
             t[(size_t) i] = { name ("on"), name ("mode"), name ("lo"), name ("hi"), name ("drive"),
-                              name ("amount"), name ("tone"), name ("adapt"), name ("rebuild") };
+                              name ("amount"), name ("tone"), name ("adapt"), name ("rebuild"),
+                              name ("clean") };
         }
         return t;
     }();
@@ -153,6 +155,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         F (ids.tone,    label ("Tone"),    { 0.0f, 100.0f, 1.0f }, 50.0f, pctAttr(), bandVersion);
         F (ids.adapt,   label ("Adapt"),   { 0.0f, 100.0f, 1.0f }, 100.0f, pctAttr(), bandVersion);
         F (ids.rebuild, label ("Rebuild"), { offDb, 6.0f, 0.1f }, offDb, dbAttr (offDb), bandVersion);
+        Bool (ids.clean, label ("Clean"), false, 3); // added after the first release, so version 3; off = Warm = how every earlier session sounds
     }
 
     return { p.begin(), p.end() };
@@ -195,6 +198,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
         f.adapt = vb (ids.adapt) * 0.01;
         f.ceiling = 10.0 * effectiveRange (BandMode::fill, b.lo, b.hi).hi;
         f.resGain = gainOrOff (vb (ids.rebuild));
+        f.clean = vb (ids.clean) > 0.5f;
         f.fill = 0.8;
     }
     return e;
@@ -271,11 +275,11 @@ inline PresetValues saturateBand (int band, float lo, float hi, float driveDb)
     return { { ids.on, 1 }, { ids.mode, 0 }, { ids.lo, lo }, { ids.hi, hi }, { ids.drive, driveDb } };
 }
 
-inline PresetValues fillBand (int band, float lo, float hi, float amountDb, float tone, float adapt, float rebuildDb = offDb)
+inline PresetValues fillBand (int band, float lo, float hi, float amountDb, float tone, float adapt, float rebuildDb = offDb, bool clean = false)
 {
     const auto& ids = bandIds (band);
     return { { ids.on, 1 }, { ids.mode, 1 }, { ids.lo, lo }, { ids.hi, hi }, { ids.amount, amountDb },
-             { ids.tone, tone }, { ids.adapt, adapt }, { ids.rebuild, rebuildDb } };
+             { ids.tone, tone }, { ids.adapt, adapt }, { ids.rebuild, rebuildDb }, { ids.clean, clean ? 1.0f : 0.0f } };
 }
 
 inline PresetValues join (std::initializer_list<PresetValues> parts)
@@ -308,6 +312,8 @@ inline const std::vector<Preset>& presets()
         { "808 Sub Fill",        join ({ { { curve, 0 }, { even, 25 } },
                                          saturateBand (0, 30, 150, 4),
                                          fillBand (1, 30, 90, -8, 15, 100) }) },
+        { "Clean Sub Fill",      join ({ { { curve, 0 }, { even, 25 } },
+                                         fillBand (0, 30, 90, -8, 15, 100, offDb, true) }) },
     };
     return list;
 }
@@ -360,7 +366,7 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandMode mode, double
     {
         const int i = slot;
         const auto& ids = bandIds (i);
-        for (auto* pid : { &ids.drive, &ids.amount, &ids.tone, &ids.adapt, &ids.rebuild })
+        for (auto* pid : { &ids.drive, &ids.amount, &ids.tone, &ids.adapt, &ids.rebuild, &ids.clean })
             if (auto* param = s.getParameter (*pid))
                 setParameter (*param, param->getDefaultValue());
 
