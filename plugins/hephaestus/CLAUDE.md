@@ -34,6 +34,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   Waveshaper.h       curves + residual-ADAA shaper
   Saturator.h        user-placed saturate bands: band-pass, per-band oversample + shape, outputs only the distortion
   FundamentalEngine.h  Chebyshev "extend" (+ adaptive gain) + difference-tone "rebuild", GapDetector, harmonicsForTone()
+  PartialTracker.h   the Clean fill's note follower: pitch bank + one integrator per channel + confidence gate (see "Clean fill" below)
   Engine.h           BandParams, latency alignment, band mixing, M/S, gain match, delta, meters, analyzer taps
 ../../shared/dsp/       Biquad.h (double-precision biquads, Butterworth, Bandpass pair), AnalyzerTap.h (lock-free sample FIFOs, audio thread -> editor) and
                      SpectrumAnalyzer.h (EQ-style FFT analyzer, GUI-free so its calibration is testable; test [10]) and MusicBands.h (the six main bands and their splitter, the band solo strip; test [12b]), namespace `pdsp`, shared with Iris (and Themis)
@@ -75,6 +76,8 @@ the top harmonics (test [5]); lengthening it risks hanging tails (test [5b]). Re
 frequency-selective (`GapDetector`): comparing against the whole band, or correlating with the restored signal,
 were both tried and failed.
 
+**Clean fill.** `FundamentalEngine::Params::clean` (the per-band `bN_clean` parameter, off = Warm, which is how every session saved before it sounds) swaps only the EXTEND generator: `extendClean` builds each harmonic as `amplitude x Re (u^k)` from `PartialTracker`'s phase vector `u`, with the same `harmonic[]` weights, `usable[]`, band-limiting filter, `adaptGain` and `extGain` as Warm. Do not put a waveshaper (or anything that mixes components of the band) in that path: its whole point is that nothing but the tracked note makes harmonics. The tracker's pitch comes from a resonator bank, *not* from a frequency-locked loop: an FLL on its own was tried and does not lock to either of two notes. The integrator damping (`kSogiDamping`), the bank's Q and smoothing and the confidence thresholds trade onset speed against the non-harmonic residue; quicker settings were measured and were dirtier at the bottom of the band, so test [5g] (residue under -45 dB, 100 ms to 90 %, a quieter second note ignored) pins them. Rebuild is a squarer and is the same in both modes. A new Clean behaviour belongs in [5g] with its measured number in the README.
+
 **Adaptive fill.** `Amount` is the harmonics' total *energy* relative to the band (`harmonicsForTone` weights carry unit
 energy, so `extGain` = amount and `target` = amount squared). Adapt measures the energy above the band
 (`harmonicReach`) on the *input* and scales the harmonics by `(1 - adapt) + adapt * sqrt (shortfall)`. Keep the
@@ -92,6 +95,7 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
 ## DRY: where each thing lives (change it there only)
 
 - parameter ranges, defaults, choice lists, "off" thresholds -> `Parameters.h` (the editor reads combo items from the parameter)
+- the Warm / Clean choice of a fill band -> its `bN_clean` parameter (`BandIds::clean`, version 3), read into `Params::clean` by `readParams()`; the editor's CLEAN switch is re-bound to the selected fill band in `refreshBandPanel()` and is not a knob slot (the six slots are full)
 - per-band parameter ids -> `bandIds()`; adding / removing a band and switching its mode -> `addBand`, `removeBand`, `setBandMode`
   (the spectrum menu, the double-click menu and the band panel buttons all call these); bands pasted from another plugin
   (`pdsp::link`, `shared/dsp/BandLink.h`) -> `pasteBands` (fill bands only)
