@@ -124,6 +124,9 @@ int main (int argc, char** argv)
     setNamed (*plugin, "Delta", 0.0f);
     setNamed (*plugin, "Gain Match", 0.0f);
     setNamed (*plugin, "Mix", 0.0f);
+    // A band the fuzzing left in Octave adds that generator's latency, which is not what this section measures.
+    for (int band = 1; band <= 6; ++band)
+        setNamed (*plugin, "Band " + juce::String (band) + " Character", 0.0f);
     plugin->setPlayConfigDetails (2, 2, 48000.0, 512);
     plugin->prepareToPlay (48000.0, 512);
     juce::AudioBuffer<float> buffer (2, 512);

@@ -396,7 +396,7 @@ void testCleanFill()
 {
     std::printf ("\n[5g] Clean fill: harmonics built as sines locked to the band's strongest note, not shaped from the signal (band 40-120 Hz)\n");
     auto clean = extendParams();
-    clean.clean = true;
+    clean.character = Character::clean;
     const auto warm = extendParams();
     const double expected[4] = { -6.0, -9.0, -15.0, -22.0 };
 
@@ -569,7 +569,7 @@ void testCleanFill()
         check (std::fabs (h2 - expected[0]) < 1.5, fmt ("%6.0f Hz host: H2 of a 60 Hz note %+.1f dB (expected %.1f)", rate, h2, expected[0]));
     }
 
-    // Switching Warm <-> Clean while playing stays finite and within bounds.
+    // Switching between the three while playing stays finite and within bounds.
     {
         const auto in = sines ({ { 60.0, 0.5 }, { 95.0, 0.2 } }, 96000);
         FundamentalEngine fe;
@@ -580,7 +580,7 @@ void testCleanFill()
         for (size_t pos = 0, block = 0; pos < in.size(); pos += 480, ++block)
         {
             auto p = extendParams();
-            p.clean = (block / 7) % 2 == 1;
+            p.character = (Character) ((block / 7) % 3);
             const float* inp[1] = { in.data() + pos };
             float* outp[1] = { out.data() + pos };
             fe.process (inp, outp, 1, 480, p);
@@ -590,7 +590,423 @@ void testCleanFill()
                 peak = std::max (peak, std::fabs (out[i]));
             }
         }
-        check (finite && peak < 2.0f, fmt ("switching Warm / Clean every 7 blocks: finite, peak %.2f", peak));
+        check (finite && peak < 2.0f, fmt ("switching Warm / Clean / Octave every 7 blocks: finite, peak %.2f", peak));
+    }
+}
+
+void testOctaveFill()
+{
+    std::printf ("\n[5h] Octave fill: every resolved partial's harmonics made in the spectrum, phase-locked and late by N - 1 samples (band 500-2000 Hz)\n");
+    auto octave = extendParams();
+    octave.character = Character::octave;
+    octave.lo = 500.0;
+    octave.hi = 2000.0;
+    octave.ceiling = 20000.0;
+    auto warm = octave;
+    warm.character = Character::warm;
+    const double weightsDb[4] = { -6.0, -9.0, -15.0, -22.0 };
+    const int latency = OctaveGenerator::latencyFor (fs);
+    constexpr double pi = M_PI;
+
+    // The weights are exact, for partials that fall between bins, at any level.
+    for (double amp : { 0.3, 0.003 })
+    {
+        double worst = 0.0, worstAt = 0.0;
+        for (double f0 : { 520.0, 733.3, 1000.0, 1234.5, 1777.7 })
+        {
+            const auto in = sines ({ { f0, amp } }, 144000);
+            const auto add = runFund (in, octave);
+            for (int h = 0; h < 4; ++h)
+            {
+                const double g = db (amplitudeAt (add, 72000, 32000, f0 * (h + 2)) / amp) - weightsDb[h];
+                if (std::fabs (g) > std::fabs (worst)) { worst = g; worstAt = f0; }
+            }
+        }
+        check (std::fabs (worst) < 0.5, fmt ("partials at 520 / 733.3 / 1000 / 1234.5 / 1777.7 Hz, amplitude %.3f: H2..H5 within %.2f dB of -6 / -9 / -15 / -22 (worst at %.1f Hz)", amp, worst, worstAt));
+    }
+
+    // Phase-locked, with the fundamental's own peaks lined up (the convention Warm and Clean have): sample for sample, what comes out is
+    // the harmonics of the input as it was `latency` samples ago.
+    {
+        const double f0 = 1000.0, theta = 0.7, amp = 0.3;
+        const auto in = sines ({ { f0, amp } }, 144000);
+        std::vector<float> shifted (in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+            shifted[i] = (float) (amp * std::sin (2.0 * pi * f0 * (double) i / fs + theta));
+        const auto add = runFund (shifted, octave);
+        double worst = 0.0, peak = 0.0;
+        for (int i = 96000; i < 100000; ++i)
+        {
+            double ideal = 0.0;
+            for (int h = 0; h < 4; ++h)
+                ideal += std::pow (10.0, weightsDb[h] / 20.0) * amp * std::cos ((h + 2) * (2.0 * pi * f0 * (double) (i - latency) / fs + theta - pi / 2.0));
+            worst = std::max (worst, std::fabs (ideal - add[(size_t) i]));
+            peak = std::max (peak, std::fabs (ideal));
+        }
+        check (db (worst / peak) < -25.0, fmt ("a 1 kHz partial: the harmonics are the ideal phase-locked ones delayed by %d samples (max error %.1f dB re their peak)", latency, db (worst / peak)));
+    }
+
+    // No intermodulation: with several partials in the band, what is not on a harmonic of one of them.
+    {
+        struct Case { const char* name; std::vector<double> f; double lo; };
+        for (const auto& c : { Case { "three partials 520 / 640 / 780", { 520.0, 640.0, 780.0 }, 500.0 },
+                               Case { "six partials 520 ... 1555", { 520.0, 640.0, 780.0, 910.0, 1230.0, 1555.0 }, 500.0 } })
+        {
+            std::vector<float> in (144000, 0.0f);
+            for (double f : c.f)
+                for (int i = 0; i < 144000; ++i)
+                    in[(size_t) i] += (float) (0.3 / std::sqrt ((double) c.f.size()) * std::sin (2.0 * pi * f * i / fs + f));
+            const auto cleanOut = runFund (in, octave), warmOut = runFund (in, warm);
+            const auto offLattice = [&] (const std::vector<float>& x)
+            {
+                double on = 0.0, off = 0.0;
+                for (int bin = 20; bin <= 12000; ++bin)
+                {
+                    double re = 0, im = 0;
+                    for (int i = 96000; i < 144000; ++i) { re += x[(size_t) i] * std::cos (2.0 * pi * bin * i / fs); im += x[(size_t) i] * std::sin (2.0 * pi * bin * i / fs); }
+                    bool onLattice = false;
+                    for (double f : c.f)
+                        for (int k = 2; k <= 5; ++k)
+                            onLattice = onLattice || std::fabs ((double) bin - k * f) <= 1.0;
+                    (onLattice ? on : off) += re * re + im * im;
+                }
+                return 10.0 * std::log10 (std::max (off, 1.0e-30) / std::max (on, 1.0e-30));
+            };
+            const double cleanDb = offLattice (cleanOut), warmDb = offLattice (warmOut);
+            check (cleanDb < -35.0 && cleanDb < warmDb - 30.0, fmt ("%s: energy that is not on a harmonic %.1f dB re the harmonics (Warm %+.1f dB)", c.name, cleanDb, warmDb));
+        }
+    }
+
+    // Dynamics: the harmonics follow the level, whatever the envelope would have done.
+    {
+        std::vector<float> in (192000);
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            const double t = (double) i / fs;
+            in[i] = (float) (0.3 * (0.65 + 0.35 * std::sin (2.0 * pi * 3.0 * t)) * std::sin (2.0 * pi * 1000.0 * t));
+        }
+        const auto spread = [&] (const FundamentalEngine::Params& p)
+        {
+            const auto add = runFund (in, p);
+            double lowest = 1.0e9, highest = -1.0e9;
+            for (int at = 72000; at + 2400 < (int) in.size(); at += 1200)
+            {
+                const double r = db (amplitudeAt (add, at, 2400, 2000.0) / amplitudeAt (in, at - latency, 2400, 1000.0));
+                lowest = std::min (lowest, r);
+                highest = std::max (highest, r);
+            }
+            return highest - lowest;
+        };
+        const double octaveSpread = spread (octave), warmSpread = spread (warm);
+        check (octaveSpread < 1.0, fmt ("a 1 kHz tone under a 3 Hz tremolo (30 - 100 %%): the 2nd harmonic re the fundamental moves %.2f dB over the cycle (Warm %.1f dB)", octaveSpread, warmSpread));
+    }
+
+    // A note's start and end: no echo of it before it begins, and a short one after it ends.
+    {
+        std::vector<float> in (192000, 0.0f);
+        for (size_t i = 48000; i < 120000; ++i)
+            in[i] = (float) (0.5 * std::sin (2.0 * pi * 1000.0 * (double) i / fs));
+        const auto add = runFund (in, octave);
+        const double steady = rmsOf (add, 96000 + latency, 120000);
+        // Output samples [48000, 48000 + latency) belong to the time before the note started.
+        const double before = db (rmsOf (add, 48000, 48000 + latency - 1) / steady);
+        int reached = -1;
+        for (int i = 48000 + latency; i + 240 < 192000 && reached < 0; i += 48)
+            if (rmsOf (add, i, i + 480) >= 0.9 * steady)
+                reached = (i - 48000 - latency) * 1000 / (int) fs;
+        const double after = db (rmsOf (add, 120000 + latency + 1920, 120000 + latency + 2160) / steady); // 40 ms after it ended
+        check (before < -40.0 && reached >= 0 && reached <= 25 && after < -40.0,
+               fmt ("a note: %.0f dB re its level before it starts, 90 %% of it %d ms after it does, %.0f dB 40 ms after it ends", before, reached, after));
+    }
+
+    // Only the partials in the band are filled.
+    {
+        const auto inBand = runFund (sines ({ { 1000.0, 0.3 } }, 144000), octave);
+        const double reference = amplitudeAt (inBand, 72000, 32000, 2000.0);
+        double loudest = -1.0e9;
+        for (double f : { 300.0, 420.0, 2300.0, 3500.0 })
+        {
+            const auto add = runFund (sines ({ { f, 0.3 } }, 144000), octave);
+            loudest = std::max (loudest, db (rmsOf (add, 72000, 144000) / (reference / std::sqrt (2.0))));
+        }
+        check (loudest < -50.0, fmt ("tones at 300 / 420 Hz (under the band) and 2.3 / 3.5 kHz (over it): the loudest thing added is %.0f dB re one partial's 2nd harmonic", loudest));
+    }
+
+    // Partials too close to tell apart (60 Hz apart, under four bins) are one peak: its harmonics follow it; what comes out stays far under Warm's.
+    {
+        std::vector<float> in (144000);
+        for (int i = 0; i < 144000; ++i)
+            in[(size_t) i] = (float) (0.21 * (std::sin (2.0 * pi * 1000.0 * i / fs) + std::sin (2.0 * pi * 1060.0 * i / fs)));
+        const auto bandEnergy = [&] (const std::vector<float>& x, double lo, double hi)
+        {
+            double e = 0.0;
+            for (double f = lo; f <= hi; f += 5.0)
+            {
+                const double a = amplitudeAt (x, 72000, 48000, f);
+                e += a * a;
+            }
+            return e;
+        };
+        const auto cleanOut = runFund (in, octave), warmOut = runFund (in, warm);
+        // The energy between the two notes' own 2nd harmonics' neighbours (2.0-2.12 kHz holds them) versus 3rd-order products' neighbours (2.5-2.9 kHz).
+        const double intermod = 10.0 * std::log10 (bandEnergy (cleanOut, 2200.0, 2900.0) / bandEnergy (cleanOut, 1990.0, 2130.0));
+        const double warmIntermod = 10.0 * std::log10 (bandEnergy (warmOut, 2200.0, 2900.0) / bandEnergy (warmOut, 1990.0, 2130.0));
+        check (intermod < -20.0 && intermod < warmIntermod - 10.0, fmt ("two partials 60 Hz apart: %.0f dB between their harmonics' neighbourhood and the rest (Warm %.0f dB)", intermod, warmIntermod));
+    }
+
+    // Silence adds nothing, noise adds less than it holds, and the block size changes nothing.
+    {
+        check (rmsOf (runFund (std::vector<float> (48000, 0.0f), octave), 0, 48000) < 1.0e-12, "silence in, silence out");
+
+        std::mt19937 rng (5);
+        std::normal_distribution<float> gauss (0.0f, 0.1f);
+        std::vector<float> noiseIn (96000);
+        for (auto& v : noiseIn) v = gauss (rng);
+        const auto noiseOut = runFund (noiseIn, octave);
+        float peak = 0.0f;
+        for (size_t i = 48000; i < noiseOut.size(); ++i) peak = std::max (peak, std::fabs (noiseOut[i]));
+        check (rmsOf (noiseOut, 48000, 96000) < rmsOf (noiseIn, 48000, 96000) && peak < 0.5f, fmt ("white noise 0.1 rms: adds %.3f rms, peak %.2f", rmsOf (noiseOut, 48000, 96000), peak));
+
+        const auto in = sines ({ { 700.0, 0.3 }, { 1230.0, 0.2 } }, 48000);
+        const auto whole = runFund (in, octave);
+        FundamentalEngine fe;
+        fe.prepare (fs);
+        std::vector<float> pieces (in.size());
+        for (size_t pos = 0; pos < in.size();)
+        {
+            const size_t n = std::min<size_t> (1 + pos % 97, in.size() - pos); // blocks of 1 .. 97 samples
+            const float* inp[1] = { in.data() + pos };
+            float* outp[1] = { pieces.data() + pos };
+            fe.process (inp, outp, 1, (int) n, octave);
+            pos += n;
+        }
+        float worst = 0.0f;
+        for (size_t i = 0; i < in.size(); ++i) worst = std::max (worst, std::fabs (pieces[i] - whole[i]));
+        check (worst == 0.0f || worst < 1.0e-7f, fmt ("blocks of 1 to 97 samples give the output of one block of 480 (max difference %.1e)", worst));
+    }
+
+    // Stereo: a partial in one channel only is filled in that channel only.
+    {
+        const auto left = sines ({ { 1000.0, 0.4 } }, 96000);
+        const std::vector<float> silent (left.size(), 0.0f);
+        Rig rig;
+        rig.p.bands[0] = fillBand (octave);
+        const auto out = rig.run (left, &silent);
+        const double l = rmsOf (out.l, 60000, 96000), r = rmsOf (out.r, 60000, 96000);
+        check (l > 0.1 && db (r / l) < -60.0, fmt ("a left-only partial: left %.3f rms, right %.1e (%.0f dB)", l, r, db (r / l)));
+    }
+
+    // Other host rates: the frame follows the rate (about 43 ms) and the weights stay exact.
+    for (double rate : { 44100.0, 96000.0, 192000.0 })
+    {
+        const int size = OctaveGenerator::sizeFor (rate);
+        std::vector<float> in ((size_t) (3.0 * rate));
+        for (size_t i = 0; i < in.size(); ++i)
+            in[i] = (float) (0.3 * std::sin (2.0 * pi * 1000.0 * (double) i / rate));
+        const auto add = runFundAt (in, octave, rate);
+        double re = 0, im = 0;
+        const size_t from = (size_t) (1.5 * rate), count = (size_t) rate;
+        for (size_t i = from; i < from + count; ++i)
+        {
+            re += add[i] * std::cos (2.0 * pi * 2000.0 * (double) i / rate);
+            im += add[i] * std::sin (2.0 * pi * 2000.0 * (double) i / rate);
+        }
+        const double h2 = db (2.0 * std::sqrt (re * re + im * im) / (double) count / 0.3);
+        check (std::fabs (h2 - weightsDb[0]) < 0.5 && std::fabs (1000.0 * (double) size / rate - 1000.0 * 2048.0 / 48000.0) < 5.0,
+               fmt ("%6.0f Hz host: frame %d samples (%.1f ms), H2 of a 1 kHz partial %+.2f dB (expected %.1f)", rate, size, 1000.0 * size / rate, h2, weightsDb[0]));
+    }
+
+    // Rebuild, summed with it, is held back the same way.
+    {
+        auto rebuild = octave;
+        rebuild.extGain = 0.0;
+        rebuild.resGain = 1.0;
+        rebuild.fill = 0.0;
+        rebuild.lo = 40.0;
+        rebuild.hi = 120.0;
+        auto plain = rebuild;
+        plain.character = Character::warm;
+        const auto in = sines ({ { 120.0, 0.3 }, { 180.0, 0.3 } }, 96000);
+        const auto late = runFund (in, rebuild), now = runFund (in, plain);
+        float worst = 0.0f;
+        for (size_t i = (size_t) latency; i < in.size(); ++i) worst = std::max (worst, std::fabs (late[i] - now[i - (size_t) latency]));
+        check (worst < 1.0e-6f, fmt ("an octave band's Rebuild is the plain one, %d samples later (max difference %.1e)", latency, worst));
+    }
+
+    // The engine around it: every path is brought to the one latency, bit for bit.
+    {
+        const auto in = noise (96000, 11, 0.3f);
+        const auto settings = [] (Rig& rig, bool withOctave, bool withWarmFill)
+        {
+            rig.p.bands[0] = saturateBand (60.0, 300.0, 8.0);
+            rig.p.bands[1] = saturateBand (1000.0, 3000.0, 6.0);
+            if (withWarmFill)
+            {
+                auto f = extendParams();
+                f.lo = 40.0;
+                f.hi = 120.0;
+                rig.p.bands[2] = fillBand (f);
+            }
+            if (withOctave)
+            {
+                auto f = extendParams();
+                f.character = Character::octave;
+                f.extGain = 0.0; // on, in Octave, with nothing to add: it asks for the latency and for nothing else
+                f.lo = 600.0;
+                f.hi = 2000.0;
+                rig.p.bands[3] = fillBand (f);
+            }
+        };
+        Rig plain, withOctave, plainWarm, warmWithOctave;
+        settings (plain, false, false);
+        settings (withOctave, true, false);
+        settings (plainWarm, false, true);
+        settings (warmWithOctave, true, true);
+        const auto a = plain.runMono (in), b = withOctave.runMono (in), c = plainWarm.runMono (in), d = warmWithOctave.runMono (in);
+        float diffSat = 0.0f, diffWarm = 0.0f;
+        for (size_t i = (size_t) latency + 2000; i < in.size(); ++i)
+        {
+            diffSat = std::max (diffSat, std::fabs (b[i] - a[i - (size_t) latency]));
+            diffWarm = std::max (diffWarm, std::fabs (d[i] - c[i - (size_t) latency]));
+        }
+        check (withOctave.eng.getLatency() == plain.eng.getLatency() + latency,
+               fmt ("an octave band adds %d samples to the reported latency (%d -> %d)", latency, plain.eng.getLatency(), withOctave.eng.getLatency()));
+        check (diffSat == 0.0f && diffWarm == 0.0f, fmt ("with an octave band on, the saturate bands (max difference %.1e) and a warm fill band (%.1e) are exactly what they were, %d samples later", diffSat, diffWarm, latency));
+
+        // The dry impulse comes out exactly at the reported latency.
+        std::vector<float> impulse (8192, 0.0f);
+        impulse[100] = 0.001f;
+        Rig rig;
+        settings (rig, true, false);
+        rig.p.mix = 0.0f;
+        const auto out = rig.runMono (impulse);
+        const int at = (int) (std::max_element (out.begin(), out.end(), [] (float x, float y) { return std::fabs (x) < std::fabs (y); }) - out.begin()) - 100;
+        check (at == rig.eng.getLatency(), fmt ("the dry impulse comes out at +%d, the reported latency is %d", at, rig.eng.getLatency()));
+
+        // And what the octave band adds lands on the harmonics of the delayed dry signal.
+        {
+            const double f0 = 1000.0, theta = 0.7, amp = 0.3;
+            std::vector<float> tone (144000);
+            for (size_t i = 0; i < tone.size(); ++i)
+                tone[i] = (float) (amp * std::sin (2.0 * pi * f0 * (double) i / fs + theta));
+            auto f = extendParams();
+            f.character = Character::octave;
+            f.lo = 500.0;
+            f.hi = 2000.0;
+            f.ceiling = 20000.0;
+            Rig tonal;
+            tonal.p.bands[0] = fillBand (f);
+            tonal.p.bands[0].fill = f;
+            tonal.p.delta = true;
+            const auto added = tonal.runMono (tone);
+            const int total = tonal.eng.getLatency();
+            double worst = 0.0, peak = 0.0;
+            for (int i = 96000; i < 100000; ++i)
+            {
+                double ideal = 0.0;
+                for (int h = 0; h < 4; ++h)
+                    ideal += std::pow (10.0, weightsDb[h] / 20.0) * amp * std::cos ((h + 2) * (2.0 * pi * f0 * (double) (i - total) / fs + theta - pi / 2.0));
+                worst = std::max (worst, std::fabs (ideal - added[(size_t) i]));
+                peak = std::max (peak, std::fabs (ideal));
+            }
+            check (db (worst / peak) < -25.0, fmt ("through the whole engine (delta, %d samples of latency): the added harmonics are the ideal ones (max error %.1f dB re their peak)", total, db (worst / peak)));
+        }
+
+        // The band's solo plays what it adds, and the solos of all the bands sum to the delta.
+        {
+            const auto setup = [&] (Rig& r)
+            {
+                r.p.bands[0] = saturateBand (60.0, 300.0, 8.0);
+                auto f = extendParams();
+                f.character = Character::octave;
+                f.lo = 600.0;
+                f.hi = 2000.0;
+                f.ceiling = 20000.0;
+                r.p.bands[1] = fillBand (f);
+                auto w = extendParams();
+                w.lo = 40.0;
+                w.hi = 120.0;
+                r.p.bands[2] = fillBand (w);
+            };
+            Rig deltaRig;
+            setup (deltaRig);
+            deltaRig.p.delta = true;
+            const auto whole = deltaRig.runMono (in);
+            std::vector<float> sum (in.size(), 0.0f);
+            for (int band = 0; band < 3; ++band)
+            {
+                Rig r;
+                setup (r);
+                r.eng.monitor.soloKind = (int) SoloKind::adds;
+                r.eng.monitor.soloBand = band;
+                const auto part = r.runMono (in);
+                for (size_t i = 0; i < in.size(); ++i) sum[i] += part[i];
+            }
+            float worstSum = 0.0f, loudest = 0.0f;
+            for (size_t i = 48000; i < in.size(); ++i)
+            {
+                worstSum = std::max (worstSum, std::fabs (sum[i] - whole[i]));
+                loudest = std::max (loudest, std::fabs (whole[i]));
+            }
+            check (loudest > 0.01f && worstSum < 1.0e-4f, fmt ("saturate, octave and warm bands' ADDS solos sum to the delta (peak %.3f, max error %.1e)", loudest, worstSum));
+        }
+    }
+
+    // Switching the character while playing, with every band running, stays finite.
+    {
+        Engine eng;
+        eng.prepare (fs, 512);
+        std::mt19937 rng (21);
+        std::uniform_real_distribution<float> u (-1.0f, 1.0f);
+        bool finite = true;
+        float peak = 0.0f;
+        for (int block = 0; block < 400; ++block)
+        {
+            EngineParams p;
+            p.osMode = block / 100 % 4;
+            for (int b = 0; b < 3; ++b)
+            {
+                auto f = extendParams();
+                f.character = (Character) ((block / 7 + b) % 3);
+                f.extGain = block % 5 == 0 ? 0.0 : 1.0;
+                f.lo = 300.0 * (1 + b);
+                f.hi = 3.0 * f.lo;
+                f.resGain = b == 1 ? 0.5 : 0.0;
+                p.bands[(size_t) b] = fillBand (f);
+            }
+            p.bands[3] = saturateBand (100.0, 4000.0, 3.0);
+            juce::AudioBuffer<float> buf (2, 480);
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < 480; ++i)
+                    buf.setSample (c, i, 0.4f * u (rng));
+            eng.process (buf, p);
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < 480; ++i)
+                {
+                    finite = finite && std::isfinite (buf.getSample (c, i));
+                    peak = std::max (peak, std::fabs (buf.getSample (c, i)));
+                }
+        }
+        check (finite && peak < 5.0f, fmt ("400 blocks that change every band's character and the oversampling as they go: finite, peak %.2f", peak));
+    }
+
+    // CPU: six octave bands, stereo.
+    {
+        const auto in = noise (480000, 17, 0.3f);
+        Rig rig;
+        for (int b = 0; b < 6; ++b)
+        {
+            auto f = extendParams();
+            f.character = Character::octave;
+            f.lo = 500.0;
+            f.hi = 2000.0;
+            f.ceiling = 20000.0;
+            rig.p.bands[(size_t) b] = fillBand (f);
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        rig.run (in, nullptr, 480);
+        const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+        std::printf ("  six octave bands, 10 s of stereo noise at 48 kHz: %.2f s -> %.1f%% of one core\n", seconds, seconds * 10.0);
     }
 }
 
@@ -898,7 +1314,7 @@ void testRobustness()
             band.fill.extGain = u (rng) > 0.3f ? 2.0 : 0.0;
             band.fill.target = band.fill.extGain * band.fill.extGain;
             band.fill.adapt = u (rng);
-            band.fill.clean = u (rng) > 0.5f;
+            band.fill.character = (Character) (int) (u (rng) * 2.99f);
             band.fill.ceiling = 10.0 * band.hi;
         }
 
@@ -1340,6 +1756,7 @@ int main()
     testExtend();
     testExtendNoteOff();
     testCleanFill();
+    testOctaveFill();
     testToneWeights();
     testNyquistGuard();
     testHarmonicSpan();
