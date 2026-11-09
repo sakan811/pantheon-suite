@@ -123,7 +123,7 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
   modes); knobs are re-attached when it changes. If you add state that changes what the panel shows, put it in the signature.
 - `HostCheck` randomises every wrapper parameter, the host's own **Bypass** included; it must be cleared before anything
   that measures audio (it ends up engaged or not depending on how many parameters precede it, so adding parameters can
-  silently flip it). Symptom: audio undelayed and latency "stuck" at whatever it was before.
+  silently flip it). Symptom: audio undelayed and latency "stuck" at whatever it was before. The same randomising leaves the plugin's own **Delta** and **Mix** wherever the last draw put them, so the latency section sets Delta, Gain Match and Mix by name before measuring, and the state round trip gives a stepped parameter (the wrapper's Program included) one of its own steps (`randomValue`): both failed after the Clean switch added six parameters, with a plugin that was fine, until they were made independent of the draw.
 - A hosted VST3 wraps state in its own chunk, so `HostCheck` cannot feed it a hand-built session; legacy-session
   tests go through `HephaestusProcessor` directly (`UiCheck`).
 
