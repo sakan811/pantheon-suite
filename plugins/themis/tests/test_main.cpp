@@ -1792,6 +1792,58 @@ TEST (clip_meter_finds_a_plateau_that_spans_blocks_and_ignores_quiet_ones)
     (void) fs;
 }
 
+TEST (dc_offset_is_measured_and_advised)
+{
+    const double fs = 48000;
+    const double seconds = history::dc::kMinSeconds;
+    // A healthy signal, however low and loud: a full-scale 20 Hz tone cut off at its worst moment (half a cycle left over).
+    auto tone = sine (fs, 20.0, seconds + 0.025, 1.0);
+    ClipMeter m;
+    m.prepare();
+    m.process (tone.data(), tone.data(), static_cast<int> (tone.size()));
+    CHECK (m.totals().dcOffsetDb() < history::dc::kWarnDb);
+    CHECK (history::dc::level (m.totals().dcOffsetDb()) == Level::good);
+
+    // The same with 1 % of full scale added to the left and -0.2 % to the right, in blocks, with a NaN on the way.
+    auto left = tone, right = tone;
+    for (auto& x : left) x = 0.5f * x + 0.01f;
+    for (auto& x : right) x = 0.5f * x - 0.002f;
+    right[1000] = std::numeric_limits<float>::quiet_NaN();
+    m.requestReset();
+    for (size_t i = 0; i < left.size(); i += 480)
+        m.process (left.data() + i, right.data() + i, static_cast<int> (std::min<size_t> (480, left.size() - i)));
+    const auto t = m.totals();
+    CHECK_NEAR (t.dcLeft, 0.01, 0.0005);
+    CHECK_NEAR (t.dcRight, -0.002, 0.0005);
+    CHECK_NEAR (t.dcOffsetDb(), -40.0, 0.4);
+
+    // The plan: nothing for the healthy tone or before the mean has settled, one item naming the channel and the amount after.
+    const auto hasItem = [] (const MasterAdvice& a) {
+        return std::any_of (a.items.begin(), a.items.end(), [] (const Advice& i) { return i.topic == Topic::dcOffset; });
+    };
+    MasterInputs in;
+    in.clip = t;
+    in.analysedSeconds = seconds - 1.0;
+    CHECK (!hasItem (advise (in)));
+    in.analysedSeconds = seconds;
+    const auto plan = advise (in);
+    CHECK (hasItem (plan));
+    for (const auto& i : plan.items)
+        if (i.topic == Topic::dcOffset)
+        {
+            CHECK (i.level == Level::bad);
+            CHECK (i.headline.find ("left") != std::string::npos && i.headline.find ("1.00 %") != std::string::npos && i.headline.find ("above") != std::string::npos);
+        }
+    in.clip.dcLeft = 0.0f; // the right channel alone: -54 dBFS, a warning
+    const auto rightOnly = advise (in);
+    for (const auto& i : rightOnly.items)
+        if (i.topic == Topic::dcOffset)
+            CHECK (i.level == Level::warn && i.headline.find ("right") != std::string::npos && i.headline.find ("below") != std::string::npos);
+    CHECK (hasItem (rightOnly));
+    in.clip.dcRight = 0.0005f; // -66 dBFS: not worth an item
+    CHECK (!hasItem (advise (in)));
+}
+
 TEST (clip_meter_totals_accumulate_and_reset)
 {
     const double fs = 48000;
