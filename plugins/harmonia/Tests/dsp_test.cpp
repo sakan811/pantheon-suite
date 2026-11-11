@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 using namespace testsig;
 using harmonia::AutoTuneEngine;
@@ -733,6 +734,33 @@ int main()
         const double secs = std::chrono::duration<double> (t1 - t0).count();
         const double load = secs / 10.0 * 100.0;
         check (load < 10.0, "CPU load (stereo, 48 kHz, one core)", load, "%");
+    }
+
+    // ------------------------------------------------------------------ 9. bad samples
+    std::printf ("9. A NaN and an inf in the input\n");
+    {
+        const auto in = makeVoice (fs, 4.0, [] (double) { return midiToHz (57.35); });
+        auto bad = in;
+        bad[20000] = std::numeric_limits<float>::quiet_NaN();
+        bad[30000] = std::numeric_limits<float>::infinity();
+        AutoTuneEngine withBad, clean;
+        for (auto* e : { &withBad, &clean })
+        {
+            e->prepare (fs, 1);
+            e->setParams (makeParams (chromatic, 40.0f, 0.7f));
+        }
+        const auto a = runEngine (withBad, bad), b = runEngine (clean, in);
+        int nonFinite = 0;
+        double worst = 0.0;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            if (! std::isfinite (a[i]))
+                ++nonFinite;
+            else if (i + 48000 >= a.size())
+                worst = std::max (worst, (double) std::fabs (a[i] - b[i]));
+        }
+        check (nonFinite == 0, "the output stays finite", nonFinite, "bad samples");
+        check (worst < 0.01, "a second later the voice is what it would have been", worst, "max difference");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED", failures, failures == 1 ? "" : "s");

@@ -195,7 +195,9 @@ public:
             float mono = 0.0f;
             for (int c = 0; c < nch; ++c)
             {
-                const float v = io[c][i];
+                // An inf or NaN is taken as silence: one of them in the detector's filters or the correction's smoothing stays there
+                // for good, and the voice then never comes back in tune (dsp_test, section 9).
+                const float v = std::isfinite (io[c][i]) ? io[c][i] : 0.0f;
                 hist[(size_t) c].push (v);
                 mono += v;
             }

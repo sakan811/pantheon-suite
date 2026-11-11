@@ -172,6 +172,7 @@ state of that is tracked in the repository's [CLAUDE.md](../../CLAUDE.md)). Run 
 | Vibrato depth kept ≥ 100 % at *Natural 100*, ≤ 15 % at *Natural 0* | Voices other than a clean solo vocal (see Limitations) |
 | Formants unchanged when shifting 3 semitones (spectral centroid ratio 1.04; naive resampling gives 1.19) | |
 | ~0.8 % of one core (stereo, 48 kHz; ~1.4 % at 96 kHz). Passes `auval` and `pluginval` at strictness 10 | |
+| A NaN or an inf in the input is taken as silence: the output stays finite and a second later the voice is what it would have been without it (`dsp_test`, section 9) | |
 
 ## Limitations
 
