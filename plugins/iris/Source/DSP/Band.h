@@ -58,6 +58,7 @@ struct BandParams
     double freq = 1000.0, gainDb = 0.0, q = 1.0;
     int slope = 1;             // cuts only: index into 12 / 24 / 36 / 48 dB per octave
     bool dynamic = false;
+    bool external = false;     // the dynamics listen to the sidechain input instead of the band's own signal (when one is connected)
     DynamicsParams dyn;
 
     // Whether the dynamic part does anything: cuts and notches have no gain to move.
