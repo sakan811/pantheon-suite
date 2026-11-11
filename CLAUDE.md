@@ -31,7 +31,7 @@ apps/<name>/     one self-contained standalone application each (no plugin forma
   panels, glass, lamps, buttons, knobs, the header plate and the nameplate), [HardwareLookAndFeel.h](shared/ui/include/pantheon/ui/HardwareLookAndFeel.h),
   [Controls.h](shared/ui/include/pantheon/ui/Controls.h) (the parameter-bound `Knob`, `Choice` and `Toggle`; a choice takes its items from the parameter, so a plugin never lists them twice; clicking a `Knob`'s read-out opens it for typing a value),
   [ValueKnob.h](shared/ui/include/pantheon/ui/ValueKnob.h) (the same knob for a value that is not a plugin parameter, such as the setting of the selected note in an editor: it holds its own value and calls back; Orpheus is its only user) and
-  [MeterCell.h](shared/ui/include/pantheon/ui/MeterCell.h), plus [FreqAxis.h](shared/ui/include/pantheon/ui/FreqAxis.h) (the logarithmic frequency axis every spectrum display uses). Plugins call them; they do not draw their own panels, lamps or
+  [MeterCell.h](shared/ui/include/pantheon/ui/MeterCell.h), plus [FreqAxis.h](shared/ui/include/pantheon/ui/FreqAxis.h) (the logarithmic frequency axis every spectrum display uses) and [Spectrogram.h](shared/ui/include/pantheon/ui/Spectrogram.h) (`ui::Spectrogram`: a ring of rows drawn on glass, levels in, the caller's grid; Atlas is its only user so far). Plugins call them; they do not draw their own panels, lamps or
   buttons. The namespaces (`colours`, `ui`, `ui::hw`) are kept short on purpose.
 - Everything is drawn from code: no image or font files, nothing random at run time.
 - **A change here changes every plugin that uses it.** Build all of them, and regenerate and look at each plugin's
@@ -52,6 +52,8 @@ apps/<name>/     one self-contained standalone application each (no plugin forma
   Low-Mid 250–500 Hz, Midrange 500 Hz–2 kHz, Upper-Mid 2–6 kHz, High 6–20 kHz, and `pdsp::BandSplitter`, the LR4 splitter whose bands sum flat), which every
   plugin but Harmonia solos by: Themis' AUDITION ranges, Iris' regions (their default crossovers), Hephaestus' band solo strip and Atlas' six compressor bands (the splitter is its zero-latency split, the edges its default crossovers). A new plugin with a band solo uses it
   too; Themis' readouts keep their own four `kEnergyRanges` (their limits were set on them). It is plain C++, so Themis' JUCE-free core includes it.
+  And [SpectrumIssues.h](shared/dsp/include/pantheon/dsp/SpectrumIssues.h) (`pdsp::SpectrumGrid`, the 1/24-octave grid of a spectrogram, and `pdsp::IssueFinder`: narrow peaks that stay, and regions
+  whose level keeps jumping over its average; plain C++, fed from a display's timer), written to be shared and used by Atlas so far; AtlasTests [9] pins it.
 - It knows nothing about any plugin and has no GUI. The namespace is `pdsp` (not `dsp`, which would collide with `juce::dsp`).
 - **A change here changes every plugin that uses it.** Run each one's DSP tests (Hephaestus: `HephaestusTests`; Iris: `IrisTests`; Atlas: `AtlasTests`, for MusicBands.h and Biquad.h; Themis: `make test`, for MusicBands.h); the
   analyzer's calibration is pinned by Hephaestus' test [10]; BandLink by both `UiCheck`s (PASTE) and Themis' `ThemisSmoke` build. The files are
@@ -79,6 +81,8 @@ Delete an item here when it is done; this list is the only place that says what 
   `~/Library/Audio/Plug-Ins`. Themis makes this an option (`THEMIS_INSTALL_AFTER_BUILD`), which CI relies on.
 - **CI** builds and tests Themis (macOS and Linux), runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)) Atlas' `AtlasTests` and `AtlasUiCheck` on Linux ([atlas.yml](.github/workflows/atlas.yml)) and Orpheus' `OrpheusTests` and `OrpheusUiCheck` on Linux ([orpheus.yml](.github/workflows/orpheus.yml)). Iris, Atlas and Orpheus have no macOS job yet (universal binary, AU and `auval` for Iris and Atlas), Atlas has no `HostCheck` and has not been built on macOS or run through `auval`, the Atlas and Orpheus workflows have not run yet, and Hephaestus and Harmonia are in no workflow.
 - **Harmonia has no CLAUDE.md.** Its architecture, invariants and gotchas are not written down yet; its README is the only description.
+- **The spectrogram and its finder in Iris and Themis.** `ui::Spectrogram` and `pdsp::IssueFinder` are in `shared/` for all three, but only Atlas uses them. Iris still has its own
+  `ResonanceFinder` (the same idea as the finder's peaks, on its own grid) and no spectrogram or JUMPS markers; Themis has its own spectrogram (`core/.../Spectrogram.h`, `HistoryViews.h`, on its `BandGrid`) with no markers.
 - **Shared DSP.** Only what a second plugin actually needed has been extracted (see shared/dsp). Themis' FFT, band grid and target
   curves, and Harmonia's pitch tracking, are used by one plugin each and stay there; so are Orpheus' offline pitch tracker and PSOLA ([apps/orpheus/Source/Dsp](apps/orpheus/Source/Dsp)), which are whole-file and share no code with Harmonia's real-time ones (if a second consumer needs either, extract then); Themis' `TonalAnalyzer` is not the same code as
   the shared spectrum analyser (it differs in precision and JUCE dependence). Extract when a second plugin needs the same code.

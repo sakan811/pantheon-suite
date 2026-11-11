@@ -3,7 +3,9 @@
 
 // Renders the plugin editor to a PNG while feeding it a programme, so the reduction meters show real activity.
 //
-//   AtlasSnapshot <out.png> [solo=MASK] [delta=MASK] [linear] [os=N]
+//   AtlasSnapshot <out.png> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N]
+//
+//   bands=N   join bands from the top until N are left
 
 #include "PluginEditor.h"
 #include <random>
@@ -41,6 +43,9 @@ int main (int argc, char** argv)
         else if (arg.startsWith ("delta=")) proc.engine.monitor.delta = (unsigned) value;
         else if (arg == "linear")           set (atlas::id::phase, 1.0f);
         else if (arg.startsWith ("os="))    set (atlas::id::oversampling, (float) value);
+        else if (arg.startsWith ("bands="))
+            while (atlas::layoutOf (proc.apvts).numBands > std::max (value, 1))
+                atlas::removeSplit (proc.apvts, atlas::layoutOf (proc.apvts).numBands - 2);
     }
 
     // Pink-ish noise with a beat: something in every band, moving.
@@ -49,17 +54,18 @@ int main (int argc, char** argv)
     juce::AudioBuffer<float> buffer (2, 512);
     juce::MidiBuffer midi;
     float lowL = 0.0f, lowR = 0.0f;
-    for (int block = 0; block < 300; ++block)
+    for (int block = 0; block < 720; ++block)
     {
         for (int i = 0; i < 512; ++i)
         {
             const int n = block * 512 + i;
-            const float beat = 0.35f + 0.65f * std::exp (-(float) (n % 24000) / 5000.0f);
+            const float beat = 0.1f + 0.9f * std::exp (-(float) (n % 24000) / 3000.0f);
             lowL += 0.08f * (white (gen) - lowL);
             lowR += 0.08f * (white (gen) - lowR);
             const float kick = 0.6f * std::sin (6.2831853f * 55.0f * (float) n / 48000.0f) * beat;
-            buffer.setSample (0, i, beat * (2.0f * lowL + 0.15f * white (gen)) + kick);
-            buffer.setSample (1, i, beat * (2.0f * lowR + 0.15f * white (gen)) + kick);
+            const float ring = 0.02f * std::sin (6.2831853f * 3100.0f * (float) n / 48000.0f); // a resonance that stays
+            buffer.setSample (0, i, beat * (2.0f * lowL + 0.15f * white (gen)) + kick + ring);
+            buffer.setSample (1, i, beat * (2.0f * lowR + 0.15f * white (gen)) + kick + ring);
         }
         proc.processBlock (buffer, midi);
         if (block % 4 == 0)

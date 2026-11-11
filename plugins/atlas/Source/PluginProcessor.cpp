@@ -38,6 +38,8 @@ void AtlasProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     juce::ScopedNoDenormals noDenormals;
     const auto params = atlas::readParams (apvts);
     const int n = buffer.getNumSamples();
+    if (buffer.getNumChannels() > 0)
+        tapIn.push (buffer.getArrayOfReadPointers(), buffer.getNumChannels(), n);
     if (buffer.getNumChannels() >= 2)
     {
         engine.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n, params);

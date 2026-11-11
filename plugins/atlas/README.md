@@ -1,8 +1,10 @@
 # Atlas Span
 
-A **six-band compressor** (VST3 + AU + Standalone) for mixing and mastering. The bands are the six main bands of music
-(Sub, Bass, Low-Mid, Midrange, Upper-Mid, High), the same ones the other plugins of this repository solo by, and their edges
-can be moved. Each band has its own compressor, working on **Stereo**, **L/R**, **M/S**, or on Left, Right, Mid or Side alone;
+A **multiband compressor** (VST3 + AU + Standalone) for mixing and mastering, with **one to six bands that you make on a
+spectrogram**: double-click to split a band, drag an edge, double-click an edge to join two. It starts on the six main bands
+of music (Sub, Bass, Low-Mid, Midrange, Upper-Mid, High), the same ones the other plugins of this repository solo by. The
+display also points at trouble: **PEAK** marks a narrow region that stands out and stays, **JUMPS** a region whose level keeps
+leaping over its own average, and a click on a JUMPS marker makes that region a band. Each band has its own compressor, working on **Stereo**, **L/R**, **M/S**, or on Left, Right, Mid or Side alone;
 its own **SOLO** and **DELTA**; and its own **gain MATCH**. The split is **Zero Latency** or **Linear** phase, and the
 compressors can run **oversampled** (2x, 4x).
 
@@ -14,15 +16,21 @@ the short name "Atlas".)
 
 ![Atlas Span](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins) over a programme with a beat. Five
-bands are soloed (the Sub is dimmed), the Midrange is on DELTA, the Bass works on M/S and the High band has MATCH on. Regenerate
-with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins) over a programme with a beat, a
+55 Hz kick and a ringing tone at 3.1 kHz. The display is the input over the last six seconds, low to high across, newest at the
+bottom: the beat is the horizontal stripes, the two PEAK markers are the kick's note and the ringing tone, and the JUMPS markers
+are the regions the beat leaps in. The white lines are the band edges, the amber shade at the top of a band is what its
+compressor is taking off. Bands 2 to 6 are soloed (band 1 is dimmed), band 4 is on DELTA, band 2 works on M/S and band 6 has
+MATCH on. Regenerate with the command under "Development".*
 
 ## What it does
 
 | | |
 |---|---|
-| **Six bands** | Sub 20–60 Hz, Bass 60–250 Hz, Low-Mid 250–500 Hz, Midrange 500 Hz–2 kHz, Upper-Mid 2–6 kHz, High 6–20 kHz by default. **XOVER** on a strip moves its upper edge (40 Hz to 16 kHz; the edges keep their order, at least a ratio of 1.2 apart). |
+| **One to six bands** | Sub 20–60 Hz, Bass 60–250 Hz, Low-Mid 250–500 Hz, Midrange 500 Hz–2 kHz, Upper-Mid 2–6 kHz, High 6–20 kHz to start with. On the display: **double-click** splits the band there (both halves keep its settings), **drag** an edge to move it (also **XOVER** on the strip), **double-click an edge** joins the two bands (the lower one's settings stay). Edges go from 40 Hz to 16 kHz and stay at least a ratio of 1.2 apart. With no split it is a plain single-band compressor. There is a strip for each band, in the order of the spectrum. |
+| **The display** | A spectrogram of the input: frequency across, the last six seconds running down. The amber shade hanging from the top of a band is the dB its compressor is taking off; a band that is not heard (another is soloed) is dimmed. |
+| **PEAK** | A narrow region that stands at least 6 dB above its neighbourhood (1/6 to 1/2 octave either side) on a 3 s average: a ringing note, a room mode, a harsh formant. Up to four. It is a pointer for an equaliser or a narrow band; nothing is changed. |
+| **JUMPS** | A region at least 1/4 octave wide whose level keeps leaping 10 dB or more over its own 3 s average: a kick that pokes out, a voice that leaps, sibilance. Up to three. **Click the marker** and the region becomes a band (splits are added at its edges where there is room), switched on; the band is then listened to for two seconds and its threshold is set half the jump under the loudest level it read. Ratio and times stay as they were. |
 | **Per band** | **ON**, **THRESH**, **RATIO**, **ATTACK**, **RELEASE**, **MAKEUP**, and a meter of the dB taken off. The knee is 6 dB wide. A band that is off passes as it is. |
 | **Channels** | **Stereo**: left and right with one gain (the louder decides), so the image does not move. **L/R**: left and right, each with its own gain. **M/S**: the centre and the sides, each with its own gain. **Left / Right / Mid / Side**: that one only; the rest of the band is untouched. |
 | **SOLO** | Hear the band alone, as it comes out. Click more to hear them together; any combination adds up flat. Not saved with the session. |
@@ -67,12 +75,22 @@ input -> split into six bands -> per band:  level -> gain computer -> attack / r
 - **Oversampling.** With the bands off, 2x and 4x are the plain output 49 and 61 samples later, bit for bit. An 11 kHz tone
   compressed with the fastest times: the harmonics that fold back to 15 and 7 kHz are 89 / 92 dB under the tone without
   oversampling, 134 / 136 dB at 2x, 150 / 142 dB at 4x.
+- **Bands.** With no split, -30 dB and 4:1 take a 1 kHz tone at -10 dB down 15.00 dB on the whole output (the law gives 15.00).
+  With one split at 250 Hz and the upper band compressing, 4 kHz is taken down 15.00 dB and 60 Hz +0.000 dB. Joined bands
+  still add to the input (linear, bands off) and give the same output for any host block.
+- **The finder** (synthetic spectrogram columns, 30 per second). A steady programme: nothing. A 12 dB resonance at 3 kHz: one
+  peak, at 2958 Hz (the nearest 1/24-octave step), 12.0 dB over its neighbourhood. A region around 80 Hz leaping 18 dB twice a second: one
+  region, 63 to 102 Hz. Nothing in the first two seconds; silence says nothing.
 - **Robust.** The output is the same, bit for bit, for host blocks of 512, 377 and 1 samples in every mode; an inf or a NaN in the
   input does not get through; it runs at 44.1, 96 and 192 kHz; the modes can be switched while playing.
 
 ## Limits
 
 - No look-ahead, no sidechain input, no presets, and the times are not automatic.
+- PEAK and JUMPS read the display's analyzer on the editor's timer: they need the editor open, they see the input (not what the
+  compressors did), and their limits are rules of thumb. A threshold set from a JUMPS marker is a starting point.
+- Splitting or joining bands while they are compressing can click (the gains start again), and ends every solo and delta.
+  In Zero Latency a split that is switched off is parked at the top of the spectrum, where its crossover still turns the phase a little above 16 kHz.
 - The level is not a peak reading (see above): this is not a limiter.
 - Linear mode resolves a crossover down to 40 Hz, which is why XOVER stops there. Its FFT is single precision: the floor is about -135 dB.
 - Changing Phase or Oversampling while playing restarts the bands from silence (a short gap) and changes the latency.

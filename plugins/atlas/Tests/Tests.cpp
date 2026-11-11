@@ -5,6 +5,7 @@
 
 #include "Check.h"
 #include "DSP/Engine.h"
+#include <pantheon/dsp/SpectrumIssues.h>
 #include <random>
 
 using namespace atlas;
@@ -452,6 +453,100 @@ void testRobust()
     }
     check (ok, "phase and oversampling switched while playing: finite output, and the latency reported is the mode's");
 }
+void testFreeBands()
+{
+    std::printf ("\n[8] One to six bands\n");
+    check (bandOwners ({ true, true, true, true, true }) == std::array<int, kBands> { 0, 1, 2, 3, 4, 5 }
+               && bandOwners ({ false, false, false, false, false }) == std::array<int, kBands> { 0, 0, 0, 0, 0, 0 }
+               && bandOwners ({ true, false, false, true, false }) == std::array<int, kBands> { 0, 1, 1, 1, 4, 4 },
+           "a split that is off joins the band above it to the one below");
+
+    // No splits: one band, a plain compressor. The whole output follows the law (nothing leaks into a neighbour).
+    auto p = allOff();
+    p.split = { false, false, false, false, false };
+    p.bands[0] = { true, Channels::stereo, -30.0, 4.0, 1.0, 50.0, 0.0, false };
+    const auto tone = sine (1000.0, std::pow (10.0, -10.0 / 20.0), second);
+    const auto one = run (p, tone, tone);
+    const double taken = toDb (amplitudeAt (one.l, 1000.0, second / 2, second / 4)) + 10.0;
+    check (std::fabs (taken + 15.0) < 0.2, fmt ("no splits, -30 dB, 4:1: a 1 kHz tone at -10 dB is taken down %+.2f dB on the whole output (the law gives -15.00)", taken));
+
+    // Two bands split at 250 Hz only: the low band's compressor does not touch 2 kHz, the upper band's does, with strip 2's settings.
+    p = allOff();
+    p.split = { false, true, false, false, false };
+    p.bands[2] = { true, Channels::stereo, -30.0, 4.0, 1.0, 50.0, 0.0, false };
+    const auto high = sine (4000.0, std::pow (10.0, -10.0 / 20.0), second), low = sine (60.0, std::pow (10.0, -10.0 / 20.0), second);
+    const auto h = run (p, high, high), lo = run (p, low, low);
+    const double takenHigh = toDb (amplitudeAt (h.l, 4000.0, second / 2, second / 4)) + 10.0, takenLow = toDb (amplitudeAt (lo.l, 60.0, second / 2, second / 4)) + 10.0;
+    check (std::fabs (takenHigh + 15.0) < 0.2 && std::fabs (takenLow) < 0.05,
+           fmt ("one split at 250 Hz, the upper band compressing: 4 kHz %+.2f dB (it spans 250 Hz to 20 kHz), 60 Hz %+.3f dB", takenHigh, takenLow));
+
+    // Joined bands still add back to the input, in both phase modes, and the output does not depend on the host's block.
+    const auto l = noise (11, 0.4, second / 2), r = noise (12, 0.4, second / 2);
+    auto q = allOff();
+    q.split = { true, false, false, true, false };
+    q.phase = PhaseMode::linear;
+    Engine e;
+    e.prepare (fs, q.phase, 0);
+    const int latency = e.latencySamples.load();
+    const auto out = run (e, q, l, r);
+    q.bands[1] = { true, Channels::midSide, -40.0, 3.0, 5.0, 80.0, 2.0, true };
+    const auto a = run (q, l, r, 512), b = run (q, l, r, 1);
+    check (maxDiff (out.l, l, 0, second / 2 - latency, latency) < 1.0e-5 && a.l == b.l && a.r == b.r,
+           "three bands, linear: with the bands off the output is the input, later; compressing, blocks of 512 and 1 give the same output bit for bit");
+}
+
+void testIssueFinder()
+{
+    std::printf ("\n[9] The display's finder: peaks and jumps (shared/dsp SpectrumIssues.h)\n");
+    using pdsp::IssueFinder;
+    using pdsp::SpectrumGrid;
+    const float dt = 1.0f / 30.0f;
+    std::mt19937 gen (21);
+    std::uniform_real_distribution<float> jitter (-1.5f, 1.5f);
+    // A programme that slopes down 3 dB per octave from -30 dB, every step wobbling a little.
+    const auto base = [&] (int i) { return -30.0f - 3.0f * (float) i / (float) SpectrumGrid::kPerOctave + jitter (gen); };
+
+    IssueFinder steady;
+    for (int frame = 0; frame < 240; ++frame)
+    {
+        SpectrumGrid::Column c;
+        for (int i = 0; i < SpectrumGrid::kSteps; ++i) c[(size_t) i] = base (i);
+        steady.push (c, dt);
+    }
+    std::array<IssueFinder::Peak, IssueFinder::kMaxPeaks> peaks;
+    std::array<IssueFinder::Swing, IssueFinder::kMaxSwings> swings;
+    check (steady.peaks (peaks) == 0 && steady.swings (swings) == 0, "a steady, smooth programme: no peaks, no jumps");
+
+    // The same with a resonance at 3 kHz (12 dB, narrow) and a region around 80 Hz that leaps 18 dB twice a second.
+    IssueFinder f;
+    const int resonance = (int) std::lround (SpectrumGrid::stepAt (3000.0)), kick = (int) std::lround (SpectrumGrid::stepAt (80.0));
+    for (int frame = 0; frame < 240; ++frame)
+    {
+        SpectrumGrid::Column c;
+        for (int i = 0; i < SpectrumGrid::kSteps; ++i)
+        {
+            c[(size_t) i] = base (i);
+            if (std::abs (i - resonance) <= 1) c[(size_t) i] += i == resonance ? 12.0f : 6.0f;
+            if (std::abs (i - kick) <= 8 && frame % 15 < 3) c[(size_t) i] += 18.0f;
+        }
+        f.push (c, dt);
+        if (frame == 30)
+            check (f.peaks (peaks) == 0 && f.swings (swings) == 0, "nothing is reported in the first two seconds");
+    }
+    const int numPeaks = f.peaks (peaks), numSwings = f.swings (swings);
+    check (numPeaks == 1 && std::fabs (std::log2 (peaks[0].freqHz / 3000.0)) < 1.0 / 24.0 && peaks[0].prominenceDb > 8.0f,
+           fmt ("a 12 dB resonance at 3 kHz: %d peak, at %.0f Hz, %.1f dB over its neighbourhood", numPeaks, peaks[0].freqHz, peaks[0].prominenceDb));
+    check (numSwings == 1 && swings[0].loHz < 70.0 && swings[0].hiHz > 92.0 && swings[0].loHz > 55.0 && swings[0].hiHz < 115.0 && swings[0].swingDb > 10.0f
+               && swings[0].thresholdDb() < swings[0].peakDb && swings[0].thresholdDb() > swings[0].peakDb - swings[0].swingDb,
+           fmt ("a region around 80 Hz that leaps 18 dB: %d region, %.0f to %.0f Hz, jumping %.1f dB to %.1f dB (a threshold half way: %.1f dB)",
+                numSwings, swings[0].loHz, swings[0].hiHz, swings[0].swingDb, swings[0].peakDb, swings[0].thresholdDb()));
+
+    IssueFinder silent;
+    SpectrumGrid::Column quiet;
+    quiet.fill (-140.0f);
+    for (int frame = 0; frame < 240; ++frame) silent.push (quiet, dt);
+    check (silent.peaks (peaks) == 0 && silent.swings (swings) == 0, "silence says nothing");
+}
 } // namespace
 
 int main()
@@ -464,5 +559,7 @@ int main()
     testGainMatch();
     testOversampling();
     testRobust();
+    testFreeBands();
+    testIssueFinder();
     return test::finish ("AtlasTests");
 }
