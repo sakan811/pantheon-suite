@@ -586,6 +586,40 @@ int main (int argc, char** argv)
                 auditionPanel = auditionPanel != nullptr ? auditionPanel : dynamic_cast<AuditionPanel*> (child);
             }
             CHECK (plan != nullptr && auditionPanel != nullptr);
+            {
+                // Usage notes: what the status window says about how the plugin is being used.
+                const auto has = [] (const std::vector<ui::Note>& n, const char* word, ui::Severity sev) { return ui::hasNote (n, word, sev); };
+                usage::Input fine;
+                fine.signal = true; fine.analysedSeconds = 60.0;
+                CHECK (usage::notesFor (fine).empty(), "a playing track measured for a minute: nothing to say");
+                auto in = fine; in.auditionActive = true;
+                CHECK (has (usage::notesFor (in), "AUDITION is engaged", ui::Severity::warning), "audition engaged: a warning");
+                in = fine; in.comparing = true;
+                CHECK (has (usage::notesFor (in), "COMPARE is on", ui::Severity::warning), "COMPARE on: a warning");
+                in = fine; in.signal = false;
+                CHECK (has (usage::notesFor (in), "No signal", ui::Severity::info), "no signal: say where to put the plugin");
+                in = fine; in.analysedSeconds = 5.0;
+                CHECK (has (usage::notesFor (in), "20 s", ui::Severity::info), "5 s measured: the plan needs 20 s");
+                in = fine; in.auditionActive = true; in.comparing = true; in.signal = false; in.analysedSeconds = 0.0;
+                size_t longest = 0;
+                for (auto& n : usage::notesFor (in))
+                    longest = std::max (longest, n.text.size());
+                CHECK (static_cast<int> (longest) <= usage::kMaxChars, "the longest note is %d characters (the status window holds %d)", static_cast<int> (longest), usage::kMaxChars);
+                CHECK (usage::notesFor (in).front().severity == ui::Severity::warning, "warnings come first");
+                auto* themisEditor = dynamic_cast<ThemisEditor*> (editor.get());
+                CHECK (themisEditor != nullptr && themisEditor->guide().isVisible() && std::strlen (usage::guideText()) > 400
+                           && std::string (usage::guideText()).find ("NOT FOR") != std::string::npos,
+                       "the GUIDE button is there and its text says what the plugin is not for");
+                if (themisEditor != nullptr)
+                {
+                    CHECK (! has (themisEditor->notes(), "AUDITION", ui::Severity::warning), "the editor shows no audition warning at first");
+                    themis::Switches sw;
+                    sw.solo = 1u;
+                    proc.setAudition (sw);
+                    CHECK (has (themisEditor->notes(), "AUDITION is engaged", ui::Severity::warning), "an audition engaged in the processor reaches the editor's notes");
+                    proc.setAudition (themis::Switches {});
+                }
+            }
             if (plan != nullptr)
             {
                 const auto& advice = plan->currentAdvice();

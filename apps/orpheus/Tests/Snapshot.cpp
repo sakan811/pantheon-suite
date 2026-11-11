@@ -21,7 +21,7 @@ int main (int argc, char** argv)
     }
     juce::ScopedJuceInitialiser_GUI gui;
     orpheus::gui::MainComponent window (false);
-    window.setSize (1240, 760);
+    window.setSize (orpheus::gui::MainComponent::kDesignWidth, orpheus::gui::MainComponent::kDesignHeight);
 
     const auto phrase = test::outOfTunePhrase();
     juce::String audioFile;

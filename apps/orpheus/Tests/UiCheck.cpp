@@ -48,7 +48,7 @@ void doubleClick (juce::Component& view, juce::Point<float> at)
 std::unique_ptr<MainComponent> makeWindow (bool chromatic = false, double detune = 0.0)
 {
     auto w = std::make_unique<MainComponent> (false);
-    w->setSize (1240, 760);
+    w->setSize (MainComponent::kDesignWidth, MainComponent::kDesignHeight);
     auto notes = test::outOfTunePhrase();
     if (detune != 0.0) // every note on the same off-grid: the singer is flat or sharp all the way through
         for (auto& n : notes)
@@ -358,7 +358,7 @@ int main()
         // navigation: the bar, the zoom buttons, the wheel, the pitch scrollbar
         auto w = makeWindow();
         auto& roll = w->roll;
-        w->setSize (1240, 760);
+        w->setSize (MainComponent::kDesignWidth, MainComponent::kDesignHeight);
         roll.setViewSeconds (0.0, 2.0);
         const double visible0 = roll.visibleSeconds();
         test::check (std::fabs (visible0 - 2.0) < 0.01, test::fmt ("the display can be set to show exactly 2 s (%.2f)", visible0));
@@ -400,6 +400,50 @@ int main()
         test::check (w->playback.position() == 48000, "seek moves the playhead");
         click (w->roll, { (float) w->roll.xOfSample (96000.0), (float) w->roll.kRulerHeight / 2.0f });
         test::check (std::abs (w->playback.position() - 96000) < 400, "a click on the ruler moves the playhead there");
+    }
+
+    {
+        // Advice: the notes that keep the editor from being used for the wrong job
+        using ui::Severity;
+        const auto has = [] (const std::vector<ui::Note>& n, const char* word, Severity sev) { return ui::hasNote (n, word, sev); };
+        AdviceInput fine;
+        fine.hasAudio = true; fine.notes = 9; fine.shortestNoteMs = 300.0;
+        test::check (adviceFor (fine).empty(), "a recording with notes, nothing edited: nothing to say");
+        auto in = fine; in.hasAudio = false;
+        test::check (has (adviceFor (in), "Open a recording", Severity::info), "no recording: say what to open and that it is one voice");
+        in = fine; in.busy = true;
+        test::check (has (adviceFor (in), "Analysing", Severity::info), "while analysing: say so");
+        in = fine; in.playingOriginal = true;
+        test::check (has (adviceFor (in), "ORIGINAL is lit", Severity::warning), "ORIGINAL lit: a warning");
+        in = fine; in.hasEdits = true;
+        test::check (has (adviceFor (in), "not saved", Severity::warning), "edits never saved: a warning");
+        in.projectSaved = true;
+        test::check (! has (adviceFor (in), "not saved", Severity::warning), "... which a saved project does not give");
+        in = fine; in.largestShiftSemitones = 8.0;
+        test::check (has (adviceFor (in), "8 semitones", Severity::warning), "a shift of 8 semitones: the voice changes character");
+        in = fine; in.shortestNoteMs = 60.0;
+        test::check (has (adviceFor (in), "under 100 ms", Severity::info), "a 60 ms note may be a mis-cut");
+
+        size_t longest = 0;
+        for (int mask = 0; mask < 64; ++mask)
+        {
+            AdviceInput all;
+            all.hasAudio = true; all.notes = 9; all.playingOriginal = mask & 1; all.hasEdits = mask & 2; all.largestShiftSemitones = (mask & 4) ? 12.0 : 0.0;
+            all.shortestNoteMs = (mask & 8) ? 50.0 : 300.0; all.busy = mask & 16; all.hasAudio = ! (mask & 32);
+            for (auto& n : adviceFor (all))
+                longest = std::max (longest, n.text.size());
+        }
+        test::check ((int) longest <= ui::kMaxNoteChars, test::fmt ("the longest note is %d characters (a line holds %d)", (int) longest, ui::kMaxNoteChars));
+
+        auto w = makeWindow();
+        test::check (w->notes().empty(), "a window with the phrase open and nothing done: no warning");
+        w->originalButton.setToggleState (true, juce::sendNotification);
+        test::check (has (w->notes(), "ORIGINAL is lit", Severity::warning), "ORIGINAL pressed in the window reaches its notes");
+        w->originalButton.setToggleState (false, juce::sendNotification);
+        w->session.correct (1.0f);
+        test::check (has (w->notes(), "not saved", Severity::warning), "Correct all without saving: the edits are not saved");
+        test::check (w->guideButton.isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
+                     "the GUIDE button is there and its text says what the app is not for");
     }
 
     return test::finish ("OrpheusUiCheck");

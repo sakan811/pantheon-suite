@@ -23,6 +23,7 @@ const Preset kPresets[3] = {
 constexpr int kKnobX = 190, kKnobW = 111, kKnobTop = 412, kKnobH = 140, kNumKnobs = 6;
 constexpr int kRowTop = 96, kRowH = 292;       // the graph and the key module
 constexpr int kStyleTop = 400, kStyleH = 168;  // the style and knob module
+const juce::Rectangle<int> kNoteStrip { 20, kStyleTop + kStyleH + 6, 840, ui::kNoteStripHeight }; // the notes, under it
 } // namespace
 
 HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
@@ -57,7 +58,7 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
             detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
         awaitingKeyResult = false;
     };
-    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton, &resetButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton, &resetButton, &guideButton })
         content.addAndMakeVisible (c);
 
     detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
@@ -127,6 +128,7 @@ void HarmoniaEditor::resized()
     rangeBox.setBounds (580, 36, 190, 28);
     bypassButton.setBounds (784, 36, 76, 28);
     resetButton.setBounds (kLatencyBounds.getRight() + 16, 36, 84, 28);
+    guideButton.setBounds (resetButton.getRight() + 10, 36, 76, 28);
 
     graph.setBounds (20, kRowTop, 560, kRowH);
 
@@ -168,6 +170,8 @@ void HarmoniaEditor::paintContent (juce::Graphics& g)
     g.setFont (ui::font (11.0f));
     g.drawText (keysLocked ? "The key follows your vocal" : "Click keys to allow or block notes", 616, kRowTop + 258, 228, 28, juce::Justification::centredLeft);
 
+    ui::drawNoteStrip (g, kNoteStrip, harmonia::adviceFor (adviceInput()));
+
     // style and the knobs
     hw::drawModule (g, juce::Rectangle<float> (20.0f, (float) kStyleTop, 840.0f, (float) kStyleH));
     hw::drawLabel (g, "Style", { 40, kStyleTop + 14, 120, 16 }, juce::Justification::left, colours::text, 10.5f);
@@ -175,6 +179,23 @@ void HarmoniaEditor::paintContent (juce::Graphics& g)
     g.fillRect (180.0f, (float) kStyleTop + 16.0f, 1.0f, 136.0f);
     g.setColour (juce::Colours::white.withAlpha (0.07f));
     g.fillRect (181.0f, (float) kStyleTop + 16.0f, 1.0f, 136.0f);
+}
+
+harmonia::AdviceInput HarmoniaEditor::adviceInput() const
+{
+    harmonia::AdviceInput in;
+    in.bypass = proc.paramValue (ids::bypass) >= 0.5f;
+    in.autoKey = proc.paramValue (ids::autoKey) >= 0.5f;
+    in.speedMs = proc.paramValue (ids::speed);
+    in.holdMs = proc.paramValue (ids::hold);
+    in.formantSemitones = proc.paramValue (ids::formant);
+    in.tuningHz = proc.paramValue (ids::tuning);
+    in.voiceRangeFixed = (int) proc.paramValue (ids::range) != 0;
+    const uint16_t mask = proc.currentNoteMask();
+    in.allowedNotes = 0;
+    for (int i = 0; i < 12; ++i)
+        in.allowedNotes += (mask >> i) & 1u;
+    return in;
 }
 
 // ---- parameter helpers ---------------------------------------------------------------
@@ -288,6 +309,18 @@ void HarmoniaEditor::timerCallback()
         const bool match = std::abs (speed - kPresets[i].speed) < 0.5f && std::abs (strength - kPresets[i].strength) < 0.5f
                            && std::abs (natural - kPresets[i].natural) < 0.5f;
         presetButtons[i].setToggleState (match, juce::dontSendNotification);
+    }
+
+    // The notes follow the parameters, which change without the editor's help.
+    {
+        juce::String all;
+        for (auto& n : notes())
+            all << n.text << '\n';
+        if (all != shownNotes)
+        {
+            shownNotes = all;
+            content.repaint (kNoteStrip);
+        }
     }
 
     // The latency readout only changes when the host (re)prepares the plug-in.

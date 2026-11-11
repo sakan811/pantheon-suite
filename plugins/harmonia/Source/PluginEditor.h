@@ -3,11 +3,13 @@
 
 #pragma once
 
+#include "Advice.h"
 #include "PluginProcessor.h"
 #include "ui/HarmoniaUi.h"
 #include "ui/NoteKeyboard.h"
 #include "ui/PitchGraph.h"
 
+#include <pantheon/ui/Advice.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
 class HarmoniaEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -18,7 +20,10 @@ public:
 
     void resized() override;
 
-    static constexpr int kDesignW = 880, kDesignH = 584; // the editor is drawn at this size and scaled
+    juce::TextButton& guide() noexcept { return guideButton; }                          // for the selftest
+    std::vector<ui::Note> notes() const { return harmonia::adviceFor (adviceInput()); } // what the strip under the controls says, for the selftest
+
+    static constexpr int kDesignW = 880, kDesignH = 584 + 6 + 36 + 0; // the editor is drawn at this size and scaled; the foot strip is the notes' (or GUIDE's reminder)
 
 private:
     static constexpr int kHeaderH = 84;
@@ -36,6 +41,7 @@ private:
     };
 
     void paintContent (juce::Graphics&);
+    harmonia::AdviceInput adviceInput() const;
     void timerCallback() override;
 
     // Sets any parameter from its plain value (choice index, bool as 0/1, or float), as one host gesture.
@@ -57,6 +63,7 @@ private:
     ui::Toggle bypassButton, autoKeyButton;
     juce::TextButton detectButton { "Detect key" };
     juce::TextButton resetButton { "RESET" };
+    ui::GuideButton guideButton { harmonia::guideTitle(), harmonia::guideText() };
     juce::TextButton presetButtons[3];
     juce::Label statusLabel;
     std::array<std::unique_ptr<ui::Knob>, 6> knobs;
@@ -64,7 +71,7 @@ private:
     bool keysLocked = false; // the key follows the vocal: the piano keys cannot be edited
     bool awaitingKeyResult = false;
     juce::uint32 finishClickedAt = 0;
-    juce::String detectedText, latencyText;
+    juce::String detectedText, latencyText, shownNotes;
     bool singing = false; // the nameplate lamp: a voice is being tracked
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HarmoniaEditor)

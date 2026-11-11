@@ -43,6 +43,7 @@ line and the key it is meant to be in. (CMake targets, namespaces and plugin cod
 | **Tuning (A4)** | Reference pitch, for songs not tuned to 440 Hz. |
 | **Voice** | Bass/baritone, tenor/alto, soprano or Auto. Narrows the pitch search: faster, never jumps an octave. Each range reaches a whole tone past the usual top note of its voices (G4, F5, C6; Auto covers them all), and moves with **Tuning**. |
 | **Bypass** | Original vocal, delayed by the latency so it stays aligned. |
+| **Guide and notes** | **GUIDE** (header) says what Harmonia is for and what it is *not* for: one voice at a time, not chords, stacks or mixes; it moves a note to the nearest allowed one, it does not fix timing, and the delay is fixed (record dry). The strip under the controls warns, in amber, when BYPASS is on, when no note or fewer than five are allowed, and when TUNING is not 440 Hz; it notes an almost instant SPEED (the robotic effect), NOTE HOLD 0, AUTO KEY's limits, a moved FORMANT and a fixed VOICE range. The rules are in [Advice.h](Source/Advice.h), checked by `HarmoniaDevTool selftest`. |
 | **Pitch graph** | Your pitch (amber) and the corrected pitch (teal) over the last few seconds against the allowed notes. |
 
 ### How it works
@@ -151,7 +152,7 @@ Layout (the one file map; update it when a source file is added, renamed or remo
 ```
 Source/dsp/        JUCE-free engine: Scales, KeyTracker, PitchDetector, PitchCorrector, AutoTuneEngine,
                    Kernels (SIMD-friendly sums), Rings (history buffers)
-Source/            PluginProcessor (parameters, host glue), PluginEditor
+Source/            PluginProcessor (parameters, host glue), PluginEditor, Advice.h (the notes under the controls and the GUIDE text; plain C++)
 Source/ui/         PitchGraph, NoteKeyboard, HarmoniaUi.h (the two pitch colours); the look itself is shared/ui
 ../../shared/ui/   the drawing kit of the interface, shared with the other plugins of the repository
 Tests/             dsp_test, tune_wav, DevTool, synthetic voice generator

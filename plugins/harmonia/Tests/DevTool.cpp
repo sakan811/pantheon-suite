@@ -8,6 +8,7 @@
 //   HarmoniaDevTool process in.wav out.wav [key 0-11] [scale index] [speed ms] [natural %] [strength %]
 //                                         run a WAV file through the real HarmoniaProcessor (delay-compensated)
 
+#include "../Source/Advice.h"
 #include "../Source/PluginEditor.h"
 #include "../Source/PluginProcessor.h"
 #include "TestSignals.h"
@@ -160,6 +161,48 @@ static int selftest()
         check (following && proc.currentNoteMask() == harmonia::scaleMask (0, harmonia::kMajorScale), "auto key follows what is sung", proc.currentNoteMask());
         setParam (proc, ids::autoKey, 0.0f);
         check (! proc.followedKey (root, minor) && proc.currentNoteMask() == harmonia::scaleMask (6, harmonia::kMinorScale), "auto key off: the chosen key is back", proc.currentNoteMask());
+    }
+
+    std::printf ("\nAdvice: the notes that keep a pitch corrector from being used for the wrong job\n");
+    {
+        using ui::Severity;
+        const auto has = [] (const std::vector<ui::Note>& n, const char* w, Severity s) { return ui::hasNote (n, w, s); };
+        harmonia::AdviceInput fine;
+        fine.speedMs = 40.0;
+        check (harmonia::adviceFor (fine).empty(), "a normal setting: nothing to say", 0);
+        auto in = fine; in.bypass = true;
+        check (has (harmonia::adviceFor (in), "BYPASS", Severity::warning), "BYPASS on: a warning", 0);
+        in = fine; in.allowedNotes = 0;
+        check (has (harmonia::adviceFor (in), "No note is allowed", Severity::warning), "no note allowed: nothing can be corrected", 0);
+        in = fine; in.allowedNotes = 3;
+        check (has (harmonia::adviceFor (in), "Only 3 notes", Severity::warning), "three notes allowed: a warning", 0);
+        in = fine; in.tuningHz = 432.0;
+        check (has (harmonia::adviceFor (in), "432 Hz", Severity::warning), "TUNING away from 440: a warning", 0);
+        in = fine; in.speedMs = 0.0;
+        check (has (harmonia::adviceFor (in), "robotic", Severity::info), "SPEED at 0: the robotic effect", 0);
+        in = fine; in.holdMs = 0.0;
+        check (has (harmonia::adviceFor (in), "NOTE HOLD is 0", Severity::info), "NOTE HOLD 0: it can flicker", 0);
+        in = fine; in.autoKey = true; in.formantSemitones = 2.0; in.voiceRangeFixed = true;
+        check (has (harmonia::adviceFor (in), "AUTO KEY", Severity::info) && has (harmonia::adviceFor (in), "FORMANT", Severity::info)
+                   && has (harmonia::adviceFor (in), "VOICE", Severity::info), "AUTO KEY, FORMANT and VOICE: each named", 0);
+
+        size_t longest = 0;
+        for (int mask = 0; mask < 256; ++mask)
+        {
+            harmonia::AdviceInput all;
+            all.bypass = mask & 1; all.autoKey = mask & 2; all.speedMs = (mask & 4) ? 0.0 : 40.0; all.formantSemitones = (mask & 8) ? 3.0 : 0.0;
+            all.tuningHz = (mask & 16) ? 466.0 : 440.0; all.holdMs = (mask & 32) ? 0.0 : 70.0; all.allowedNotes = (mask & 64) ? 3 : 12; all.voiceRangeFixed = mask & 128;
+            for (auto& n : harmonia::adviceFor (all))
+                longest = std::max (longest, n.text.size());
+        }
+        check ((int) longest <= ui::kMaxNoteChars, "the longest note fits a line", (double) longest);
+
+        HarmoniaEditor editor (proc);
+        setParam (proc, ids::bypass, 1.0f);
+        check (has (editor.notes(), "BYPASS", Severity::warning), "BYPASS in the plugin reaches the editor's notes", 0);
+        setParam (proc, ids::bypass, 0.0f);
+        check (editor.guide().isVisible() && std::strlen (harmonia::guideText()) > 400 && std::string (harmonia::guideText()).find ("NOT FOR") != std::string::npos,
+               "the GUIDE button is there and its text says what the plugin is not for", 0);
     }
 
     std::printf ("\n%s\n", failures == 0 ? "PROCESSOR TESTS PASSED" : "PROCESSOR TESTS FAILED");

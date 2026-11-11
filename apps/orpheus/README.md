@@ -63,6 +63,7 @@ of the third and seventh notes is kept, moved with the note.*
 | **Navigator** | The bar under the display shows the whole recording, with a tick for every note and a bright window for the part on screen. Drag the window to scroll along the audio, drag its edges to zoom, click elsewhere on the bar to go there. **-**, **+** and **FIT** zoom the display; the scrollbar at the right edge of the display scrolls the pitch. |
 | **Piano keys** | Click one to hear that pitch as a tone, to check a note by ear. |
 | **Save / Open** | A project (`.orpheus`) keeps the notes, the key and the settings and points at the audio, which it does not copy. Open takes any audio file the system can decode, or a project. |
+| **Guide and notes** | **GUIDE** (header) says what Orpheus is for and what it is *not* for: the pitch of one voice, not chords or a mix, not timing, not big leaps (past about 5 semitones the voice changes), and not a plugin. The strip at the foot of the window warns, in amber, when ORIGINAL is lit (you hear the take, not your edits), when edits are not saved, and when a note is moved more than 5 semitones; it says what to open when nothing is, and that a note under 100 ms may be a mis-cut. The rules are in [Advice.h](Source/UI/Advice.h), checked by `OrpheusUiCheck`. |
 | **Export** | A 24-bit WAV at the sample rate of the recording, mono or stereo. |
 
 ### Keys and mouse
