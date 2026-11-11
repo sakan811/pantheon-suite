@@ -115,10 +115,14 @@ out over 10 ms and its filters are reset when it starts; releasing one returns t
 to the input's magnitude (test [8]). Do not "save" the compensation filters: soloing two regions at once would then bump at the crossover.
 The crossovers are kept in order, at least a ratio of 1.2 apart, in `control()`; the display and the engine agree on that. Their defaults are `defaultCrossoverHz` in `Band.h`, taken from the six main bands of music in `shared/dsp` MusicBands.h (`pdsp::bands`), which Themis' AUDITION and Hephaestus' band solo strip use too; the splitter is the shared `pdsp::BandSplitter` (`RegionSplitter` is an alias). `xo0`, the sub / bass split, was added after `xo1` ... `xo4` (version 2): the crossover array is `xo0` ... `xo4` in that order, so a session from before it keeps the other four where they were.
 
-**The sidechain is only measured.** The second input bus (`Sidechain`, off unless the host connects it) is pushed into
-`IrisProcessor::sidechainTap` for the masking view and never reaches the engine: `processBlock` hands the engine the main bus only
-(`getBusBuffer`). Do not feed it to a band's detector without making that a separate, tested feature. `HostCheck` builds its layouts
-with the sidechain bus in them; a layout with one input bus is not this plugin's.
+**The sidechain is never heard.** The second input bus (`Sidechain`, off unless the host connects it) is pushed into
+`IrisProcessor::sidechainTap` for the masking view and handed to `Engine::process` as its third argument, where it reaches one thing only: the
+detectors of the dynamic bands whose `bN_listen` is Sidechain (`BandParams::external`, latched into `BandState::external` at a tick like the
+placement; `feedSidechain`). It is never added to the output, and a band that is not dynamic never reads it (test [16], bit for bit). Both of its
+channels go to the band's two detectors whatever the placement (`controlBand` takes the louder), so do not route it through `feedDetectors`:
+a mono-in-one-channel key would vanish from a Side band. With no sidechain (`scIn[0] == nullptr`) `external` stays false and the band listens to
+itself; a change of what it listens to resets the detectors. Non-finite samples are zeroed on the way in, as on the main input. `HostCheck` builds
+its layouts with the sidechain bus in them; a layout with one input bus is not this plugin's.
 
 **Display analysis is not audio analysis.** The resonance markers, the masking zones and the dynamics-usage check read the display's
 analyzers on the editor's timer: nothing runs on the audio thread, they need the editor open, and their limits are rules of thumb
@@ -131,7 +135,7 @@ placement order there is the same as `Placement`'s. A harmonic-fill band is skip
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`): an IIR filter keeps a NaN for good.
 
-**Parameters.** Global ids (`iris::id`, `phase` included: version 3) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`) are stored in sessions and automation: never
+**Parameters.** Global ids (`iris::id`, `phase` included: version 3) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`, and `b1_listen` ... `b8_listen`, version 4, declared after all the others so the first layout keeps its order in a host's list) are stored in sessions and automation: never
 rename or remove one. A new parameter needs a `ParameterID` version above 1 (every parameter in the first layout is 1), an entry in
 `readParams()` and, if it has a control, a place in the editor. Session-wide controls go in `isGlobalParameter()` so presets leave them
 alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arrive as 0.000002: anything that has to be exactly zero

@@ -32,8 +32,9 @@ Regenerate with the command under "Development" (`phase=2`).*
 ![A dynamic band](docs/dynamics.png)
 
 *The "De-Esser" preset on the same programme: a bell at 7.2 kHz whose gain moves with the level of its own region. The bar
-hanging from the node is the range the dynamics can move it through (down to -7 dB); the white dot is where it is now (-1.1 dB, still
-releasing after the sibilant burst), and the DYNAMICS panel reads the level the band hears and the gain it applies.*
+hanging from the node is the range the dynamics can move it through (down to -7 dB); the white dot is where it is now (at rest,
+between two sibilant bursts), and the DYNAMICS panel reads the level the band hears and the gain it applies; the selector beside Above is what the
+band listens to (Self, or the sidechain input).*
 
 ![Solo](docs/solo.png)
 
@@ -84,7 +85,7 @@ up to the reference's. The pill at the top right says what the last action did (
 | **Bands** | Up to eight. Double-click the display where you want one (a bell, at the gain you clicked), drag its node (frequency across, gain up and down; Shift for fine), turn the wheel over the node for Q (for a cut, the wheel steps the slope), right-click it for its menu. **Types**: Bell, Low Shelf, High Shelf, Low Cut, High Cut (12 / 24 / 36 / 48 dB per octave, Butterworth) and Notch. Frequency 20 Hz – 20 kHz, gain ±24 dB, Q 0.1 – 18. All filters are double-precision biquads; a band glides to new settings and fades in and out, so nothing zippers or clicks. |
 | **Left / Right / Mid / Side** | Each band has its own **Works on**: Stereo (both channels), Left, Right, Mid or Side. A mid band and a side band are two independent equalisers. Mid is (L+R)/2 and Side is (L-R)/2, and the round trip is exact. A one-channel track is treated as mid. |
 | **Curves** | The display sums the bands into one curve per channel that has a band of its own: Left (blue), Right (rose), Mid (teal), Side (violet), and a single amber curve when every band is on Stereo. The selected band's own curve is filled. The dynamic bands' curves move live. |
-| **Dynamic** | Any bell or shelf can be dynamic. The band listens to its own frequency region (a band-pass for a bell, a low-pass below a low shelf, a high-pass above a high shelf) on what goes *into* the band, so its own boost cannot feed back. **Threshold** (dB, as the peak of a sine), **Ratio**, **Range** (the most the gain moves; negative cuts further, positive boosts), **Attack**, **Release**, and **Above** or **Below** (engage while the level is over, or under, the threshold). The band rests at its **Gain** and moves towards Gain + Range; a 6 dB soft knee smooths the start. On a Stereo band the two channels are linked. See [How the dynamics work](#how-the-dynamics-work). |
+| **Dynamic** | Any bell or shelf can be dynamic. The band listens to its own frequency region (a band-pass for a bell, a low-pass below a low shelf, a high-pass above a high shelf) on what goes *into* the band, so its own boost cannot feed back; or, with the selector next to the DYNAMIC switch on **Sidechain**, to the same region of the *other track* on the sidechain input (see [Listening to the sidechain](#listening-to-the-sidechain)). **Threshold** (dB, as the peak of a sine), **Ratio**, **Range** (the most the gain moves; negative cuts further, positive boosts), **Attack**, **Release**, and **Above** or **Below** (engage while the level is over, or under, the threshold). The band rests at its **Gain** and moves towards Gain + Range; a 6 dB soft knee smooths the start. On a Stereo band the two channels are linked. See [How the dynamics work](#how-the-dynamics-work). |
 | **Clean / Sat** | **Clean** is a plain equaliser. **Sat** passes what a *boosting* band adds through a soft curve, so a boost that gets loud warms up and rounds off instead of staying perfectly linear: small signals stay linear, cuts and cut filters stay clean. **Drive** (0 – 30 dB) is how far below full scale the knee sits; **Style** is the curve: **Tape** (tanh, odd harmonics), **Tube** (asymmetric, adds the even ones, DC-blocked) or **Console** (arctan, open and gentle). No latency and no oversampling: the shaper is anti-aliased (see [How Sat works](#how-sat-works)). |
 | **Phase** | **Zero Latency** (default): the bands are minimum-phase filters, no delay. **Linear**: no phase shift, delayed by 2304 samples (48 ms at 48 kHz). **Linear HQ**: the same at four times the frequency resolution, delayed by 9216 samples (192 ms). The latency is reported to the host, which compensates it. SAT works in Zero Latency only. A session-wide setting: presets leave it alone. See [Phase modes](#phase-modes). |
 | **Delta** | Plays only what the equaliser changes (output minus input). Not saved; a band solo takes over from it. |
@@ -153,6 +154,22 @@ the way after 15 ms (a single-pole curve gives 1.7), and with a 400 ms release i
 (the curve gives -1.26). The level reading does not depend on the times: a sine at -26 dB reads -26 dB. The detector cannot be
 faster than about two cycles of the band's own frequency, which is a limit of measuring a level, not of this one. The gain and
 the coefficients are updated every 32 samples (0.67 ms at 48 kHz).
+
+### Listening to the sidechain
+
+A dynamic band normally listens to itself (**Self**). Set to **Sidechain**, its detector hears the track the host routes to Iris' sidechain input
+instead, through the same band-matched filter, and everything else (Threshold, Ratio, Range, Attack, Release, Above / Below) works as before. That
+is how one track makes room for another only while the other plays and only where they collide: a bell on the bass at the kick's fundamental, Above,
+Range -4 dB, listening to the kick; or a shelf on the pads that dips while the vocal is present. The masking view on the same input shows where.
+
+- The sidechain is **never heard**, only measured, and a band that is not dynamic ignores it.
+- The band's **Works on** says which part of *this* track moves; of the sidechain both channels are measured and the louder one counts, so a
+  sidechain on one side moves a Mid, a Side or a one-channel band alike.
+- **Without a sidechain connected** the band listens to itself, exactly as on Self, and the DYNAMICS panel says NO SIDECHAIN.
+- In a Linear mode the band hears the sidechain as it arrives while the sound it acts on is the reported latency late, as with its own signal.
+
+Measured (test [16]): a track 10 dB under the threshold is cut by the full range (-12.00 dB) while the sidechain is loud in the band, and passes at
++0.000 dB when the sidechain is silent, however loud the track itself is, or loud somewhere else in the spectrum.
 
 ### How Sat works
 
@@ -266,7 +283,10 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
   untouched, bit for bit. Mid and Side bands give +6.00 dB where they should.
 - **Dynamics.** Under the threshold +0.000 dB; 4 dB over at 4:1 is -3.02 dB (the law gives -3.00); far over it stops at the range (-12.00 dB);
   Below mode gives +6.00 dB on quiet material and +0.006 dB on loud; a loud tone far from the band does not move it. Attack and
-  release as quoted above.
+  release as quoted above. **Sidechain** (test [16]): the numbers under [Listening to the sidechain](#listening-to-the-sidechain); a Mid and a
+  Right band follow a sidechain that is on the right channel only; with none connected the output is bit for bit that of a band on Self; with no
+  band listening a loud sidechain leaves the output bit for bit the input; a NaN or an inf on it is taken as silence; the output is the same for
+  host blocks of 512 and 37 samples; Linear gives -11.99 dB.
 - **Clean / Sat.** Clean: 2nd harmonic -240 dB, 3rd -163 dB. Sat, 0.3 amplitude through a +12 dB bell, Drive 12 dB: Tape has the 3rd at
   -17.8 dB, 5th at -26.0 dB and the 2nd at -221 dB (none); Tube has the 2nd at -26.4 dB; Console's 3rd is -19.5 dB (gentler than Tape).
 - **Delta** is the processed signal minus the input to 3e-8. **Gain Match**: a +9 dB low shelf on noise is 2.4 dB louder and 0.03 dB
@@ -291,10 +311,8 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
 ### Limitations
 
 - **The reference** is the long-term average of what the display's analyzer sees (a 30 s running average, fast attack and slow release as the display, on the editor's timer), so it needs the editor open, the track has to play in real time (it is not an offline analysis), and loud passages count for more. A short or a looped excerpt gives that excerpt's shape. Two masters differ in more than their EQ (dynamics, stereo image, what is in the mix), so MATCH EQ is a starting point, not a fix; it matches the broad shape (about two thirds of an octave) and leaves single notes alone. Bands on one channel, mid or side, and the dynamics of a band, are not counted as what is already done.
-- **Minimum phase only.** The bands are IIR filters (there is no linear-phase mode), so they have the phase of the analogue
-  filters they model.
-- **The dynamics listen to themselves.** The detector is internal: the sidechain input feeds only the masking view, never a band's
-  detector, and a band's detector listens to the signal entering it, after the bands before it.
+- **A band's own detector listens to the signal entering it**, after the bands before it. One set to Sidechain listens to the whole
+  sidechain input through the band's filter: there is no separate filter or level for the key, and no way to listen to it.
 - **Resonances, masking and the dynamics check are rules of thumb on the display's analyzer** (an 8192-point FFT averaged over a few
   seconds): tested on synthetic spectra (a Q 8 peak is found within 1/24 octave; a broad bump, a smooth spectrum and silence are not;
   two tracks loud in the same range clash, in different ranges do not), not on a library of mixes. A note held for seconds is a
