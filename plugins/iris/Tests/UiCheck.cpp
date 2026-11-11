@@ -8,6 +8,7 @@
 //   IrisUiCheck
 
 #include "Check.h"
+#include "Advice.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 #include "TestSignals.h"
@@ -402,6 +403,62 @@ int main()
         p2.prepareToPlay (48000.0, 512);
         check (p2.getLatencySamples() == latencyFor (PhaseMode::linear), "prepared with LINEAR already set, the latency is reported at once");
         setParameterValue (p2.apvts, id::phase, 0.0f);
+    }
+
+    std::printf ("\nAdvice: the notes that keep the equaliser from being used for the wrong job\n");
+    {
+        using ui::Severity;
+        const auto has = [] (const std::vector<ui::Note>& n, const char* word, Severity sev) { return ui::hasNote (n, word, sev); };
+
+        AdviceInput fine;
+        fine.bandOn = true;
+        check (adviceFor (fine).empty(), "a plain bell in Zero Latency: nothing to say");
+
+        auto in = fine; in.delta = true;
+        check (has (adviceFor (in), "DELTA", Severity::warning), "DELTA on: a warning");
+        in = fine; in.soloActive = true;
+        check (has (adviceFor (in), "SOLO", Severity::warning), "a solo on: a warning");
+        in = fine; in.satChosen = true; in.phase = PhaseMode::linear; in.latencyMs = 48.0;
+        check (has (adviceFor (in), "SAT does nothing", Severity::warning) && has (adviceFor (in), "48 ms", Severity::info), "SAT in a linear mode: it does nothing, and the delay is named");
+        in = fine; in.place = Placement::side; in.gainDb = 3.0; in.freqHz = 80.0;
+        check (has (adviceFor (in), "Side below 150", Severity::warning), "a bass boost on the Side: weakens the bass in mono");
+        in.freqHz = 6000.0;
+        check (! has (adviceFor (in), "Side below 150", Severity::warning), "... but a boost up on the Side is the usual air");
+        in = fine; in.gainDb = 10.0;
+        check (has (adviceFor (in), "GAIN MATCH", Severity::warning), "a 10 dB boost with GAIN MATCH off: louder is not better");
+        in.gainMatch = true;
+        check (! has (adviceFor (in), "boost of 9 dB", Severity::warning) && has (adviceFor (in), "GAIN MATCH is on", Severity::info), "... with it on, only the note that level is matched away");
+        in = fine; in.bandOn = false; in.anyBoostOver = true;
+        check (has (adviceFor (in), "Some band boosts", Severity::info), "another band's big boost is named when this slot is free");
+        in = fine; in.q = 12.0; in.gainDb = 8.0;
+        check (has (adviceFor (in), "rings", Severity::info), "a narrow, strong boost rings");
+
+        size_t longest = 0;
+        for (int mask = 0; mask < 512; ++mask)
+            for (auto place : { Placement::stereo, Placement::side })
+            {
+                AdviceInput all;
+                all.bandOn = true; all.place = place; all.delta = mask & 1; all.soloActive = mask & 2; all.gainMatch = mask & 4; all.satChosen = mask & 8;
+                all.phase = (mask & 16) ? PhaseMode::linearHq : PhaseMode::zeroLatency; all.latencyMs = 999.0; all.gainDb = (mask & 32) ? 12.0 : 0.0;
+                all.freqHz = (mask & 64) ? 80.0 : 4000.0; all.q = (mask & 128) ? 12.0 : 1.0; all.anyBoostOver = mask & 256;
+                for (auto& n : adviceFor (all))
+                    longest = std::max (longest, n.text.size());
+            }
+        check ((int) longest <= ui::kMaxNoteChars, fmt ("the longest note is %d characters (a line holds %d)", (int) longest, ui::kMaxNoteChars));
+
+        IrisProcessor host;
+        host.setPlayConfigDetails (2, 2, 48000.0, 512);
+        host.prepareToPlay (48000.0, 512);
+        IrisEditor editor (host);
+        check (editor.notes().empty(), "the editor starts with no warning");
+        host.engine.monitor.delta = true;
+        check (has (editor.notes(), "DELTA", Severity::warning), "DELTA on in the engine reaches the editor's notes");
+        host.engine.monitor.delta = false;
+        host.engine.monitor.regions = 1u;
+        check (has (editor.notes(), "SOLO", Severity::warning), "a region solo reaches them too");
+        host.engine.monitor.regions = 0u;
+        check (editor.guide().isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
+               "the GUIDE button is there and its text says what the plugin is not for");
     }
 
     return finish ("UI CHECK");

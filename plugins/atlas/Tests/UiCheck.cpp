@@ -4,6 +4,7 @@
 // Builds the editor on the real processor and checks what a host and a user would meet: the parameters, the name, the strips,
 // and that solo and delta are monitoring that ends with the window.
 
+#include "Advice.h"
 #include "Check.h"
 #include "PluginEditor.h"
 
@@ -145,6 +146,66 @@ int main()
     other.setStateInformation (state.getData(), (int) state.getSize());
     const auto a = readParams (proc.apvts), b = readParams (other.apvts);
     check (b.phase == PhaseMode::linear && b.oversampling == a.oversampling && b.bands[0].channels == Channels::midSide, "a saved state comes back in another instance");
+
+    std::printf ("\nAdvice: the notes that keep a compressor from being used for the wrong job\n");
+    {
+        using ui::Severity;
+        const auto has = [] (const std::vector<ui::Note>& n, const char* word, Severity sev) { return ui::hasNote (n, word, sev); };
+
+        BandAdvice band;
+        band.number = 2; band.loHz = 500.0; band.hiHz = 2000.0;
+        band.params.on = true; band.params.thresholdDb = -20.0; band.params.ratio = 3.0; band.params.attackMs = 10.0;
+        AdviceInput fine;
+        fine.bands = { band };
+        check (adviceFor (fine).empty(), "a band with a threshold, a ratio of 3 and a 10 ms attack: nothing to say");
+
+        auto in = fine; in.delta = true;
+        check (has (adviceFor (in), "DELTA", Severity::warning), "DELTA on: a warning");
+        in = fine; in.solo = true;
+        check (has (adviceFor (in), "SOLO", Severity::warning), "a solo on: a warning");
+        in = fine; in.bands[0].params.on = false;
+        check (has (adviceFor (in), "Every band is off", Severity::warning), "every band off: the plugin passes the sound");
+        in = fine; in.bands[0].params.thresholdDb = 0.0;
+        check (has (adviceFor (in), "THRESH is at the top", Severity::warning), "a threshold at the top: it hardly compresses");
+        in = fine; in.bands[0].params.ratio = 1.0;
+        check (has (adviceFor (in), "1:1", Severity::warning), "a ratio of 1:1 does nothing");
+        in = fine; in.bands[0].params.ratio = 20.0;
+        check (has (adviceFor (in), "limiting", Severity::warning), "a ratio of 20:1: limiting without look-ahead");
+        in = fine; in.bands[0].reductionDb = 15.0;
+        check (has (adviceFor (in), "pump", Severity::warning), "15 dB of reduction: it will pump");
+        in = fine; in.bands[0].hiHz = 120.0; in.bands[0].params.attackMs = 1.0;
+        check (has (adviceFor (in), "fast ATTACK on bass", Severity::info), "a 1 ms attack on bass: it distorts");
+        in.bands[0].hiHz = 2000.0;
+        check (! has (adviceFor (in), "fast ATTACK on bass", Severity::info), "... but not on the midrange");
+        in = fine; in.bands[0].params.channels = Channels::dual;
+        check (has (adviceFor (in), "image can drift", Severity::info), "L/R: the image can drift");
+        in = fine; in.phase = PhaseMode::linear; in.latencyMs = 64.0;
+        check (has (adviceFor (in), "64 ms", Severity::info), "Linear phase: the delay is named");
+
+        size_t longest = 0;
+        for (int mask = 0; mask < 1024; ++mask)
+        {
+            AdviceInput all;
+            BandAdvice b = band;
+            b.number = 6; b.hiHz = (mask & 1) ? 120.0 : 2000.0;
+            b.params.on = mask & 2; b.params.thresholdDb = (mask & 4) ? 0.0 : -20.0; b.params.ratio = (mask & 8) ? 1.0 : ((mask & 16) ? 20.0 : 3.0);
+            b.params.attackMs = (mask & 32) ? 1.0 : 10.0; b.params.channels = (mask & 64) ? Channels::dual : Channels::stereo; b.params.match = mask & 128;
+            b.reductionDb = (mask & 256) ? 99.0 : 0.0;
+            all.bands = { b };
+            all.delta = mask & 512; all.solo = mask & 512; all.phase = PhaseMode::linear; all.latencyMs = 999.0;
+            for (auto& n : adviceFor (all))
+                longest = std::max (longest, n.text.size());
+        }
+        check ((int) longest <= ui::kMaxNoteChars, fmt ("the longest note is %d characters (a line holds %d)", (int) longest, ui::kMaxNoteChars));
+
+        AtlasEditor editor (proc);
+        check (has (editor.notes(), "THRESH is at the top", Severity::warning), "the editor reads the real bands: a fresh plugin has thresholds at the top");
+        proc.engine.monitor.delta = 1u;
+        check (has (editor.notes(), "DELTA", Severity::warning), "DELTA in the engine reaches the editor's notes");
+        proc.engine.monitor.delta = 0u;
+        check (editor.guide().isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
+               "the GUIDE button is there and its text says what the plugin is not for");
+    }
 
     return test::finish ("UI CHECK");
 }

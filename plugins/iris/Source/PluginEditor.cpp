@@ -9,7 +9,7 @@ using namespace iris::gui;
 namespace
 {
 constexpr int kTimerHz = 30;
-constexpr int editorWidth = 1180, editorHeight = 704;
+constexpr int editorWidth = 1180, editorHeight = 704 + ui::kNoteStripHeight + 6 + 12 - 18; // the foot strip: notes, or the reminder of GUIDE
 constexpr int headerHeight = 84;   // the control panel along the top
 constexpr int viewHeight = 322;
 constexpr int cellHeight = 104;    // a knob: name, knob, read-out
@@ -103,6 +103,7 @@ IrisEditor::IrisEditor (IrisProcessor& p)
     }
     soloBandButton.onClick = [this] { view.toggleBandSolo (view.getSelectedBand(), SoloKind::band); };
     soloCurveButton.onClick = [this] { view.toggleBandSolo (view.getSelectedBand(), SoloKind::curve); };
+    addAndMakeVisible (guideButton);
     for (auto* b : { &removeButton, &addButton, &soloBandButton, &soloCurveButton })
         addChildComponent (*b);
     pasteButton.setTooltip ("Add the bands another plugin of the suite copied (Themis: COPY on a plan item, or Copy EQ for the tonal curve), "
@@ -284,6 +285,31 @@ juce::String IrisEditor::dynamicsHint() const
     return "GAIN is where the band rests. While the level is past the threshold the gain moves towards GAIN + RANGE. The display shows the range as a bar and the live gain as a white dot.";
 }
 
+iris::AdviceInput IrisEditor::adviceInput() const
+{
+    const int band = view.getSelectedBand();
+    const auto value = [this] (const juce::String& pid) { return proc.apvts.getRawParameterValue (pid)->load(); };
+    const auto& ids = bandIds (band);
+
+    AdviceInput in;
+    in.bandOn = isBandOn (proc.apvts, band);
+    in.type = bandType (proc.apvts, band);
+    in.place = bandPlacement (proc.apvts, band);
+    in.freqHz = value (ids.freq);
+    in.gainDb = value (ids.gain);
+    in.q = value (ids.q);
+    in.delta = proc.engine.monitor.delta.load();
+    in.soloActive = proc.engine.monitor.soloBand.load() >= 0 || proc.engine.monitor.regions.load() != 0u;
+    in.gainMatch = value (id::match) > 0.5f;
+    in.satChosen = value (id::mode) > 0.5f;
+    in.phase = (PhaseMode) std::clamp ((int) value (id::phase), 0, 2);
+    in.latencyMs = 1000.0 * latencyFor (in.phase) / proc.currentSampleRate;
+    for (int i = 0; i < maxBands; ++i)
+        if (isBandOn (proc.apvts, i) && hasGain (bandType (proc.apvts, i)) && value (bandIds (i).gain) >= kBigBoostDb)
+            in.anyBoostOver = true;
+    return in;
+}
+
 void IrisEditor::layoutBandPanel()
 {
     const auto panel = panelBounds[(size_t) Panel::band];
@@ -296,6 +322,7 @@ void IrisEditor::layoutBandPanel()
     removeButton.setBounds (buttonSlot);
     addButton.setBounds (buttonSlot);
     pasteButton.setBounds (panel.getRight() - 14 - 64, panel.getY() + 6, 64, 20);
+    guideButton.setBounds (pasteButton.getX() - 8 - 64, panel.getY() + 6, 64, 20);
 
     const int boxY = panel.getY() + 78;
     typeBoxes[(size_t) band]->setBounds (panel.getX() + 14, boxY, 118, 26);
@@ -356,6 +383,8 @@ void IrisEditor::resized()
     panelBounds[(size_t) Panel::dynamics] = row.removeFromLeft (dynPanelWidth);
     row.removeFromLeft (12);
     panelBounds[(size_t) Panel::output] = row;
+
+    noteStrip = bounds.withTrimmedTop (6).withHeight (ui::kNoteStripHeight);
 
     const auto out = panelBounds[(size_t) Panel::output];
     phaseBox.setBounds (out.getX() + 14, out.getY() + 52, out.getWidth() - 28, 26);
@@ -513,6 +542,8 @@ void IrisEditor::paint (juce::Graphics& g)
                                  : juce::String ("No delay");
         g.drawFittedText (hint, out.getX() + 18, out.getY() + 80, out.getWidth() - 36, 14, juce::Justification::topLeft, 1);
     }
+
+    ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
 
     // Level meters: two bars in one window of glass, green until -6 dBFS, amber to -0.5, red above.
     hw::drawGlass (g, meterArea.toFloat(), 3.0f, colours::amber);

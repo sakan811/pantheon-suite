@@ -3,9 +3,11 @@
 
 #pragma once
 
+#include "Advice.h"
 #include "PluginProcessor.h"
 #include "UI/EqView.h"
 #include "UI/IrisUi.h"
+#include <pantheon/ui/Advice.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 class IrisEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -20,6 +22,8 @@ public:
 
     void selectBand (int band);
     iris::gui::EqView& display() noexcept { return view; } // for the checks and the snapshot tool
+    juce::TextButton& guide() noexcept { return guideButton; }   // for the checks
+    std::vector<ui::Note> notes() const { return iris::adviceFor (adviceInput()); } // what the strip under the panels says, for the checks
 
 private:
     enum class Panel { band, dynamics, output, count };
@@ -29,6 +33,7 @@ private:
     int bandSignature() const;
     juce::String bandHint() const;
     juce::String dynamicsHint() const;
+    iris::AdviceInput adviceInput() const;
     void timerCallback() override;
 
     IrisProcessor& proc;
@@ -42,6 +47,7 @@ private:
     ui::Knob thresholdKnob, ratioKnob, rangeKnob, attackKnob, releaseKnob;
     std::array<std::unique_ptr<ui::Choice>, iris::maxBands> typeBoxes, placeBoxes, slopeBoxes, dynModeBoxes, listenBoxes;
     std::array<std::unique_ptr<ui::Toggle>, iris::maxBands> dynToggles, autoToggles;
+    ui::GuideButton guideButton { iris::guideTitle(), iris::guideText() };
     juce::TextButton removeButton { "REMOVE" }, addButton { "ADD BAND" }, pasteButton { "PASTE" }, soloBandButton { "BAND" }, soloCurveButton { "CURVE" };
     std::array<juce::Rectangle<int>, iris::maxBands> chipBounds;
     int shownSignature = -1;
@@ -61,7 +67,7 @@ private:
     std::array<float, iris::maxBands> usageKey {};
     void trackUsage();
     std::array<juce::Rectangle<int>, (size_t) Panel::count> panelBounds;
-    juce::Rectangle<int> nameplate, meterArea, dynReadout;
+    juce::Rectangle<int> nameplate, meterArea, dynReadout, noteStrip;
     int lastProgram = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (IrisEditor)
