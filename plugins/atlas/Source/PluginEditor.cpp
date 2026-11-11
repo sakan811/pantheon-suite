@@ -152,7 +152,8 @@ void AtlasEditor::paint (juce::Graphics& g)
         hw::drawGlass (g, m, 3.0f, colours::amber);
         const float share = juce::jlimit (0.0f, 1.0f, s.shownReduction / gui::kMeterRangeDb);
         g.setColour (colours::amber.withAlpha (0.55f));
-        g.fillRect (m.reduced (3.0f).withTrimmedLeft ((m.getWidth() - 6.0f) * (1.0f - share)));
+        const auto bar = m.reduced (3.0f).withTrimmedLeft (m.getWidth() * 0.55f); // the left of the window is the read-out's
+        g.fillRect (bar.withTrimmedLeft (bar.getWidth() * (1.0f - share)));
         g.setFont (ui::lcdFont (11.5f));
         g.setColour (colours::amber);
         juce::String text = s.shownReduction < 0.05f ? juce::String ("0.0 dB") : "-" + juce::String (s.shownReduction, 1) + " dB";
