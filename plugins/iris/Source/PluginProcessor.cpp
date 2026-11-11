@@ -40,20 +40,22 @@ void IrisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // The sidechain is only listened to (the masking view); the equaliser works on the main bus alone.
+    // The sidechain is only listened to (the masking view, and the dynamic bands set to listen to it); it is never heard.
+    juce::AudioBuffer<float> side;
     if (getBusCount (true) > 1 && getBus (true, 1)->isEnabled())
     {
-        const auto side = getBusBuffer (buffer, true, 1);
+        side = getBusBuffer (buffer, true, 1);
         if (side.getNumChannels() > 0)
             sidechainTap.push (side.getArrayOfReadPointers(), side.getNumChannels(), side.getNumSamples());
     }
+    sidechainConnected.store (side.getNumChannels() > 0, std::memory_order_relaxed);
 
     auto main = getBusBuffer (buffer, false, 0);
     const int mainIn = getMainBusNumInputChannels();
     for (int c = mainIn; c < main.getNumChannels(); ++c)
         main.clear (c, 0, main.getNumSamples());
 
-    engine.process (main, iris::readParams (apvts));
+    engine.process (main, iris::readParams (apvts), side.getNumChannels() > 0 ? &side : nullptr);
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
 }

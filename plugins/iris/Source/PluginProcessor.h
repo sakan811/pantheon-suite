@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "Parameters.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -38,6 +40,8 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     // What arrives at the sidechain input (another track), for the masking view only: it never reaches the audio.
     pdsp::StereoTap sidechainTap;
+    // Whether the host handed the last block a sidechain: the editor says so next to a band set to listen to it.
+    std::atomic<bool> sidechainConnected { false };
     double currentSampleRate = 48000.0;
 
 private:

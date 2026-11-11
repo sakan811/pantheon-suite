@@ -40,7 +40,7 @@ private:
     // good, so each band has its own and only the selected band's is shown.
     ui::Knob freqKnob, gainKnob, qKnob;
     ui::Knob thresholdKnob, ratioKnob, rangeKnob, attackKnob, releaseKnob;
-    std::array<std::unique_ptr<ui::Choice>, iris::maxBands> typeBoxes, placeBoxes, slopeBoxes, dynModeBoxes;
+    std::array<std::unique_ptr<ui::Choice>, iris::maxBands> typeBoxes, placeBoxes, slopeBoxes, dynModeBoxes, listenBoxes;
     std::array<std::unique_ptr<ui::Toggle>, iris::maxBands> dynToggles;
     juce::TextButton removeButton { "REMOVE" }, addButton { "ADD BAND" }, pasteButton { "PASTE" }, soloBandButton { "BAND" }, soloCurveButton { "CURVE" };
     std::array<juce::Rectangle<int>, iris::maxBands> chipBounds;

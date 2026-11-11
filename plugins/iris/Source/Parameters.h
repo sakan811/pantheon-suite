@@ -31,6 +31,7 @@ namespace id
 struct BandIds
 {
     juce::String on, type, place, freq, gain, q, slope, dyn, dynMode, threshold, ratio, range, attack, release;
+    juce::String listen; // what the dynamics listen to: the band's own signal or the sidechain (version 4)
 };
 
 inline const BandIds& bandIds (int band)
@@ -42,7 +43,8 @@ inline const BandIds& bandIds (int band)
         {
             const auto name = [i] (const char* field) { return "b" + juce::String (i + 1) + "_" + field; };
             t[(size_t) i] = { name ("on"), name ("type"), name ("place"), name ("freq"), name ("gain"), name ("q"), name ("slope"),
-                              name ("dyn"), name ("dmode"), name ("thresh"), name ("ratio"), name ("range"), name ("attack"), name ("release") };
+                              name ("dyn"), name ("dmode"), name ("thresh"), name ("ratio"), name ("range"), name ("attack"), name ("release"),
+                              name ("listen") };
         }
         return t;
     }();
@@ -54,6 +56,8 @@ inline const juce::StringArray typeNames { "Bell", "Low Shelf", "High Shelf", "L
 inline const juce::StringArray placeNames { "Stereo", "Left", "Right", "Mid", "Side" };
 inline const juce::StringArray slopeNames { "12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct" };
 inline const juce::StringArray dynModeNames { "Above", "Below" };
+// What a dynamic band's detector listens to: the band's own signal, or the other track on the sidechain input.
+inline const juce::StringArray listenNames { "Self", "Sidechain" };
 inline const juce::StringArray modeNames { "Clean", "Sat" };
 inline const juce::StringArray styleNames { "Tape", "Tube", "Console" };
 // Zero Latency: minimum-phase bands, no delay. Linear: no phase shift at all, delayed by 2304 samples. Linear HQ: the same at a resolution
@@ -114,7 +118,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         return t.containsIgnoreCase ("ms") || ! t.containsIgnoreCase ("s") ? v : v * 1000.0f;
     };
 
-    // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover, version 2; the phase mode, 3.
+    // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover, version 2; the phase mode, 3;
+    // what a dynamic band listens to, 4.
     const auto F = [&] (const String& pid, const String& name, NormalisableRange<float> r, float def, Attr a, int version = 1)
     {
         p.push_back (std::make_unique<Float> (ParameterID { pid, version }, name, r, def, a));
@@ -161,6 +166,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         F (ids.release, label ("Release"), skewed (5.0f, 2000.0f, 1.0f, 120.0f), 120.0f, Attr().withStringFromValueFunction (msText).withValueFromStringFunction (msValue));
     }
 
+    // After every band of the first layout, so the parameters a host already knows keep their places in its list.
+    for (int i = 0; i < maxBands; ++i)
+        Choice (bandIds (i).listen, "Band " + String (i + 1) + " Listens To", listenNames, 0, 4);
+
     return { p.begin(), p.end() };
 }
 
@@ -191,6 +200,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
         b.q = v (ids.q);
         b.slope = (int) v (ids.slope);
         b.dynamic = v (ids.dyn) > 0.5f;
+        b.external = (int) v (ids.listen) == 1;
         b.dyn.mode = (DynMode) std::clamp ((int) v (ids.dynMode), 0, 1);
         b.dyn.thresholdDb = v (ids.threshold);
         b.dyn.ratio = v (ids.ratio);
@@ -310,7 +320,7 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double
         return -1;
 
     const auto& ids = bandIds (slot);
-    for (auto* pid : { &ids.place, &ids.q, &ids.slope, &ids.dyn, &ids.dynMode, &ids.threshold, &ids.ratio, &ids.range, &ids.attack, &ids.release })
+    for (auto* pid : { &ids.place, &ids.q, &ids.slope, &ids.dyn, &ids.dynMode, &ids.threshold, &ids.ratio, &ids.range, &ids.attack, &ids.release, &ids.listen })
         if (auto* param = s.getParameter (*pid))
             setParameter (*param, param->getDefaultValue());
 

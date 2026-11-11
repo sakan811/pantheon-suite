@@ -73,10 +73,13 @@ IrisEditor::IrisEditor (IrisProcessor& p)
             "Mid / Side: the centre or the sides; the rest of the image is untouched.");
         slopeBoxes[(size_t) i] = std::make_unique<ui::Choice> (p.apvts, ids.slope, "How steep the cut is.");
         dynModeBoxes[(size_t) i] = std::make_unique<ui::Choice> (p.apvts, ids.dynMode, "Above: the dynamics engage while the band's level is over the threshold. Below: while it is under it.");
+        listenBoxes[(size_t) i] = std::make_unique<ui::Choice> (p.apvts, ids.listen,
+            "What the dynamics listen to.\nSelf: the band's own signal.\nSidechain: the other track on the sidechain input, in this band's frequency region "
+            "(the louder of its two channels): a cut here while the kick plays there, for example. Without a sidechain connected the band listens to itself.");
         dynToggles[(size_t) i] = std::make_unique<ui::Toggle> (p.apvts, ids.dyn, "DYNAMIC",
             "Makes the band dynamic: its gain moves with the level of its own frequency region (bells and shelves).");
         for (auto* c : std::initializer_list<juce::Component*> { typeBoxes[(size_t) i].get(), placeBoxes[(size_t) i].get(), slopeBoxes[(size_t) i].get(),
-                                                                 dynModeBoxes[(size_t) i].get(), dynToggles[(size_t) i].get() })
+                                                                 dynModeBoxes[(size_t) i].get(), listenBoxes[(size_t) i].get(), dynToggles[(size_t) i].get() })
             addChildComponent (*c);
     }
 
@@ -228,6 +231,7 @@ void IrisEditor::refreshBandPanel()
         dynToggles[(size_t) i]->setVisible (mine);
         dynToggles[(size_t) i]->setEnabled (hasGain (type));
         dynModeBoxes[(size_t) i]->setVisible (mine && hasGain (type));
+        listenBoxes[(size_t) i]->setVisible (mine && hasGain (type));
     }
     removeButton.setVisible (on);
     soloBandButton.setVisible (on);
@@ -252,6 +256,9 @@ juce::String IrisEditor::dynamicsHint() const
         return "Dynamics move a band's gain, so they need a bell or a shelf.";
     if (proc.apvts.getRawParameterValue (bandIds (band).dyn)->load() < 0.5f)
         return "Switch DYNAMIC on to make this band follow the level of its own frequency region.";
+
+    if (proc.apvts.getRawParameterValue (bandIds (band).listen)->load() > 0.5f && ! proc.sidechainConnected.load (std::memory_order_relaxed))
+        return "NO SIDECHAIN: route another track to the sidechain input for this band to listen to. Until then it listens to itself.";
 
     // Measured over the last seconds: a band that never moves, or never lets go, is a static band with a detector.
     const auto& ids = bandIds (band);
@@ -299,6 +306,7 @@ void IrisEditor::layoutBandPanel()
     const auto dyn = panelBounds[(size_t) Panel::dynamics];
     dynToggles[(size_t) band]->setBounds (dyn.getRight() - 14 - 90, dyn.getY() + 6, 90, 22);
     dynModeBoxes[(size_t) band]->setBounds (dyn.getRight() - 14 - 90 - 8 - 92, dyn.getY() + 6, 92, 22);
+    listenBoxes[(size_t) band]->setBounds (dyn.getRight() - 14 - 90 - 8 - 92 - 8 - 104, dyn.getY() + 6, 104, 22);
     dynReadout = { dyn.getX() + 14, dyn.getY() + 34, dyn.getWidth() - 28, 26 };
     const int dynCell = (dyn.getWidth() - 16) / 5;
     int k = 0;
@@ -522,7 +530,7 @@ void IrisEditor::trackUsage()
         const auto& ids = bandIds (b);
         const auto value = [&] (const juce::String& id) { return proc.apvts.getRawParameterValue (id)->load(); };
         const bool dynamic = isBandOn (proc.apvts, b) && hasGain (bandType (proc.apvts, b)) && value (ids.dyn) > 0.5f;
-        const float key = dynamic ? value (ids.threshold) * 7.0f + value (ids.range) * 131.0f + value (ids.dynMode) * 977.0f
+        const float key = dynamic ? value (ids.threshold) * 7.0f + value (ids.range) * 131.0f + value (ids.dynMode) * 977.0f + value (ids.listen) * 4099.0f
                                     + value (ids.ratio) * 3.0f + std::log (value (ids.freq)) * 59.0f
                                   : -1.0e9f;
         if (std::fabs (key - usageKey[(size_t) b]) > 1.0e-3f)
