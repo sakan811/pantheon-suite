@@ -185,8 +185,6 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
     setPresetTooltip();
     addAndMakeVisible (presetBox);
 
-    guideButton.setTooltip ("What Hephaestus is for, and what it is not for: it adds harmonics, it does not equalise, compress or limit.");
-    guideButton.onClick = [] { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, guideTitle(), guideText()); };
     addAndMakeVisible (guideButton);
 
     clearMetersButton.setTooltip ("Clear the IN and OUT level meters. Use it if a reading looks stuck.");
@@ -562,25 +560,10 @@ void HephaestusEditor::paint (juce::Graphics& g)
                           juce::Justification::topLeft, 2);
     }
 
-    // What to watch for with this band and this session: warnings in amber, information dim; the first three that fit.
+    // What to watch for with this band and this session: warnings in amber, information dim.
     {
         const auto bandPanel = panelBounds[(size_t) Panel::band];
-        constexpr int lineHeight = 14, maxLines = 3;
-        int y = bandPanel.getY() + 236;
-        int shown = 0;
-        g.setFont (juce::FontOptions (11.0f));
-        for (const auto& note : adviceFor (adviceInput()))
-        {
-            if (shown++ == maxLines)
-                break;
-            const bool warning = note.severity == Severity::warning;
-            const auto colour = warning ? colours::warn : colours::dim;
-            g.setColour (colour);
-            g.fillEllipse ((float) bandPanel.getX() + 18.0f, (float) y + 4.0f, 5.0f, 5.0f);
-            g.drawFittedText (juce::String (note.text), bandPanel.getX() + 30, y, bandPanel.getWidth() - 48, lineHeight,
-                              juce::Justification::centredLeft, 1, 0.85f);
-            y += lineHeight;
-        }
+        ui::drawNotes (g, { bandPanel.getX() + 18, bandPanel.getY() + 236, bandPanel.getWidth() - 36, 42 }, adviceFor (adviceInput()));
     }
 
     // A solo on another band than the one shown would otherwise be easy to forget.

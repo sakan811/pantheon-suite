@@ -384,10 +384,8 @@ int main()
 
     std::printf ("\nAdvice: the notes that keep a tool from being used for the wrong job\n");
     {
-        const auto has = [] (const std::vector<Note>& notes, const char* word, Severity severity)
-        {
-            return std::any_of (notes.begin(), notes.end(), [&] (const Note& n) { return n.severity == severity && n.text.find (word) != std::string::npos; });
-        };
+        using ui::Severity;
+        const auto has = [] (const std::vector<ui::Note>& notes, const char* word, Severity severity) { return ui::hasNote (notes, word, severity); };
 
         AdviceInput fine;
         fine.bandOn = true;
@@ -434,7 +432,7 @@ int main()
                         for (auto& n : adviceFor (all))
                             longest = std::max (longest, n.text.size());
                     }
-        check ((int) longest <= kMaxNoteChars, fmt ("the longest note is %d characters (a line holds %d)", (int) longest, kMaxNoteChars));
+        check ((int) longest <= ui::kMaxNoteChars, fmt ("the longest note is %d characters (a line holds %d)", (int) longest, ui::kMaxNoteChars));
 
         // Every preset says what it is for, in one line.
         bool described = true;
