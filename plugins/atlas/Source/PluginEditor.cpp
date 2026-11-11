@@ -63,11 +63,11 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
     view.onLayoutChanged = [this] { layoutStrips(); };
     clearButton.setTooltip ("End every solo and delta: all six bands, as they come out.");
     clearButton.onClick = [this] { proc.engine.monitor.solo = 0u; proc.engine.monitor.delta = 0u; };
-    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &outKnob, &clearButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &outKnob, &clearButton, &guideButton })
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
-    setSize (24 + kBands * 186 + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 12);
+    setSize (24 + kBands * 186 + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 6 + ui::kNoteStripHeight + 12);
 }
 
 AtlasEditor::~AtlasEditor()
@@ -95,12 +95,33 @@ void AtlasEditor::resized()
     row.removeFromLeft (14);
     latencyLabel = row.removeFromLeft (150);
     clearButton.setBounds (row.removeFromRight (96));
+    row.removeFromRight (8);
+    guideButton.setBounds (row.removeFromRight (64));
 
     bounds.removeFromTop (10);
     view.setBounds (bounds.removeFromTop (viewHeight));
     bounds.removeFromTop (10);
     stripArea = bounds.removeFromTop (stripHeight);
+    noteStrip = bounds.withTrimmedTop (6).withHeight (ui::kNoteStripHeight);
     layoutStrips();
+}
+
+AdviceInput AtlasEditor::adviceInput() const
+{
+    const auto l = layoutOf (proc.apvts);
+    const auto params = readParams (proc.apvts);
+    AdviceInput in;
+    for (int band = 0; band < l.numBands; ++band)
+    {
+        const int slot = l.slot[(size_t) band];
+        in.bands.push_back ({ band + 1, l.edgeHz[(size_t) band], l.edgeHz[(size_t) (band + 1)], params.bands[(size_t) slot],
+                              (double) strips[(size_t) slot]->shownReduction });
+    }
+    in.delta = proc.engine.monitor.delta.load() != 0u;
+    in.solo = proc.engine.monitor.solo.load() != 0u;
+    in.phase = params.phase;
+    in.latencyMs = 1000.0 * proc.engine.latencySamples.load() / std::max (proc.getSampleRate(), 1.0);
+    return in;
 }
 
 int AtlasEditor::layoutSignature() const
@@ -168,6 +189,8 @@ void AtlasEditor::paint (juce::Graphics& g)
     const int latency = proc.engine.latencySamples.load();
     hw::drawLabel (g, latency == 0 ? juce::String ("No delay") : "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms",
                    latencyLabel, juce::Justification::centredLeft, colours::dim, 9.5f);
+
+    ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
 
     const unsigned solo = proc.engine.monitor.solo.load(), delta = proc.engine.monitor.delta.load();
     const auto l = layoutOf (proc.apvts);

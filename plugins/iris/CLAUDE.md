@@ -40,6 +40,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   Saturator.h        Shaper: three curves, residual ADAA, DC block
   Crossover.h        RegionSplitter (the shared pdsp::BandSplitter: six regions, flat sum), regionName()
   Engine.h           the whole signal path, the tick, solo, delta, gain match, meters, analyzer taps
+Source/Advice.h      the notes of the strip under the panels (warnings that a setting does not suit its job or that what is heard is not the track) and the GUIDE text; plain C++, no JUCE
 Source/Parameters.h  parameter layout, presets, readParams(), band helpers                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/IrisUi.h` holds what is Iris' own; `UI/EqView.h` is the display)
 ../../shared/dsp/    Biquad.h (with the EQ designs), AnalyzerTap.h, SpectrumAnalyzer.h, BandLink.h (PASTE), MusicBands.h (the six bands and their splitter): shared with Hephaestus and Themis, namespace `pdsp`
@@ -153,6 +154,7 @@ alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arriv
 - the phase mode's latency and sizes -> `LinearSpec` / `latencyFor()` in `DSP/LinearPhase.h` (the README, the editor and the tests read them; the choice list is `phaseNames` in `Parameters.h`)
 - the plugin's name ("Iris Prism") -> `IRIS_PLUGIN_NAME` in `CMakeLists.txt`, which reaches the code as `JucePlugin_Name`; the nameplate's
   two words are `iris::gui::kProjectWord` / `kPluginWord` in `UI/IrisUi.h` (`UiCheck` checks they agree)
+- what the plugin warns about (DELTA or a solo on, SAT in a linear mode, a Side bass boost, a big boost without GAIN MATCH...) and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor only fills `AdviceInput` (`adviceInput()`) and draws what comes back with `ui::drawNoteStrip`. A note restates a limit the README documents: a new note needs it there, a test in UiCheck's Advice section, and at most `ui::kMaxNoteChars` characters
 - placement colours -> `iris::gui::forPlacement()` in `UI/IrisUi.h`
 - every pixel of the interface and the parameter-bound controls -> `shared/ui`, shared with the other plugins (see the repository's
   [CLAUDE.md](../../CLAUDE.md)); the editor calls it and does not draw its own. The log-frequency axis is `ui::FreqAxis`.

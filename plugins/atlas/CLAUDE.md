@@ -28,6 +28,7 @@ Source/DSP/        no GUI dependencies; covered by Tests/Tests.cpp
   Compressor.h       Channels, BandParams, reductionDb() (the gain computer), Level (the detector), GainFollower (attack / release on the gain)
   LinearSplit.h      the linear-phase split: kernels from the crossovers, FFT overlap-save, the top band as the complement
   Engine.h           the whole signal path, the tick, oversampling, makeup and gain match, solo and delta, meters, latency
+Source/Advice.h      the notes of the strip under the bands and the GUIDE text; plain C++, no JUCE
 Source/Parameters.h  parameter layout, readParams(), layoutOf(), addSplit() / removeSplit()                 <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/BandView.h` is the display (spectrogram, band edges, PEAK / JUMPS)
 ../../shared/dsp/    SpectrumIssues.h (`pdsp::SpectrumGrid`, `pdsp::IssueFinder`: plain C++, tested by AtlasTests [9]), SpectrumAnalyzer.h, AnalyzerTap.h
@@ -104,6 +105,7 @@ The order of `channelNames` is the order of `Channels`.
 - the six bands, their names, default edges and the zero-latency splitter -> `shared/dsp` MusicBands.h (shared: run the other plugins' tests too)
 - parameter ranges, defaults, choice lists -> `Parameters.h` (the editor reads the items from the parameters); the defaults of a band -> `BandParams`
 - which signals a channel mode runs -> `usesMidSide` / `runsFirst` / `runsSecond` / `isLinked` in `Compressor.h`
+- what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor fills `AdviceInput` (`adviceInput()`) and draws the notes with `ui::drawNoteStrip`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's Advice section, and at most `ui::kMaxNoteChars` characters
 - the order of the crossovers -> `orderedCrossovers()` in `Engine.h` (the engine and the editor's labels use it)
 - the plugin's name -> `ATLAS_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/AtlasUi.h` (`UiCheck` checks they agree)
 - every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls

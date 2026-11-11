@@ -3,9 +3,11 @@
 
 #pragma once
 
+#include "Advice.h"
 #include "PluginProcessor.h"
 #include "UI/AtlasUi.h"
 #include "UI/BandView.h"
+#include <pantheon/ui/Advice.h>
 
 // The display (the spectrogram the bands are made on) and a strip for each band, with its compressor, its solo and its delta; the split's phase mode, the oversampling
 // and the output gain in the header. Everything drawn is the shared kit's (shared/ui).
@@ -39,12 +41,16 @@ public:
     };
     std::array<std::unique_ptr<Strip>, atlas::kBands> strips;
     juce::TextButton clearButton { "ALL BANDS" };
+    ui::GuideButton guideButton { atlas::guideTitle(), atlas::guideText() };
     atlas::gui::BandView view;
+    juce::TextButton& guide() noexcept { return guideButton; }                    // for the checks
+    std::vector<ui::Note> notes() const { return atlas::adviceFor (adviceInput()); } // what the strip under the bands says, for the checks
 
 private:
     void timerCallback() override;
     void layoutStrips();
     int layoutSignature() const;
+    atlas::AdviceInput adviceInput() const;
 
     AtlasProcessor& proc;
     HardwareLookAndFeel look;
@@ -53,7 +59,7 @@ private:
     ui::Knob outKnob;
     juce::Rectangle<int> nameplate, phaseLabel, oversamplingLabel, latencyLabel;
     float inLevel = 0.0f;
-    juce::Rectangle<int> stripArea;
+    juce::Rectangle<int> stripArea, noteStrip;
     int shownLayout = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AtlasEditor)
