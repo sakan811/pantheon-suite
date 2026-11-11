@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Parameters.h"
+#include <pantheon/dsp/AnalyzerTap.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
 class AtlasProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
@@ -36,6 +37,7 @@ public:
 
     atlas::Engine engine;
     juce::AudioProcessorValueTreeState apvts;
+    pdsp::StereoTap tapIn; // the input, for the display's spectrogram
 
 private:
     // The latency changes with the phase and oversampling modes; setLatencySamples belongs to the message thread, so the

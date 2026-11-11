@@ -16,6 +16,7 @@ struct EngineParams
 {
     std::array<BandParams, kBands> bands;
     std::array<double, kCrossovers> crossover = pdsp::bands::defaultCrossovers();
+    std::array<bool, kCrossovers> split { true, true, true, true, true }; // a split that is off joins the band above it to the one below
     PhaseMode phase = PhaseMode::zeroLatency;
     int oversampling = 0; // 0 = off, 1 = 2x, 2 = 4x
     double outGainDb = 0.0;
@@ -28,6 +29,16 @@ inline std::array<double, kCrossovers> orderedCrossovers (std::array<double, kCr
     for (int k = 1; k < kCrossovers; ++k)
         hz[(size_t) k] = std::max (hz[(size_t) k], hz[(size_t) (k - 1)] * kMinCrossoverRatio);
     return hz;
+}
+
+// Which band each of the six pieces of the split belongs to: its own, or the nearest one below it whose upper split is on.
+// So one to six bands: a band is piece b when b is 0 or split b - 1 is on, and it takes every piece up to the next split.
+inline std::array<int, kBands> bandOwners (const std::array<bool, kCrossovers>& split) noexcept
+{
+    std::array<int, kBands> owner {};
+    for (int b = 1; b < kBands; ++b)
+        owner[(size_t) b] = split[(size_t) (b - 1)] ? b : owner[(size_t) (b - 1)];
+    return owner;
 }
 
 // Whole-sample delay: the dry band waits for the oversampled path.
@@ -77,6 +88,7 @@ public:
 
     std::array<std::atomic<float>, kBands> reductionMeter {}; // dB taken off, the most over the last tick
     std::array<std::atomic<float>, kBands> matchMeter {};     // dB gain match is adding
+    std::array<std::atomic<float>, kBands> levelMeter {};     // the level the band's compressor read (dB), the most over the last tick
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     std::atomic<int> latencySamples { 0 };
 
@@ -158,6 +170,7 @@ private:
         double dryHeard = 0.0, dryHeardTarget = 0.0, dryHeardStep = 0.0; // delta: the input is taken back out
         bool idle = true;                            // switched off and at rest: the compressor path is not run
         float maxReduction = 0.0f;
+        double maxLevelSq = 0.0;
         std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, kNumOsModes> os; // [1] 2x, [2] 4x
         std::array<IntDelay, 2> dry;
     };
@@ -196,18 +209,33 @@ private:
             linear.setCrossovers (xo);
         }
 
+        owner = bandOwners (p.split);
+
         const unsigned solo = monitor.solo.load (std::memory_order_relaxed), delta = monitor.delta.load (std::memory_order_relaxed);
         const double fade = (double) tick / (kFadeSeconds * fs);
         const double rate = fs * (double) (1 << osMode);
         for (int i = 0; i < kBands; ++i)
         {
             auto& s = band[(size_t) i];
+            if (owner[(size_t) i] != i)
+            {
+                // Part of the band below: nothing of its own runs, and it starts clean if it becomes a band again.
+                s.idle = true;
+                s.grA = s.grB = 0.0;
+                s.maxReduction = 0.0f;
+                reductionMeter[(size_t) i].store (0.0f, std::memory_order_relaxed);
+                matchMeter[(size_t) i].store (0.0f, std::memory_order_relaxed);
+                levelMeter[(size_t) i].store (-120.0f, std::memory_order_relaxed);
+                continue;
+            }
             const auto& t = p.bands[(size_t) i];
             s.follower.set (t, rate, i == 0 ? pdsp::bands::kBands[0].loHz : appliedCrossover[(size_t) (i - 1)]);
             s.channels = t.channels;
 
             reductionMeter[(size_t) i].store (s.maxReduction, std::memory_order_relaxed);
+            levelMeter[(size_t) i].store ((float) (10.0 * std::log10 (std::max (s.maxLevelSq, 1.0e-12))), std::memory_order_relaxed);
             s.maxReduction = 0.0f;
+            s.maxLevelSq = 0.0;
 
             // Gain match: the band's loudness after the compressor against before it, never more than the limit either way.
             double matchDb = 0.0;
@@ -269,8 +297,15 @@ private:
             l[i] = r[i] = 0.0f;
         }
 
+        for (int b = 1; b < kBands; ++b)
+            if (const int to = owner[(size_t) b]; to != b)
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < n; ++i)
+                        bandBuffer[(size_t) to][(size_t) c][(size_t) i] += bandBuffer[(size_t) b][(size_t) c][(size_t) i];
+
         for (int b = 0; b < kBands; ++b)
-            runBand (band[(size_t) b], bandBuffer[(size_t) b][0].data(), bandBuffer[(size_t) b][1].data(), l, r, n);
+            if (owner[(size_t) b] == b)
+                runBand (band[(size_t) b], bandBuffer[(size_t) b][0].data(), bandBuffer[(size_t) b][1].data(), l, r, n);
 
         for (int i = 0; i < n; ++i)
         {
@@ -346,12 +381,14 @@ private:
     void compress (BandState& s, float* a, float* b, int n) noexcept
     {
         const auto& f = s.follower;
-        double grA = s.grA, grB = s.grB, most = 0.0;
+        double grA = s.grA, grB = s.grB, most = 0.0, loudest = 0.0;
         if (isLinked (s.channels))
         {
             for (int i = 0; i < n; ++i)
             {
-                const double g = f.step (grA, std::max (s.levelA.push (a[i], f.detector), s.levelB.push (b[i], f.detector))) - 1.0;
+                const double level = std::max (s.levelA.push (a[i], f.detector), s.levelB.push (b[i], f.detector));
+                loudest = std::max (loudest, level);
+                const double g = f.step (grA, level) - 1.0;
                 most = std::max (most, grA);
                 a[i] = (float) (a[i] * g);
                 b[i] = (float) (b[i] * g);
@@ -365,14 +402,17 @@ private:
             if (! second) grB = 0.0;
             for (int i = 0; i < n; ++i)
             {
-                a[i] = first_ ? (float) (a[i] * (f.step (grA, s.levelA.push (a[i], f.detector)) - 1.0)) : 0.0f;
-                b[i] = second ? (float) (b[i] * (f.step (grB, s.levelB.push (b[i], f.detector)) - 1.0)) : 0.0f;
+                const double la = first_ ? s.levelA.push (a[i], f.detector) : 0.0, lb = second ? s.levelB.push (b[i], f.detector) : 0.0;
+                loudest = std::max (loudest, std::max (la, lb));
+                a[i] = first_ ? (float) (a[i] * (f.step (grA, la) - 1.0)) : 0.0f;
+                b[i] = second ? (float) (b[i] * (f.step (grB, lb) - 1.0)) : 0.0f;
                 most = std::max (most, std::max (grA, grB));
             }
         }
         s.grA = grA;
         s.grB = grB;
         s.maxReduction = std::max (s.maxReduction, (float) most);
+        s.maxLevelSq = std::max (s.maxLevelSq, loudest);
     }
 
     double fs = 48000.0;
@@ -382,6 +422,7 @@ private:
     bool first = true;
     std::array<int, kNumOsModes> osLatency {};
     std::array<double, kCrossovers> appliedCrossover {};
+    std::array<int, kBands> owner { 0, 1, 2, 3, 4, 5 };
     double outGain = 1.0, outGainTarget = 1.0, outGainStep = 0.0;
 
     pdsp::BandSplitter splitter;

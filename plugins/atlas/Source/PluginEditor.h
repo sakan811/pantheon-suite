@@ -5,8 +5,9 @@
 
 #include "PluginProcessor.h"
 #include "UI/AtlasUi.h"
+#include "UI/BandView.h"
 
-// Six strips, one per band of music, each with its compressor, its solo and its delta; the split's phase mode, the oversampling
+// The display (the spectrogram the bands are made on) and a strip for each band, with its compressor, its solo and its delta; the split's phase mode, the oversampling
 // and the output gain in the header. Everything drawn is the shared kit's (shared/ui).
 class AtlasEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
@@ -26,14 +27,24 @@ public:
         ui::Choice channels;
         ui::Knob threshold, ratio, attack, release, makeup;
         std::unique_ptr<ui::Knob> crossover; // the edge to the next band; the top band has none
+        std::vector<juce::Component*> components()
+        {
+            std::vector<juce::Component*> all { &on, &match, &solo, &delta, &channels, &threshold, &ratio, &attack, &release, &makeup };
+            if (crossover != nullptr)
+                all.push_back (crossover.get());
+            return all;
+        }
         juce::Rectangle<int> bounds, meter;
         float shownReduction = 0.0f;
     };
     std::array<std::unique_ptr<Strip>, atlas::kBands> strips;
     juce::TextButton clearButton { "ALL BANDS" };
+    atlas::gui::BandView view;
 
 private:
     void timerCallback() override;
+    void layoutStrips();
+    int layoutSignature() const;
 
     AtlasProcessor& proc;
     HardwareLookAndFeel look;
@@ -42,6 +53,8 @@ private:
     ui::Knob outKnob;
     juce::Rectangle<int> nameplate, phaseLabel, oversamplingLabel, latencyLabel;
     float inLevel = 0.0f;
+    juce::Rectangle<int> stripArea;
+    int shownLayout = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AtlasEditor)
 };

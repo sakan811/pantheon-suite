@@ -11,6 +11,8 @@ namespace
 constexpr int headerHeight = 84;
 constexpr int stripHeight = 478;
 constexpr int stripGap = 8;
+constexpr int stripWidth = 186;
+constexpr int viewHeight = 230;
 constexpr int cellHeight = 104; // a knob: name, knob, read-out
 constexpr int kTimerHz = 30;
 
@@ -30,12 +32,11 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
       release (p.apvts, bandIds (band).release, "RELEASE", "How fast the gain comes back.", ui::Knob::Layout::below),
       makeup (p.apvts, bandIds (band).makeup, "MAKEUP", "Gain after the band's compressor.", ui::Knob::Layout::below)
 {
-    const auto& info = pdsp::bands::kBands[(size_t) band];
     if (band < kCrossovers)
         crossover = std::make_unique<ui::Knob> (p.apvts, id::crossover[(size_t) band], "XOVER",
-                                                "Where this band ends and the " + juce::String (pdsp::bands::kBands[(size_t) (band + 1)].title) + " begin. The edges keep their order.",
+                                                "Where this band ends and the next begins (also: drag the edge on the display). The edges keep their order.",
                                                 ui::Knob::Layout::below);
-    solo.setTooltip ("Solo the " + juce::String (info.title) + " band: " + info.role + ". Click more bands to hear them together. Not saved with the session.");
+    solo.setTooltip ("Solo this band. Click more bands to hear them together; any combination adds up flat. Not saved with the session.");
     delta.setTooltip ("Listen to only what this band's compressor changes (its output minus its input). Not saved with the session.");
     auto& monitor = p.engine.monitor;
     solo.onClick = [&monitor, band] { monitor.solo ^= 1u << band; };
@@ -43,7 +44,7 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
 }
 
 AtlasEditor::AtlasEditor (AtlasProcessor& p)
-    : AudioProcessorEditor (&p), proc (p),
+    : AudioProcessorEditor (&p), view (p), proc (p),
       phaseBox (p.apvts, id::phase, "ZERO LATENCY: the bands are split by minimum-phase crossovers, the way an analogue one does: no delay, and the phase turns "
                                     "around each edge.\nLINEAR: the same bands with no phase shift at all, so what the compressors do not touch is the input, only later; "
                                     "the whole sound is delayed (the host compensates)."),
@@ -55,17 +56,18 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
     for (int b = 0; b < kBands; ++b)
     {
         auto& s = *(strips[(size_t) b] = std::make_unique<Strip> (p, b));
-        for (auto* c : std::initializer_list<juce::Component*> { &s.on, &s.match, &s.solo, &s.delta, &s.channels, &s.threshold, &s.ratio, &s.attack, &s.release, &s.makeup, s.crossover.get() })
-            if (c != nullptr)
-                addAndMakeVisible (*c);
+        for (auto* c : s.components())
+            addChildComponent (*c);
     }
+    addAndMakeVisible (view);
+    view.onLayoutChanged = [this] { layoutStrips(); };
     clearButton.setTooltip ("End every solo and delta: all six bands, as they come out.");
     clearButton.onClick = [this] { proc.engine.monitor.solo = 0u; proc.engine.monitor.delta = 0u; };
     for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &outKnob, &clearButton })
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
-    setSize (24 + kBands * 186 + (kBands - 1) * stripGap, headerHeight + 10 + stripHeight + 12);
+    setSize (24 + kBands * 186 + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 12);
 }
 
 AtlasEditor::~AtlasEditor()
@@ -95,19 +97,44 @@ void AtlasEditor::resized()
     clearButton.setBounds (row.removeFromRight (96));
 
     bounds.removeFromTop (10);
-    auto area = bounds.removeFromTop (stripHeight);
-    const int width = (area.getWidth() - (kBands - 1) * stripGap) / kBands;
+    view.setBounds (bounds.removeFromTop (viewHeight));
+    bounds.removeFromTop (10);
+    stripArea = bounds.removeFromTop (stripHeight);
+    layoutStrips();
+}
+
+int AtlasEditor::layoutSignature() const
+{
+    const auto l = layoutOf (proc.apvts);
+    int signature = l.numBands;
+    for (int b = 0; b < l.numBands; ++b)
+        signature = signature * 7 + l.slot[(size_t) b];
+    return signature;
+}
+
+// One strip for each band there is, from the left, in the order of the spectrum.
+void AtlasEditor::layoutStrips()
+{
+    shownLayout = layoutSignature();
+    const auto l = layoutOf (proc.apvts);
     for (auto& strip : strips)
     {
-        auto& s = *strip;
-        s.bounds = area.removeFromLeft (width);
+        strip->bounds = {};
+        for (auto* c : strip->components())
+            c->setVisible (false);
+    }
+    auto area = stripArea;
+    for (int b = 0; b < l.numBands; ++b)
+    {
+        auto& s = *strips[(size_t) l.slot[(size_t) b]];
+        s.bounds = area.removeFromLeft (stripWidth);
         area.removeFromLeft (stripGap);
         auto r = s.bounds.reduced (10, 0).withTrimmedTop (32);
-        const auto pair = [&r] (juce::Component& a, juce::Component& b)
+        const auto pair = [&r] (juce::Component& a, juce::Component& b2)
         {
             auto line = r.removeFromTop (22);
             a.setBounds (line.removeFromLeft ((line.getWidth() - 6) / 2));
-            b.setBounds (line.withTrimmedLeft (6));
+            b2.setBounds (line.withTrimmedLeft (6));
             r.removeFromTop (6);
         };
         pair (s.on, s.match);
@@ -117,11 +144,18 @@ void AtlasEditor::resized()
         s.meter = r.removeFromTop (24);
         r.removeFromTop (6);
         const int cell = r.getWidth() / 2;
-        ui::Knob* knobs[] = { &s.threshold, &s.ratio, &s.attack, &s.release, &s.makeup, s.crossover.get() };
+        // The edge knob belongs to the strip only while the split above the band is the strip's own (the editor keeps it so).
+        ui::Knob* knobs[] = { &s.threshold, &s.ratio, &s.attack, &s.release, &s.makeup, l.splitAbove[(size_t) b] == l.slot[(size_t) b] ? s.crossover.get() : nullptr };
+        for (auto* c : s.components())
+            c->setVisible (c != s.crossover.get());
         for (int k = 0; k < 6; ++k)
             if (knobs[k] != nullptr)
+            {
+                knobs[k]->setVisible (true);
                 knobs[k]->setBounds (r.getX() + cell * (k % 2), r.getY() + cellHeight * (k / 2), cell, cellHeight);
+            }
     }
+    repaint();
 }
 
 void AtlasEditor::paint (juce::Graphics& g)
@@ -136,13 +170,18 @@ void AtlasEditor::paint (juce::Graphics& g)
                    latencyLabel, juce::Justification::centredLeft, colours::dim, 9.5f);
 
     const unsigned solo = proc.engine.monitor.solo.load(), delta = proc.engine.monitor.delta.load();
-    for (int b = 0; b < kBands; ++b)
+    const auto l = layoutOf (proc.apvts);
+    if (l.numBands < kBands)
+        hw::drawLabel (g, "Double-click the display to split a band", stripArea.withTrimmedLeft (l.numBands * (stripWidth + stripGap)).reduced (12, 0).removeFromTop (40),
+                       juce::Justification::centredLeft, colours::dim, 9.5f);
+    for (int band = 0; band < l.numBands; ++band)
     {
+        const int b = l.slot[(size_t) band];
         const auto& s = *strips[(size_t) b];
         hw::drawModule (g, s.bounds.toFloat());
         const bool heard = solo == 0u || (solo & (1u << b)) != 0u;
-        const auto range = bandRangeHz (proc.apvts, b);
-        hw::drawLabel (g, pdsp::bands::kBands[(size_t) b].name, { s.bounds.getX() + 16, s.bounds.getY() + 10, 90, 14 }, juce::Justification::left,
+        const std::pair<double, double> range { l.edgeHz[(size_t) band], l.edgeHz[(size_t) (band + 1)] };
+        hw::drawLabel (g, "Band " + juce::String (band + 1), { s.bounds.getX() + 16, s.bounds.getY() + 10, 90, 14 }, juce::Justification::left,
                        heard ? colours::amber : colours::dim, 10.5f);
         hw::drawLabel (g, hzName (range.first) + " - " + hzName (range.second), { s.bounds.getRight() - 116, s.bounds.getY() + 10, 100, 14 },
                        juce::Justification::right, colours::dim, 8.5f);
@@ -178,6 +217,9 @@ void AtlasEditor::timerCallback()
         const float now = proc.engine.reductionMeter[(size_t) b].load();
         s.shownReduction = std::max (now, s.shownReduction - gui::kMeterRangeDb / (float) kTimerHz);
     }
+    if (layoutSignature() != shownLayout) // a host or a preset changed the splits
+        layoutStrips();
+    view.tick (1.0f / (float) kTimerHz);
     inLevel = proc.engine.inPeak.exchange (0.0f);
     proc.engine.outPeak.store (0.0f);
     repaint();

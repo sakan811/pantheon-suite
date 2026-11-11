@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Atlas Span: a JUCE six-band compressor (VST3 / AU / Standalone). The bands are the six main bands of music (`shared/dsp`
-MusicBands.h); each has a compressor on Stereo / L/R / M/S / Left / Right / Mid / Side, a solo, a delta and a gain match; the
+Atlas Span: a JUCE multiband compressor (VST3 / AU / Standalone) with one to six bands made on a spectrogram (they start as
+the six main bands of music, `shared/dsp` MusicBands.h); the display marks peaks and regions that jump; each band has a compressor on Stereo / L/R / M/S / Left / Right / Mid / Side, a solo, a delta and a gain match; the
 split is Zero Latency or Linear; the compressors can be oversampled. See `README.md` for what it does and what has been
 measured; this file is what you need to change it safely.
 
@@ -29,7 +29,9 @@ Source/DSP/        no GUI dependencies; covered by Tests/Tests.cpp
   LinearSplit.h      the linear-phase split: kernels from the crossovers, FFT overlap-save, the top band as the complement
   Engine.h           the whole signal path, the tick, oversampling, makeup and gain match, solo and delta, meters, latency
 Source/Parameters.h  parameter layout, readParams(), bandRangeHz()                    <- the single source of truth for parameters
-Source/Plugin*.{h,cpp}, Source/UI/AtlasUi.h   JUCE wrapper and editor (the look is `shared/ui`)
+Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/BandView.h` is the display (spectrogram, band edges, PEAK / JUMPS)
+../../shared/dsp/    SpectrumIssues.h (`pdsp::SpectrumGrid`, `pdsp::IssueFinder`: plain C++, tested by AtlasTests [9]), SpectrumAnalyzer.h, AnalyzerTap.h
+../../shared/ui/     Spectrogram.h (`ui::Spectrogram`: the ring of rows the display draws)
 ../../shared/dsp/    MusicBands.h (the six bands, `pdsp::BandSplitter`: the zero-latency split), Biquad.h
 Tests/               Tests.cpp (DSP), UiCheck.cpp (editor on the real processor), Snapshot.cpp (editor -> PNG), Check.h
 ```
@@ -71,6 +73,20 @@ The crossovers stop at 40 Hz because the kernels (+-2048 samples at 48 kHz) cann
 new mode, and reaches the host through `AtlasProcessor::handleAsyncUpdate` on the message thread; `prepareToPlay` passes the saved
 modes to `Engine::prepare` so the host hears the right latency before the first block. A mode switch clears the histories.
 
+**One to six bands.** The splitter always makes six pieces; `bandOwners (split)` says which band each piece belongs to (a split
+that is off joins the piece above it to the band below), the pieces of a band are added together before its compressor, and only
+owners run (`segment`). A band's settings, solo bit and meters are its owner piece's index (its *slot*). The engine accepts any
+pattern of splits; the editor keeps the ones that are on in the first slots, in order (`addSplit` / `removeSplit` / `writeSplits` in
+`Parameters.h`, which also move the bands' settings so they travel with the bands), so band i is strip i. Use `layoutOf()` for
+anything that asks "which bands are there": never loop over `kBands` strips in the editor. A split that is off is parked at
+`kMaxCrossoverHz`, so its (still running) crossover is out of the way.
+
+**The display is not audio analysis.** `BandView::tick` runs on the editor's timer: the input tap (`AtlasProcessor::tapIn`) goes
+through the shared `pdsp::SpectrumAnalyzer` onto `pdsp::SpectrumGrid` (1/24 octave), one row per tick into `ui::Spectrogram` and
+into `pdsp::IssueFinder`. Nothing of it runs on the audio thread. The spectrogram's levels are per frequency and tilted, not a
+band's level: that is why a band made from a JUMPS marker gets its threshold from `Engine::levelMeter` (what the band's own
+detector read over `kLearnSeconds`), not from the marker.
+
 **Solo and delta are monitoring, not state.** They live in `Engine::monitor` (bit masks, atomics), not in parameters, and the
 editor ends them in its destructor. Do not make them parameters. They fade over 10 ms (`heard`, `dryHeard`).
 
@@ -79,7 +95,7 @@ editor ends them in its destructor. Do not make them parameters. They fade over 
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`).
 
-**Parameters.** Ids (`atlas::id`, `bandIds (i)`: `b1_on` ... `b6_match`) are stored in sessions and automation: never rename or
+**Parameters.** Ids (`atlas::id`: `xo0` ... `xo4` and `xo0_on` ... `xo4_on` among them; `bandIds (i)`: `b1_on` ... `b6_match`) are stored in sessions and automation: never rename or
 remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `channelNames` is the order of `Channels`.
 
@@ -96,6 +112,8 @@ The order of `channelNames` is the order of `Channels`.
 
 - A single tone's reduction measured on the whole output is less than the band's (its neighbours carry part of it): tests
   that check the law solo the band (`runSolo`).
+- A tone inside a band is lower than on the whole signal (100 Hz is 3 dB down in a 70 to 160 Hz band): anything that sets a
+  threshold has to read the band, not the input.
 - `ui::Choice` and `ui::Toggle` are bound to one parameter for good, so every strip owns its controls (`AtlasEditor::Strip`).
 - In an editor constructor call `setSize()` **last**.
 

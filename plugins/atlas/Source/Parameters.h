@@ -13,6 +13,7 @@ namespace id
 {
 inline const juce::String phase { "phase" }, oversampling { "os" }, out { "out" };
 inline const std::array<juce::String, kCrossovers> crossover { "xo0", "xo1", "xo2", "xo3", "xo4" };
+inline const std::array<juce::String, kCrossovers> split { "xo0_on", "xo1_on", "xo2_on", "xo3_on", "xo4_on" }; // off: the two bands are one
 }
 
 // Ids are "b1_on" ... "b6_match": built once and kept, so the audio thread never builds a String.
@@ -73,13 +74,16 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::oversampling, 1 }, "Oversampling", oversamplingNames, 0));
     F (id::out, "Output", { -24.0f, 24.0f, 0.1f }, 0.0f, Attr().withStringFromValueFunction (db));
     for (int k = 0; k < kCrossovers; ++k)
-        F (id::crossover[(size_t) k], String (pdsp::bands::kBands[(size_t) k].name) + " / " + pdsp::bands::kBands[(size_t) (k + 1)].name + " Crossover",
+        F (id::crossover[(size_t) k], "Split " + String (k + 1) + " Frequency",
            skewed (kMinCrossoverHz, kMaxCrossoverHz, 1.0f, 800.0f), (float) pdsp::bands::crossoverHz (k), Attr().withStringFromValueFunction (hz).withValueFromStringFunction (hzValue));
+
+    for (int k = 0; k < kCrossovers; ++k)
+        p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::split[(size_t) k], 1 }, "Split " + String (k + 1) + " On", true));
 
     for (int i = 0; i < kBands; ++i)
     {
         const auto& ids = bandIds (i);
-        const auto label = [i] (const char* what) { return String (pdsp::bands::kBands[(size_t) i].name) + " " + what; };
+        const auto label = [i] (const char* what) { return "Band " + String (i + 1) + " " + what; };
         const BandParams d;
         p.push_back (std::make_unique<AudioParameterBool> (ParameterID { ids.on, 1 }, label ("On"), d.on));
         p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { ids.channels, 1 }, label ("Channels"), channelNames, 0));
@@ -102,7 +106,10 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.oversampling = std::clamp ((int) v (id::oversampling), 0, kNumOsModes - 1);
     e.outGainDb = v (id::out);
     for (int k = 0; k < kCrossovers; ++k)
+    {
         e.crossover[(size_t) k] = v (id::crossover[(size_t) k]);
+        e.split[(size_t) k] = v (id::split[(size_t) k]) > 0.5f;
+    }
     for (int i = 0; i < kBands; ++i)
     {
         const auto& ids = bandIds (i);
@@ -119,13 +126,128 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     return e;
 }
 
-// The edges of band `b` as the engine has them (ordered), for the editor's labels.
-inline std::pair<double, double> bandRangeHz (juce::AudioProcessorValueTreeState& s, int b)
+// ---- the bands as they are laid out --------------------------------------------------------------
+// One to six bands. The editor keeps the splits that are on in the first slots, in order (addSplit / removeSplit), so the
+// bands are strips 0 ... numBands - 1 from the bottom of the spectrum up; the engine does not rely on that (bandOwners).
+inline constexpr double kSpectrumLowHz = 20.0, kSpectrumHighHz = 20000.0;
+
+struct Layout
 {
-    std::array<double, kCrossovers> xo {};
+    int numBands = 1;
+    std::array<int, kBands> slot {};          // the strip (parameter set) of each band
+    std::array<double, kBands + 1> edgeHz {}; // band i is edgeHz[i] ... edgeHz[i + 1]
+    std::array<int, kBands> splitAbove {};    // the crossover slot at the top of each band (-1 for the last)
+};
+
+inline Layout layoutOf (juce::AudioProcessorValueTreeState& s)
+{
+    const auto p = readParams (s);
+    const auto xo = orderedCrossovers (p.crossover);
+    Layout l;
+    l.numBands = 0;
+    l.edgeHz[0] = kSpectrumLowHz;
+    l.slot[0] = 0;
     for (int k = 0; k < kCrossovers; ++k)
-        xo[(size_t) k] = s.getRawParameterValue (id::crossover[(size_t) k])->load();
-    xo = orderedCrossovers (xo);
-    return { b == 0 ? pdsp::bands::kBands[0].loHz : xo[(size_t) (b - 1)], b == kBands - 1 ? pdsp::bands::kBands[(size_t) (kBands - 1)].hiHz : xo[(size_t) b] };
+        if (p.split[(size_t) k])
+        {
+            l.splitAbove[(size_t) l.numBands] = k;
+            l.edgeHz[(size_t) ++l.numBands] = xo[(size_t) k];
+            l.slot[(size_t) l.numBands] = k + 1;
+        }
+    l.splitAbove[(size_t) l.numBands] = -1;
+    l.edgeHz[(size_t) ++l.numBands] = kSpectrumHighHz;
+    return l;
+}
+
+inline void setValue (juce::AudioProcessorValueTreeState& s, const juce::String& pid, float value)
+{
+    if (auto* param = s.getParameter (pid))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (value));
+        param->endChangeGesture();
+    }
+}
+
+inline void copyBand (juce::AudioProcessorValueTreeState& s, int from, int to)
+{
+    const auto& a = bandIds (from);
+    const auto& b = bandIds (to);
+    const juce::String* const pairs[][2] = { { &a.on, &b.on }, { &a.channels, &b.channels }, { &a.threshold, &b.threshold }, { &a.ratio, &b.ratio },
+                                             { &a.attack, &b.attack }, { &a.release, &b.release }, { &a.makeup, &b.makeup }, { &a.match, &b.match } };
+    for (const auto& pair : pairs)
+        setValue (s, *pair[1], s.getParameter (*pair[0])->convertFrom0to1 (s.getParameter (*pair[0])->getValue()));
+}
+
+// Writes the splits that are on into the first slots, in order, and parks the rest at the top, off.
+inline void writeSplits (juce::AudioProcessorValueTreeState& s, const std::vector<double>& hz)
+{
+    for (int k = 0; k < kCrossovers; ++k)
+    {
+        const bool on = k < (int) hz.size();
+        setValue (s, id::crossover[(size_t) k], on ? (float) hz[(size_t) k] : kMaxCrossoverHz);
+        setValue (s, id::split[(size_t) k], on ? 1.0f : 0.0f);
+    }
+}
+
+inline std::vector<double> splitsOf (const Layout& l)
+{
+    std::vector<double> hz;
+    for (int i = 1; i < l.numBands; ++i)
+        hz.push_back (l.edgeHz[(size_t) i]);
+    return hz;
+}
+
+// Splits the band at `hz` in two; both halves keep its settings, and the bands above move up a strip. Returns the new upper
+// band, or -1 when there are six already or `hz` is too close to an edge (kMinCrossoverRatio) or out of range.
+inline int addSplit (juce::AudioProcessorValueTreeState& s, double hz)
+{
+    const auto l = layoutOf (s);
+    if (l.numBands >= kBands || hz < kMinCrossoverHz || hz > kMaxCrossoverHz)
+        return -1;
+    auto splits = splitsOf (l);
+    for (double f : splits)
+        if (std::max (f, hz) / std::min (f, hz) < kMinCrossoverRatio)
+            return -1;
+    const int at = (int) (std::upper_bound (splits.begin(), splits.end(), hz) - splits.begin()); // the band that is split
+    // Settings first, from the top down, read from the strips the bands are on now.
+    for (int band = l.numBands - 1; band >= at; --band)
+        copyBand (s, l.slot[(size_t) band], band + 1);
+    for (int band = 0; band < at; ++band)
+        if (l.slot[(size_t) band] != band)
+            copyBand (s, l.slot[(size_t) band], band);
+    splits.insert (splits.begin() + at, hz);
+    writeSplits (s, splits);
+    return at + 1;
+}
+
+// Removes the split at the top of `band`: it and the band above become one, with `band`'s settings.
+inline bool removeSplit (juce::AudioProcessorValueTreeState& s, int band)
+{
+    const auto l = layoutOf (s);
+    if (band < 0 || band >= l.numBands - 1)
+        return false;
+    for (int b = 0; b < l.numBands; ++b)
+    {
+        const int to = b <= band ? b : b - 1;
+        if (b != band + 1 && l.slot[(size_t) b] != to)
+            copyBand (s, l.slot[(size_t) b], to);
+    }
+    auto splits = splitsOf (l);
+    splits.erase (splits.begin() + band);
+    writeSplits (s, splits);
+    return true;
+}
+
+// Moves the split at the top of `band`, kept between its neighbours.
+inline void moveSplit (juce::AudioProcessorValueTreeState& s, int band, double hz)
+{
+    const auto l = layoutOf (s);
+    if (band < 0 || band >= l.numBands - 1)
+        return;
+    const double lo = band == 0 ? kMinCrossoverHz : l.edgeHz[(size_t) band] * kMinCrossoverRatio;
+    const double hi = band == l.numBands - 2 ? kMaxCrossoverHz : l.edgeHz[(size_t) (band + 2)] / kMinCrossoverRatio;
+    if (auto* param = s.getParameter (id::crossover[(size_t) l.splitAbove[(size_t) band]]))
+        param->setValueNotifyingHost (param->convertTo0to1 ((float) std::clamp (hz, lo, std::max (lo, hi))));
 }
 } // namespace atlas
