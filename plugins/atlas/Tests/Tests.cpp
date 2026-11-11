@@ -6,6 +6,7 @@
 #include "Check.h"
 #include "DSP/Engine.h"
 #include <pantheon/dsp/SpectrumIssues.h>
+#include <limits>
 #include <random>
 
 using namespace atlas;
@@ -88,6 +89,25 @@ Stereo runSolo (const EngineParams& p, unsigned mask, const std::vector<float>& 
     e.prepare (fs, p.phase, p.oversampling);
     e.monitor.solo = mask;
     return run (e, p, l, r);
+}
+
+
+// The same with a sidechain input (null: none connected).
+Stereo runSc (Engine& e, const EngineParams& p, const std::vector<float>& l, const std::vector<float>& r, const std::vector<float>* scl, const std::vector<float>* scr, int block = 512)
+{
+    Stereo out { l, r };
+    for (int start = 0; start < (int) l.size(); start += block)
+        e.process (out.l.data() + start, out.r.data() + start, std::min (block, (int) l.size() - start), p,
+                   scl != nullptr ? scl->data() + start : nullptr, scr != nullptr ? scr->data() + start : nullptr);
+    return out;
+}
+
+Stereo runLook (const EngineParams& p, const std::vector<float>& l, const std::vector<float>& r, unsigned solo = 0u, int block = 512)
+{
+    Engine e;
+    e.prepare (fs, p.phase, p.oversampling, p.lookahead);
+    e.monitor.solo = solo;
+    return run (e, p, l, r, block);
 }
 
 EngineParams allOff()
@@ -547,6 +567,153 @@ void testIssueFinder()
     for (int frame = 0; frame < 240; ++frame) silent.push (quiet, dt);
     check (silent.peaks (peaks) == 0 && silent.swings (swings) == 0, "silence says nothing");
 }
+
+void testLookahead()
+{
+    std::printf("\n[10] Look-ahead\n");
+    const auto l = noise (21, 0.2, second), r = noise (22, 0.2, second);
+    std::string line;
+    bool exact = true;
+    for (int look = 1; look < kNumLookahead; ++look)
+        for (int os = 0; os < kNumOsModes; ++os)
+        {
+            auto p = allOff();
+            p.lookahead = look;
+            p.oversampling = os;
+            Engine e;
+            e.prepare (fs, p.phase, os, look);
+            const int latency = e.latencySamples.load(), samples = lookaheadSamples (fs, look);
+            const auto out = run (e, p, l, r);
+            auto q = allOff();
+            q.oversampling = os;
+            const auto ref = run (q, l, r);
+            const int osLatency = latency - samples;
+            // Nothing compressing: the plain output (with the oversampling's own delay), look-ahead later, bit for bit.
+            exact = exact && latency == osLatency + samples && maxDiff (out.l, ref.l, 0, second - latency, samples) <= 0.0 && maxDiff (out.r, ref.r, 0, second - latency, samples) <= 0.0;
+            if (os == 0)
+                line += fmt (" %g ms = %d samples,", kLookaheadMs[(size_t) look], samples);
+        }
+    check (exact, "bands off, every look-ahead and oversampling: the plain output, look-ahead samples later, bit for bit;" + line + " reported with the latency");
+
+    // What it is for: a loud tone that starts at once. The compressor's attack is 5 ms; with 5 ms of look-ahead the gain is already coming
+    // down when the tone reaches the output.
+    const int start = second / 2;
+    const auto burstIn = [&]
+    {
+        auto x = sine (1000.0, 0.0005, second);
+        const auto loud = sine (1000.0, 0.5, second);
+        for (int i = start; i < second; ++i) x[(size_t) i] = loud[(size_t) i];
+        return x;
+    }();
+    const auto firstPeak = [&] (int look)
+    {
+        auto p = midrangeOnly (-30.0, 20.0);
+        p.bands[3].attackMs = 5.0;
+        p.bands[3].releaseMs = 100.0;
+        p.lookahead = look;
+        const auto out = runLook (p, burstIn, burstIn, 1u << 3);
+        const int from = start + lookaheadSamples (fs, look); // where the tone arrives at the output
+        double peak = 0.0;
+        for (int i = from; i < from + (int) (0.002 * fs); ++i)
+            peak = std::max (peak, (double) std::fabs (out.l[(size_t) i]));
+        return std::pair { toDb (peak), toDb (amplitudeAt (out.l, 1000.0, second - second / 8, second / 16)) };
+    };
+    const auto none = firstPeak (0), five = firstPeak (3);
+    check (five.first < none.first - 2.0 && std::fabs (five.second - none.second) < 0.1,
+           fmt ("a tone at -6 dB starts at once, attack 5 ms (the band soloed): its first 2 ms reach %.1f dB without look-ahead, %.1f dB with 5 ms; settled they are %.2f and %.2f dB",
+                none.first, five.first, none.second, five.second));
+
+    // Block sizes: the same output for any, with look-ahead and oversampling.
+    auto p = midrangeOnly (-30.0, 6.0);
+    p.lookahead = 2;
+    p.oversampling = 1;
+    const auto a = runLook (p, l, r, 0u, 512), b = runLook (p, l, r, 0u, 61);
+    check (a.l == b.l && a.r == b.r, "look-ahead 2 ms with 2x oversampling: the output is the same for blocks of 512 and 61, bit for bit");
+}
+
+void testSidechain()
+{
+    std::printf("\n[11] Sidechain input\n");
+    const auto quiet = sine (1000.0, std::pow (10.0, -45.0 / 20.0), second), loud = sine (1000.0, std::pow (10.0, -10.0 / 20.0), second);
+    const auto silent = std::vector<float> ((size_t) second, 0.0f);
+    auto p = midrangeOnly (-30.0, 4.0);
+    auto sc = p;
+    sc.bands[3].sidechain = true;
+
+    const auto ran = [&] (const EngineParams& q, const std::vector<float>& main, const std::vector<float>* key, int os = 0, PhaseMode phase = PhaseMode::zeroLatency, int block = 512)
+    {
+        auto r = q;
+        r.oversampling = os;
+        r.phase = phase;
+        Engine e;
+        e.prepare (fs, phase, os);
+        e.monitor.solo = 1u << 3;
+        return runSc (e, r, main, main, key, key, block);
+    };
+
+    // The level the band reads on the key (what the law needs): the key through the band, uncompressed.
+    const auto keyBand = ran (allOff(), loud, nullptr);
+    const double keyLevelDb = toDb (amplitudeAt (keyBand.l, 1000.0, second / 2, second / 4));
+    const double law = -0.75 * (keyLevelDb + 30.0);
+    const auto taken = [&] (const Stereo& out, const Stereo& dry) { return toDb (amplitudeAt (out.l, 1000.0, second / 2, second / 4) / amplitudeAt (dry.l, 1000.0, second / 2, second / 4)); };
+    const auto dryQuiet = ran (allOff(), quiet, nullptr);
+
+    const auto self = ran (sc, quiet, nullptr);                 // no sidechain connected: it listens to itself
+    const auto own = ran (p, quiet, nullptr);
+    check (self.l == own.l && self.r == own.r, "a band set to Sidechain with none connected listens to itself, bit for bit");
+
+    const auto keyed = ran (sc, quiet, &loud);
+    const double got = taken (keyed, dryQuiet);
+    check (std::fabs (got - law) < 0.3 && std::fabs (taken (own, dryQuiet)) < 0.05,
+           fmt ("a quiet 1 kHz tone (-45 dB) with the key at -10 dB: the band is taken down %+.2f dB (the law at the key's level of %.1f dB in the band gives %+.2f); alone it passes at %+.3f dB",
+                got, keyLevelDb, law, taken (own, dryQuiet)));
+
+    const auto unkeyed = ran (sc, loud, &silent);
+    const auto reference = ran (allOff(), loud, nullptr);
+    check (unkeyed.l == reference.l && unkeyed.r == reference.r, "a loud tone with a silent key: nothing is taken, bit for bit (the band does not listen to itself)");
+
+    const auto heard = ran (sc, silent, &loud);
+    double worst = 0.0;
+    for (size_t i = 0; i < heard.l.size(); ++i)
+        worst = std::max (worst, (double) std::max (std::fabs (heard.l[i]), std::fabs (heard.r[i])));
+    check (worst == 0.0, "silence in, a loud key: silence out (the sidechain is never heard)");
+
+    const auto os2 = ran (sc, quiet, &loud, 1), lin = ran (sc, quiet, &loud, 0, PhaseMode::linear);
+    const auto dryLin = ran (allOff(), quiet, nullptr, 0, PhaseMode::linear), dryOs = ran (allOff(), quiet, nullptr, 1);
+    check (std::fabs (taken (os2, dryOs) - law) < 0.4 && std::fabs (taken (lin, dryLin) - law) < 0.5,
+           fmt ("the same at 2x oversampling (%+.2f dB) and in the linear mode (%+.2f dB): the key is split and held the same way", taken (os2, dryOs), taken (lin, dryLin)));
+
+    const auto nl = noise (31, 0.1, second), nr = noise (32, 0.1, second), kl = noise (33, 0.3, second), kr = noise (34, 0.3, second);
+    auto q = sc;
+    q.oversampling = 1;
+    q.lookahead = 2;
+    const auto run1 = [&] (int block)
+    {
+        Engine e;
+        e.prepare (fs, q.phase, q.oversampling, q.lookahead);
+        return runSc (e, q, nl, nr, &kl, &kr, block);
+    };
+    const auto a = run1 (512), b = run1 (61);
+    check (a.l == b.l && a.r == b.r, "with a noise key, 2x oversampling and look-ahead: the output is the same for blocks of 512 and 61, bit for bit");
+
+    Engine mono;
+    mono.prepare (fs);
+    Engine both;
+    both.prepare (fs);
+    const auto m = runSc (mono, sc, nl, nr, &kl, nullptr), s2 = runSc (both, sc, nl, nr, &kl, &kl);
+    check (m.l == s2.l && m.r == s2.r, "a mono key is the same as the same signal on both channels, bit for bit");
+
+    auto nonFinite = kl;
+    nonFinite[1000] = std::numeric_limits<float>::quiet_NaN();
+    nonFinite[1001] = std::numeric_limits<float>::infinity();
+    Engine bad;
+    bad.prepare (fs);
+    const auto outBad = runSc (bad, sc, nl, nr, &nonFinite, &kr);
+    bool finite = true;
+    for (size_t i = 0; i < outBad.l.size(); ++i)
+        finite = finite && std::isfinite (outBad.l[i]) && std::isfinite (outBad.r[i]);
+    check (finite, "a NaN and an inf in the key: the output stays finite");
+}
 } // namespace
 
 int main()
@@ -560,6 +727,8 @@ int main()
     testOversampling();
     testRobust();
     testFreeBands();
+    testLookahead();
+    testSidechain();
     testIssueFinder();
     return test::finish ("AtlasTests");
 }

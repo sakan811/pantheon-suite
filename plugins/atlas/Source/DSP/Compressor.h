@@ -30,6 +30,7 @@ struct BandParams
     double attackMs = 10.0, releaseMs = 120.0;
     double makeupDb = 0.0;
     bool match = false; // the band's output is brought back to the loudness of its input
+    bool sidechain = false; // its compressor listens to the same band of the sidechain input instead of its own (itself again when none is connected)
 };
 
 inline constexpr double kKneeDb = 6.0;

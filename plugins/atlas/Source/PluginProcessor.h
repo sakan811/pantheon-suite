@@ -26,10 +26,10 @@ public:
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return "Default"; }
+    int getNumPrograms() override { return (int) atlas::presets().size(); }
+    int getCurrentProgram() override { return currentProgram; }
+    void setCurrentProgram (int) override;
+    const juce::String getProgramName (int) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
@@ -38,12 +38,15 @@ public:
     atlas::Engine engine;
     juce::AudioProcessorValueTreeState apvts;
     pdsp::StereoTap tapIn; // the input, for the display's spectrogram
+    // Whether the host handed the last block a sidechain: the editor says so next to a band set to listen to it.
+    std::atomic<bool> sidechainConnected { false };
 
 private:
     // The latency changes with the phase and oversampling modes; setLatencySamples belongs to the message thread, so the
     // audio thread only asks for it.
     void handleAsyncUpdate() override;
     std::atomic<int> reportedLatency { 0 };
+    int currentProgram = 0;
     std::vector<float> monoRight; // a mono host: the engine's second channel
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AtlasProcessor)

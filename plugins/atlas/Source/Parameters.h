@@ -11,7 +11,7 @@ namespace atlas
 {
 namespace id
 {
-inline const juce::String phase { "phase" }, oversampling { "os" }, out { "out" };
+inline const juce::String phase { "phase" }, oversampling { "os" }, out { "out" }, lookahead { "look" };
 inline const std::array<juce::String, kCrossovers> crossover { "xo0", "xo1", "xo2", "xo3", "xo4" };
 inline const std::array<juce::String, kCrossovers> split { "xo0_on", "xo1_on", "xo2_on", "xo3_on", "xo4_on" }; // off: the two bands are one
 }
@@ -20,6 +20,7 @@ inline const std::array<juce::String, kCrossovers> split { "xo0_on", "xo1_on", "
 struct BandIds
 {
     juce::String on, channels, threshold, ratio, attack, release, makeup, match;
+    juce::String listen; // what its compressor listens to: its own band, or the sidechain's (version 2)
 };
 
 inline const BandIds& bandIds (int band)
@@ -30,7 +31,7 @@ inline const BandIds& bandIds (int band)
         for (int i = 0; i < kBands; ++i)
         {
             const auto name = [i] (const char* what) { return "b" + juce::String (i + 1) + "_" + what; };
-            t[(size_t) i] = { name ("on"), name ("ch"), name ("thresh"), name ("ratio"), name ("attack"), name ("release"), name ("makeup"), name ("match") };
+            t[(size_t) i] = { name ("on"), name ("ch"), name ("thresh"), name ("ratio"), name ("attack"), name ("release"), name ("makeup"), name ("match"), name ("listen") };
         }
         return t;
     }();
@@ -40,6 +41,15 @@ inline const BandIds& bandIds (int band)
 inline const juce::StringArray channelNames { "Stereo", "L/R", "M/S", "Left", "Right", "Mid", "Side" }; // the order of Channels
 inline const juce::StringArray phaseNames { "Zero Latency", "Linear" };
 inline const juce::StringArray oversamplingNames { "Off", "2x", "4x" };
+inline const juce::StringArray listenNames { "Self", "Sidechain" };
+// The choices of kLookaheadMs (Engine.h), named from it.
+inline juce::StringArray lookaheadNames()
+{
+    juce::StringArray names;
+    for (double ms : kLookaheadMs)
+        names.add (ms == 0.0 ? juce::String ("Off") : juce::String (ms, 0) + " ms");
+    return names;
+}
 
 inline constexpr float kMinCrossoverHz = 40.0f, kMaxCrossoverHz = 16000.0f; // the linear mode's kernels resolve a split down to here
 
@@ -94,6 +104,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         F (ids.makeup, label ("Makeup"), { -12.0f, 24.0f, 0.1f }, 0.0f, Attr().withStringFromValueFunction (db));
         p.push_back (std::make_unique<AudioParameterBool> (ParameterID { ids.match, 1 }, label ("Gain Match"), d.match));
     }
+    // Added after the first release, so version 2 and after everything else: the parameters a host already knows keep their places.
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames(), 0));
+    for (int i = 0; i < kBands; ++i)
+        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { bandIds (i).listen, 2 }, "Band " + String (i + 1) + " Listens To", listenNames, 0));
     return { p.begin(), p.end() };
 }
 
@@ -105,6 +119,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.phase = (PhaseMode) std::clamp ((int) v (id::phase), 0, 1);
     e.oversampling = std::clamp ((int) v (id::oversampling), 0, kNumOsModes - 1);
     e.outGainDb = v (id::out);
+    e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookahead - 1);
     for (int k = 0; k < kCrossovers; ++k)
     {
         e.crossover[(size_t) k] = v (id::crossover[(size_t) k]);
@@ -122,6 +137,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
         b.releaseMs = v (ids.release);
         b.makeupDb = v (ids.makeup);
         b.match = v (ids.match) > 0.5f;
+        b.sidechain = v (ids.listen) > 0.5f;
     }
     return e;
 }
@@ -174,7 +190,7 @@ inline void copyBand (juce::AudioProcessorValueTreeState& s, int from, int to)
     const auto& a = bandIds (from);
     const auto& b = bandIds (to);
     const juce::String* const pairs[][2] = { { &a.on, &b.on }, { &a.channels, &b.channels }, { &a.threshold, &b.threshold }, { &a.ratio, &b.ratio },
-                                             { &a.attack, &b.attack }, { &a.release, &b.release }, { &a.makeup, &b.makeup }, { &a.match, &b.match } };
+                                             { &a.attack, &b.attack }, { &a.release, &b.release }, { &a.makeup, &b.makeup }, { &a.match, &b.match }, { &a.listen, &b.listen } };
     for (const auto& pair : pairs)
         setValue (s, *pair[1], s.getParameter (*pair[0])->convertFrom0to1 (s.getParameter (*pair[0])->getValue()));
 }
@@ -249,5 +265,90 @@ inline void moveSplit (juce::AudioProcessorValueTreeState& s, int band, double h
     const double hi = band == l.numBands - 2 ? kMaxCrossoverHz : l.edgeHz[(size_t) (band + 2)] / kMinCrossoverRatio;
     if (auto* param = s.getParameter (id::crossover[(size_t) l.splitAbove[(size_t) band]]))
         param->setValueNotifyingHost (param->convertTo0to1 ((float) std::clamp (hz, lo, std::max (lo, hi))));
+}
+
+// ---- presets -------------------------------------------------------------------------------------
+// A preset is the bands' settings; everything not listed goes back to its default, the session-wide controls (phase, oversampling,
+// look-ahead, output) are kept. The thresholds are starting points for a master around -14 LUFS: the band's level decides, so set THRESH
+// where the meter first moves.
+using PresetValues = std::vector<std::pair<juce::String, float>>;
+
+struct Preset
+{
+    const char* name;
+    PresetValues values;
+    const char* purpose; // one line: what it is for, and what it is not
+};
+
+inline bool isGlobalParameter (const juce::String& pid)
+{
+    return pid == id::phase || pid == id::oversampling || pid == id::out || pid == id::lookahead;
+}
+
+inline PresetValues bandValues (int band, double thresholdDb, double ratio, double attackMs, double releaseMs,
+                                Channels channels = Channels::stereo, bool match = false, bool sidechain = false)
+{
+    const auto& ids = bandIds (band);
+    return { { ids.on, 1.0f }, { ids.threshold, (float) thresholdDb }, { ids.ratio, (float) ratio }, { ids.attack, (float) attackMs },
+             { ids.release, (float) releaseMs }, { ids.channels, (float) (int) channels }, { ids.match, match ? 1.0f : 0.0f }, { ids.listen, sidechain ? 1.0f : 0.0f } };
+}
+
+inline PresetValues bandsOff (std::initializer_list<int> bands)
+{
+    PresetValues v;
+    for (int b : bands)
+        v.push_back ({ bandIds (b).on, 0.0f });
+    return v;
+}
+
+inline PresetValues join (std::initializer_list<PresetValues> parts)
+{
+    PresetValues all;
+    for (auto& part : parts)
+        all.insert (all.end(), part.begin(), part.end());
+    return all;
+}
+
+inline const std::vector<Preset>& presets()
+{
+    static constexpr double glue[kBands] = { -24.0, -20.0, -24.0, -26.0, -32.0, -38.0 };
+    static const std::vector<Preset> list
+    {
+        { "Init", {}, "The starting point: six bands with their thresholds at the top, so nothing compresses until you lower THRESH." },
+        { "Mastering Glue", join ({ bandValues (0, glue[0], 1.5, 30, 200, Channels::stereo, true), bandValues (1, glue[1], 1.5, 30, 200, Channels::stereo, true),
+                                    bandValues (2, glue[2], 1.5, 30, 200, Channels::stereo, true), bandValues (3, glue[3], 1.5, 30, 200, Channels::stereo, true),
+                                    bandValues (4, glue[4], 1.5, 30, 200, Channels::stereo, true), bandValues (5, glue[5], 1.5, 30, 200, Channels::stereo, true) }),
+          "A light, slow squeeze on every band, gain-matched. Evens a master out; it is not a limiter and will not make it louder." },
+        { "Tame the Low End", join ({ bandValues (0, -22, 3, 20, 150), bandValues (1, -18, 3, 20, 150), bandsOff ({ 2, 3, 4, 5 }) }),
+          "A boomy or uneven sub and bass: turns them down only when they swell. It does not cut what is always too loud: use an equaliser." },
+        { "Steady Low-Mids", join ({ bandValues (2, -26, 2.5, 30, 250), bandsOff ({ 0, 1, 3, 4, 5 }) }),
+          "Mud that comes and goes in the low-mids. It follows the swells; a constant excess is an equaliser's job." },
+        { "De-Harsh Upper-Mid", join ({ bandValues (4, -30, 3, 5, 80), bandsOff ({ 0, 1, 2, 3, 5 }) }),
+          "Harshness that spikes at 2 - 6 kHz (a loud voice or cymbal). Turns the band down only while it spikes." },
+        { "De-Ess", join ({ bandValues (5, -36, 4, 1, 40), bandsOff ({ 0, 1, 2, 3, 4 }) }),
+          "Sibilance in the top band. Set LOOK-AHEAD to 1 - 2 ms so the first 's' is caught; it works on one band, so it is a broad de-esser." },
+        { "Mid/Side Control", join ({ bandValues (0, glue[0], 2, 20, 150, Channels::midSide), bandValues (1, glue[1], 2, 20, 150, Channels::midSide),
+                                      bandValues (2, glue[2], 2, 20, 150, Channels::midSide), bandValues (3, glue[3], 2, 20, 150, Channels::midSide),
+                                      bandValues (4, glue[4], 2, 20, 150, Channels::midSide), bandValues (5, glue[5], 2, 20, 150, Channels::midSide) }),
+          "Each band's centre and sides get their own gain, so a loud centre does not pull the width down. Check mono with DELTA." },
+        { "Kick Ducks Bass", join ({ bandValues (0, -30, 4, 5, 120, Channels::stereo, false, true), bandValues (1, -30, 4, 5, 120, Channels::stereo, false, true),
+                                     bandsOff ({ 2, 3, 4, 5 }) }),
+          "Put the kick on the SIDECHAIN input: the sub and bass duck when it hits. Needs a sidechain routed in your host." },
+    };
+    return list;
+}
+
+inline void applyPreset (juce::AudioProcessorValueTreeState& s, int index)
+{
+    const auto& list = presets();
+    if (! juce::isPositiveAndBelow (index, (int) list.size()))
+        return;
+    // Start from the defaults so a preset does not inherit what the last one left.
+    for (auto* param : s.processor.getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+            if (! isGlobalParameter (ranged->paramID))
+                setValue (s, ranged->paramID, ranged->convertFrom0to1 (ranged->getDefaultValue()));
+    for (auto& [pid, value] : list[(size_t) index].values)
+        setValue (s, pid, value);
 }
 } // namespace atlas
