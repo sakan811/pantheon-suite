@@ -108,12 +108,18 @@ public:
         eDry = eWet = 0.0;
     }
 
-    void process (juce::AudioBuffer<float>& buffer, const EngineParams& p)
+    // `sidechain` is the other track a dynamic band may listen to (BandParams::external): never heard, only measured. Null, or
+    // without channels, when the host has not connected one; such a band then listens to its own signal as any other does.
+    void process (juce::AudioBuffer<float>& buffer, const EngineParams& p, const juce::AudioBuffer<float>* sidechain = nullptr)
     {
         const int total = buffer.getNumSamples();
         const int nCh = std::min (buffer.getNumChannels(), 2);
         if (nCh == 0)
             return;
+
+        const int scCh = sidechain != nullptr && sidechain->getNumSamples() >= total ? std::min (sidechain->getNumChannels(), 2) : 0;
+        scIn[0] = scCh > 0 ? sidechain->getReadPointer (0) : nullptr;
+        scIn[1] = scCh > 0 ? sidechain->getReadPointer (scCh > 1 ? 1 : 0) : nullptr;
 
         const float* in[2] = { buffer.getReadPointer (0), buffer.getReadPointer (nCh > 1 ? 1 : 0) };
         tapIn.push (in, nCh, total);
@@ -130,6 +136,7 @@ public:
         const float* out[2] = { buffer.getReadPointer (0), buffer.getReadPointer (nCh > 1 ? 1 : 0) };
         tapOut.push (out, nCh, total);
         smoothPeak (outPeak, peakOf (buffer, nCh), total);
+        scIn[0] = scIn[1] = nullptr;
     }
 
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
@@ -158,6 +165,7 @@ private:
         int appliedOrder = -1;                            // a cut's slope: a change of it is a new filter too
         double mix = 0.0, mixPrev = 0.0, mixStep = 0.0;   // 0..1 fade when the band is switched on or off
         bool dynamic = false;
+        bool external = false;                            // listening to the sidechain (latched at a tick, like the placement)
     };
 
     // ---- once per tick -------------------------------------------------------------------------
@@ -273,6 +281,7 @@ private:
         for (auto& d : s.det) d.reset();
         for (auto& sh : s.shaper) sh.reset (satStyle);
         s.dynamic = false;
+        s.external = false;
         s.appliedOrder = -1;
     }
 
@@ -320,13 +329,16 @@ private:
 
         const bool wasDynamic = s.dynamic;
         s.dynamic = t.isDynamic();
-        if (s.dynamic && ! wasDynamic)
+        // What the detector listens to changes at a tick too. Its memory is of the other signal, so it starts from silence.
+        const bool wantExternal = s.dynamic && t.external && scIn[0] != nullptr;
+        if (s.dynamic && (! wasDynamic || wantExternal != s.external))
         {
             // The detector has not been fed (or configured) while the band was not dynamic: it starts from silence, on the band's
             // current frequency and width.
             for (auto& d : s.det) d.reset();
             s.appliedGain = 1.0e9;
         }
+        s.external = wantExternal;
         if (s.dynamic)
         {
             const double level = std::max (s.det[0].level(), s.det[1].level());
@@ -384,17 +396,28 @@ private:
             R[i] = dryR[i] = std::isfinite (in1[i]) ? (double) in1[i] : 0.0;
         }
 
+        // The sidechain over the same samples, for the bands that listen to it (a band latched `external` at a tick may meet a block
+        // without one: it then hears silence until the next tick puts it back on its own signal).
+        double scL[tick] = {}, scR[tick] = {};
+        if (scIn[0] != nullptr)
+            for (int i = 0; i < n; ++i)
+            {
+                const float a = scIn[0][start + i], b = scIn[1][start + i];
+                scL[i] = std::isfinite (a) ? (double) a : 0.0;
+                scR[i] = std::isfinite (b) ? (double) b : 0.0;
+            }
+
         // While a band solo fades out the band that was soloed is still the one shown.
         const bool curveShown = shownIndex >= 0 && shownKind == SoloKind::curve;
         if (phaseMode != PhaseMode::zeroLatency)
-            runLinear (L, R, dryL, dryR, soloL, soloR, n);
+            runLinear (L, R, dryL, dryR, soloL, soloR, scL, scR, n);
         else
             for (int b = 0; b < maxBands; ++b)
             {
                 auto& s = bands[(size_t) b];
                 const bool capture = b == shownIndex && curveShown;
                 if (s.running && (s.active || s.dynamic))
-                    runBand (s, L, R, n, capture ? soloL : nullptr, capture ? soloR : nullptr);
+                    runBand (s, L, R, scL, scR, n, capture ? soloL : nullptr, capture ? soloR : nullptr);
             }
 
         const bool bandSolo = soloIndex >= 0;
@@ -469,13 +492,18 @@ private:
     // The linear-phase modes over a segment: the input goes into the filter and what comes out is the sound of `latencySamples` ago, so
     // the dry signal (for Delta and Gain Match) is replaced by its delayed copy. The detectors listen to the input, which is
     // ahead of the sound they act on: a dynamic band reacts before the level it has measured arrives (look-ahead, by the latency).
-    void runLinear (double* L, double* R, double* dryL, double* dryR, double* soloL, double* soloR, int n)
+    void runLinear (double* L, double* R, double* dryL, double* dryR, double* soloL, double* soloR, const double* scL, const double* scR, int n)
     {
         for (int i = 0; i < n; ++i)
         {
             for (auto& s : bands)
                 if (s.running && s.dynamic)
-                    feedDetectors (s, L[i], R[i]);
+                {
+                    if (s.external)
+                        feedSidechain (s, scL[i], scR[i]);
+                    else
+                        feedDetectors (s, L[i], R[i]);
+                }
 
             const auto f = linear.step (L[i], R[i]);
             if (linear.hopDue())
@@ -499,6 +527,14 @@ private:
             case Placement::mid:    s.det[0].push (0.5 * (l + r)); break;
             case Placement::side:   s.det[0].push (0.5 * (l - r)); break;
         }
+    }
+
+    // The sidechain is another track, so the band's placement says nothing about it: both of its channels are measured and the
+    // louder one counts (`controlBand` takes the larger of the two detectors), whatever the band works on.
+    static void feedSidechain (BandState& s, double l, double r) noexcept
+    {
+        s.det[0].push (l);
+        s.det[1].push (r);
     }
 
     // A block of the linear filter has been collected: rebuild its curve if anything in it moved since the last one.
@@ -525,13 +561,17 @@ private:
     }
 
     // One band over a segment. It adds its difference to L and R, so what it does not touch stays exactly as it was.
-    void runBand (BandState& s, double* L, double* R, int n, double* soloL, double* soloR)
+    void runBand (BandState& s, double* L, double* R, const double* scL, const double* scR, int n, double* soloL, double* soloR)
     {
         const bool sat = satAmount > 0.0 && s.saturating;
         const SatStyle style = satStyle;
         const double drive = satDrive;
-        const bool dyn = s.dynamic;
+        const bool dyn = s.dynamic && ! s.external; // an external band's detectors are fed the sidechain below
         const int base = phase;
+
+        if (s.dynamic && s.external)
+            for (int i = 0; i < n; ++i)
+                feedSidechain (s, scL[i], scR[i]);
 
         const auto shape = [&] (int slot, double d, double satMix)
         {
@@ -648,6 +688,7 @@ private:
     double fs = 48000.0;
     int maxBlock = 512;
     EngineParams params;
+    const float* scIn[2] = { nullptr, nullptr };          // the sidechain of the block being processed
     int phase = 0;
     PhaseMode phaseMode = PhaseMode::zeroLatency;
     LinearFilter linear;
