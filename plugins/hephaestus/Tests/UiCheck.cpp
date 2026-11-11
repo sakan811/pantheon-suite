@@ -10,6 +10,7 @@
 
 #include "Check.h"
 #include "PluginEditor.h"
+#include "Advice.h"
 #include "PluginProcessor.h"
 #include "UI/SpectrumView.h"
 #include <pantheon/ui/Controls.h>
@@ -379,6 +380,83 @@ int main()
 
         editor.selectBand (1);
         check (box.isVisible() && box.getSelectedItemIndex() == 0, "selecting another fill band re-binds the selector to that band");
+    }
+
+    std::printf ("\nAdvice: the notes that keep a tool from being used for the wrong job\n");
+    {
+        const auto has = [] (const std::vector<Note>& notes, const char* word, Severity severity)
+        {
+            return std::any_of (notes.begin(), notes.end(), [&] (const Note& n) { return n.severity == severity && n.text.find (word) != std::string::npos; });
+        };
+
+        AdviceInput fine;
+        fine.bandOn = true;
+        fine.lo = 40.0; fine.hi = 120.0; fine.mode = BandMode::fill; fine.character = Character::clean;
+        check (adviceFor (fine).empty(), "a clean fill band on one bass note: nothing to warn about");
+
+        auto in = fine; in.delta = true;
+        check (has (adviceFor (in), "DELTA", Severity::warning) && adviceFor (in).front().severity == Severity::warning, "DELTA on: a warning, first");
+        in = fine; in.soloActive = true;
+        check (has (adviceFor (in), "SOLO", Severity::warning), "a solo on: a warning");
+        in = fine; in.amountOff = true;
+        check (has (adviceFor (in), "AMOUNT is off", Severity::warning), "a fill band with AMOUNT off: it adds nothing");
+        in = fine; in.character = Character::octave; in.lo = 40.0; in.hi = 120.0;
+        check (has (adviceFor (in), "cannot tell bass partials", Severity::warning) && has (adviceFor (in), "43 ms", Severity::info), "Octave on bass: the resolution warning, and the latency");
+        in.lo = 600.0; in.hi = 2000.0;
+        check (! has (adviceFor (in), "cannot tell bass partials", Severity::warning) && has (adviceFor (in), "43 ms", Severity::info), "Octave on mids: no resolution warning, the latency still named");
+        in = fine; in.hi = 900.0;
+        check (has (adviceFor (in), "CLEAN follows one note", Severity::warning), "Clean over the mids: it follows one note");
+        in = fine; in.character = Character::warm; in.lo = 600.0; in.hi = 2000.0;
+        check (has (adviceFor (in), "WARM mixes", Severity::info), "Warm over the mids: chords turn dirty");
+        in = fine; in.rebuildOn = true;
+        check (has (adviceFor (in), "REBUILD is experimental", Severity::warning), "Rebuild on: experimental");
+        in = fine; in.adaptPercent = 0.0;
+        check (has (adviceFor (in), "ADAPT is 0", Severity::info), "Adapt at 0 %: adds regardless");
+        in = fine; in.mode = BandMode::saturate; in.driveDb = 18.0; in.oversamplingMode = 0;
+        check (has (adviceFor (in), "Heavy DRIVE", Severity::warning) && has (adviceFor (in), "OVERSAMPLING is off", Severity::warning), "a hard-driven saturate band with no oversampling: both warnings");
+        in.driveDb = 3.0; in.oversamplingMode = 2;
+        check (adviceFor (in).size() == 1 && has (adviceFor (in), "cannot change the level", Severity::info), "a gentle saturate band: only the note that it is not an equaliser");
+        in = fine; in.bandOn = false;
+        check (adviceFor (in).empty(), "a free slot: no band notes");
+
+        // Every note must fit a line of the band panel, whatever the combination.
+        size_t longest = 0;
+        for (int mask = 0; mask < (1 << 10); ++mask)
+            for (auto mode : { BandMode::saturate, BandMode::fill })
+                for (auto character : { Character::warm, Character::clean, Character::octave })
+                    for (auto range : { std::pair<double, double> { 40.0, 120.0 }, { 600.0, 2000.0 } })
+                    {
+                        AdviceInput all;
+                        all.bandOn = true; all.mode = mode; all.character = character; all.lo = range.first; all.hi = range.second;
+                        all.delta = mask & 1; all.soloActive = mask & 2; all.amountOff = mask & 4; all.rebuildOn = mask & 8; all.midSide = mask & 16;
+                        all.gainMatch = mask & 32; all.oversamplingMode = (mask & 64) ? 0 : 2; all.driveDb = (mask & 128) ? 18.0 : 3.0;
+                        all.adaptPercent = (mask & 256) ? 0.0 : 100.0; all.mixPercent = (mask & 512) ? 50.0 : 100.0;
+                        for (auto& n : adviceFor (all))
+                            longest = std::max (longest, n.text.size());
+                    }
+        check ((int) longest <= kMaxNoteChars, fmt ("the longest note is %d characters (a line holds %d)", (int) longest, kMaxNoteChars));
+
+        // Every preset says what it is for, in one line.
+        bool described = true;
+        for (auto& preset : presets())
+            described = described && preset.purpose != nullptr && std::strlen (preset.purpose) > 20 && std::strlen (preset.purpose) <= 130;
+        check (described, "every preset has a purpose of one line");
+
+        // The editor reads the real parameters: DELTA on in the plugin shows up in its notes, and the GUIDE button exists.
+        HephaestusProcessor host;
+        host.setPlayConfigDetails (2, 2, 48000.0, 512);
+        host.prepareToPlay (48000.0, 512);
+        HephaestusEditor editor (host);
+        const auto shows = [&] (const char* word) { return has (editor.notes(), word, Severity::warning); };
+        check (! shows ("DELTA"), "the editor shows no DELTA warning at first");
+        setParameterValue (host.apvts, id::delta, 1.0f);
+        check (shows ("DELTA"), "DELTA switched on in the plugin reaches the editor's notes");
+        setParameterValue (host.apvts, id::delta, 0.0f);
+        host.engine.monitor.regions = 1u;
+        check (shows ("SOLO"), "a main-band solo reaches the editor's notes");
+        host.engine.monitor.regions = 0u;
+        check (editor.guide().isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
+               "the GUIDE button is there and its text says what the plugin is not for");
     }
 
     return finish ("UI CHECK");

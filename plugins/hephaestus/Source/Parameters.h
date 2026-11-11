@@ -267,6 +267,7 @@ struct Preset
 {
     const char* name;
     PresetValues values; // everything not listed falls back to default
+    const char* purpose; // one line shown under the editor's preset box: what it is for, and what it is not
 };
 
 inline PresetValues saturateBand (int band, float lo, float hi, float driveDb)
@@ -295,27 +296,36 @@ inline const std::vector<Preset>& presets()
     using namespace id;
     static const std::vector<Preset> list
     {
-        { "Init", {} },
-        { "Master Glue",         join ({ { { curve, 0 }, { even, 20 } }, saturateBand (0, 20, 20000, 3) }) },
-        { "Warm Tube",           join ({ { { curve, 0 }, { even, 65 } }, saturateBand (0, 20, 20000, 5) }) },
+        { "Init", {}, "The starting point: one gentle saturate band over the whole spectrum. Make your own bands." },
+        { "Master Glue",         join ({ { { curve, 0 }, { even, 20 } }, saturateBand (0, 20, 20000, 3) }),
+          "Warmth over a whole mix, a touch. It is not a compressor: it does not control dynamics." },
+        { "Warm Tube",           join ({ { { curve, 0 }, { even, 65 } }, saturateBand (0, 20, 20000, 5) }),
+          "Warmer, with even harmonics, over a whole mix. Compare with GAIN MATCH: louder is not better." },
         { "Tape Body",           join ({ { { curve, 1 }, { even, 10 } },
                                          saturateBand (0, 40, 400, 7), saturateBand (1, 400, 3500, 4), saturateBand (2, 3500, 20000, 2),
-                                         fillBand (3, 40, 100, -12, 40, 100) }) },
+                                         fillBand (3, 40, 100, -12, 40, 100) }),
+                                           "Body in the lows, a little on top. A saturator: it does not fix level or tone." },
         { "Air Exciter",         join ({ { { curve, 2 }, { even, 35 } },
-                                         saturateBand (0, 150, 3500, 2), saturateBand (1, 3500, 20000, 10) }) },
+                                         saturateBand (0, 150, 3500, 2), saturateBand (1, 3500, 20000, 10) }),
+                                           "A dull top end: harmonics above 3.5 kHz. It cannot lift what is missing, only add on top of it." },
         { "Missing Fundamental", join ({ { { curve, 0 }, { even, 20 } },
                                          saturateBand (0, 20, 150, 1), saturateBand (1, 150, 3500, 2), saturateBand (2, 3500, 20000, 1),
-                                         fillBand (3, 35, 110, -6, 50, 100, -9) }) },
+                                         fillBand (3, 35, 110, -6, 50, 100, -9) }),
+                                           "Thin bass: restores a missing fundamental and adds harmonics. Watch FILL % and check with DELTA." },
         { "Small-Speaker Bass",  join ({ { { curve, 0 }, { even, 25 } },
                                          saturateBand (0, 20, 20000, 2),
-                                         fillBand (1, 50, 160, 0, 60, 100) }) },
+                                         fillBand (1, 50, 160, 0, 60, 100) }),
+                                           "Bass that vanishes on laptops and phones: harmonics of 50 - 160 Hz. Check with DELTA." },
         { "808 Sub Fill",        join ({ { { curve, 0 }, { even, 25 } },
                                          saturateBand (0, 30, 150, 4),
-                                         fillBand (1, 30, 90, -8, 15, 100) }) },
+                                         fillBand (1, 30, 90, -8, 15, 100) }),
+                                           "A sub or 808 with nothing above it. Wants one bass note at a time; on chords use WARM or OCTAVE." },
         { "Clean Sub Fill",      join ({ { { curve, 0 }, { even, 25 } },
-                                         fillBand (0, 30, 90, -8, 15, 100, offDb, Character::clean) }) },
+                                         fillBand (0, 30, 90, -8, 15, 100, offDb, Character::clean) }),
+                                           "The same fill for one bass note, without the amp-like colour. It adds less when the band holds several notes." },
         { "Octave Air",          join ({ { { curve, 0 }, { even, 25 } },
-                                         fillBand (0, 600, 2000, -12, 35, 100, offDb, Character::octave) }) },
+                                         fillBand (0, 600, 2000, -12, 35, 100, offDb, Character::octave) }),
+                                           "Harmonics for mids and highs (600 Hz - 2 kHz) without intermodulation. Adds 43 ms of latency." },
     };
     return list;
 }

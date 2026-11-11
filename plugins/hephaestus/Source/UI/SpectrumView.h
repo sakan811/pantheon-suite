@@ -336,6 +336,9 @@ private:
             g.setColour (colours::dim);
             g.setFont (juce::FontOptions (13.0f));
             g.drawText ("Double-click to add a band", plot.reduced (0.0f, 40.0f), juce::Justification::centred);
+            g.setFont (juce::FontOptions (11.5f));
+            g.drawText ("Hephaestus only ADDS harmonics. It does not equalise, compress or limit (see GUIDE).",
+                        plot.reduced (0.0f, 40.0f).translated (0.0f, 22.0f), juce::Justification::centred);
         }
     }
 
