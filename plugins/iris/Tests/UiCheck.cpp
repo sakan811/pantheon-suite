@@ -87,7 +87,7 @@ int main()
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
 
     std::printf ("\nParameters\n");
-    check (proc.getParameters().size() == 6 + numCrossovers + 14 * maxBands, fmt ("%d parameters: %d global (six settings and the %d region crossovers) and 14 for each of %d bands", proc.getParameters().size(), 6 + numCrossovers, numCrossovers, maxBands));
+    check (proc.getParameters().size() == 6 + numCrossovers + 15 * maxBands, fmt ("%d parameters: %d global (six settings and the %d region crossovers) and 15 for each of %d bands", proc.getParameters().size(), 6 + numCrossovers, numCrossovers, maxBands));
     bool presetsOk = true;
     for (auto& preset : presets())
         for (auto& [pid, v] : preset.values)
@@ -233,9 +233,20 @@ int main()
         const auto count = [&] (const juce::String& text) { int n = 0; for (auto* c : editor.getChildren()) if (c->isVisible()) if (auto* b = dynamic_cast<juce::TextButton*> (c)) n += b->getButtonText() == text; return n; };
         check (count ("DYNAMIC") == 1, "a bell offers DYNAMIC");
 
+        // What the dynamics listen to: one selector for the shown band, with the parameter's own two items, and a new band starts on Self.
+        const auto listenBoxes = [&] { std::vector<juce::ComboBox*> v; for (auto* c : editor.getChildren()) if (c->isVisible()) if (auto* b = dynamic_cast<juce::ComboBox*> (c)) if (b->getNumItems() == listenNames.size() && b->getItemText (1) == listenNames[1]) v.push_back (b); return v; };
+        check (listenBoxes().size() == 1 && listenBoxes()[0]->getSelectedItemIndex() == 0, "a bell offers the Self / Sidechain selector, on Self");
+        listenBoxes()[0]->setSelectedItemIndex (1, juce::sendNotificationSync);
+        pump (150);
+        check (readParams (proc.apvts).bands[0].external, "choosing Sidechain reaches the engine's parameters");
+        removeBand (proc.apvts, 0);
+        addBand (proc.apvts, BandType::bell, 1000.0, 0.0, 0);
+        pump (150);
+        check (! readParams (proc.apvts).bands[0].external, "a band added to the slot again listens to itself");
+
         setParameterValue (proc.apvts, bandIds (0).type, (float) (int) BandType::lowCut);
         pump (150);
-        check (count ("DYNAMIC") == 1 && findButton (editor, "BAND") != nullptr, "a cut: the controls follow the type without leaving the editor");
+        check (count ("DYNAMIC") == 1 && findButton (editor, "BAND") != nullptr && listenBoxes().empty(), "a cut: the controls follow the type without leaving the editor (no dynamics, so nothing to listen to)");
 
         // Solo buttons act on the selected band.
         findButton (editor, "CURVE")->onClick();
