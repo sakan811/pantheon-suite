@@ -25,6 +25,9 @@ struct ClipWindow
     uint32_t overSamples = 0; // samples at or above 0 dBFS
 };
 
+// A linear level as dBFS, down to the history floor (no -5 digit cut-off: a DC offset far under a peak still counts).
+inline float peakToDbOrFloor (float linear) { return linear > 0.0f ? std::max (linToDb (linear), kHistoryFloorDb) : kHistoryFloorDb; }
+
 // Everything since the last reset, for the CLIPPING readout.
 struct ClipTotals
 {
@@ -32,6 +35,11 @@ struct ClipTotals
     float samplePeakDb = kHistoryFloorDb;
     float truePeakDb = kHistoryFloorDb;
     uint64_t clipEvents = 0, clipSamples = 0, overSamples = 0;
+    // The mean of each channel's samples since the reset, linear and signed (0 for a healthy signal): a DC offset. Not part of
+    // the comparison below, because it moves in its last digits with every block.
+    float dcLeft = 0.0f, dcRight = 0.0f;
+    // The larger of the two as a level, dBFS (the history floor for none).
+    float dcOffsetDb() const { return peakToDbOrFloor (std::max (std::abs (dcLeft), std::abs (dcRight))); }
 
     // Exact: only used to tell whether a readout has changed.
     bool operator== (const ClipTotals& o) const
@@ -89,8 +97,14 @@ public:
         for (int c = 0; c < 2; ++c)
         {
             auto& s = state[c];
+            double sum = 0.0;
             for (int i = 0; i < n; ++i)
+            {
                 step (s, channels[c][i], w);
+                if (std::isfinite (channels[c][i]))
+                    sum += static_cast<double> (channels[c][i]);
+            }
+            s.sum += sum;
         }
         publish (w, static_cast<uint64_t> (n));
     }
@@ -119,6 +133,9 @@ public:
         t.clipEvents = totalClipEvents.load (std::memory_order_relaxed);
         t.clipSamples = totalClipSamples.load (std::memory_order_relaxed);
         t.overSamples = totalOverSamples.load (std::memory_order_relaxed);
+        const auto count = static_cast<double> (totalSamples.load (std::memory_order_relaxed));
+        t.dcLeft = static_cast<float> (totalSum[0].load (std::memory_order_relaxed) / count);
+        t.dcRight = static_cast<float> (totalSum[1].load (std::memory_order_relaxed) / count);
         return t;
     }
 
@@ -129,6 +146,7 @@ private:
         float previous = 0.0f;
         int plateau = 0;       // length of the current run of equal, high samples
         float entryStep = 0.0f; // how far the run's first sample was from the one before it
+        double sum = 0.0;       // of every sample since the reset (the DC offset is this over the count)
     };
 
     static void endPlateau (Channel& s, ClipWindow& w)
@@ -187,6 +205,8 @@ private:
         totalClipEvents.store (totalClipEvents.load (std::memory_order_relaxed) + w.clipEvents, std::memory_order_relaxed);
         totalClipSamples.store (totalClipSamples.load (std::memory_order_relaxed) + w.clipSamples, std::memory_order_relaxed);
         totalOverSamples.store (totalOverSamples.load (std::memory_order_relaxed) + w.overSamples, std::memory_order_relaxed);
+        totalSum[0].store (state[0].sum, std::memory_order_relaxed);
+        totalSum[1].store (state[1].sum, std::memory_order_relaxed);
         totalSamples.store (totalSamples.load (std::memory_order_relaxed) + samples, std::memory_order_release);
     }
 
@@ -198,8 +218,11 @@ private:
             s.previous = 0.0f;
             s.plateau = 0;
             s.entryStep = 0.0f;
+            s.sum = 0.0;
         }
         take();
+        totalSum[0].store (0.0, std::memory_order_relaxed);
+        totalSum[1].store (0.0, std::memory_order_relaxed);
         totalSamples.store (0, std::memory_order_relaxed);
         totalSamplePeak.store (0.0f, std::memory_order_relaxed);
         totalTruePeak.store (0.0f, std::memory_order_relaxed);
@@ -220,5 +243,6 @@ private:
     std::atomic<float> totalSamplePeak { 0.0f }, totalTruePeak { 0.0f };
     std::atomic<uint64_t> totalClipEvents { 0 }, totalClipSamples { 0 }, totalOverSamples { 0 };
     std::atomic<uint64_t> totalSamples { 0 };
+    std::atomic<double> totalSum[2] { { 0.0 }, { 0.0 } };
 };
 } // namespace themis

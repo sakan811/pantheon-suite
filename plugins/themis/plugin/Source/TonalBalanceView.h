@@ -501,6 +501,8 @@ private:
                             + juce::String (clipTotals.truePeakDb, 1) + " dBTP. "
                             + juce::String (static_cast<juce::int64> (clipTotals.clipEvents)) + " flat-topped clips (" + juce::String (static_cast<juce::int64> (clipTotals.clipSamples))
                             + " samples) and " + juce::String (static_cast<juce::int64> (clipTotals.overSamples)) + " samples at or over 0 dBFS. ";
+        text += "DC offset (the average of the samples, which should be zero): " + juce::String (clipTotals.dcOffsetDb(), 0) + " dBFS"
+                + (themis::history::dc::level (clipTotals.dcOffsetDb()) == themis::Level::good ? " (none worth removing). " : ", worth removing: see the master plan. ");
         text += "Any clip or over is bad, a true peak above " + juce::String (clip::kTruePeakWarnDb, 0) + " dBTP is a warning (lossy encoding can push it over) and above "
                 + juce::String (clip::kTruePeakBadDb, 0) + " dBTP bad: rules of thumb. A synthesised square wave or a held level also looks like a flat top. "
                   "The PEAKS tab of the LEVEL graph shows when it happened.";
