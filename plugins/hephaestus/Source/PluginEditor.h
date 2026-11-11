@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "Advice.h"
 #include "PluginProcessor.h"
 #include "UI/HephaestusUi.h"
 #include "UI/SpectrumView.h"
@@ -20,6 +21,8 @@ public:
 
     void selectBand (int band);
     juce::TextButton& regionButton (int band) { return regionButtons[(size_t) band]; } // the band solo strip, for UiCheck
+    juce::TextButton& guide() { return guideButton; }                                  // the GUIDE button, for UiCheck
+    std::vector<hep::Note> notes() const { return hep::adviceFor (adviceInput()); }                // what the band panel tells the user, for UiCheck
     juce::ComboBox& characterSelector() { return characterBox; }                     // Warm / Clean / Octave of the shown fill band, for UiCheck
 
 private:
@@ -31,6 +34,9 @@ private:
     void refreshBandPanel();
     int bandSignature() const;
     juce::String bandHint() const;
+    hep::AdviceInput adviceInput() const;
+    void setPresetTooltip();
+    juce::String notesSignature() const;
     void timerCallback() override;
 
     HephaestusProcessor& proc;
@@ -45,7 +51,7 @@ private:
     juce::ComboBox presetBox;
     ui::Choice stereoBox, osBox, curveBox;
     ui::Toggle deltaButton, matchButton;
-    juce::TextButton clearMetersButton { "CLEAR" };
+    juce::TextButton clearMetersButton { "CLEAR" }, guideButton { "GUIDE" };
 
     // How the selected fill band makes its harmonics: bound to that band's parameter while one is shown, and to nothing otherwise.
     juce::ComboBox characterBox;
@@ -64,6 +70,7 @@ private:
     std::array<juce::Rectangle<int>, (size_t) Panel::count> panelBounds;
     juce::Rectangle<int> nameplate, meterArea;
     int lastProgram = -1;
+    juce::String shownNotes;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HephaestusEditor)
 };

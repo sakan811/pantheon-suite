@@ -181,9 +181,13 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
     for (int i = 0; i < (int) presets().size(); ++i)
         presetBox.addItem (presets()[(size_t) i].name, i + 1);
     presetBox.setSelectedId (proc.getCurrentProgram() + 1, juce::dontSendNotification);
-    presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); };
-    presetBox.setTooltip ("Presets. Global settings (gain, mix, stereo mode, oversampling) are kept.");
+    presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); setPresetTooltip(); };
+    setPresetTooltip();
     addAndMakeVisible (presetBox);
+
+    guideButton.setTooltip ("What Hephaestus is for, and what it is not for: it adds harmonics, it does not equalise, compress or limit.");
+    guideButton.onClick = [] { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, guideTitle(), guideText()); };
+    addAndMakeVisible (guideButton);
 
     clearMetersButton.setTooltip ("Clear the IN and OUT level meters. Use it if a reading looks stuck.");
     clearMetersButton.onClick = [this]
@@ -303,7 +307,8 @@ juce::String HephaestusEditor::bandHint() const
 {
     const int band = spectrum.getSelectedBand();
     if (! isBandOn (proc.apvts, band))
-        return "Slot " + juce::String (band + 1) + " is free. Add a band here, or double-click the display where you want one.";
+        return "Slot " + juce::String (band + 1) + " is free. SATURATE adds warmth and glue; HARMONIC FILL adds harmonics to thin bass or "
+               "dull highs. Or double-click the display where you want a band. GUIDE says what it is not for.";
 
     if (bandMode (proc.apvts, band) == BandMode::saturate)
         return "Drives the sound inside the band into the curve, so harmonics appear above it (the shaded zone, 2nd to 5th harmonic). "
@@ -312,6 +317,56 @@ juce::String HephaestusEditor::bandHint() const
     return "Adds harmonics above the band (the shaded zone, 2nd to 5th harmonic), but only as many as are missing: the energy just above the band is "
            "measured against the band's own, and only the shortfall to AMOUNT is generated. FILL % on the band shows how much is being added. "
            "CHARACTER picks how: Warm shapes the signal, Clean and Octave build pure sines (Octave for mids and highs).";
+}
+
+void HephaestusEditor::setPresetTooltip()
+{
+    const auto& list = presets();
+    const int index = presetBox.getSelectedId() - 1;
+    juce::String text = "Presets. Global settings (gain, mix, stereo mode, oversampling) are kept.";
+    if (juce::isPositiveAndBelow (index, (int) list.size()))
+        text << "\n\n" << list[(size_t) index].name << ": " << list[(size_t) index].purpose;
+    presetBox.setTooltip (text);
+}
+
+// The parameters the notes read, in the plain form the rules take.
+hep::AdviceInput HephaestusEditor::adviceInput() const
+{
+    const auto value = [this] (const juce::String& pid) { return proc.apvts.getRawParameterValue (pid)->load(); };
+    const int band = spectrum.getSelectedBand();
+    const auto& ids = bandIds (band);
+
+    AdviceInput in;
+    in.bandOn = isBandOn (proc.apvts, band);
+    in.mode = bandMode (proc.apvts, band);
+    const auto range = bandRange (proc.apvts, band);
+    in.lo = range.lo;
+    in.hi = range.hi;
+    in.driveDb = value (ids.drive);
+    in.amountOff = isOff (value (ids.amount), fillOffDb);
+    in.rebuildOn = ! isOff (value (ids.rebuild));
+    in.adaptPercent = value (ids.adapt);
+    in.character = (Character) std::clamp ((int) value (ids.character), 0, 2);
+
+    for (int i = 0; i < maxBands; ++i)
+        if (isBandOn (proc.apvts, i) && bandMode (proc.apvts, i) == BandMode::fill)
+            in.anyFillBandOn = true;
+    in.midSide = (int) value (id::stereo) == 1;
+    in.delta = value (id::delta) > 0.5f;
+    in.gainMatch = value (id::match) > 0.5f;
+    in.oversamplingMode = (int) value (id::oversampling);
+    in.mixPercent = value (id::mix);
+    in.soloActive = proc.engine.monitor.soloBand.load() >= 0 || proc.engine.monitor.regions.load() != 0u;
+    return in;
+}
+
+// All the notes as one string, to see when they change.
+juce::String HephaestusEditor::notesSignature() const
+{
+    juce::String all;
+    for (auto& n : adviceFor (adviceInput()))
+        all << n.text << '\n';
+    return all;
 }
 
 void HephaestusEditor::layoutBandPanel()
@@ -413,6 +468,8 @@ void HephaestusEditor::resized()
     row.removeFromTop (8);
     panelBounds[(size_t) Panel::master] = row;
 
+    guideButton.setBounds (panelBounds[(size_t) Panel::master].getRight() - 14 - 64, panelBounds[(size_t) Panel::master].getY() + 6, 64, 20);
+
     // Character panel: the curve sits in the first column, ahead of the EVEN knob, level with the knobs' faces.
     {
         const auto& spec = panelSpecs[(size_t) Panel::character];
@@ -505,6 +562,27 @@ void HephaestusEditor::paint (juce::Graphics& g)
                           juce::Justification::topLeft, 2);
     }
 
+    // What to watch for with this band and this session: warnings in amber, information dim; the first three that fit.
+    {
+        const auto bandPanel = panelBounds[(size_t) Panel::band];
+        constexpr int lineHeight = 14, maxLines = 3;
+        int y = bandPanel.getY() + 236;
+        int shown = 0;
+        g.setFont (juce::FontOptions (11.0f));
+        for (const auto& note : adviceFor (adviceInput()))
+        {
+            if (shown++ == maxLines)
+                break;
+            const bool warning = note.severity == Severity::warning;
+            const auto colour = warning ? colours::warn : colours::dim;
+            g.setColour (colour);
+            g.fillEllipse ((float) bandPanel.getX() + 18.0f, (float) y + 4.0f, 5.0f, 5.0f);
+            g.drawFittedText (juce::String (note.text), bandPanel.getX() + 30, y, bandPanel.getWidth() - 48, lineHeight,
+                              juce::Justification::centredLeft, 1, 0.85f);
+            y += lineHeight;
+        }
+    }
+
     // A solo on another band than the one shown would otherwise be easy to forget.
     if (const int soloed = proc.engine.monitor.soloBand.load(); soloed >= 0 && soloed != spectrum.getSelectedBand() && isBandOn (proc.apvts, soloed))
         hw::drawLabel (g, "SOLO: BAND " + juce::String (soloed + 1) + (proc.engine.monitor.soloKind.load() == (int) SoloKind::adds ? " ADDS" : ""),
@@ -568,5 +646,13 @@ void HephaestusEditor::timerCallback()
     {
         lastProgram = prog;
         presetBox.setSelectedId (prog + 1, juce::dontSendNotification);
+        setPresetTooltip();
+    }
+
+    // The notes depend on the parameters and the solos, which change without the editor's help.
+    if (const auto text = notesSignature(); text != shownNotes)
+    {
+        shownNotes = text;
+        repaint (panelBounds[(size_t) Panel::band]);
     }
 }

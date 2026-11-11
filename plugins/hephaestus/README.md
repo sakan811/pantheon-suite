@@ -12,7 +12,7 @@ namespaces and plugin codes use the short name "Hephaestus".)
 
 ![Hephaestus Forge](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins) on an 808-style sub note (52 Hz) with nothing above it, in the "808 Sub Fill" preset. Band 2 (teal) is a Harmonic Fill band: the dim input trace has no energy above the note, the cream output has grown harmonics at 104 and 156 Hz, and the band's tab reads FILL 85 % because that is how much of its Amount it is currently adding. The tinted zone under "HARMONICS ADDED" is where that band's harmonics land; "ADAPT LISTENS HERE" marks the region the adaptive fill measures. Under the display, the band solo strip: the six main bands of music, each switch spanning its band on the axis. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins) on an 808-style sub note (52 Hz) with nothing above it, in the "808 Sub Fill" preset. Band 2 (teal) is a Harmonic Fill band: the dim input trace has no energy above the note, the cream output has grown harmonics at 104 and 156 Hz, and the band's tab reads FILL 85 % because that is how much of its Amount it is currently adding. The tinted zone under "HARMONICS ADDED" is where that band's harmonics land; "ADAPT LISTENS HERE" marks the region the adaptive fill measures. Under the display, the band solo strip: the six main bands of music, each switch spanning its band on the axis. Under the band's knobs the panel would list its notes (none here: nothing in this setting needs a warning), and GUIDE, in the master panel, says what the plugin is for and not for. Regenerate with the command under "Development".*
 
 ## Core philosophy
 
@@ -51,6 +51,7 @@ namespaces and plugin codes use the short name "Hephaestus".)
 | **Delta / Gain Match / Mix** | **Delta** plays only what the plugin adds (wet − dry). **Gain Match** is a slow (~0.6 s) RMS match, clamped to ±12 dB, for a loudness-matched A/B; it is off by default. **Mix** is latency-compensated: 0 is the input delayed by exactly the reported latency. |
 | **Stereo mode** | **Mid/Side** saturates M and S; fill bands then work on Mid only so bass stays centred. |
 | **Oversampling** | Off / 2× / 4× / 8×, linear-phase; 4× is the default. Latency is reported to the host and changes with this setting. |
+| **Guide and notes** | **GUIDE** (master panel) says what the plugin is for and what it is *not* for: it only adds harmonics, so it is not an equaliser (it cannot lift or remove a region), a compressor or a limiter, and it does not clean up resonances or noise. Under the band's knobs the panel shows up to three **notes** for the band shown and the session, warnings in amber and information dim: DELTA or a solo is on (what you hear is not the mix), a fill band with AMOUNT off, Octave on bass (it cannot tell partials closer than about 94 Hz apart) or its 43 ms of latency, Clean on a band reaching past 400 Hz (it follows one note), Warm on chords in the mids, Rebuild on, ADAPT at 0 %, a heavy Drive (12 dB or more) and with no oversampling, Gain Match against a bass boost. Every note restates a limit under [Limitations](#limitations), and the rules are in [Advice.h](Source/Advice.h). Hovering the preset box says what the preset is for. |
 | **Presets** | Ten, including *808 Sub Fill*, *Clean Sub Fill* (the same fill, Clean, with no saturate band), *Octave Air* (an Octave fill band over 600 Hz - 2 kHz, 43 ms of latency), *Missing Fundamental*, *Small-Speaker Bass*, *Master Glue*, *Warm Tube*, *Tape Body* and *Air Exciter* (see [Using it](#using-it)). |
 
 ### Why Harmonic Fill is adaptive
@@ -159,19 +160,20 @@ Builds are for your own use; if you hand one to somebody else, see [License and 
 
 ### Using it
 
-1. **Put it on the master (or a bus) before the limiter.** Latency (shown by FL as PDC) is reported automatically; it changes
+1. **Check it is the right tool.** Hephaestus adds harmonics (warmth, glue, bass that carries on small speakers, air). To fix the tonal balance use an equaliser (Iris), for level and dynamics a compressor (Atlas) and a limiter; GUIDE in the plugin says the same, and the notes under the band's knobs warn when a setting does not suit its job.
+2. **Put it on the master (or a bus) before the limiter.** Latency (shown by FL as PDC) is reported automatically; it changes
    with the Oversampling setting.
-2. **Make bands.** Double-click the spectrum where you want one and choose *Saturate* or *Harmonic Fill*, or use the buttons
+3. **Make bands.** Double-click the spectrum where you want one and choose *Saturate* or *Harmonic Fill*, or use the buttons
    in the band panel. Drag a band's edges to resize it, its body to move it; right-click it to change its mode or remove it.
    The band panel below shows the selected band's controls; the numbered chips pick a band.
-3. **Or start from a preset:**
+4. **Or start from a preset:**
    - **Thin or small-speaker bass:** *Missing Fundamental* or *Small-Speaker Bass*. Put a Harmonic Fill band over the fundamentals you want to support. Watch the FILL % on its tab and confirm with **Delta**.
    - **808 / sub that disappears on laptops:** *808 Sub Fill*.
    - **Harmonics in the mids and highs without the tube-like distortion:** *Octave Air*, or set a fill band's **Character** to Octave and drag it over 500 Hz - 2 kHz. Mind the 43 ms of latency (it is reported to the host).
    - **The same bass fill, without the amp-like character:** *Clean Sub Fill*, or set a fill band's **Character** to Clean. Use it when the band holds one bass note at a time; if the harmonics fade in and out, the band holds more than one thing and Warm is the better tool.
    - **Glue and warmth:** *Master Glue* / *Warm Tube* / *Tape Body*. Use **Gain Match** so more saturation isn't mistaken for "better".
    - **Dull top end:** *Air Exciter* (a saturate band over the highs; harmonics land above it).
-4. **Judge with Delta and with the analyzer.** The display is tilted +4.5 dB/oct by default so typical programme material looks
+5. **Judge with Delta and with the analyzer.** The display is tilted +4.5 dB/oct by default so typical programme material looks
    flat.
 
 ## Development
@@ -202,6 +204,7 @@ Source/DSP/FundamentalEngine.h   Chebyshev harmonics + adaptive fill + differenc
 Source/DSP/Engine.h              latency alignment, band mixing, M/S, gain match, delta, meters
 Source/Parameters.h              parameter layout, presets, band helpers, legacy-session migration
 Source/PluginProcessor.*         JUCE wrapper
+Source/Advice.h                  the notes under the band's knobs and the GUIDE text (plain C++; UiCheck pins the rules)
 Source/PluginEditor.*, UI/       band panel, spectrum view with draggable bands, HephaestusUi.h (band colours); the look itself is shared/ui
 ../../shared/ui/                 the drawing kit of the interface, shared with the other plugins of the repository
 ../../shared/dsp/                biquads, Butterworth cascades, the display's lock-free FIFOs and its EQ-style FFT analyzer (GUI-free, unit-tested here), shared with Iris; MusicBands.h (the six main bands and their splitter, the band solo strip), shared with Iris and Themis
@@ -263,7 +266,7 @@ state of that is tracked in the repository's [CLAUDE.md](../../CLAUDE.md)). Run 
 
 | Verified | Not yet verified |
 |---|---|
-| **`HephaestusUiCheck`** drives the real spectrum component with synthetic mouse events: a band added at 1 kHz takes the first free slot; clicking where bands overlap selects the narrowest; dragging an edge moves only that edge; dragging the body keeps the width ratio; an edge can't cross the minimum width; a fill band is pulled to at most 2 kHz; a full plugin refuses a seventh band and reuses a freed slot | **Inside FL Studio itself.** It was validated through JUCE's VST3 host and `auval`; *pluginval* was not run (the sandbox blocked executing the downloaded binary). Load it in FL and report anything odd |
+| **`HephaestusUiCheck`** checks the notes and presets (each warning fires for its setting and not otherwise, every note fits its line, every preset names its job, DELTA and a solo reach the editor's notes) and drives the real spectrum component with synthetic mouse events: a band added at 1 kHz takes the first free slot; clicking where bands overlap selects the narrowest; dragging an edge moves only that edge; dragging the body keeps the width ratio; an edge can't cross the minimum width; a fill band is pulled to at most 2 kHz; a full plugin refuses a seventh band and reuses a freed slot | **Inside FL Studio itself.** It was validated through JUCE's VST3 host and `auval`; *pluginval* was not run (the sandbox blocked executing the downloaded binary). Load it in FL and report anything odd |
 | **`HephaestusHostCheck`** loads the installed **VST3** through JUCE's host wrapper: 5 sample rates (22.05-192 kHz) x 5 block sizes (1-4096) with every parameter randomised, latency reporting follows the oversampling choice (0 / 49 / 61 / 65 samples) and an impulse through the loaded plugin comes out exactly that many samples later, state and all 10 presets round-trip, and a session saved with the old fixed three-band layout loads as three saturate bands plus one fill band. Apple's `auval` passes for the **AU** | **The mouse interaction by hand in a DAW.** Dragging, the add/remove menus and the band panel are covered by `HephaestusUiCheck` and screenshots, but not by a person using them |
 | | Windows and Linux builds. JUCE is cross-platform, but they were not built or tested |
 

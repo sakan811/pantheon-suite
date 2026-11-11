@@ -39,6 +39,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   Engine.h           BandParams, latency alignment, band mixing, M/S, gain match, delta, meters, analyzer taps
 ../../shared/dsp/       Biquad.h (double-precision biquads, Butterworth, Bandpass pair), AnalyzerTap.h (lock-free sample FIFOs, audio thread -> editor) and
                      SpectrumAnalyzer.h (EQ-style FFT analyzer, GUI-free so its calibration is testable; test [10]) and MusicBands.h (the six main bands and their splitter, the band solo strip; test [12b]), namespace `pdsp`, shared with Iris (and Themis)
+Source/Advice.h      the notes under the band's knobs (warnings that a setting does not suit its job) and the GUIDE text; plain C++, no JUCE
 Source/Parameters.h  parameter layout, presets, readParams(), band helpers, legacy migration  <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/HephaestusUi.h` holds what is Hephaestus' own)
 Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse drags, slots, legacy sessions), HostCheck.cpp (loads the VST3),
@@ -109,6 +110,8 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
   fit below Nyquist -> `effectiveRange()` / `harmonicSpan()` / `highestHarmonic()` / `harmonicReach()` (the adaptive measurement region) in `Band.h`
   (engine, spectrum view and tests all call them; test [5f] pins the span against measured energy)
 - the plugin's name ("Hephaestus Forge") -> `HEPHAESTUS_PLUGIN_NAME` in `CMakeLists.txt`, which reaches the code as `JucePlugin_Name`; the nameplate's two words are `hep::gui::kProjectWord` / `kPluginWord` in `UI/HephaestusUi.h` (`UiCheck` checks they agree)
+- what the plugin warns about (DELTA or a solo on, AMOUNT off, Octave on bass, Clean on mids, Rebuild, heavy Drive...) and what the GUIDE button says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor only fills `AdviceInput` from the parameters (`adviceInput()`) and draws what comes back. A note restates a limit the README's Limitations measured: a new note needs its number there, a test in UiCheck's Advice section, and at most `kMaxNoteChars` characters
+- what a preset is for (its tooltip) -> `Preset::purpose` in `Parameters.h`, one line each; UiCheck fails a preset without one
 - band colours -> `hep::gui::forMode()` in `UI/HephaestusUi.h`
 - every pixel of the interface and the parameter-bound controls (panels, glass, lamps, knobs, selectors, switches, fonts, the palette) -> `shared/ui`, shared with the other plugins (see the repository's [CLAUDE.md](../../CLAUDE.md)); the editor calls it and does not draw its own
 - knob id / caption / tooltip / panel membership -> `knobSpecs` and `panelSpecs` (character, master) and `bandKnobSpecs` (the six slots that follow the selected band) in `PluginEditor.cpp`
