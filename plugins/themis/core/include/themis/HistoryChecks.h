@@ -205,6 +205,18 @@ inline Level level (float truePeakDb, uint64_t clipEvents, uint64_t overSamples)
 }
 } // namespace clip
 
+// ---- DC offset (ClipTotals::dcOffsetDb: the mean of the samples since the reset) ------------------
+// Rules of thumb: at kWarnDb the offset is worth removing (it costs headroom on one side and clicks at the track's start and
+// end), at kBadDb those clicks are audible and every dynamics processor after it works unevenly.
+namespace dc
+{
+inline constexpr float kWarnDb = -60.0f, kBadDb = -40.0f;
+// A mean is only an offset once it has been averaged over many cycles of the lowest note: a full-scale 20 Hz tone averaged
+// over this long reads under kWarnDb by itself (test dc_offset_is_measured_and_advised).
+inline constexpr double kMinSeconds = 20.0;
+inline Level level (float offsetDb) { return offsetDb >= kBadDb ? Level::bad : offsetDb >= kWarnDb ? Level::warn : Level::good; }
+} // namespace dc
+
 struct PeakReport
 {
     bool have = false;

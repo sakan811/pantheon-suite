@@ -40,7 +40,7 @@ inline constexpr float kStreamingLufs = -14.0f; // what Spotify, YouTube and Tid
 } // namespace master
 
 // What an item is about; the order is the order of priority among items of the same severity.
-enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, swing };
+enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, swing, dcOffset };
 
 struct Advice
 {
@@ -172,6 +172,26 @@ inline MasterAdvice advise (const MasterInputs& in)
                                                static_cast<double> (history::clip::kTruePeakWarnDb)),
                                        format ("True peak is %+.1f dBTP. AAC, MP3 and Ogg encodes overshoot the peaks they are fed, so a master above %.0f dBTP can clip after conversion.",
                                                static_cast<double> (in.clip.truePeakDb), static_cast<double> (history::clip::kTruePeakWarnDb))));
+    }
+
+    // ---- DC offset: the mean of the samples, once it has been averaged for long enough to be one ----
+    if (in.clip.have && in.analysedSeconds >= history::dc::kMinSeconds)
+    {
+        const float offsetDb = in.clip.dcOffsetDb();
+        const Level level = history::dc::level (offsetDb);
+        check (level);
+        if (level != Level::good)
+        {
+            const bool left = std::abs (in.clip.dcLeft) >= std::abs (in.clip.dcRight);
+            const float worst = left ? in.clip.dcLeft : in.clip.dcRight;
+            out.items.push_back (make (level, Topic::dcOffset,
+                                       format ("Remove the DC offset: the %s channel sits %.2f %% of full scale %s zero (%.0f dBFS)", left ? "left" : "right",
+                                               static_cast<double> (std::abs (worst) * 100.0f), worst > 0.0f ? "above" : "below", static_cast<double> (offsetDb)),
+                                       format ("The average of the samples is %+.4f (left) and %+.4f (right) instead of 0. An offset takes headroom from one side of the waveform, "
+                                               "clicks where the track starts and ends, and makes a limiter work unevenly. A high-pass filter at 20 Hz or under, or a DC-removal tool, "
+                                               "takes it out; find the processor that adds it first.",
+                                               static_cast<double> (in.clip.dcLeft), static_cast<double> (in.clip.dcRight))));
+        }
     }
 
     // ---- loudness against the delivery target ------------------------------------------------------
