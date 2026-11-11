@@ -31,6 +31,7 @@ namespace id
 struct BandIds
 {
     juce::String on, type, place, freq, gain, q, slope, dyn, dynMode, threshold, ratio, range, attack, release;
+    juce::String autoTimes; // attack and release chosen for the band (version 5)
     juce::String listen; // what the dynamics listen to: the band's own signal or the sidechain (version 4)
 };
 
@@ -44,7 +45,7 @@ inline const BandIds& bandIds (int band)
             const auto name = [i] (const char* field) { return "b" + juce::String (i + 1) + "_" + field; };
             t[(size_t) i] = { name ("on"), name ("type"), name ("place"), name ("freq"), name ("gain"), name ("q"), name ("slope"),
                               name ("dyn"), name ("dmode"), name ("thresh"), name ("ratio"), name ("range"), name ("attack"), name ("release"),
-                              name ("listen") };
+                              name ("auto"), name ("listen") };
         }
         return t;
     }();
@@ -119,7 +120,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     };
 
     // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover, version 2; the phase mode, 3;
-    // what a dynamic band listens to, 4.
+    // what a dynamic band listens to, 4; a dynamic band's automatic times, 5.
     const auto F = [&] (const String& pid, const String& name, NormalisableRange<float> r, float def, Attr a, int version = 1)
     {
         p.push_back (std::make_unique<Float> (ParameterID { pid, version }, name, r, def, a));
@@ -169,6 +170,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     // After every band of the first layout, so the parameters a host already knows keep their places in its list.
     for (int i = 0; i < maxBands; ++i)
         Choice (bandIds (i).listen, "Band " + String (i + 1) + " Listens To", listenNames, 0, 4);
+    // Off by default, so a session from before it keeps the times it was mixed with; a band that is added starts with it on (addBand).
+    for (int i = 0; i < maxBands; ++i)
+        p.push_back (std::make_unique<AudioParameterBool> (ParameterID { bandIds (i).autoTimes, 5 }, "Band " + String (i + 1) + " Auto Times", false));
 
     return { p.begin(), p.end() };
 }
@@ -207,6 +211,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
         b.dyn.rangeDb = v (ids.range);
         b.dyn.attackMs = v (ids.attack);
         b.dyn.releaseMs = v (ids.release);
+        b.dyn.autoTimes = v (ids.autoTimes) > 0.5f;
     }
     return e;
 }
@@ -327,6 +332,7 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double
     setParameterValue (s, ids.type, (float) (int) type);
     setParameterValue (s, ids.freq, (float) std::clamp (freqHz, minHz, maxHz));
     setParameterValue (s, ids.gain, hasGain (type) ? (float) std::clamp (gainDb, (double) minGainDb, (double) maxGainDb) : 0.0f);
+    setParameterValue (s, ids.autoTimes, 1.0f);
     setParameterValue (s, ids.on, 1.0f);
     return slot;
 }

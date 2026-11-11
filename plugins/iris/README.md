@@ -155,6 +155,13 @@ the way after 15 ms (a single-pole curve gives 1.7), and with a 400 ms release i
 faster than about two cycles of the band's own frequency, which is a limit of measuring a level, not of this one. The gain and
 the coefficients are updated every 32 samples (0.67 ms at 48 kHz).
 
+**AUTO** (on the dynamics panel; on for a band you add, off in a session saved before it existed) chooses the two times instead of the
+knobs. They are counted in cycles of the band's own frequency: 4 cycles to engage (between 3 and 80 ms) and 40 to let go (between 60 and
+600 ms), which is 3 / 60 ms at 4 kHz, 20 / 200 ms at 200 Hz and 80 / 600 ms at 40 Hz. The release also follows the programme: a second,
+slow gain builds up only while the signal stays past the threshold (over four releases) and lets go six times slower, and the larger of
+the two is applied. Measured on a 1 kHz band with a 12 dB range: a 30 ms hit is back at -0.92 dB 200 ms later; after 1.5 s held it is
+still at -6.9 dB 200 ms later.
+
 ### Listening to the sidechain
 
 A dynamic band normally listens to itself (**Self**). Set to **Sidechain**, its detector hears the track the host routes to Iris' sidechain input
@@ -283,7 +290,7 @@ Everything in this README that is a number comes from `IrisTests` (headless, 48 
   untouched, bit for bit. Mid and Side bands give +6.00 dB where they should.
 - **Dynamics.** Under the threshold +0.000 dB; 4 dB over at 4:1 is -3.02 dB (the law gives -3.00); far over it stops at the range (-12.00 dB);
   Below mode gives +6.00 dB on quiet material and +0.006 dB on loud; a loud tone far from the band does not move it. Attack and
-  release as quoted above. **Sidechain** (test [16]): the numbers under [Listening to the sidechain](#listening-to-the-sidechain); a Mid and a
+  release, and AUTO's times, as quoted above. **Sidechain** (test [16]): the numbers under [Listening to the sidechain](#listening-to-the-sidechain); a Mid and a
   Right band follow a sidechain that is on the right channel only; with none connected the output is bit for bit that of a band on Self; with no
   band listening a loud sidechain leaves the output bit for bit the input; a NaN or an inf on it is taken as silence; the output is the same for
   host blocks of 512 and 37 samples; Linear gives -11.99 dB.

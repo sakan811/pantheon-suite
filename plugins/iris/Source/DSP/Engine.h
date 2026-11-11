@@ -161,6 +161,7 @@ private:
         Placement place = Placement::stereo;
         double logFreq = 0.0, gainDb = 0.0, logQ = 0.0;   // where the glide has got to
         double dynDb = 0.0;
+        double dynFast = 0.0, dynSlow = 0.0;                             // AUTO: the gain that builds up only while the signal stays (AutoTimes)
         double appliedGain = 1.0e9, appliedFreq = 0.0, appliedQ = 0.0;
         int appliedOrder = -1;                            // a cut's slope: a change of it is a new filter too
         double mix = 0.0, mixPrev = 0.0, mixStep = 0.0;   // 0..1 fade when the band is switched on or off
@@ -274,7 +275,7 @@ private:
         s.logFreq = std::log (clampFreq (t.freq, fs));
         s.gainDb = t.gainDb;
         s.logQ = std::log (std::clamp (t.q, 0.1, 18.0));
-        s.dynDb = 0.0;
+        s.dynDb = s.dynFast = s.dynSlow = 0.0;
         s.appliedGain = 1.0e9;
         s.mix = s.mixPrev = s.mixStep = 0.0;
         for (auto& f : s.filter) f.reset();
@@ -346,13 +347,31 @@ private:
 
             // Attack and release act on the gain, in dB: attack while the gain is moving further from rest, release while it comes back.
             const double wanted = dynamicOffsetDb (t.dyn, levelDb);
-            const double ms = std::fabs (wanted) > std::fabs (s.dynDb) ? t.dyn.attackMs : t.dyn.releaseMs;
-            s.dynDb += (1.0 - std::exp (-(double) tick / (std::max (ms, 0.01) * 0.001 * fs))) * (wanted - s.dynDb);
+            const auto step = [&] (double& value, double attackMs, double releaseMs)
+            {
+                const double ms = std::fabs (wanted) > std::fabs (value) ? attackMs : releaseMs;
+                value += (1.0 - std::exp (-(double) tick / (std::max (ms, 0.01) * 0.001 * fs))) * (wanted - value);
+            };
+            if (t.dyn.autoTimes)
+            {
+                // The fast gain is `dynFast`, kept apart from what is applied: the slow one holds the applied gain up while the fast one
+                // has already let go, and must not hold the fast one up with it.
+                const auto times = AutoTimes::forFrequency (std::exp (s.logFreq));
+                step (s.dynFast, times.attackMs, times.releaseMs);
+                step (s.dynSlow, times.slowAttackMs, times.slowReleaseMs);
+                s.dynDb = std::fabs (s.dynSlow) > std::fabs (s.dynFast) ? s.dynSlow : s.dynFast;
+            }
+            else
+            {
+                step (s.dynDb, t.dyn.attackMs, t.dyn.releaseMs);
+                s.dynFast = s.dynDb; // so switching AUTO on carries on from here
+                s.dynSlow = 0.0;
+            }
             detectedDb[index].store ((float) levelDb, std::memory_order_relaxed);
         }
         else
         {
-            s.dynDb = 0.0;
+            s.dynDb = s.dynFast = s.dynSlow = 0.0;
             detectedDb[index].store (-120.0f, std::memory_order_relaxed);
         }
         dynamicDb[index].store ((float) s.dynDb, std::memory_order_relaxed);

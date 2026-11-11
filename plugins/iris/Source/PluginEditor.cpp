@@ -78,6 +78,10 @@ IrisEditor::IrisEditor (IrisProcessor& p)
             "(the louder of its two channels): a cut here while the kick plays there, for example. Without a sidechain connected the band listens to itself.");
         dynToggles[(size_t) i] = std::make_unique<ui::Toggle> (p.apvts, ids.dyn, "DYNAMIC",
             "Makes the band dynamic: its gain moves with the level of its own frequency region (bells and shelves).");
+        autoToggles[(size_t) i] = std::make_unique<ui::Toggle> (p.apvts, ids.autoTimes, "AUTO",
+            "Attack and release are chosen for the band: a few cycles of its own frequency to engage, and a release that is short after a single hit "
+            "and long after a held or dense passage, so the gain does not pump. Off: the ATTACK and RELEASE knobs.");
+        addChildComponent (*autoToggles[(size_t) i]);
         for (auto* c : std::initializer_list<juce::Component*> { typeBoxes[(size_t) i].get(), placeBoxes[(size_t) i].get(), slopeBoxes[(size_t) i].get(),
                                                                  dynModeBoxes[(size_t) i].get(), listenBoxes[(size_t) i].get(), dynToggles[(size_t) i].get() })
             addChildComponent (*c);
@@ -186,6 +190,7 @@ int IrisEditor::bandSignature() const
         const bool on = isBandOn (proc.apvts, i);
         signature = signature * 7u + (on ? 1u + (unsigned) bandType (proc.apvts, i) : 0u);
         signature = signature * 2u + (on && proc.apvts.getRawParameterValue (bandIds (i).dyn)->load() > 0.5f ? 1u : 0u);
+        signature = signature * 2u + (on && proc.apvts.getRawParameterValue (bandIds (i).autoTimes)->load() > 0.5f ? 1u : 0u);
     }
     return (int) (signature & 0x7fffffffu);
 }
@@ -221,6 +226,9 @@ void IrisEditor::refreshBandPanel()
     }
     for (auto* k : { &thresholdKnob, &ratioKnob, &rangeKnob, &attackKnob, &releaseKnob })
         k->setAlpha (dynamic ? 1.0f : 0.4f);
+    if (proc.apvts.getRawParameterValue (ids.autoTimes)->load() > 0.5f) // AUTO has the two times: the knobs keep their values for when it is switched off
+        for (auto* k : { &attackKnob, &releaseKnob })
+            k->setAlpha (0.4f);
 
     for (int i = 0; i < maxBands; ++i)
     {
@@ -232,6 +240,7 @@ void IrisEditor::refreshBandPanel()
         dynToggles[(size_t) i]->setEnabled (hasGain (type));
         dynModeBoxes[(size_t) i]->setVisible (mine && hasGain (type));
         listenBoxes[(size_t) i]->setVisible (mine && hasGain (type));
+        autoToggles[(size_t) i]->setVisible (mine && hasGain (type));
     }
     removeButton.setVisible (on);
     soloBandButton.setVisible (on);
@@ -307,6 +316,7 @@ void IrisEditor::layoutBandPanel()
     dynToggles[(size_t) band]->setBounds (dyn.getRight() - 14 - 90, dyn.getY() + 6, 90, 22);
     dynModeBoxes[(size_t) band]->setBounds (dyn.getRight() - 14 - 90 - 8 - 92, dyn.getY() + 6, 92, 22);
     listenBoxes[(size_t) band]->setBounds (dyn.getRight() - 14 - 90 - 8 - 92 - 8 - 104, dyn.getY() + 6, 104, 22);
+    autoToggles[(size_t) band]->setBounds (dyn.getRight() - 14 - 90 - 8 - 92 - 8 - 104 - 8 - 62, dyn.getY() + 6, 62, 22);
     dynReadout = { dyn.getX() + 14, dyn.getY() + 34, dyn.getWidth() - 28, 26 };
     const int dynCell = (dyn.getWidth() - 16) / 5;
     int k = 0;

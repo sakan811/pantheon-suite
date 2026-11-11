@@ -96,7 +96,8 @@ from clean filter, detector and shaper history when it comes back (`startBand`).
 peak of a sine, so the threshold means the same at any speed. Attack and release are **not** in the detector: they act on the gain in
 dB, in `controlBand` (`dynDb`). Putting them in the power domain was tried: the gain engaged almost at once whatever the attack,
 and a fast attack made the reading depend on the waveform. A dynamic band exists only for bells and shelves (`BandParams::isDynamic`).
-The detector listens to the band's *input*; never move it to the output, which would make a feedback loop.
+AUTO (`bN_auto`, `AutoTimes` in `Dynamics.h`) replaces the two knobs with times counted in cycles of the band's frequency and two gains, fast and slow, the larger applied;
+`dynFast` is kept apart from the applied `dynDb` so the slow gain cannot hold the fast one up. The detector listens to the band's *input*; never move it to the output, which would make a feedback loop.
 
 **Sat.** The shaper works on the residual of the curve (`f(u) - u`) of the band's difference, with ADAA on that residual, and the
 residual is added to the untouched difference (`Shaper`). Do not "simplify" this to plain ADAA on the signal: it low-passes it.
@@ -135,7 +136,7 @@ placement order there is the same as `Placement`'s. A harmonic-fill band is skip
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`): an IIR filter keeps a NaN for good.
 
-**Parameters.** Global ids (`iris::id`, `phase` included: version 3) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`, and `b1_listen` ... `b8_listen`, version 4, declared after all the others so the first layout keeps its order in a host's list) are stored in sessions and automation: never
+**Parameters.** Global ids (`iris::id`, `phase` included: version 3) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`, and `b1_listen` ... `b8_listen`, version 4, then `b1_auto` ... `b8_auto`, version 5 (default off so old sessions keep their times; `addBand` switches it on), declared after all the others so the first layout keeps its order in a host's list) are stored in sessions and automation: never
 rename or remove one. A new parameter needs a `ParameterID` version above 1 (every parameter in the first layout is 1), an entry in
 `readParams()` and, if it has a control, a place in the editor. Session-wide controls go in `isGlobalParameter()` so presets leave them
 alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arrive as 0.000002: anything that has to be exactly zero
