@@ -12,6 +12,16 @@ namespace atlas
 enum class PhaseMode { zeroLatency, linear };
 inline constexpr int kNumOsModes = 3; // off, 2x, 4x
 
+// Look-ahead: the compressors read the audio this much before it is heard, so a fast peak is already being turned down when it arrives.
+// The whole sound is delayed by it (the host compensates). A choice, not a knob: the delay is the plugin's latency, and a latency that
+// moved with a knob would re-align the host's track on every turn.
+inline constexpr int kNumLookahead = 5;
+inline constexpr std::array<double, kNumLookahead> kLookaheadMs { 0.0, 1.0, 2.0, 5.0, 10.0 };
+inline int lookaheadSamples (double sampleRate, int index) noexcept
+{
+    return juce::roundToInt (kLookaheadMs[(size_t) std::clamp (index, 0, kNumLookahead - 1)] * 0.001 * sampleRate);
+}
+
 struct EngineParams
 {
     std::array<BandParams, kBands> bands;
@@ -19,6 +29,7 @@ struct EngineParams
     std::array<bool, kCrossovers> split { true, true, true, true, true }; // a split that is off joins the band above it to the one below
     PhaseMode phase = PhaseMode::zeroLatency;
     int oversampling = 0; // 0 = off, 1 = 2x, 2 = 4x
+    int lookahead = 0;    // index into kLookaheadMs
     double outGainDb = 0.0;
 };
 
@@ -47,6 +58,17 @@ class IntDelay
 public:
     void prepare (int maxDelay) { buffer.assign ((size_t) maxDelay + 1, 0.0f); pos = 0; delay = 0; }
     void setDelay (int d) noexcept { delay = std::clamp (d, 0, (int) buffer.size() - 1); std::fill (buffer.begin(), buffer.end(), 0.0f); pos = 0; }
+    void clear() noexcept { std::fill (buffer.begin(), buffer.end(), 0.0f); pos = 0; }
+    // One sample in, the one from `delay` samples ago out.
+    inline float push (float x) noexcept
+    {
+        if (delay == 0)
+            return x;
+        const float out = buffer[(size_t) pos];
+        buffer[(size_t) pos] = x;
+        if (++pos == delay) pos = 0;
+        return out;
+    }
     inline void process (float* x, int n) noexcept
     {
         if (delay == 0)
@@ -92,10 +114,11 @@ public:
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     std::atomic<int> latencySamples { 0 };
 
-    void prepare (double sampleRate, PhaseMode initialPhase = PhaseMode::zeroLatency, int initialOs = 0)
+    void prepare (double sampleRate, PhaseMode initialPhase = PhaseMode::zeroLatency, int initialOs = 0, int initialLookahead = 0)
     {
         fs = sampleRate;
         linear.prepare (fs);
+        scLinear.prepare (fs);
         int maxOsLatency = 0;
         for (int m = 1; m < kNumOsModes; ++m)
         {
@@ -108,10 +131,15 @@ public:
             }
             maxOsLatency = std::max (maxOsLatency, osLatency[(size_t) m]);
         }
+        const int maxLook = lookaheadSamples (fs, kNumLookahead - 1);
         for (auto& b : band)
-            for (auto& d : b.dry) d.prepare (maxOsLatency);
+        {
+            for (auto& d : b.dry) d.prepare (maxOsLatency + maxLook);
+            for (auto& d : b.look) d.prepare (maxLook * (1 << (kNumOsModes - 1)));
+        }
         phase = initialPhase;
         osMode = std::clamp (initialOs, 0, kNumOsModes - 1);
+        lookIndex = std::clamp (initialLookahead, 0, kNumLookahead - 1);
         reset();
     }
 
@@ -119,6 +147,8 @@ public:
     {
         counter = 0;
         splitter.prepare (fs);
+        scSplitter.prepare (fs);
+        scActive = false;
         appliedCrossover = {};
         outGain = outGainStep = 0.0;
         first = true;
@@ -137,11 +167,15 @@ public:
         }
     }
 
-    int latencyFor (PhaseMode p, int os) const noexcept { return (p == PhaseMode::linear ? linear.latency() : 0) + osLatency[(size_t) os]; }
+    int latencyFor (PhaseMode p, int os, int look = 0) const noexcept { return (p == PhaseMode::linear ? linear.latency() : 0) + osLatency[(size_t) os] + lookaheadSamples (fs, look); }
 
-    // In place. Must not allocate, lock or log.
-    void process (float* l, float* r, int numSamples, const EngineParams& p) noexcept
+    // In place. Must not allocate, lock or log. `scL` / `scR` are the sidechain input, only listened to (never heard): null when
+    // none is connected, and then a band set to listen to it listens to itself. A mono sidechain is `scL` alone.
+    void process (float* l, float* r, int numSamples, const EngineParams& p, const float* scL = nullptr, const float* scR = nullptr) noexcept
     {
+        if (scL != nullptr && scR == nullptr)
+            scR = scL;
+        scPresent = scL != nullptr;
         float peakIn = 0.0f, peakOut = 0.0f;
         for (int start = 0; start < numSamples;)
         {
@@ -149,7 +183,7 @@ public:
             if (phaseInTick == 0)
                 control (p);
             const int n = std::min (numSamples - start, tick - phaseInTick);
-            segment (l + start, r + start, n, peakIn, peakOut);
+            segment (l + start, r + start, scPresent ? scL + start : nullptr, scPresent ? scR + start : nullptr, n, peakIn, peakOut);
             counter += n;
             start += n;
         }
@@ -169,10 +203,12 @@ private:
         double heard = 1.0, heardTarget = 1.0, heardStep = 0.0;          // solo
         double dryHeard = 0.0, dryHeardTarget = 0.0, dryHeardStep = 0.0; // delta: the input is taken back out
         bool idle = true;                            // switched off and at rest: the compressor path is not run
+        bool listenSc = false;                       // its compressor reads the sidechain's band (latched at a tick)
         float maxReduction = 0.0f;
         double maxLevelSq = 0.0;
         std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, kNumOsModes> os; // [1] 2x, [2] 4x
         std::array<IntDelay, 2> dry;
+        std::array<IntDelay, 2> look;                // the audio waiting for the look-ahead, at the compressors' rate
     };
 
     // The phase or oversampling mode changed (or playback starts): new latency, clean history.
@@ -180,26 +216,32 @@ private:
     {
         linear.reset();
         splitter.reset();
+        scLinear.reset();
+        scSplitter.reset();
+        const int lookSamples = lookaheadSamples (fs, lookIndex);
         for (auto& b : band)
         {
-            for (auto& d : b.dry) d.setDelay (osLatency[(size_t) osMode]);
+            for (auto& d : b.dry) d.setDelay (osLatency[(size_t) osMode] + lookSamples);
+            for (auto& d : b.look) d.setDelay (lookSamples * (1 << osMode));
             for (auto& o : b.os)
                 if (o != nullptr) o->reset();
             b.grA = b.grB = 0.0;
             b.levelA.reset();
             b.levelB.reset();
         }
-        latencySamples.store (latencyFor (phase, osMode), std::memory_order_relaxed);
+        latencySamples.store (latencyFor (phase, osMode, lookIndex), std::memory_order_relaxed);
     }
 
     // ---- once per tick -------------------------------------------------------------------------
     void control (const EngineParams& p) noexcept
     {
         const int os = std::clamp (p.oversampling, 0, kNumOsModes - 1);
-        if (p.phase != phase || os != osMode)
+        const int look = std::clamp (p.lookahead, 0, kNumLookahead - 1);
+        if (p.phase != phase || os != osMode || look != lookIndex)
         {
             phase = p.phase;
             osMode = os;
+            lookIndex = look;
             configure();
         }
         if (const auto xo = orderedCrossovers (p.crossover); xo != appliedCrossover)
@@ -207,9 +249,26 @@ private:
             appliedCrossover = xo;
             splitter.setCrossovers (fs, xo);
             linear.setCrossovers (xo);
+            scSplitter.setCrossovers (fs, xo);
+            scLinear.setCrossovers (xo);
         }
 
         owner = bandOwners (p.split);
+
+        // The sidechain is split only while some band listens to it; it starts from clean filters when it is first needed.
+        bool anySc = false;
+        for (int i = 0; i < kBands; ++i)
+        {
+            auto& s = band[(size_t) i];
+            s.listenSc = scPresent && owner[(size_t) i] == i && p.bands[(size_t) i].on && p.bands[(size_t) i].sidechain;
+            anySc = anySc || s.listenSc;
+        }
+        if (anySc && ! scActive)
+        {
+            scSplitter.reset();
+            scLinear.reset();
+        }
+        scActive = anySc;
 
         const unsigned solo = monitor.solo.load (std::memory_order_relaxed), delta = monitor.delta.load (std::memory_order_relaxed);
         const double fade = (double) tick / (kFadeSeconds * fs);
@@ -264,7 +323,43 @@ private:
     }
 
     // ---- up to one tick of samples -------------------------------------------------------------
-    void segment (float* l, float* r, int n, float& peakIn, float& peakOut) noexcept
+    // One signal split into the six bands, then the bands of pieces that join added into the band that owns them.
+    template <typename Splitter, typename Linear, typename Buffers>
+    void splitInto (Splitter& zero, Linear& lin, Buffers& out, const float* l, const float* r, int n) noexcept
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float x = std::isfinite (l[i]) ? l[i] : 0.0f, y = std::isfinite (r[i]) ? r[i] : 0.0f;
+            if (phase == PhaseMode::linear)
+            {
+                std::array<std::array<float, 2>, kBands> parts;
+                lin.process (x, y, parts);
+                for (int b = 0; b < kBands; ++b)
+                {
+                    out[(size_t) b][0][(size_t) i] = parts[(size_t) b][0];
+                    out[(size_t) b][1][(size_t) i] = parts[(size_t) b][1];
+                }
+            }
+            else
+            {
+                std::array<double, kBands> partL, partR;
+                zero.split (0, (double) x, partL);
+                zero.split (1, (double) y, partR);
+                for (int b = 0; b < kBands; ++b)
+                {
+                    out[(size_t) b][0][(size_t) i] = (float) partL[(size_t) b];
+                    out[(size_t) b][1][(size_t) i] = (float) partR[(size_t) b];
+                }
+            }
+        }
+        for (int b = 1; b < kBands; ++b)
+            if (const int to = owner[(size_t) b]; to != b)
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < n; ++i)
+                        out[(size_t) to][(size_t) c][(size_t) i] += out[(size_t) b][(size_t) c][(size_t) i];
+    }
+
+    void segment (float* l, float* r, const float* scL, const float* scR, int n, float& peakIn, float& peakOut) noexcept
     {
         for (int i = 0; i < n; ++i)
         {
@@ -272,40 +367,18 @@ private:
             if (! std::isfinite (l[i])) l[i] = 0.0f;
             if (! std::isfinite (r[i])) r[i] = 0.0f;
             peakIn = std::max (peakIn, std::max (std::fabs (l[i]), std::fabs (r[i])));
-
-            if (phase == PhaseMode::linear)
-            {
-                std::array<std::array<float, 2>, kBands> parts;
-                linear.process (l[i], r[i], parts);
-                for (int b = 0; b < kBands; ++b)
-                {
-                    bandBuffer[(size_t) b][0][(size_t) i] = parts[(size_t) b][0];
-                    bandBuffer[(size_t) b][1][(size_t) i] = parts[(size_t) b][1];
-                }
-            }
-            else
-            {
-                std::array<double, kBands> partL, partR;
-                splitter.split (0, (double) l[i], partL);
-                splitter.split (1, (double) r[i], partR);
-                for (int b = 0; b < kBands; ++b)
-                {
-                    bandBuffer[(size_t) b][0][(size_t) i] = (float) partL[(size_t) b];
-                    bandBuffer[(size_t) b][1][(size_t) i] = (float) partR[(size_t) b];
-                }
-            }
-            l[i] = r[i] = 0.0f;
         }
-
-        for (int b = 1; b < kBands; ++b)
-            if (const int to = owner[(size_t) b]; to != b)
-                for (int c = 0; c < 2; ++c)
-                    for (int i = 0; i < n; ++i)
-                        bandBuffer[(size_t) to][(size_t) c][(size_t) i] += bandBuffer[(size_t) b][(size_t) c][(size_t) i];
+        splitInto (splitter, linear, bandBuffer, l, r, n);
+        if (scActive)
+            splitInto (scSplitter, scLinear, scBuffer, scL, scR, n); // what a band that listens to the sidechain reads
+        for (int i = 0; i < n; ++i)
+            l[i] = r[i] = 0.0f;
 
         for (int b = 0; b < kBands; ++b)
             if (owner[(size_t) b] == b)
-                runBand (band[(size_t) b], bandBuffer[(size_t) b][0].data(), bandBuffer[(size_t) b][1].data(), l, r, n);
+                runBand (band[(size_t) b], bandBuffer[(size_t) b][0].data(), bandBuffer[(size_t) b][1].data(),
+                         band[(size_t) b].listenSc ? scBuffer[(size_t) b][0].data() : nullptr, band[(size_t) b].listenSc ? scBuffer[(size_t) b][1].data() : nullptr,
+                         l, r, n);
 
         for (int i = 0; i < n; ++i)
         {
@@ -316,7 +389,8 @@ private:
         }
     }
 
-    void runBand (BandState& s, float* dl, float* dr, float* outL, float* outR, int n) noexcept
+    // `sl` / `sr`: the sidechain's piece of this band, when the band listens to it (else null).
+    void runBand (BandState& s, float* dl, float* dr, const float* sl, const float* sr, float* outL, float* outR, int n) noexcept
     {
         const bool ms = usesMidSide (s.channels);
         const bool run = s.follower.on || s.grA > 0.0 || s.grB > 0.0;
@@ -329,6 +403,7 @@ private:
                 // Their memory is of before the band stopped.
                 s.levelA.reset();
                 s.levelB.reset();
+                for (auto& d : s.look) d.clear();
                 if (os != nullptr)
                     os->reset();
             }
@@ -337,17 +412,39 @@ private:
                 w[0][i] = ms ? 0.5f * (dl[i] + dr[i]) : dl[i];
                 w[1][i] = ms ? 0.5f * (dl[i] - dr[i]) : dr[i];
             }
+
+            // What the compressor reads, at the rate it runs: the band's own signal, or the sidechain's piece of the band (made the same
+            // way, held to the oversampled rate: the level is a smoothed mean square, which a held sample leaves exactly as it was).
+            const int m = 1 << osMode;
+            const float* det[2] = { nullptr, nullptr };
+            if (sl != nullptr)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    const float a = ms ? 0.5f * (sl[i] + sr[i]) : sl[i], b = ms ? 0.5f * (sl[i] - sr[i]) : sr[i];
+                    for (int j = 0; j < m; ++j)
+                    {
+                        detBuffer[0][(size_t) (i * m + j)] = a;
+                        detBuffer[1][(size_t) (i * m + j)] = b;
+                    }
+                }
+                det[0] = detBuffer[0].data();
+                det[1] = detBuffer[1].data();
+            }
+
             if (os != nullptr)
             {
                 const float* const in[2] = { w[0], w[1] };
                 auto up = os->processSamplesUp (juce::dsp::AudioBlock<const float> (in, 2, (size_t) n));
-                compress (s, up.getChannelPointer (0), up.getChannelPointer (1), (int) up.getNumSamples());
+                float* ua = up.getChannelPointer (0);
+                float* ub = up.getChannelPointer (1);
+                compress (s, ua, ub, det[0] != nullptr ? det[0] : ua, det[1] != nullptr ? det[1] : ub, (int) up.getNumSamples());
                 juce::dsp::AudioBlock<float> down (w, 2, (size_t) n);
                 os->processSamplesDown (down);
             }
             else
             {
-                compress (s, w[0], w[1], n);
+                compress (s, w[0], w[1], det[0] != nullptr ? det[0] : w[0], det[1] != nullptr ? det[1] : w[1], n);
             }
         }
         s.idle = ! run;
@@ -377,8 +474,10 @@ private:
         }
     }
 
-    // Turns the two signals into what the compressor takes off them: x * (gain - 1). At the oversampled rate when there is one.
-    void compress (BandState& s, float* a, float* b, int n) noexcept
+    // Turns the two signals into what the compressor takes off them: x * (gain - 1), where the level comes from `detA` / `detB`
+    // (the signals themselves, or the sidechain's) and the gain is applied to the signal after the look-ahead delay. At the
+    // oversampled rate when there is one. With no look-ahead and no sidechain this is exactly the compressor without either.
+    void compress (BandState& s, float* a, float* b, const float* detA, const float* detB, int n) noexcept
     {
         const auto& f = s.follower;
         double grA = s.grA, grB = s.grB, most = 0.0, loudest = 0.0;
@@ -386,12 +485,13 @@ private:
         {
             for (int i = 0; i < n; ++i)
             {
-                const double level = std::max (s.levelA.push (a[i], f.detector), s.levelB.push (b[i], f.detector));
+                const double level = std::max (s.levelA.push (detA[i], f.detector), s.levelB.push (detB[i], f.detector));
                 loudest = std::max (loudest, level);
                 const double g = f.step (grA, level) - 1.0;
                 most = std::max (most, grA);
-                a[i] = (float) (a[i] * g);
-                b[i] = (float) (b[i] * g);
+                const float xa = s.look[0].push (a[i]), xb = s.look[1].push (b[i]);
+                a[i] = (float) (xa * g);
+                b[i] = (float) (xb * g);
             }
             grB = grA;
         }
@@ -402,10 +502,11 @@ private:
             if (! second) grB = 0.0;
             for (int i = 0; i < n; ++i)
             {
-                const double la = first_ ? s.levelA.push (a[i], f.detector) : 0.0, lb = second ? s.levelB.push (b[i], f.detector) : 0.0;
+                const double la = first_ ? s.levelA.push (detA[i], f.detector) : 0.0, lb = second ? s.levelB.push (detB[i], f.detector) : 0.0;
                 loudest = std::max (loudest, std::max (la, lb));
-                a[i] = first_ ? (float) (a[i] * (f.step (grA, la) - 1.0)) : 0.0f;
-                b[i] = second ? (float) (b[i] * (f.step (grB, lb) - 1.0)) : 0.0f;
+                const float xa = s.look[0].push (a[i]), xb = s.look[1].push (b[i]);
+                a[i] = first_ ? (float) (xa * (f.step (grA, la) - 1.0)) : 0.0f;
+                b[i] = second ? (float) (xb * (f.step (grB, lb) - 1.0)) : 0.0f;
                 most = std::max (most, std::max (grA, grB));
             }
         }
@@ -418,17 +519,18 @@ private:
     double fs = 48000.0;
     juce::int64 counter = 0;
     PhaseMode phase = PhaseMode::zeroLatency;
-    int osMode = 0;
-    bool first = true;
+    int osMode = 0, lookIndex = 0;
+    bool first = true, scPresent = false, scActive = false;
     std::array<int, kNumOsModes> osLatency {};
     std::array<double, kCrossovers> appliedCrossover {};
     std::array<int, kBands> owner { 0, 1, 2, 3, 4, 5 };
     double outGain = 1.0, outGainTarget = 1.0, outGainStep = 0.0;
 
-    pdsp::BandSplitter splitter;
-    LinearSplit linear;
+    pdsp::BandSplitter splitter, scSplitter; // the sidechain gets its own, so the main signal's filters never hear it
+    LinearSplit linear, scLinear;
     std::array<BandState, kBands> band;
-    std::array<std::array<std::array<float, tick>, 2>, kBands> bandBuffer {};
+    std::array<std::array<std::array<float, tick>, 2>, kBands> bandBuffer {}, scBuffer {};
+    std::array<std::array<float, tick * (1 << (kNumOsModes - 1))>, 2> detBuffer {}; // the sidechain's piece of a band, at the oversampled rate
     std::array<std::array<float, tick>, 2> workBuffer {};
 };
 } // namespace atlas

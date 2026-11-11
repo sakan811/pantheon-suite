@@ -27,6 +27,8 @@ struct AdviceInput
     bool delta = false, solo = false;
     PhaseMode phase = PhaseMode::zeroLatency;
     double latencyMs = 0.0;
+    double lookaheadMs = 0.0;
+    bool sidechainConnected = false;
 };
 
 constexpr double kBassTopHz = 250.0;     // the top of the Bass band: below it a fast attack follows single cycles
@@ -63,7 +65,11 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         if (b.reductionDb >= kHeavyReductionDb)
             warn (name + "taking off " + std::to_string ((int) (b.reductionDb + 0.5)) + " dB or more. Raise THRESH or lower RATIO, or it will pump.");
         if (b.params.ratio >= kLimiterRatio)
-            warn (name + "RATIO 10:1 or more is limiting, but Atlas has no look-ahead: peaks pass. Use a limiter after it.");
+            warn (name + "RATIO 10:1 or more is limiting, but Atlas reads no true peak. Use a limiter after it.");
+        if (b.params.sidechain && ! in.sidechainConnected)
+            warn (name + "listens to the SIDECHAIN, but none is connected, so it listens to itself. Route a track in.");
+        if (in.lookaheadMs > 0.0 && b.params.attackMs > in.lookaheadMs + 0.5)
+            info (name + "ATTACK (" + std::to_string (static_cast<int> (b.params.attackMs + 0.5)) + " ms) is longer than the look-ahead: it is still turning down at the peak.");
         if (b.hiHz <= kBassTopHz && b.params.attackMs < kFastAttackMs)
             info (name + "a fast ATTACK on bass follows single cycles and distorts the notes. Try 10 ms or more.");
         if (b.params.channels == Channels::dual)
@@ -72,6 +78,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
             info (name + "MATCH brings it back to its old loudness, so it will not seem quieter. MAKEUP adds on top.");
     }
 
+    if (in.lookaheadMs > 0.0)
+        info ("Look-ahead delays the sound by " + std::to_string (static_cast<int> (in.lookaheadMs + 0.5)) + " ms (reported to the host). Changing it restarts the bands.");
     if (in.phase == PhaseMode::linear)
         info ("Linear phase delays the sound by " + std::to_string ((int) (in.latencyMs + 0.5)) + " ms (reported to the host). Changing it restarts the bands.");
 
@@ -86,16 +94,18 @@ inline const char* guideText()
            "  - One to six bands made on a spectrogram: double-click to split, drag an edge, double-click an edge to join.\n"
            "  - Taming what pokes out in one part of the spectrum: a boomy low end, a harsh upper-mid, a kick that leaps. PEAK and JUMPS "
            "mark where to look, and a click on a JUMPS marker makes that region a band.\n"
+           "  - Making room: a band can listen to the SIDECHAIN input instead of itself (route the kick there and the bass bands duck when it hits).\n"
            "  - Gluing a sound that moves around: Stereo keeps the image still, M/S compresses the centre and the sides apart.\n"
            "\n"
            "IT IS NOT FOR:\n"
-           "  - Limiting peaks: there is no look-ahead and the level is not a true-peak reading. Use a limiter after it.\n"
+           "  - Limiting peaks: LOOK-AHEAD lets a fast peak be turned down as it arrives, but the level is not a true-peak reading and nothing is clipped. Use a limiter after it.\n"
            "  - Fixing the tonal balance: it turns a band down only while it is loud. For a constant cut or lift use an equaliser (Iris).\n"
            "  - Adding what is missing: it only takes away. Use Hephaestus to add harmonics.\n"
            "  - Doing the work by itself: PEAK and JUMPS are rules of thumb on the input, and a threshold from a marker is a starting point.\n"
            "\n"
-           "GOOD TO KNOW: start with THRESH where the meter first moves, a low RATIO (2:1) and slow-ish times, and use DELTA to hear what a "
+           "GOOD TO KNOW: the presets are starting points: their thresholds suit a master around -14 LUFS, so set THRESH where the meter first "
+           "moves. Use a low RATIO (2:1) and slow-ish times, and DELTA to hear what a "
            "band takes. MATCH keeps a band from sounding better only because it is quieter. Splitting or joining bands while they compress "
-           "can click, and changing Phase or Oversampling while playing restarts the bands (a short gap).";
+           "can click, and changing Phase, Oversampling or Look-ahead while playing restarts the bands (a short gap).";
 }
 }

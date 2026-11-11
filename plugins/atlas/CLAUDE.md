@@ -70,7 +70,11 @@ the delayed input whatever truncating the kernels did: keep it that way. The fra
 is `(-j)^bin` and needs no table; changing the sizes independently breaks that. Sizes scale with the sample rate (`scaleFor`).
 The crossovers stop at 40 Hz because the kernels (+-2048 samples at 48 kHz) cannot resolve a lower one.
 
-**Latency** is `Engine::latencySamples` (linear split + oversampler), written on the audio thread in `configure()` when a tick sees a
+**Look-ahead** is a delay of the audio *relative to the detector*, inside the compressor, not a delay of the detector's input: `compress()` reads the level from `detA` / `detB` and multiplies the signal that has waited in `BandState::look` (at the compressors' rate, so `lookSamples << osMode`); the dry band waits `osLatency + lookSamples` (`dry`). Everything that sums is therefore late by the same amount and `latencySamples` is the phase mode's + the oversampling's + the look-ahead's. It is a choice (`kLookaheadMs`, named by `lookaheadNames()`) because the latency must not move with a knob; a change goes through `configure()` like the other modes. With the look-ahead off `IntDelay::push` returns its input, so the compressor is the old one bit for bit: keep that (tests [2] and [6] pin it).
+
+**The sidechain** is split by its own `scSplitter` / `scLinear` (never the main one: its filters must not hear it), only while a band listens to it (`scActive`, latched at a tick; it starts from clean filters), and each band reads *its own piece* of it: through the same owner summing as the main bands, the same Mid/Side transform as the band's channels, and held (each sample repeated) up to the oversampled rate, which leaves the level (a smoothed mean square) exactly as it was. A band with `sidechain` and no sidechain connected (`scPresent` false) listens to itself, so a session saved with it still works without one. The key's non-finite samples are zeroed in `splitInto`. The input is `Engine::process`'s last two arguments (null: none); the bus is the processor's second input, off by default, and `sidechainConnected` is what the editor's note reads.
+
+**Latency** is `Engine::latencySamples` (linear split + oversampler + look-ahead), written on the audio thread in `configure()` when a tick sees a
 new mode, and reaches the host through `AtlasProcessor::handleAsyncUpdate` on the message thread; `prepareToPlay` passes the saved
 modes to `Engine::prepare` so the host hears the right latency before the first block. A mode switch clears the histories.
 
@@ -97,7 +101,7 @@ editor ends them in its destructor. Do not make them parameters. They fade over 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`).
 
 **Parameters.** Ids (`atlas::id`: `xo0` ... `xo4` and `xo0_on` ... `xo4_on` among them; `bandIds (i)`: `b1_on` ... `b6_match`) are stored in sessions and automation: never rename or
-remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+remove one. All are `ParameterID` version 1 except `look` and each band's `listen` (version 2, declared after everything else, so a host's list keeps its order); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `channelNames` is the order of `Channels`.
 
 ## DRY: where each thing lives
@@ -106,6 +110,7 @@ The order of `channelNames` is the order of `Channels`.
 - parameter ranges, defaults, choice lists -> `Parameters.h` (the editor reads the items from the parameters); the defaults of a band -> `BandParams`
 - which signals a channel mode runs -> `usesMidSide` / `runsFirst` / `runsSecond` / `isLinked` in `Compressor.h`
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor fills `AdviceInput` (`adviceInput()`) and draws the notes with `ui::drawNoteStrip`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's Advice section, and at most `ui::kMaxNoteChars` characters
+- the look-ahead choices -> `kLookaheadMs` / `lookaheadSamples()` in `Engine.h` (the parameter's names, the engine and the editor read them); the presets and what each is for -> `presets()` in `Parameters.h` (`Preset::purpose` is the tooltip; `isGlobalParameter()` says what a preset keeps)
 - the order of the crossovers -> `orderedCrossovers()` in `Engine.h` (the engine and the editor's labels use it)
 - the plugin's name -> `ATLAS_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/AtlasUi.h` (`UiCheck` checks they agree)
 - every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls

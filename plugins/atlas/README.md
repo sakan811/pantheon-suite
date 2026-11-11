@@ -37,13 +37,17 @@ MATCH on. Regenerate with the command under "Development".*
 | **DELTA** | Hear only what that band's compressor changes: its output minus its input. Not saved with the session. **ALL BANDS** ends every solo and delta. |
 | **MATCH** | Brings the band back to the loudness it had before its compressor (a 0.4 s window, never more than 12 dB), so the band is not judged by being quieter. MAKEUP adds to it. |
 | **Phase** | **Zero Latency**: Linkwitz-Riley crossovers (24 dB per octave), no delay; the bands add to the input with its phase turned around each edge, as any such crossover does. **Linear**: the same bands with no phase shift, so the bands add to the input itself, only later (64 ms at 48 kHz, reported to the host). |
-| **Guide and notes** | **GUIDE** (header) says what Atlas is for and what it is *not* for: dynamics band by band, not limiting (no look-ahead, no true-peak reading), not a tonal fix, not adding what is missing. The strip under the bands warns, in amber, when DELTA or a solo is on, when every band is off, and, band by band, when a threshold is still at the top (it hardly compresses), a ratio is 1:1, a band is taking off 12 dB or more, or a ratio of 10:1 or more is used as a limiter; it notes a fast attack on bass, L/R on a band (the image can drift), MATCH, and the delay of Linear. Each note restates a limit under [Limits](#limits); the rules are in [Advice.h](Source/Advice.h). |
+| **Look-ahead** | **Off, 1, 2, 5 or 10 ms** (header). The compressors read the sound that long before it is heard, so a fast peak is already being turned down when it reaches the output: set it to about the attack time. The whole sound is delayed by it (reported to the host, added to the phase mode's and the oversampling's); it is a choice and not a knob because a latency that moved with a knob would re-align the host's track on every turn. Changing it while playing restarts the bands (a short gap). |
+| **Sidechain** | A second input (off until the host connects it). Each band has **Self / Sidechain** under its channels: set to Sidechain, its compressor reads the *same band of the sidechain input* (split with the same crossovers, in either phase mode) instead of its own, so another track decides when this band is turned down: the kick on the sidechain ducks the sub and bass. The sidechain is never heard, and with none connected a band set to it listens to itself. A mono sidechain is used on both sides. |
+| **Presets** | Eight (header): *Init*, *Mastering Glue*, *Tame the Low End*, *Steady Low-Mids*, *De-Harsh Upper-Mid*, *De-Ess*, *Mid/Side Control* and *Kick Ducks Bass*. They set the bands (their thresholds suit a master around -14 LUFS: a band's own level decides, so set THRESH where its meter first moves); phase, oversampling, look-ahead and output are kept. Hover the box for what the chosen one is for and what it is not. |
+| **Guide and notes** | **GUIDE** (header) says what Atlas is for and what it is *not* for: dynamics band by band, not limiting (look-ahead helps, but there is no true-peak reading), not a tonal fix, not adding what is missing. The strip under the bands warns, in amber, when DELTA or a solo is on, when every band is off, and, band by band, when a threshold is still at the top (it hardly compresses), a ratio is 1:1, a band is taking off 12 dB or more, a ratio of 10:1 or more is used as a limiter, or a band is set to the sidechain with none connected; it notes an attack longer than the look-ahead, a fast attack on bass, L/R on a band (the image can drift), MATCH, and the delay of Linear. Each note restates a limit under [Limits](#limits); the rules are in [Advice.h](Source/Advice.h). |
 | **Oversampling** | Off, 2x, 4x: the compressors' gain is made and applied at that rate, so a fast gain on high notes does not fold back as false tones. Adds 49 / 61 samples of delay at 48 kHz, reported to the host. |
 
 ## How it works
 
 ```
-input -> split into six bands -> per band:  level -> gain computer -> attack / release -> band + band x (gain - 1)
+input -> split into six bands -> per band:  level (the band's, or the sidechain's) -> gain computer -> attack / release
+                                              -> band + (the band, look-ahead later) x (gain - 1)
       -> makeup, gain match -> solo / delta -> sum -> output gain
 ```
 
@@ -82,19 +86,20 @@ input -> split into six bands -> per band:  level -> gain computer -> attack / r
 - **The finder** (synthetic spectrogram columns, 30 per second). A steady programme: nothing. A 12 dB resonance at 3 kHz: one
   peak, at 2958 Hz (the nearest 1/24-octave step), 12.0 dB over its neighbourhood. A region around 80 Hz leaping 18 dB twice a second: one
   region, 63 to 102 Hz. Nothing in the first two seconds; silence says nothing.
+- **Look-ahead.** With the bands off, every look-ahead (1, 2, 5 and 10 ms = 48, 96, 240 and 480 samples) at every oversampling is the plain output that many samples later, bit for bit, and the latency reported is the sum. A 1 kHz tone at -6 dB that starts at once, attack 5 ms, ratio 20:1, the Midrange soloed: its first 2 ms at the output reach -8.1 dB without look-ahead and -20.2 dB with 5 ms; settled, both are at -28.87 dB. The same output for blocks of 512 and 61 with 2 ms and 2x oversampling, bit for bit.
+- **Sidechain.** A band set to the sidechain with none connected is the band listening to itself, bit for bit. A quiet 1 kHz tone (-45 dB) with a -10 dB key (-11.1 dB in the band) is taken down 14.21 dB (the law gives 14.19), at 2x oversampling and in the linear mode too; alone it passes at +0.000 dB. A loud tone with a silent key: nothing is taken, bit for bit. Silence with a loud key: silence out. A mono key is the same as the same signal on both channels; blocks of 512 and 61 give the same output with a noise key, 2x and look-ahead; a NaN and an inf in the key leave the output finite.
 - **Robust.** The output is the same, bit for bit, for host blocks of 512, 377 and 1 samples in every mode; an inf or a NaN in the
   input does not get through; it runs at 44.1, 96 and 192 kHz; the modes can be switched while playing.
 
 ## Limits
 
-- No look-ahead, no sidechain input, no presets, and the times are not automatic.
+- The times are not automatic. **Look-ahead is a delay, not a true-peak limiter**: the level is read as a smoothed mean square and nothing is clipped, so a peak can still pass; use a limiter after it. The sidechain is split with the band's own crossovers and read by the same detector, so it is the key's level *in that band*; it has no filter or level of its own.
 - PEAK and JUMPS read the display's analyzer on the editor's timer: they need the editor open, they see the input (not what the
   compressors did), and their limits are rules of thumb. A threshold set from a JUMPS marker is a starting point.
 - Splitting or joining bands while they are compressing can click (the gains start again), and ends every solo and delta.
   In Zero Latency a split that is switched off is parked at the top of the spectrum, where its crossover still turns the phase a little above 16 kHz.
-- The level is not a peak reading (see above): this is not a limiter.
 - Linear mode resolves a crossover down to 40 Hz, which is why XOVER stops there. Its FFT is single precision: the floor is about -135 dB.
-- Changing Phase or Oversampling while playing restarts the bands from silence (a short gap) and changes the latency.
+- Changing Phase, Oversampling or Look-ahead while playing restarts the bands from silence (a short gap) and changes the latency.
 - Not yet built on macOS, run through `auval` or loaded in a host by a check tool; there is no `HostCheck` yet. CI builds the VST3 on Linux.
 
 ## Building

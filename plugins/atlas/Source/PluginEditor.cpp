@@ -9,9 +9,9 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int stripHeight = 478;
+constexpr int stripHeight = 510;
 constexpr int stripGap = 8;
-constexpr int stripWidth = 186;
+constexpr int stripWidth = 196;
 constexpr int viewHeight = 230;
 constexpr int cellHeight = 104; // a knob: name, knob, read-out
 constexpr int kTimerHz = 30;
@@ -26,6 +26,9 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
       channels (p.apvts, bandIds (band).channels,
                 "What the band's compressor works on.\nStereo: left and right with one gain, so the image does not move.\nL/R: left and right, each with its own gain.\n"
                 "M/S: the centre and the sides, each with its own gain.\nLeft / Right / Mid / Side: that one only; the rest of the band is untouched."),
+      listen (p.apvts, bandIds (band).listen,
+              "What this band's compressor listens to.\nSelf: the band itself.\nSidechain: the same band of the sidechain input (another track, routed in the host), so that "
+              "track decides when this band is turned down. With no sidechain connected it listens to itself."),
       threshold (p.apvts, bandIds (band).threshold, "THRESH", "The level (peak, in dB) of the band above which it is turned down. The knee is 6 dB wide.", ui::Knob::Layout::below),
       ratio (p.apvts, bandIds (band).ratio, "RATIO", "How many dB the band has to rise past the threshold for 1 dB more to come out.", ui::Knob::Layout::below),
       attack (p.apvts, bandIds (band).attack, "ATTACK", "How fast the gain goes down.", ui::Knob::Layout::below),
@@ -50,6 +53,9 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
                                     "the whole sound is delayed (the host compensates)."),
       oversamplingBox (p.apvts, id::oversampling, "Runs the compressors at 2 or 4 times the sample rate, so a fast gain on high notes does not fold back as "
                                                    "false tones. Adds a short delay (the host compensates) and processor load."),
+      lookaheadBox (p.apvts, id::lookahead,
+                    "The compressors read the sound this long before it is heard, so a fast peak is already being turned down when it arrives: set it "
+                    "to about the ATTACK time. The whole sound is delayed by it (the host compensates). Changing it while playing restarts the bands."),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything.")
 {
     setLookAndFeel (&look);
@@ -63,11 +69,16 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
     view.onLayoutChanged = [this] { layoutStrips(); };
     clearButton.setTooltip ("End every solo and delta: all six bands, as they come out.");
     clearButton.onClick = [this] { proc.engine.monitor.solo = 0u; proc.engine.monitor.delta = 0u; };
-    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &outKnob, &clearButton, &guideButton })
+    for (int i = 0; i < (int) presets().size(); ++i)
+        presetBox.addItem (presets()[(size_t) i].name, i + 1);
+    presetBox.setSelectedId (p.getCurrentProgram() + 1, juce::dontSendNotification);
+    presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); setPresetTooltip(); };
+    setPresetTooltip();
+    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &lookaheadBox, &presetBox, &outKnob, &clearButton, &guideButton })
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
-    setSize (24 + kBands * 186 + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 6 + ui::kNoteStripHeight + 12);
+    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 6 + ui::kNoteStripHeight + 12);
 }
 
 AtlasEditor::~AtlasEditor()
@@ -93,7 +104,13 @@ void AtlasEditor::resized()
     oversamplingLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
     oversamplingBox.setBounds (row.removeFromLeft (84));
     row.removeFromLeft (14);
-    latencyLabel = row.removeFromLeft (150);
+    lookaheadLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
+    lookaheadBox.setBounds (row.removeFromLeft (84));
+    row.removeFromLeft (14);
+    presetLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
+    presetBox.setBounds (row.removeFromLeft (140));
+    row.removeFromLeft (14);
+    latencyLabel = row.removeFromLeft (96);
     clearButton.setBounds (row.removeFromRight (96));
     row.removeFromRight (8);
     guideButton.setBounds (row.removeFromRight (64));
@@ -104,6 +121,17 @@ void AtlasEditor::resized()
     stripArea = bounds.removeFromTop (stripHeight);
     noteStrip = bounds.withTrimmedTop (6).withHeight (ui::kNoteStripHeight);
     layoutStrips();
+}
+
+void AtlasEditor::setPresetTooltip()
+{
+    const auto& list = presets();
+    const int index = presetBox.getSelectedId() - 1;
+    juce::String text = "Presets: starting points. The thresholds suit a master around -14 LUFS, so set THRESH where each band's meter first moves. "
+                        "Phase, oversampling, look-ahead and output are kept.";
+    if (juce::isPositiveAndBelow (index, (int) list.size()))
+        text << "\n\n" << list[(size_t) index].name << ": " << list[(size_t) index].purpose;
+    presetBox.setTooltip (text);
 }
 
 AdviceInput AtlasEditor::adviceInput() const
@@ -121,6 +149,8 @@ AdviceInput AtlasEditor::adviceInput() const
     in.solo = proc.engine.monitor.solo.load() != 0u;
     in.phase = params.phase;
     in.latencyMs = 1000.0 * proc.engine.latencySamples.load() / std::max (proc.getSampleRate(), 1.0);
+    in.lookaheadMs = kLookaheadMs[(size_t) params.lookahead];
+    in.sidechainConnected = proc.sidechainConnected.load (std::memory_order_relaxed);
     return in;
 }
 
@@ -161,6 +191,8 @@ void AtlasEditor::layoutStrips()
         pair (s.on, s.match);
         pair (s.solo, s.delta);
         s.channels.setBounds (r.removeFromTop (24));
+        r.removeFromTop (6);
+        s.listen.setBounds (r.removeFromTop (24));
         r.removeFromTop (8);
         s.meter = r.removeFromTop (24);
         r.removeFromTop (6);
@@ -186,6 +218,8 @@ void AtlasEditor::paint (juce::Graphics& g)
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Multiband compressor", inLevel > 0.001f, 25.0f);
     hw::drawLabel (g, "Phase", phaseLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Oversampling", oversamplingLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Look-ahead", lookaheadLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     const int latency = proc.engine.latencySamples.load();
     hw::drawLabel (g, latency == 0 ? juce::String ("No delay") : "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms",
                    latencyLabel, juce::Justification::centredLeft, colours::dim, 9.5f);
@@ -239,6 +273,12 @@ void AtlasEditor::timerCallback()
         // Up at once, down slowly, so a short reduction can be read.
         const float now = proc.engine.reductionMeter[(size_t) b].load();
         s.shownReduction = std::max (now, s.shownReduction - gui::kMeterRangeDb / (float) kTimerHz);
+    }
+    if (const int prog = proc.getCurrentProgram(); prog != lastProgram)
+    {
+        lastProgram = prog;
+        presetBox.setSelectedId (prog + 1, juce::dontSendNotification);
+        setPresetTooltip();
     }
     if (layoutSignature() != shownLayout) // a host or a preset changed the splits
         layoutStrips();

@@ -21,9 +21,9 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 3 + 2 * kCrossovers + 8 * kBands,
-           fmt ("%d parameters: phase, oversampling, output, the %d splits (frequency and on) and 8 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
-    check (channelNames.size() == kNumChannelModes && oversamplingNames.size() == kNumOsModes, "the choice lists match the engine's modes");
+    check (proc.getParameters().size() == 4 + 2 * kCrossovers + 9 * kBands,
+           fmt ("%d parameters: phase, oversampling, output, look-ahead, the %d splits (frequency and on) and 9 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
+    check (channelNames.size() == kNumChannelModes && oversamplingNames.size() == kNumOsModes && lookaheadNames().size() == kNumLookahead && listenNames.size() == 2, "the choice lists match the engine's modes");
     for (int k = 0; k < kCrossovers; ++k)
         check (std::fabs (proc.apvts.getRawParameterValue (id::crossover[(size_t) k])->load() - (float) pdsp::bands::crossoverHz (k)) < 0.5f,
                fmt ("crossover %d starts on the shared band edge, %.0f Hz", k + 1, pdsp::bands::crossoverHz (k)));
@@ -170,7 +170,15 @@ int main()
         in = fine; in.bands[0].params.ratio = 1.0;
         check (has (adviceFor (in), "1:1", Severity::warning), "a ratio of 1:1 does nothing");
         in = fine; in.bands[0].params.ratio = 20.0;
-        check (has (adviceFor (in), "limiting", Severity::warning), "a ratio of 20:1: limiting without look-ahead");
+        check (has (adviceFor (in), "limiting", Severity::warning), "a ratio of 20:1: limiting without a true-peak reading");
+        in = fine; in.bands[0].params.sidechain = true;
+        check (has (adviceFor (in), "SIDECHAIN, but none is connected", Severity::warning), "a band set to the sidechain with none connected: a warning");
+        in.sidechainConnected = true;
+        check (adviceFor (in).empty(), "... and nothing once one is");
+        in = fine; in.lookaheadMs = 2.0; in.bands[0].params.attackMs = 10.0;
+        check (has (adviceFor (in), "longer than the look-ahead", Severity::info) && has (adviceFor (in), "2 ms", Severity::info), "a 10 ms attack with 2 ms of look-ahead: the gain is still falling; the delay is named");
+        in.bands[0].params.attackMs = 2.0;
+        check (! has (adviceFor (in), "longer than the look-ahead", Severity::info), "... but not with an attack of 2 ms");
         in = fine; in.bands[0].reductionDb = 15.0;
         check (has (adviceFor (in), "pump", Severity::warning), "15 dB of reduction: it will pump");
         in = fine; in.bands[0].hiHz = 120.0; in.bands[0].params.attackMs = 1.0;
@@ -205,6 +213,77 @@ int main()
         proc.engine.monitor.delta = 0u;
         check (editor.guide().isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
                "the GUIDE button is there and its text says what the plugin is not for");
+    }
+
+    std::printf ("\nLook-ahead, sidechain and presets, through the processor\n");
+    {
+        AtlasProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        const auto settle = [&] { buffer.clear(); q.processBlock (buffer, midi); juce::MessageManager::getInstance()->runDispatchLoopUntil (100); };
+
+        setValue (q.apvts, id::lookahead, 3.0f); // 5 ms
+        settle();
+        check (q.getLatencySamples() == lookaheadSamples (48000.0, 3), fmt ("look-ahead 5 ms: the host is told %d samples", q.getLatencySamples()));
+        setValue (q.apvts, id::oversampling, 1.0f);
+        settle();
+        check (q.getLatencySamples() > lookaheadSamples (48000.0, 3), fmt ("with 2x oversampling too: %d samples", q.getLatencySamples()));
+
+        // Presets: each applies, keeps the session's own controls, and puts the bands where it says.
+        bool all = true;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && std::strlen (presets()[(size_t) i].purpose) > 20 && std::strlen (presets()[(size_t) i].purpose) <= 140;
+        }
+        check (all && q.getNumPrograms() == (int) presets().size(), fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        int duck = -1;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+            if (q.getProgramName (i) == "Kick Ducks Bass") duck = i;
+        q.setCurrentProgram (duck);
+        const auto d = readParams (q.apvts);
+        check (duck > 0 && d.bands[0].sidechain && d.bands[1].sidechain && ! d.bands[2].sidechain && ! d.bands[2].on && d.lookahead == 3 && d.oversampling == 1,
+               "Kick Ducks Bass puts the sub and bass on the sidechain, the rest off, and leaves the look-ahead and oversampling alone");
+        q.setCurrentProgram (0);
+        check (! readParams (q.apvts).bands[0].sidechain && readParams (q.apvts).bands[2].on, "Init puts every band back to its own signal, on");
+        q.setCurrentProgram (duck);
+        juce::MemoryBlock state;
+        q.getStateInformation (state);
+        AtlasProcessor other;
+        other.setStateInformation (state.getData(), (int) state.getSize());
+        check (other.getCurrentProgram() == duck && readParams (other.apvts).bands[0].sidechain, "the chosen preset and its settings are saved with the session");
+
+        // A sidechain bus: the layout is accepted, and a block with a loud key takes down a band that is listening to it.
+        auto layout = q.getBusesLayout();
+        layout.inputBuses.getReference (1) = juce::AudioChannelSet::stereo();
+        check (q.isBusesLayoutSupported (layout) && q.setBusesLayout (layout), "a stereo sidechain input is accepted");
+        q.setCurrentProgram (duck);
+        setValue (q.apvts, id::lookahead, 0.0f);
+        setValue (q.apvts, id::oversampling, 0.0f);
+        q.prepareToPlay (48000.0, 512);
+        juce::AudioBuffer<float> four (4, 512);
+        const auto measure = [&] (float key)
+        {
+            q.reset();
+            float peak = 0.0f;
+            for (int block = 0; block < 100; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float t = (float) (block * 512 + i) / 48000.0f;
+                    const float bass = 0.05f * std::sin (6.2831853f * 100.0f * t), kick = key * std::sin (6.2831853f * 80.0f * t);
+                    four.setSample (0, i, bass); four.setSample (1, i, bass); four.setSample (2, i, kick); four.setSample (3, i, kick);
+                }
+                q.processBlock (four, midi);
+                if (block >= 90)
+                    for (int i = 0; i < 512; ++i) peak = std::max (peak, std::fabs (four.getSample (0, i)));
+            }
+            return peak;
+        };
+        const float quiet = measure (0.0f), keyed = measure (0.5f);
+        check (q.sidechainConnected.load() && keyed < 0.6f * quiet, fmt ("a 100 Hz bass at the output: %.4f with a silent key, %.4f with a loud kick on the sidechain (the bass ducks)", quiet, keyed));
     }
 
     return test::finish ("UI CHECK");
