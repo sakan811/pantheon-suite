@@ -12,6 +12,7 @@
 #include "DSP/ResonanceFinder.h"
 #include "TestSignals.h"
 
+#include <limits>
 #include <chrono>
 #include <functional>
 
@@ -1402,6 +1403,113 @@ void testLinearPhase()
     }
 }
 
+// Runs an engine over a signal with another track on the sidechain (the same in both of its channels unless `scR` is given).
+Stereo runWithSidechain (const EngineParams& p, const std::vector<float>& in, const std::vector<float>& scL, const std::vector<float>* scR = nullptr,
+                         int block = 512)
+{
+    Engine e;
+    e.prepare (fs, block, p.phase);
+    Stereo out { in, in };
+    const int total = (int) in.size();
+    juce::AudioBuffer<float> buffer (2, block), side (2, block);
+    for (int start = 0; start < total; start += block)
+    {
+        const int n = std::min (block, total - start);
+        buffer.setSize (2, n, false, false, true);
+        side.setSize (2, n, false, false, true);
+        for (int i = 0; i < n; ++i)
+        {
+            buffer.setSample (0, i, in[(size_t) (start + i)]);
+            buffer.setSample (1, i, in[(size_t) (start + i)]);
+            side.setSample (0, i, scL[(size_t) (start + i)]);
+            side.setSample (1, i, (scR != nullptr ? *scR : scL)[(size_t) (start + i)]);
+        }
+        e.process (buffer, p, &side);
+        for (int i = 0; i < n; ++i)
+        {
+            out.l[(size_t) (start + i)] = buffer.getSample (0, i);
+            out.r[(size_t) (start + i)] = buffer.getSample (1, i);
+        }
+    }
+    return out;
+}
+
+void testSidechain()
+{
+    std::printf ("\n[16] Dynamic bands listening to the sidechain\n");
+    const int n = oneSecond + 12000;
+    const auto db = [] (double x) { return std::pow (10.0, x / 20.0); };
+    const auto gainOf = [&] (const Stereo& out, const std::vector<float>& in, int latency = 0)
+    {
+        return toDb (amplitudeAt (out.l, 1000.0, 12000 + latency, oneSecond - latency) / amplitudeAt (in, 1000.0, 12000, oneSecond - latency));
+    };
+
+    EngineParams p;
+    setBand (p, 0, BandType::bell, 1000.0, 0.0, 1.0);
+    p.bands[0].dynamic = true;
+    p.bands[0].external = true;
+    p.bands[0].dyn = { DynMode::above, -30.0, 4.0, -12.0, 2.0, 80.0 };
+
+    const auto quiet = sine (1000.0, db (-40.0), n), loud = sine (1000.0, db (-10.0), n);
+    const std::vector<float> silence ((size_t) n, 0.0f);
+
+    const double ducked = gainOf (runWithSidechain (p, quiet, loud), quiet);
+    check (std::fabs (ducked + 12.0) < 0.3, fmt ("a quiet track is cut by the range while the sidechain is loud in the band: %+.2f dB (want -12.00)", ducked));
+
+    const double own = gainOf (runWithSidechain (p, loud, silence), loud);
+    check (std::fabs (own) < 0.05, fmt ("the band's own level no longer moves it: a loud track under a silent sidechain passes at %+.3f dB", own));
+
+    const double elsewhere = gainOf (runWithSidechain (p, quiet, sine (100.0, 0.5, n)), quiet);
+    check (std::fabs (elsewhere) < 0.05, fmt ("a sidechain that is loud far from the band does not move it (%+.3f dB)", elsewhere));
+
+    // The band's placement is about this track, not the other one: a sidechain on one channel moves a Mid and a Side band alike.
+    for (auto place : { Placement::mid, Placement::right })
+    {
+        auto q = p;
+        q.bands[0].place = place;
+        const double g = toDb (amplitudeAt (runWithSidechain (q, quiet, silence, &loud).r, 1000.0, 12000, oneSecond) / amplitudeAt (quiet, 1000.0, 12000, oneSecond));
+        check (std::fabs (g + 12.0) < 0.3, fmt ("%s band, sidechain on the right channel only: %+.2f dB", place == Placement::mid ? "Mid" : "Right", g));
+    }
+
+    // Without a sidechain the band listens to itself, exactly as a band set to Self does.
+    auto self = p;
+    self.bands[0].external = false;
+    check (identical (runSame (p, loud), runSame (self, loud)), "no sidechain connected: the output is bit for bit that of a band listening to itself");
+
+    // The sidechain is measured, never heard.
+    EngineParams off;
+    const auto noiseIn = noise (5, 0.3, n);
+    const auto through = runWithSidechain (off, noiseIn, loud);
+    check (through.l == noiseIn && through.r == noiseIn, "with no band listening, a loud sidechain leaves the output bit for bit the input");
+    auto staticBand = p;
+    staticBand.bands[0].dynamic = false;
+    staticBand.bands[0].gainDb = 4.0;
+    check (identical (runWithSidechain (staticBand, noiseIn, loud), runSame (staticBand, noiseIn)), "a band that is not dynamic ignores it");
+
+    // Bursts on the sidechain: the same output for any host block.
+    auto bursts = loud;
+    for (int i = 0; i < n; ++i)
+        if ((i / 6000) % 2 == 1)
+            bursts[(size_t) i] = 0.0f;
+    const auto a = runWithSidechain (p, noiseIn, bursts, nullptr, 512), b = runWithSidechain (p, noiseIn, bursts, nullptr, 37);
+    check (identical (a, b), "the output does not depend on the host's block size");
+
+    // A NaN or an inf on the sidechain must not stay in the detector.
+    auto bad = silence;
+    bad[100] = std::numeric_limits<float>::quiet_NaN();
+    bad[200] = std::numeric_limits<float>::infinity();
+    const auto afterBad = runWithSidechain (p, quiet, bad);
+    check (allFinite (afterBad) && std::fabs (gainOf (afterBad, quiet)) < 0.05, "a NaN and an inf on the sidechain are taken as silence");
+
+    // The linear modes: the same gain, on the delayed sound.
+    auto lin = p;
+    lin.phase = PhaseMode::linear;
+    const int latency = latencyFor (PhaseMode::linear);
+    const auto linOut = runWithSidechain (lin, quiet, loud);
+    const double linGain = toDb (amplitudeAt (linOut.l, 1000.0, 12000 + latency, oneSecond - latency) / amplitudeAt (quiet, 1000.0, 12000, oneSecond - latency));
+    check (std::fabs (linGain + 12.0) < 0.3, fmt ("Linear: %+.2f dB (want -12.00)", linGain));
+}
+
 int main()
 {
     testTransparent();
@@ -1419,5 +1527,6 @@ int main()
     testMasking();
     testReferenceMatch();
     testLinearPhase();
+    testSidechain();
     return finish ("IrisTests");
 }
