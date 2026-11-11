@@ -28,7 +28,7 @@ Source/DSP/        no GUI dependencies; covered by Tests/Tests.cpp
   Compressor.h       Channels, BandParams, reductionDb() (the gain computer), Level (the detector), GainFollower (attack / release on the gain)
   LinearSplit.h      the linear-phase split: kernels from the crossovers, FFT overlap-save, the top band as the complement
   Engine.h           the whole signal path, the tick, oversampling, makeup and gain match, solo and delta, meters, latency
-Source/Parameters.h  parameter layout, readParams(), bandRangeHz()                    <- the single source of truth for parameters
+Source/Parameters.h  parameter layout, readParams(), layoutOf(), addSplit() / removeSplit()                 <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/BandView.h` is the display (spectrogram, band edges, PEAK / JUMPS)
 ../../shared/dsp/    SpectrumIssues.h (`pdsp::SpectrumGrid`, `pdsp::IssueFinder`: plain C++, tested by AtlasTests [9]), SpectrumAnalyzer.h, AnalyzerTap.h
 ../../shared/ui/     Spectrogram.h (`ui::Spectrogram`: the ring of rows the display draws)
