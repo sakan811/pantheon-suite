@@ -96,9 +96,10 @@ public:
         {
             const int slot = l.slot[(size_t) b];
             const float x0 = xForHz (l.edgeHz[(size_t) b]), x1 = xForHz (l.edgeHz[(size_t) (b + 1)]);
-            // What the band's compressor is taking off hangs from the top.
-            const float taken = juce::jlimit (0.0f, 1.0f, proc.engine.reductionMeter[(size_t) slot].load() / kMeterRangeDb);
-            g.setColour (colours::amber.withAlpha (0.25f));
+            // What the band's compressor is taking off (or, teal, adding) hangs from the top.
+            const float change = proc.engine.reductionMeter[(size_t) slot].load(); // negative: the band is being lifted
+            const float taken = juce::jlimit (0.0f, 1.0f, std::fabs (change) / kMeterRangeDb);
+            g.setColour ((change < 0.0f ? colours::accent : colours::amber).withAlpha (0.25f));
             g.fillRect (x0 + 1.0f, area.getY(), x1 - x0 - 2.0f, taken * area.getHeight() * 0.4f);
             const bool heard = solo == 0u || (solo & (1u << slot)) != 0u;
             if (! heard)

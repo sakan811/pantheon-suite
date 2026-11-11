@@ -18,7 +18,7 @@ struct BandAdvice
     int number = 1;                // the band as the user counts them, from the bottom of the spectrum
     double loHz = 20.0, hiHz = 20000.0;
     BandParams params;
-    double reductionDb = 0.0;      // what its compressor is taking off now
+    double reductionDb = 0.0;      // what its compressor is taking off now (negative: lifting)
 };
 
 struct AdviceInput
@@ -35,6 +35,7 @@ constexpr double kBassTopHz = 250.0;     // the top of the Bass band: below it a
 constexpr double kFastAttackMs = 5.0;
 constexpr double kLimiterRatio = 10.0;
 constexpr double kHeavyReductionDb = 12.0;
+constexpr double kHeavyLiftDb = 9.0;
 constexpr double kThresholdAtTopDb = -0.5;
 
 inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
@@ -58,23 +59,32 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
             continue;
         const auto name = "Band " + std::to_string (b.number) + ": ";
 
-        if (b.params.thresholdDb >= kThresholdAtTopDb)
+        const bool up = b.params.upward;
+        if (! up && b.params.thresholdDb >= kThresholdAtTopDb)
             warn (name + "THRESH is at the top, so it hardly compresses. Lower it until the meter moves.");
+        if (up && b.params.thresholdDb >= kThresholdAtTopDb)
+            warn (name + "THRESH is at the top, so it lifts the whole band, up to 12 dB. Lower it to the quiet part.");
         if (b.params.ratio <= 1.05)
             warn (name + "RATIO is 1:1, which does nothing. Raise it.");
-        if (b.reductionDb >= kHeavyReductionDb)
+        if (! up && b.reductionDb >= kHeavyReductionDb)
             warn (name + "taking off " + std::to_string ((int) (b.reductionDb + 0.5)) + " dB or more. Raise THRESH or lower RATIO, or it will pump.");
-        if (b.params.ratio >= kLimiterRatio)
+        if (up && -b.reductionDb >= kHeavyLiftDb)
+            warn (name + "lifting " + std::to_string ((int) (-b.reductionDb + 0.5)) + " dB or more: the noise under it comes up too. Raise THRESH or lower RATIO.");
+        if (up && b.params.match)
+            warn (name + "MATCH undoes the lift: it brings the band back to its old loudness. Switch it off.");
+        if (up)
+            info (name + "UPWARD lifts what is quiet (12 dB at most, not past THRESH) and leaves what is 30 dB under it.");
+        if (! up && b.params.ratio >= kLimiterRatio)
             warn (name + "RATIO 10:1 or more is limiting, but Atlas reads no true peak. Use a limiter after it.");
         if (b.params.sidechain && ! in.sidechainConnected)
             warn (name + "listens to the SIDECHAIN, but none is connected, so it listens to itself. Route a track in.");
         if (in.lookaheadMs > 0.0 && b.params.attackMs > in.lookaheadMs + 0.5)
             info (name + "ATTACK (" + std::to_string (static_cast<int> (b.params.attackMs + 0.5)) + " ms) is longer than the look-ahead: it is still turning down at the peak.");
-        if (b.hiHz <= kBassTopHz && b.params.attackMs < kFastAttackMs)
+        if (! up && b.hiHz <= kBassTopHz && b.params.attackMs < kFastAttackMs)
             info (name + "a fast ATTACK on bass follows single cycles and distorts the notes. Try 10 ms or more.");
         if (b.params.channels == Channels::dual)
             info (name + "L/R gives each side its own gain, so the image can drift. Stereo keeps it still.");
-        if (b.params.match)
+        if (b.params.match && ! up)
             info (name + "MATCH brings it back to its old loudness, so it will not seem quieter. MAKEUP adds on top.");
     }
 
@@ -94,13 +104,15 @@ inline const char* guideText()
            "  - One to six bands made on a spectrogram: double-click to split, drag an edge, double-click an edge to join.\n"
            "  - Taming what pokes out in one part of the spectrum: a boomy low end, a harsh upper-mid, a kick that leaps. PEAK and JUMPS "
            "mark where to look, and a click on a JUMPS marker makes that region a band.\n"
+           "  - Lifting what goes quiet: set a band to UPWARD and it brings a part that dips (low-mids that go empty between sections, a top that "
+           "falls away) up towards THRESH, by at most 12 dB, and leaves noise and silence alone.\n"
            "  - Making room: a band can listen to the SIDECHAIN input instead of itself (route the kick there and the bass bands duck when it hits).\n"
            "  - Gluing a sound that moves around: Stereo keeps the image still, M/S compresses the centre and the sides apart.\n"
            "\n"
            "IT IS NOT FOR:\n"
            "  - Limiting peaks: LOOK-AHEAD lets a fast peak be turned down as it arrives, but the level is not a true-peak reading and nothing is clipped. Use a limiter after it.\n"
            "  - Fixing the tonal balance: it turns a band down only while it is loud. For a constant cut or lift use an equaliser (Iris).\n"
-           "  - Adding what is missing: it only takes away. Use Hephaestus to add harmonics.\n"
+           "  - Adding what is missing: UPWARD makes what is there louder; it cannot create energy that is not in the band. Use Hephaestus to add harmonics.\n"
            "  - Doing the work by itself: PEAK and JUMPS are rules of thumb on the input, and a threshold from a marker is a starting point.\n"
            "\n"
            "GOOD TO KNOW: the presets are starting points: their thresholds suit a master around -14 LUFS, so set THRESH where the meter first "

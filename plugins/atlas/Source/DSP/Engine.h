@@ -108,7 +108,7 @@ public:
         std::atomic<unsigned> delta { 0 }; // of these bands only what the compressor changes is heard (output minus input)
     } monitor;
 
-    std::array<std::atomic<float>, kBands> reductionMeter {}; // dB taken off, the most over the last tick
+    std::array<std::atomic<float>, kBands> reductionMeter {}; // dB taken off (negative: lifted), the largest change over the last tick
     std::array<std::atomic<float>, kBands> matchMeter {};     // dB gain match is adding
     std::array<std::atomic<float>, kBands> levelMeter {};     // the level the band's compressor read (dB), the most over the last tick
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
@@ -204,7 +204,7 @@ private:
         double dryHeard = 0.0, dryHeardTarget = 0.0, dryHeardStep = 0.0; // delta: the input is taken back out
         bool idle = true;                            // switched off and at rest: the compressor path is not run
         bool listenSc = false;                       // its compressor reads the sidechain's band (latched at a tick)
-        float maxReduction = 0.0f;
+        float maxReduction = 0.0f;                   // the largest change of the last tick, dB: positive took off, negative lifted
         double maxLevelSq = 0.0;
         std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, kNumOsModes> os; // [1] 2x, [2] 4x
         std::array<IntDelay, 2> dry;
@@ -393,7 +393,7 @@ private:
     void runBand (BandState& s, float* dl, float* dr, const float* sl, const float* sr, float* outL, float* outR, int n) noexcept
     {
         const bool ms = usesMidSide (s.channels);
-        const bool run = s.follower.on || s.grA > 0.0 || s.grB > 0.0;
+        const bool run = s.follower.on || s.grA != 0.0 || s.grB != 0.0;
         float* w[2] = { workBuffer[0].data(), workBuffer[1].data() };
         if (run)
         {
@@ -488,7 +488,7 @@ private:
                 const double level = std::max (s.levelA.push (detA[i], f.detector), s.levelB.push (detB[i], f.detector));
                 loudest = std::max (loudest, level);
                 const double g = f.step (grA, level) - 1.0;
-                most = std::max (most, grA);
+                if (std::fabs (grA) > std::fabs (most)) most = grA;
                 const float xa = s.look[0].push (a[i]), xb = s.look[1].push (b[i]);
                 a[i] = (float) (xa * g);
                 b[i] = (float) (xb * g);
@@ -507,12 +507,13 @@ private:
                 const float xa = s.look[0].push (a[i]), xb = s.look[1].push (b[i]);
                 a[i] = first_ ? (float) (xa * (f.step (grA, la) - 1.0)) : 0.0f;
                 b[i] = second ? (float) (xb * (f.step (grB, lb) - 1.0)) : 0.0f;
-                most = std::max (most, std::max (grA, grB));
+                if (std::fabs (grA) > std::fabs (most)) most = grA;
+                if (std::fabs (grB) > std::fabs (most)) most = grB;
             }
         }
         s.grA = grA;
         s.grB = grB;
-        s.maxReduction = std::max (s.maxReduction, (float) most);
+        if (std::fabs ((float) most) > std::fabs (s.maxReduction)) s.maxReduction = (float) most;
         s.maxLevelSq = std::max (s.maxLevelSq, loudest);
     }
 

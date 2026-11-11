@@ -21,9 +21,9 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 4 + 2 * kCrossovers + 9 * kBands,
-           fmt ("%d parameters: phase, oversampling, output, look-ahead, the %d splits (frequency and on) and 9 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
-    check (channelNames.size() == kNumChannelModes && oversamplingNames.size() == kNumOsModes && lookaheadNames().size() == kNumLookahead && listenNames.size() == 2, "the choice lists match the engine's modes");
+    check (proc.getParameters().size() == 4 + 2 * kCrossovers + 10 * kBands,
+           fmt ("%d parameters: phase, oversampling, output, look-ahead, the %d splits (frequency and on) and 10 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
+    check (channelNames.size() == kNumChannelModes && oversamplingNames.size() == kNumOsModes && lookaheadNames().size() == kNumLookahead && listenNames.size() == 2 && directionNames.size() == 2, "the choice lists match the engine's modes");
     for (int k = 0; k < kCrossovers; ++k)
         check (std::fabs (proc.apvts.getRawParameterValue (id::crossover[(size_t) k])->load() - (float) pdsp::bands::crossoverHz (k)) < 0.5f,
                fmt ("crossover %d starts on the shared band edge, %.0f Hz", k + 1, pdsp::bands::crossoverHz (k)));
@@ -175,6 +175,14 @@ int main()
         check (has (adviceFor (in), "SIDECHAIN, but none is connected", Severity::warning), "a band set to the sidechain with none connected: a warning");
         in.sidechainConnected = true;
         check (adviceFor (in).empty(), "... and nothing once one is");
+        in = fine; in.bands[0].params.upward = true; in.bands[0].params.thresholdDb = -24.0;
+        check (has (adviceFor (in), "UPWARD lifts what is quiet", Severity::info) && adviceFor (in).size() == 1, "an upward band: it is said what it does, and nothing else");
+        in.bands[0].params.thresholdDb = 0.0;
+        check (has (adviceFor (in), "lifts the whole band", Severity::warning) && ! has (adviceFor (in), "hardly compresses", Severity::warning), "an upward band with THRESH at the top lifts everything");
+        in = fine; in.bands[0].params.upward = true; in.bands[0].params.match = true; in.bands[0].reductionDb = -10.0;
+        check (has (adviceFor (in), "MATCH undoes the lift", Severity::warning) && has (adviceFor (in), "lifting 10 dB", Severity::warning), "upward with MATCH on, and 10 dB of lift: both warned");
+        in = fine; in.bands[0].params.upward = true; in.bands[0].params.ratio = 20.0;
+        check (! has (adviceFor (in), "limiting", Severity::warning), "a ratio of 20:1 upward is not limiting");
         in = fine; in.lookaheadMs = 2.0; in.bands[0].params.attackMs = 10.0;
         check (has (adviceFor (in), "longer than the look-ahead", Severity::info) && has (adviceFor (in), "2 ms", Severity::info), "a 10 ms attack with 2 ms of look-ahead: the gain is still falling; the delay is named");
         in.bands[0].params.attackMs = 2.0;
@@ -191,16 +199,17 @@ int main()
         check (has (adviceFor (in), "64 ms", Severity::info), "Linear phase: the delay is named");
 
         size_t longest = 0;
-        for (int mask = 0; mask < 1024; ++mask)
+        for (int mask = 0; mask < 2048; ++mask)
         {
             AdviceInput all;
             BandAdvice b = band;
             b.number = 6; b.hiHz = (mask & 1) ? 120.0 : 2000.0;
             b.params.on = mask & 2; b.params.thresholdDb = (mask & 4) ? 0.0 : -20.0; b.params.ratio = (mask & 8) ? 1.0 : ((mask & 16) ? 20.0 : 3.0);
             b.params.attackMs = (mask & 32) ? 1.0 : 10.0; b.params.channels = (mask & 64) ? Channels::dual : Channels::stereo; b.params.match = mask & 128;
-            b.reductionDb = (mask & 256) ? 99.0 : 0.0;
+            b.reductionDb = (mask & 256) ? 99.0 : ((mask & 512) ? -99.0 : 0.0);
+            b.params.upward = mask & 128 ? false : (mask & 4) != 0;
             all.bands = { b };
-            all.delta = mask & 512; all.solo = mask & 512; all.phase = PhaseMode::linear; all.latencyMs = 999.0;
+            all.delta = mask & 1024; all.solo = mask & 1024; all.phase = PhaseMode::linear; all.latencyMs = 999.0;
             for (auto& n : adviceFor (all))
                 longest = std::max (longest, n.text.size());
         }

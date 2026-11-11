@@ -12,7 +12,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce
 cmake --build build --target AtlasTests -j 10 && ./build/AtlasTests_artefacts/Release/AtlasTests
 cmake --build build --target Atlas_VST3 -j 10
 cmake --build build --target AtlasUiCheck && ./build/AtlasUiCheck_artefacts/Release/AtlasUiCheck
-cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Release/AtlasSnapshot docs/screenshot.png solo=62 delta=8 os=1
+cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Release/AtlasSnapshot docs/screenshot.png solo=62 delta=8 os=1 upward=3
 ```
 
 - Building the plugin targets does **not** install them (`ATLAS_INSTALL_AFTER_BUILD`, off by default).
@@ -69,6 +69,8 @@ same part of the spectrum in both modes (test [1]). The top band is the delayed 
 the delayed input whatever truncating the kernels did: keep it that way. The frame is `4 x half`, which is why the kernel's delay
 is `(-j)^bin` and needs no table; changing the sizes independently breaks that. Sizes scale with the sample rate (`scaleFor`).
 The crossovers stop at 40 Hz because the kernels (+-2048 samples at 48 kHz) cannot resolve a lower one.
+
+**Upward compression** is the same follower with a negative reduction: `gr` (dB) is positive for a band turning down and negative for one lifting, `GainFollower::step` asks `boostDb` instead of `reductionDb` when `upward`, and the gain is `exp (gr * -0.115...)` for either sign. The attack is the time the gain takes to *give way* to a louder level (reduction growing, or lift shrinking: `wanted > gr` in both), the release the time it takes to come back: do not swap them for upward, the one condition covers both. The cap (`kUpwardMaxBoostDb`) and the gate (`kUpwardGateDb` + `kUpwardFadeDb` under the threshold) are what keep it from lifting noise: a lift without them boosts silence by the cap. Everything that read `gr > 0` reads `!= 0` or `fabs` (`run`, `most`, the rest snap in `step`), the meter (`reductionMeter`, `maxReduction`) is signed (the largest change of the tick), and the editor and the display read its sign. Downward bands are the old compressor bit for bit (tests [2], [6]). The level starts from zero, so an upward band lifts for the first milliseconds of any sound that starts from silence: that is why test [12] settles before comparing.
 
 **Look-ahead** is a delay of the audio *relative to the detector*, inside the compressor, not a delay of the detector's input: `compress()` reads the level from `detA` / `detB` and multiplies the signal that has waited in `BandState::look` (at the compressors' rate, so `lookSamples << osMode`); the dry band waits `osLatency + lookSamples` (`dry`). Everything that sums is therefore late by the same amount and `latencySamples` is the phase mode's + the oversampling's + the look-ahead's. It is a choice (`kLookaheadMs`, named by `lookaheadNames()`) because the latency must not move with a knob; a change goes through `configure()` like the other modes. With the look-ahead off `IntDelay::push` returns its input, so the compressor is the old one bit for bit: keep that (tests [2] and [6] pin it).
 

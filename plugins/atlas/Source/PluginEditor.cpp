@@ -9,7 +9,7 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int stripHeight = 510;
+constexpr int stripHeight = 540;
 constexpr int stripGap = 8;
 constexpr int stripWidth = 196;
 constexpr int viewHeight = 230;
@@ -29,6 +29,10 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
       listen (p.apvts, bandIds (band).listen,
               "What this band's compressor listens to.\nSelf: the band itself.\nSidechain: the same band of the sidechain input (another track, routed in the host), so that "
               "track decides when this band is turned down. With no sidechain connected it listens to itself."),
+      direction (p.apvts, bandIds (band).direction,
+                 "Downward: turns the band down while it is over THRESH (an ordinary compressor).\nUpward: lifts the band while it is under THRESH, by (1 - 1 / ratio) dB for every dB it is "
+                 "under, up to 12 dB, and leaves what is more than 30 dB under it alone (noise, silence). ATTACK is how fast the lift gives way to a louder band; RELEASE how "
+                 "fast it comes back. It makes what is there louder; it cannot add what is missing."),
       threshold (p.apvts, bandIds (band).threshold, "THRESH", "The level (peak, in dB) of the band above which it is turned down. The knee is 6 dB wide.", ui::Knob::Layout::below),
       ratio (p.apvts, bandIds (band).ratio, "RATIO", "How many dB the band has to rise past the threshold for 1 dB more to come out.", ui::Knob::Layout::below),
       attack (p.apvts, bandIds (band).attack, "ATTACK", "How fast the gain goes down.", ui::Knob::Layout::below),
@@ -193,6 +197,8 @@ void AtlasEditor::layoutStrips()
         s.channels.setBounds (r.removeFromTop (24));
         r.removeFromTop (6);
         s.listen.setBounds (r.removeFromTop (24));
+        r.removeFromTop (6);
+        s.direction.setBounds (r.removeFromTop (24));
         r.removeFromTop (8);
         s.meter = r.removeFromTop (24);
         r.removeFromTop (6);
@@ -246,13 +252,14 @@ void AtlasEditor::paint (juce::Graphics& g)
         // The reduction meter: a bar that grows from the right, and the number.
         const auto m = s.meter.toFloat();
         hw::drawGlass (g, m, 3.0f, colours::amber);
-        const float share = juce::jlimit (0.0f, 1.0f, s.shownReduction / gui::kMeterRangeDb);
-        g.setColour (colours::amber.withAlpha (0.55f));
+        const float share = juce::jlimit (0.0f, 1.0f, std::fabs (s.shownReduction) / gui::kMeterRangeDb);
+        g.setColour ((s.shownReduction < 0.0f ? colours::accent : colours::amber).withAlpha (0.55f)); // teal: lifting
         const auto bar = m.reduced (3.0f).withTrimmedLeft (m.getWidth() * 0.55f); // the left of the window is the read-out's
         g.fillRect (bar.withTrimmedLeft (bar.getWidth() * (1.0f - share)));
         g.setFont (ui::lcdFont (11.5f));
         g.setColour (colours::amber);
-        juce::String text = s.shownReduction < 0.05f ? juce::String ("0.0 dB") : "-" + juce::String (s.shownReduction, 1) + " dB";
+        juce::String text = std::fabs (s.shownReduction) < 0.05f ? juce::String ("0.0 dB")
+                                                                  : (s.shownReduction > 0.0f ? "-" : "+") + juce::String (std::fabs (s.shownReduction), 1) + " dB";
         if ((delta & (1u << b)) != 0u)
             text = "DELTA  " + text;
         else if (const float matched = proc.engine.matchMeter[(size_t) b].load(); std::fabs (matched) > 0.05f)
@@ -272,7 +279,8 @@ void AtlasEditor::timerCallback()
         s.delta.setToggleState ((delta & (1u << b)) != 0u, juce::dontSendNotification);
         // Up at once, down slowly, so a short reduction can be read.
         const float now = proc.engine.reductionMeter[(size_t) b].load();
-        s.shownReduction = std::max (now, s.shownReduction - gui::kMeterRangeDb / (float) kTimerHz);
+        const float fall = gui::kMeterRangeDb / (float) kTimerHz;
+        s.shownReduction = std::fabs (now) >= std::fabs (s.shownReduction) ? now : s.shownReduction + juce::jlimit (-fall, fall, now - s.shownReduction);
     }
     if (const int prog = proc.getCurrentProgram(); prog != lastProgram)
     {
