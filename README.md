@@ -9,6 +9,7 @@ under the AGPL-3.0-or-later. It holds source only: no binaries or downloads.
 | [Hephaestus Forge](plugins/hephaestus/README.md) | A harmonic forge for mastering: a saturator that fills in harmonics and missing fundamentals for tonal balance. |
 | [Harmonia Pitch](plugins/harmonia/README.md) | Natural-sounding pitch correction for solo vocals. |
 | [Iris Prism](plugins/iris/README.md) | A dynamic equaliser: bands on left, right, mid or side, a clean or saturated mode, delta and gain match, solo for bands, curves and frequency regions, and a reference to match another track's shape. |
+| [Atlas Span](plugins/atlas/README.md) | A six-band compressor on the six main bands of music: each band on stereo, L/R, M/S or one of them, with its own solo, delta and gain match; a zero-latency or linear-phase split, and oversampling. |
 
 There is also one standalone app:
 
