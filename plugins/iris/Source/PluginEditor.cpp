@@ -467,7 +467,9 @@ void IrisEditor::paint (juce::Graphics& g)
             g.drawVerticalLine (juce::roundToInt (bar.getCentreX()), bar.getY() - 2.0f, bar.getBottom() + 2.0f);
             g.setColour (colours::amber);
             g.setFont (ui::lcdFont (11.5f));
-            g.drawText ("LEVEL " + (level < -100.0f ? juce::String ("---") : juce::String (level, 1)) + " dB   GAIN " + (live >= 0.0f ? "+" : "") + juce::String (live, 1) + " dB",
+            // The level is the sidechain's while the band listens to one that is connected: say so, or the reading looks wrong against the display.
+            const bool keyed = proc.apvts.getRawParameterValue (bandIds (band).listen)->load() > 0.5f && proc.sidechainConnected.load (std::memory_order_relaxed);
+            g.drawText (juce::String (keyed ? "SC LEVEL " : "LEVEL ") + (level < -100.0f ? juce::String ("---") : juce::String (level, 1)) + " dB   GAIN " + (live >= 0.0f ? "+" : "") + juce::String (live, 1) + " dB",
                         dynReadout.reduced (8, 0), juce::Justification::centredLeft, false);
         }
         else
