@@ -1365,6 +1365,43 @@ void testMetersRecover()
     check (rig.eng.inPeak.load() > 0.1f, "IN meter reads a normal signal");
     rig.eng.clearMeters();
     check (rig.eng.inPeak.load() <= 0.0f && rig.eng.outPeak.load() <= 0.0f, "clearMeters() zeroes both meters");
+
+    // The sound itself has to come back too: a NaN that reaches a filter, an envelope or the gain match stays there for good.
+    // Every kind of band, Gain Match and mid/side, so each piece of state that could keep one is in the path.
+    for (const bool midSide : { false, true })
+    {
+        Rig bad, good;
+        for (auto* r : { &bad, &good })
+        {
+            r->p.midSide = midSide;
+            r->p.match = true;
+            r->p.bands[0].drive = 6.0;
+            r->p.bands[1] = fillBand (extendParams());
+            r->p.bands[2] = fillBand (extendParams());
+            r->p.bands[2].fill.character = Character::clean;
+            r->p.bands[3] = fillBand (extendParams());
+            r->p.bands[3].fill.character = Character::octave;
+        }
+        auto first = sines ({ { 70.0, 0.4 }, { 900.0, 0.2 } }, 4800);
+        const auto clean = first;
+        first[1000] = std::numeric_limits<float>::quiet_NaN();
+        first[2000] = std::numeric_limits<float>::infinity();
+        first[3000] = -std::numeric_limits<float>::infinity();
+        bad.run (first);
+        good.run (clean);
+        const auto after = sines ({ { 70.0, 0.4 }, { 900.0, 0.2 } }, 48000 * 3);
+        const auto a = bad.run (after), b = good.run (after);
+        bool finite = true;
+        float worst = 0.0f;
+        for (size_t i = 0; i < a.l.size(); ++i)
+        {
+            finite = finite && std::isfinite (a.l[i]) && std::isfinite (a.r[i]);
+            if (i >= a.l.size() - 48000 && finite)
+                worst = std::max ({ worst, std::fabs (a.l[i] - b.l[i]), std::fabs (a.r[i] - b.r[i]) });
+        }
+        check (finite && worst < 1.0e-3f, fmt ("%s: after a NaN and two infs the output is finite and back to what it would have been (max difference %.1e in the third second)",
+                                               midSide ? "mid/side" : "stereo", (double) worst));
+    }
 }
 
 // ------------------------------------------------------------------------------------------

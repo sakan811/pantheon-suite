@@ -258,6 +258,7 @@ state of that is tracked in the repository's [CLAUDE.md](../../CLAUDE.md)). Run 
 | Gain Match | a -4.9 dB level drop becomes **0.0 dB** |
 | Spectrum analyzer | a bin-centred -6.02 dBFS sine reads **-6.02 dB**; 4 kHz with 4.5 dB/oct tilt reads +2.98 dB (expected +2.98); off-bin worst case -7.44 dB (Hann scalloping, < 1.5 dB); left-only signal reads -3 dB (L/R power is averaged) |
 | 600 randomised blocks (all params incl. six random bands, block sizes 1-1500, mono/stereo, mode switches) | always finite |
+| A NaN and two infs in the input (saturate, Warm, Clean and Octave bands, Gain Match; stereo and mid/side) | taken as silence: the output stays finite and, two seconds on, is within **8.3e-6** of what it would have been without them |
 | CPU, 10 s stereo, six bands on (4 saturate, 2 adaptive fill with Rebuild) | 2 % (no OS) -> 15 % of one core (8x), Apple M4 |
 
 | Verified | Not yet verified |

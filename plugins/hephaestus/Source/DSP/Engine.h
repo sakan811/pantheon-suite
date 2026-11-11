@@ -161,6 +161,16 @@ public:
         const int total = buffer.getNumSamples();
         const int nCh = std::min (buffer.getNumChannels(), maxChannels);
 
+        // An inf or NaN would stay for good in the band filters, the fill's envelopes and the gain match (the output never came back:
+        // test [9b]), so it is replaced by silence on the way in. Finite samples are not touched.
+        for (int c = 0; c < nCh; ++c)
+        {
+            float* x = buffer.getWritePointer (c);
+            for (int i = 0; i < total; ++i)
+                if (! std::isfinite (x[i]))
+                    x[i] = 0.0f;
+        }
+
         for (int start = 0; start < total; start += maxBlock)
             processChunk (buffer, start, std::min (maxBlock, total - start), nCh, p);
     }
