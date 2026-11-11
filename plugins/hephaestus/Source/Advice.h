@@ -5,22 +5,15 @@
 
 #include "DSP/Band.h"
 #include "DSP/FundamentalEngine.h"
+#include <pantheon/ui/Note.h>
 #include <string>
 #include <vector>
 
 namespace hep
 {
 // What the editor tells the user about the band it shows and about the session, so that a tool is not used for a job it
-// cannot do: plain C++ with no JUCE in it, so the rules can be tested without a window (test [13]). Every rule here restates
+// cannot do (the notes are the kit's, shared/ui Note.h): plain C++ with no JUCE in it, so the rules can be tested without a window (test [13]). Every rule here restates
 // a limit that the README measured ("Limitations"); a new rule needs its number there too.
-enum class Severity { warning, info };
-
-struct Note
-{
-    Severity severity;
-    std::string text; // one line of the band panel: at most kMaxNoteChars, which is what its width holds
-};
-
 // The values the rules read, copied out of the parameters by the editor.
 struct AdviceInput
 {
@@ -46,17 +39,15 @@ struct AdviceInput
 constexpr double kBassTopHz = 250.0;
 // Above this a fill band reaches the mids, where one note at a time is no longer the usual case.
 constexpr double kOneNoteTopHz = 400.0;
-// What one line of the band panel holds at its font size (test [13] holds every note to it).
-constexpr int kMaxNoteChars = 108;
 // Drive from which a saturate band stops being subtle.
 constexpr double kHeavyDriveDb = 12.0;
 
 // Warnings first, then information, each group in the order of how likely it is to matter. The editor shows the first few.
-inline std::vector<Note> adviceFor (const AdviceInput& in)
+inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
 {
-    std::vector<Note> warnings, infos;
-    const auto warn = [&] (std::string t) { warnings.push_back ({ Severity::warning, std::move (t) }); };
-    const auto info = [&] (std::string t) { infos.push_back ({ Severity::info, std::move (t) }); };
+    std::vector<ui::Note> notes;
+    const auto warn = [&] (std::string t) { notes.push_back ({ ui::Severity::warning, std::move (t) }); };
+    const auto info = [&] (std::string t) { notes.push_back ({ ui::Severity::info, std::move (t) }); };
 
     // What makes the output something other than the processed mix comes first: it is the commonest "why does it sound wrong".
     if (in.delta)
@@ -108,8 +99,7 @@ inline std::vector<Note> adviceFor (const AdviceInput& in)
     if (in.mixPercent < 99.5)
         info ("MIX is below 100 %: the dry signal is blended in, which is the usual way to ease a band off.");
 
-    warnings.insert (warnings.end(), infos.begin(), infos.end());
-    return warnings;
+    return ui::ordered (std::move (notes));
 }
 
 // The guide behind the GUIDE button: what Hephaestus is for and, as important, what it is not for.
