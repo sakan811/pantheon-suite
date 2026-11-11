@@ -47,6 +47,7 @@ struct DynamicsParams
     double ratio = 4.0;
     double rangeDb = -6.0;     // the most the gain moves by while the band is fully engaged (sign = direction)
     double attackMs = 10.0, releaseMs = 120.0;
+    bool autoTimes = false;    // attack and release follow the band's frequency and the programme (Dynamics.h, AutoTimes) instead of the two knobs
 };
 
 // Everything one band is told. `freq`, `gainDb` and `q` are targets: the engine glides to them.

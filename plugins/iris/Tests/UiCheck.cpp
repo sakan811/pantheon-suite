@@ -87,7 +87,7 @@ int main()
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
 
     std::printf ("\nParameters\n");
-    check (proc.getParameters().size() == 6 + numCrossovers + 15 * maxBands, fmt ("%d parameters: %d global (six settings and the %d region crossovers) and 15 for each of %d bands", proc.getParameters().size(), 6 + numCrossovers, numCrossovers, maxBands));
+    check (proc.getParameters().size() == 6 + numCrossovers + 16 * maxBands, fmt ("%d parameters: %d global (six settings and the %d region crossovers) and 16 for each of %d bands", proc.getParameters().size(), 6 + numCrossovers, numCrossovers, maxBands));
     bool presetsOk = true;
     for (auto& preset : presets())
         for (auto& [pid, v] : preset.values)

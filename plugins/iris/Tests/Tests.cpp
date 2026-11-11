@@ -284,6 +284,35 @@ void testDynamics()
     check (afterEarly < -6.0 && std::fabs (afterLate - wantLate) < 0.7,
            fmt ("release 400 ms: still %+.1f dB 30 ms after the signal stops, %+.2f dB 900 ms later (an exponential gives %+.2f)", afterEarly, afterLate, wantLate));
 
+    // AUTO: the times come from the band's frequency and from how long the signal stayed.
+    {
+        const auto fast = AutoTimes::forFrequency (4000.0), middle = AutoTimes::forFrequency (200.0), slow = AutoTimes::forFrequency (40.0);
+        check (fast.attackMs < middle.attackMs && middle.attackMs < slow.attackMs && fast.releaseMs < middle.releaseMs && middle.releaseMs < slow.releaseMs,
+               fmt ("auto times: %.0f / %.0f ms at 4 kHz, %.0f / %.0f ms at 200 Hz, %.0f / %.0f ms at 40 Hz", fast.attackMs, fast.releaseMs, middle.attackMs, middle.releaseMs, slow.attackMs, slow.releaseMs));
+
+        p.bands[0].dyn = { DynMode::above, -30.0, 20.0, -12.0, 100.0, 400.0 };
+        p.bands[0].dyn.autoTimes = true;
+        const auto gainAfter = [&] (double loudSeconds, double after, double* engaged)
+        {
+            auto x = sine (1000.0, 0.001, n);
+            const int from = oneSecond / 2, to = from + (int) (loudSeconds * fs);
+            for (int i = from; i < to; ++i)
+                x[(size_t) i] = loudTone[(size_t) i];
+            const auto y = runSame (p, x);
+            const auto g = [&] (int a) { return toDb (amplitudeAt (y.l, 1000.0, a, 480) / amplitudeAt (x, 1000.0, a, 480)); };
+            if (engaged != nullptr)
+                *engaged = g (to - 480);
+            return g (to + (int) (after * fs));
+        };
+        double hitEngaged = 0.0, heldEngaged = 0.0;
+        const double afterHit = gainAfter (0.03, 0.2, &hitEngaged), afterHeld = gainAfter (1.5, 0.2, &heldEngaged);
+        check (hitEngaged < -9.0 && afterHit > -1.5,
+               fmt ("auto, a 30 ms hit: %+.1f dB by its end (the knobs' 100 ms attack is not used), back at %+.2f dB 200 ms later", hitEngaged, afterHit));
+        check (heldEngaged < -11.5 && afterHeld < -5.0,
+               fmt ("auto, held for 1.5 s: %+.1f dB, and still %+.1f dB 200 ms after it stops (the release is longer after a long passage)", heldEngaged, afterHeld));
+        p.bands[0].dyn.autoTimes = false;
+    }
+
     // The editor draws the live gain from these.
     Engine e;
     e.prepare (fs, 512);

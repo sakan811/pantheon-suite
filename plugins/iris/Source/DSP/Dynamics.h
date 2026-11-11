@@ -71,6 +71,33 @@ inline double dynamicOffsetDb (const DynamicsParams& p, double levelDb) noexcept
     return std::copysign (std::min (moved, limit), p.rangeDb);
 }
 
+// AUTO: the times a dynamic band uses when it is left to choose them. They come from two things.
+// The band's frequency: the times are counted in cycles, so a band at 60 Hz is not asked to move within one cycle of what it
+// hears (which is distortion) and a band at 8 kHz is not as slow as one at 60 Hz. And the programme: two gains are run, a
+// fast one and a slow one that only builds up while the signal stays past the threshold, and the larger is used. A single
+// hit is let go quickly; a held note or a dense passage is let go slowly, so the gain does not pump between its peaks.
+struct AutoTimes
+{
+    static constexpr double kAttackCycles = 4.0, kReleaseCycles = 40.0;
+    static constexpr double kMinAttackMs = 3.0, kMaxAttackMs = 80.0;
+    static constexpr double kMinReleaseMs = 60.0, kMaxReleaseMs = 600.0;
+    static constexpr double kSlowRatio = 6.0;  // the slow gain's release against the fast one's
+    static constexpr double kSlowBuild = 4.0;  // and how long it takes to build up, in fast releases: a single hit leaves little of it
+
+    double attackMs = 10.0, releaseMs = 120.0, slowAttackMs = 480.0, slowReleaseMs = 720.0;
+
+    static AutoTimes forFrequency (double hz) noexcept
+    {
+        const double cycleMs = 1000.0 / std::max (hz, 1.0);
+        AutoTimes t;
+        t.attackMs = std::clamp (kAttackCycles * cycleMs, kMinAttackMs, kMaxAttackMs);
+        t.releaseMs = std::clamp (kReleaseCycles * cycleMs, kMinReleaseMs, kMaxReleaseMs);
+        t.slowAttackMs = kSlowBuild * t.releaseMs;
+        t.slowReleaseMs = kSlowRatio * t.releaseMs;
+        return t;
+    }
+};
+
 // Whether a dynamic band is doing anything, over the last few seconds of what it heard: a band whose level never reaches its
 // threshold is a static band that costs a detector, and one that sits at its full range all the time is a static band at
 // GAIN + RANGE. Fed from the meters (the editor's timer), so it lives outside the audio thread and allocates nothing.

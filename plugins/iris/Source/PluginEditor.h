@@ -41,7 +41,7 @@ private:
     ui::Knob freqKnob, gainKnob, qKnob;
     ui::Knob thresholdKnob, ratioKnob, rangeKnob, attackKnob, releaseKnob;
     std::array<std::unique_ptr<ui::Choice>, iris::maxBands> typeBoxes, placeBoxes, slopeBoxes, dynModeBoxes, listenBoxes;
-    std::array<std::unique_ptr<ui::Toggle>, iris::maxBands> dynToggles;
+    std::array<std::unique_ptr<ui::Toggle>, iris::maxBands> dynToggles, autoToggles;
     juce::TextButton removeButton { "REMOVE" }, addButton { "ADD BAND" }, pasteButton { "PASTE" }, soloBandButton { "BAND" }, soloCurveButton { "CURVE" };
     std::array<juce::Rectangle<int>, iris::maxBands> chipBounds;
     int shownSignature = -1;
