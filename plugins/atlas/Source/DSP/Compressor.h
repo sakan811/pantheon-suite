@@ -30,10 +30,16 @@ struct BandParams
     double attackMs = 10.0, releaseMs = 120.0;
     double makeupDb = 0.0;
     bool match = false; // the band's output is brought back to the loudness of its input
+    bool upward = false;    // it lifts what is under the threshold instead of turning down what is over it (up to kUpwardMaxBoostDb, and not what is far under it)
     bool sidechain = false; // its compressor listens to the same band of the sidechain input instead of its own (itself again when none is connected)
 };
 
 inline constexpr double kKneeDb = 6.0;
+
+// Upward compression lifts a level that is under the threshold towards it, by (1 - 1 / ratio) dB for every dB it is under, through the
+// same 6 dB knee, never by more than kUpwardMaxBoostDb, and not at all for a level more than kUpwardGateDb + kUpwardFadeDb under
+// the threshold: that is noise and silence, and lifting them is what makes an upward compressor hiss. Between the two it fades out.
+inline constexpr double kUpwardMaxBoostDb = 12.0, kUpwardGateDb = 30.0, kUpwardFadeDb = 10.0;
 
 // The gain computer: how many dB are taken off at a level (peak, dB). Past the threshold the level rises by 1 / ratio dB per dB,
 // through a 6 dB soft knee. `slope` is 1 - 1 / ratio.
@@ -45,6 +51,19 @@ inline double reductionDb (double levelDb, double thresholdDb, double slope) noe
     if (over > -kKneeDb * 0.5)
         return slope * (over + kKneeDb * 0.5) * (over + kKneeDb * 0.5) / (2.0 * kKneeDb);
     return 0.0;
+}
+
+// How many dB an upward compressor adds at a level (peak, dB): the mirror of reductionDb.
+inline double boostDb (double levelDb, double thresholdDb, double slope) noexcept
+{
+    const double under = thresholdDb - levelDb;
+    double boost = 0.0;
+    if (under >= kKneeDb * 0.5)
+        boost = slope * under;
+    else if (under > -kKneeDb * 0.5)
+        boost = slope * (under + kKneeDb * 0.5) * (under + kKneeDb * 0.5) / (2.0 * kKneeDb);
+    boost = std::min (boost, kUpwardMaxBoostDb);
+    return boost * std::clamp ((kUpwardGateDb + kUpwardFadeDb - under) / kUpwardFadeDb, 0.0, 1.0);
 }
 
 // How loud one signal of a band is: its mean square, smoothed by two one-pole stages of half a cycle of the band's lowest
@@ -69,6 +88,8 @@ struct GainFollower
 {
     double thresholdDb = 0.0, slope = 0.0, attack = 1.0, release = 1.0;
     double floorSq = 1.0; // the squared level under which the gain computer asks for nothing (the bottom of the knee): no logarithm below it
+    double ceilSq = 1.0, gateSq = 0.0; // upward: the squared level over which it asks for nothing (the top of the knee), and under which (the gate)
+    bool upward = false;
     double detector = 1.0; // the level's smoothing coefficient
     bool on = false;
 
@@ -81,16 +102,28 @@ struct GainFollower
         attack = 1.0 - std::exp (-1.0 / (std::max (p.attackMs, 0.01) * 0.001 * sampleRate));
         release = 1.0 - std::exp (-1.0 / (std::max (p.releaseMs, 0.01) * 0.001 * sampleRate));
         floorSq = std::pow (10.0, (p.thresholdDb - kKneeDb * 0.5) / 10.0);
+        upward = p.upward;
+        ceilSq = std::pow (10.0, (p.thresholdDb + kKneeDb * 0.5) / 10.0);
+        gateSq = std::pow (10.0, (p.thresholdDb - kUpwardGateDb - kUpwardFadeDb) / 10.0);
     }
 
-    // Steps the reduction `gr` (dB, >= 0) for a sample at the squared level `levelSq`, and returns the gain to apply.
+    // Steps the reduction `gr` (dB: positive takes off, negative lifts, which only an upward band does) for a sample at the squared level
+    // `levelSq`, and returns the gain to apply. The attack is the time the gain takes to give way to a louder level (a downward band turns
+    // down, an upward one stops lifting), the release the time it takes to come back.
     inline double step (double& gr, double levelSq) const noexcept
     {
-        const double wanted = on && levelSq > floorSq ? reductionDb (10.0 * std::log10 (levelSq), thresholdDb, slope) : 0.0;
-        gr += (wanted > gr ? attack : release) * (wanted - gr);
-        if (gr < 1.0e-7)
+        double wanted = 0.0;
+        if (on)
         {
-            if (wanted <= 0.0)
+            if (! upward)
+                wanted = levelSq > floorSq ? reductionDb (10.0 * std::log10 (levelSq), thresholdDb, slope) : 0.0;
+            else if (levelSq < ceilSq && levelSq > gateSq)
+                wanted = -boostDb (10.0 * std::log10 (levelSq), thresholdDb, slope);
+        }
+        gr += (wanted > gr ? attack : release) * (wanted - gr);
+        if (std::fabs (gr) < 1.0e-7)
+        {
+            if (upward ? wanted >= 0.0 : wanted <= 0.0)
                 gr = 0.0; // lets a band that is switched off come to rest, and keeps denormals out
             return 1.0;
         }

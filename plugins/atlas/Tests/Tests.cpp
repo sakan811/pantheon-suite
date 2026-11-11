@@ -714,6 +714,89 @@ void testSidechain()
         finite = finite && std::isfinite (outBad.l[i]) && std::isfinite (outBad.r[i]);
     check (finite, "a NaN and an inf in the key: the output stays finite");
 }
+
+void testUpward()
+{
+    std::printf ("\n[12] Upward compression\n");
+    check (std::fabs (boostDb (-40.0, -30.0, 0.5) - 5.0) < 1.0e-12 && boostDb (-20.0, -30.0, 0.5) == 0.0 && std::fabs (boostDb (-30.0, -30.0, 0.5) - 0.375) < 1.0e-12
+               && std::fabs (boostDb (-50.0, -30.0, 0.95) - kUpwardMaxBoostDb) < 1.0e-12 && boostDb (-75.0, -30.0, 0.5) == 0.0 && std::fabs (boostDb (-65.0, -30.0, 0.5) - 6.0) < 1.0e-12,
+           "gain computer at 2:1 and -30 dB: +5 dB at 10 dB under, 0 dB over the knee, +0.375 dB at the threshold (the knee), the cap of 12 dB at 20 dB under with 20:1, "
+           "0 dB at 45 dB under (the gate), half of the cap at 35 dB under (the fade)");
+
+    const auto upwardOnly = [] (double thresholdDb, double ratio, double attackMs = 1.0, double releaseMs = 50.0)
+    {
+        auto p = allOff();
+        p.bands[3] = { true, Channels::stereo, thresholdDb, ratio, attackMs, releaseMs, 0.0, false };
+        p.bands[3].upward = true;
+        return p;
+    };
+    const auto gainFor = [&] (const EngineParams& p, double toneDb)
+    {
+        // The band's own gain (soloed), as in test [2]: the tone through the band without and with the compressor.
+        const auto tone = sine (1000.0, std::pow (10.0, toneDb / 20.0), second);
+        const auto dry = runSolo (allOff(), 1u << 3, tone, tone), out = runSolo (p, 1u << 3, tone, tone);
+        const double levelDb = toDb (amplitudeAt (dry.l, 1000.0, second / 2, second / 4));
+        return std::pair { levelDb, toDb (amplitudeAt (out.l, 1000.0, second / 2, second / 4) / amplitudeAt (dry.l, 1000.0, second / 2, second / 4)) };
+    };
+
+    const auto p = upwardOnly (-30.0, 2.0);
+    const auto near = gainFor (p, -41.0), capped = gainFor (upwardOnly (-30.0, 20.0), -56.0), gated = gainFor (p, -76.0), over = gainFor (p, -10.0);
+    const double law = boostDb (near.first, -30.0, 0.5), nearGate = boostDb (gated.first, -30.0, 0.5);
+    check (std::fabs (near.second - law) < 0.3 && std::fabs (over.second) < 0.01,
+           fmt ("Midrange at -30 dB, 2:1 upward: a tone at %.1f dB in the band is lifted %+.2f dB (the law gives %+.2f); at %.1f dB, over the threshold, %+.3f dB", near.first, near.second, law, over.first, over.second));
+    check (std::fabs (capped.second - kUpwardMaxBoostDb) < 0.3 && std::fabs (gated.second - nearGate) < 0.05,
+           fmt ("20:1 with a tone at %.1f dB in the band: lifted %+.2f dB, the cap is %.0f; a tone at %.1f dB, %.0f dB under the threshold, %+.3f dB (the gate: it does not lift noise)",
+                capped.first, capped.second, kUpwardMaxBoostDb, gated.first, -30.0 - gated.first, gated.second));
+
+    const auto l = noise (41, 0.01, second), r = noise (42, 0.01, second);
+    const auto a = run (allOff(), l, r), b = run (upwardOnly (-90.0, 3.0), l, r);
+    // (The level starts from zero and passes through the quiet range on its way up, so the first milliseconds are lifted a little: that is
+    // what an upward compressor does to a sound that starts from silence. After the release it is gone.)
+    check (maxDiff (b.l, a.l, second / 2, second / 2) <= 0.0 && maxDiff (b.r, a.r, second / 2, second / 2) <= 0.0,
+           fmt ("a band set to upward with every level over its threshold changes nothing once it has settled, bit for bit (the first 0.5 s differ by at most %.1e)", maxDiff (b.l, a.l, 0, second / 2)));
+
+    // Times: the lift grows with the release and gives way with the attack.
+    auto q = upwardOnly (-30.0, 20.0, 5.0, 400.0);
+    Engine e;
+    e.prepare (fs);
+    e.monitor.solo = 1u << 3;
+    auto in = sine (1000.0, std::pow (10.0, -56.0 / 20.0), 3 * second);
+    const auto loudTone = sine (1000.0, std::pow (10.0, -10.0 / 20.0), 3 * second);
+    for (int i = 0; i < second / 2; ++i) in[(size_t) i] = loudTone[(size_t) i];
+    for (int i = 2 * second; i < 3 * second; ++i) in[(size_t) i] = loudTone[(size_t) i];
+    const auto out = run (e, q, in, in);
+    const auto dry = runSolo (allOff(), 1u << 3, in, in);
+    const auto g = [&] (double t) { const int at = (int) (t * fs); return toDb (amplitudeAt (out.l, 1000.0, at, 960) / amplitudeAt (dry.l, 1000.0, at, 960)); };
+    const double full = kUpwardMaxBoostDb, wantEarly = full * (1.0 - std::exp (-0.4 / 0.4));
+    check (std::fabs (g (0.5 + 0.4 - 0.01) - wantEarly) < 1.5 && std::fabs (g (1.9) - full) < 0.5 && g (0.25) < 0.1 && std::fabs (g (2.2)) < 0.5,
+           fmt ("release 400 ms, attack 5 ms (the band soloed): %+.1f dB at 0.25 s (loud), %+.1f dB 400 ms after the tone falls quiet (an exponential gives %+.1f), %+.1f dB settled (%+.1f), %+.2f dB 200 ms after the loud tone returns",
+                g (0.25), g (0.89), wantEarly, g (1.9), full, g (2.2)));
+
+    check (e.reductionMeter[3].load() <= 0.0f, "the meter is not positive while a band lifts");
+    Engine lifting;
+    lifting.prepare (fs);
+    const auto quietTone = sine (1000.0, std::pow (10.0, -41.0 / 20.0), second);
+    run (lifting, upwardOnly (-30.0, 2.0), quietTone, quietTone);
+    check (lifting.reductionMeter[3].load() < -3.0f, fmt ("the reduction meter reads %+.2f dB while a band lifts 5 dB (negative: it is a lift)", (double) lifting.reductionMeter[3].load()));
+
+    // Oversampling and block sizes.
+    auto os = upwardOnly (-30.0, 2.0);
+    os.oversampling = 1;
+    const auto x2 = gainFor (os, -41.0);
+    const auto b512 = run (os, l, r, 512), b61 = run (os, l, r, 61);
+    check (std::fabs (x2.second - law) < 0.4 && b512.l == b61.l && b512.r == b61.r,
+           fmt ("at 2x oversampling the same tone is lifted %+.2f dB; the output is the same for blocks of 512 and 61, bit for bit", x2.second));
+
+    // Switched off: the band comes to rest and is the input again.
+    auto off = upwardOnly (-30.0, 2.0);
+    Engine rest;
+    rest.prepare (fs);
+    auto first = run (rest, off, quietTone, quietTone);
+    off.bands[3].on = false;
+    const auto after = run (rest, off, quietTone, quietTone);
+    const auto plain = run (allOff(), quietTone, quietTone);
+    check (maxDiff (after.l, plain.l, second / 2, second / 2) <= 0.0, "a lifting band switched off: after its release the output is the plain output, bit for bit");
+}
 } // namespace
 
 int main()
@@ -729,6 +812,7 @@ int main()
     testFreeBands();
     testLookahead();
     testSidechain();
+    testUpward();
     testIssueFinder();
     return test::finish ("AtlasTests");
 }

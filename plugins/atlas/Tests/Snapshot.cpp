@@ -3,7 +3,7 @@
 
 // Renders the plugin editor to a PNG while feeding it a programme, so the reduction meters show real activity.
 //
-//   AtlasSnapshot <out.png> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N]
+//   AtlasSnapshot <out.png> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N] [upward=BAND]
 //
 //   bands=N   join bands from the top until N are left
 
@@ -43,6 +43,7 @@ int main (int argc, char** argv)
         else if (arg.startsWith ("delta=")) proc.engine.monitor.delta = (unsigned) value;
         else if (arg == "linear")           set (atlas::id::phase, 1.0f);
         else if (arg.startsWith ("os="))    set (atlas::id::oversampling, (float) value);
+        else if (arg.startsWith ("upward=")) set (atlas::bandIds (value - 1).direction, 1.0f); // band N (from 1) lifts instead of turning down
         else if (arg.startsWith ("bands="))
             while (atlas::layoutOf (proc.apvts).numBands > std::max (value, 1))
                 atlas::removeSplit (proc.apvts, atlas::layoutOf (proc.apvts).numBands - 2);

@@ -21,6 +21,7 @@ struct BandIds
 {
     juce::String on, channels, threshold, ratio, attack, release, makeup, match;
     juce::String listen; // what its compressor listens to: its own band, or the sidechain's (version 2)
+    juce::String direction; // downward (turns down what is loud) or upward (lifts what is quiet) (version 3)
 };
 
 inline const BandIds& bandIds (int band)
@@ -31,7 +32,7 @@ inline const BandIds& bandIds (int band)
         for (int i = 0; i < kBands; ++i)
         {
             const auto name = [i] (const char* what) { return "b" + juce::String (i + 1) + "_" + what; };
-            t[(size_t) i] = { name ("on"), name ("ch"), name ("thresh"), name ("ratio"), name ("attack"), name ("release"), name ("makeup"), name ("match"), name ("listen") };
+            t[(size_t) i] = { name ("on"), name ("ch"), name ("thresh"), name ("ratio"), name ("attack"), name ("release"), name ("makeup"), name ("match"), name ("listen"), name ("dir") };
         }
         return t;
     }();
@@ -42,6 +43,7 @@ inline const juce::StringArray channelNames { "Stereo", "L/R", "M/S", "Left", "R
 inline const juce::StringArray phaseNames { "Zero Latency", "Linear" };
 inline const juce::StringArray oversamplingNames { "Off", "2x", "4x" };
 inline const juce::StringArray listenNames { "Self", "Sidechain" };
+inline const juce::StringArray directionNames { "Downward", "Upward" };
 // The choices of kLookaheadMs (Engine.h), named from it.
 inline juce::StringArray lookaheadNames()
 {
@@ -108,6 +110,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames(), 0));
     for (int i = 0; i < kBands; ++i)
         p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { bandIds (i).listen, 2 }, "Band " + String (i + 1) + " Listens To", listenNames, 0));
+    for (int i = 0; i < kBands; ++i)
+        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { bandIds (i).direction, 3 }, "Band " + String (i + 1) + " Direction", directionNames, 0));
     return { p.begin(), p.end() };
 }
 
@@ -138,6 +142,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
         b.makeupDb = v (ids.makeup);
         b.match = v (ids.match) > 0.5f;
         b.sidechain = v (ids.listen) > 0.5f;
+        b.upward = v (ids.direction) > 0.5f;
     }
     return e;
 }
@@ -190,7 +195,7 @@ inline void copyBand (juce::AudioProcessorValueTreeState& s, int from, int to)
     const auto& a = bandIds (from);
     const auto& b = bandIds (to);
     const juce::String* const pairs[][2] = { { &a.on, &b.on }, { &a.channels, &b.channels }, { &a.threshold, &b.threshold }, { &a.ratio, &b.ratio },
-                                             { &a.attack, &b.attack }, { &a.release, &b.release }, { &a.makeup, &b.makeup }, { &a.match, &b.match }, { &a.listen, &b.listen } };
+                                             { &a.attack, &b.attack }, { &a.release, &b.release }, { &a.makeup, &b.makeup }, { &a.match, &b.match }, { &a.listen, &b.listen }, { &a.direction, &b.direction } };
     for (const auto& pair : pairs)
         setValue (s, *pair[1], s.getParameter (*pair[0])->convertFrom0to1 (s.getParameter (*pair[0])->getValue()));
 }
@@ -286,11 +291,12 @@ inline bool isGlobalParameter (const juce::String& pid)
 }
 
 inline PresetValues bandValues (int band, double thresholdDb, double ratio, double attackMs, double releaseMs,
-                                Channels channels = Channels::stereo, bool match = false, bool sidechain = false)
+                                Channels channels = Channels::stereo, bool match = false, bool sidechain = false, bool upward = false)
 {
     const auto& ids = bandIds (band);
     return { { ids.on, 1.0f }, { ids.threshold, (float) thresholdDb }, { ids.ratio, (float) ratio }, { ids.attack, (float) attackMs },
-             { ids.release, (float) releaseMs }, { ids.channels, (float) (int) channels }, { ids.match, match ? 1.0f : 0.0f }, { ids.listen, sidechain ? 1.0f : 0.0f } };
+             { ids.release, (float) releaseMs }, { ids.channels, (float) (int) channels }, { ids.match, match ? 1.0f : 0.0f }, { ids.listen, sidechain ? 1.0f : 0.0f },
+             { ids.direction, upward ? 1.0f : 0.0f } };
 }
 
 inline PresetValues bandsOff (std::initializer_list<int> bands)
@@ -331,6 +337,10 @@ inline const std::vector<Preset>& presets()
                                       bandValues (2, glue[2], 2, 20, 150, Channels::midSide), bandValues (3, glue[3], 2, 20, 150, Channels::midSide),
                                       bandValues (4, glue[4], 2, 20, 150, Channels::midSide), bandValues (5, glue[5], 2, 20, 150, Channels::midSide) }),
           "Each band's centre and sides get their own gain, so a loud centre does not pull the width down. Check mono with DELTA." },
+        { "Lift the Low-Mids", join ({ bandValues (2, -24, 2, 20, 300, Channels::stereo, false, false, true), bandsOff ({ 0, 1, 3, 4, 5 }) }),
+          "Low-mids that go empty between sections: lifts the band while it is quiet, up to 12 dB. A constant gap is an equaliser's job." },
+        { "Lift the Air", join ({ bandValues (5, -34, 2, 20, 300, Channels::stereo, false, false, true), bandsOff ({ 0, 1, 2, 3, 4 }) }),
+          "A top that dips in the quiet parts: lifts it while it is quiet, hiss included, so listen for noise." },
         { "Kick Ducks Bass", join ({ bandValues (0, -30, 4, 5, 120, Channels::stereo, false, true), bandValues (1, -30, 4, 5, 120, Channels::stereo, false, true),
                                      bandsOff ({ 2, 3, 4, 5 }) }),
           "Put the kick on the SIDECHAIN input: the sub and bass duck when it hits. Needs a sidechain routed in your host." },
