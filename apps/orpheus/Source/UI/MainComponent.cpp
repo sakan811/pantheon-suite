@@ -61,6 +61,7 @@ MainComponent::MainComponent (bool withAudioDevice)
     for (auto* b : { &openButton, &saveButton, &exportButton, &undoButton, &redoButton, &playButton, &rewindButton, &loopButton, &originalButton, &snapButton, &correctAllButton,
                      &detectKeyButton, &detectTuneButton, &resetAllButton, &snapNoteButton, &straightenButton, &splitButton, &mergeButton, &resetNoteButton })
         addAndMakeVisible (*b);
+    addAndMakeVisible (guideButton);
 
     styleToggle (loopButton);
     styleToggle (originalButton);
@@ -244,7 +245,7 @@ MainComponent::MainComponent (bool withAudioDevice)
     refreshInspector();
     refreshScalePanel();
     startTimerHz (30);
-    setSize (1240, 760);
+    setSize (kDesignWidth, kDesignHeight);
 }
 
 MainComponent::~MainComponent()
@@ -664,6 +665,23 @@ void MainComponent::timerCallback()
 }
 
 // ---- layout & painting -----------------------------------------------------------------------------------------------------------
+AdviceInput MainComponent::adviceInput() const
+{
+    AdviceInput in;
+    in.busy = job != nullptr;
+    in.hasAudio = session.isAnalysed();
+    in.playingOriginal = ! playback.corrected.load();
+    in.hasEdits = session.canUndo();
+    in.projectSaved = projectFile != juce::File();
+    for (const auto& n : session.notes)
+    {
+        in.largestShiftSemitones = std::max (in.largestShiftSemitones, (double) std::fabs (n.shift()));
+        in.shortestNoteMs = std::min (in.shortestNoteMs, 1000.0 * n.length() * session.contour.hop / std::max (1.0, session.sampleRate));
+    }
+    in.notes = (int) session.notes.size();
+    return in;
+}
+
 void MainComponent::resized()
 {
     auto r = getLocalBounds();
@@ -683,7 +701,8 @@ void MainComponent::resized()
     place (originalButton, 84, 14);
     timeBox = h.removeFromLeft (130).withSizeKeepingCentre (130, 34);
     h.removeFromLeft (14);
-    place (snapButton, 64, 22);
+    place (snapButton, 64, 14);
+    place (guideButton, 64, 22);
     // right-aligned: file and history
     auto right = h.removeFromRight (400);
     for (auto* b : { &openButton, &saveButton, &exportButton })
@@ -692,6 +711,8 @@ void MainComponent::resized()
     undoButton.setBounds (right.removeFromLeft (60).withSizeKeepingCentre (56, 30));
     redoButton.setBounds (right.removeFromLeft (60).withSizeKeepingCentre (56, 30));
 
+    r.removeFromBottom (8);
+    noteStrip = r.removeFromBottom (ui::kNoteStripHeight + 6).withTrimmedTop (6).reduced (8, 0);
     auto bottom = r.removeFromBottom (168).reduced (8, 6);
     scalePanel = bottom.removeFromLeft (500);
     bottom.removeFromLeft (8);
@@ -774,6 +795,7 @@ void MainComponent::paint (juce::Graphics& g)
         g.drawText (noticeShown ? notice : infoLine, box.reduced (8, 0), juce::Justification::centredLeft, true);
         ui::hw::drawGlassOverlay (g, box.toFloat(), 3.0f, false);
     }
+    ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
     if (audioError.isNotEmpty())
     {
         g.setColour (colours::bad);

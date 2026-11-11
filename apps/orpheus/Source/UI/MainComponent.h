@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include "Advice.h"
 #include "Navigator.h"
+
+#include <pantheon/ui/Advice.h>
 
 namespace orpheus::gui
 {
@@ -12,6 +15,9 @@ namespace orpheus::gui
 class MainComponent : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
+    // The window's design size: the notes strip at the foot is part of it, so the display keeps the height it had.
+    static constexpr int kDesignWidth = 1240, kDesignHeight = 760 + 6 + ui::kNoteStripHeight + 8;
+
     explicit MainComponent (bool withAudioDevice = true);
     ~MainComponent() override;
 
@@ -26,6 +32,7 @@ public:
     void analyseNow();
 
     bool isBusy() const { return job != nullptr; }
+    std::vector<ui::Note> notes() const { return adviceFor (adviceInput()); } // what the strip at the foot says, for the checks
     void refreshInspector();
     void refreshScalePanel();
     void togglePlay();
@@ -42,6 +49,7 @@ public:
     void filesDropped (const juce::StringArray& files, int, int) override { loadFile (juce::File (files[0])); }
 
     // Controls, public so the checks can press them.
+    ui::GuideButton guideButton { guideTitle(), guideText() };
     juce::TextButton openButton { "Open" }, saveButton { "Save" }, exportButton { "Export" }, undoButton { "Undo" }, redoButton { "Redo" };
     juce::TextButton zoomOutButton { "-" }, zoomInButton { "+" }, fitButton { "Fit" };
     juce::TextButton playButton { "Play" }, rewindButton { "|<" }, loopButton { "Loop" }, originalButton { "Original" }, snapButton { "Snap" };
@@ -62,6 +70,7 @@ private:
     void chooseAndSave();
     void chooseAndExport();
     void showError (const juce::String& message);
+    AdviceInput adviceInput() const;
     void say (const juce::String& message);  // a line on the glass of the note panel for a few seconds
     void setupKnob (ui::ValueKnob& knob, const juce::String& caption, double lo, double hi, double step, double reset, const juce::String& suffix, int decimals,
                     const juce::String& tooltip);
@@ -80,6 +89,6 @@ private:
     double correctAmount = 100.0;
     bool glidePending = false, audioOn = false;
     int lastVersion = -1, analysisSerial = 0;
-    juce::Rectangle<int> headerArea, scalePanel, notePanel, timeBox, nameplate;
+    juce::Rectangle<int> headerArea, scalePanel, notePanel, timeBox, nameplate, noteStrip;
 };
 } // namespace orpheus::gui

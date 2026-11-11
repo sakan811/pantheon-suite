@@ -29,7 +29,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     addAndMakeVisible (advicePanel);
     addAndMakeVisible (auditionPanel);
     for (auto* c : std::initializer_list<juce::Component*> { &targetBox, &avgKnob, &deviceBox, &deviceLabel, &loudnessBox, &loudnessLabel, &learnButton, &saveButton, &loadButton,
-                                                              &copyEqButton, &resetButton, &statusLabel, &toleranceKnob })
+                                                              &copyEqButton, &resetButton, &statusLabel, &toleranceKnob, &guideButton })
         addAndMakeVisible (c);
 
     deviceBox.setTooltip ("Preview how the balance would translate to a typical playback device (approximate response; "
@@ -65,7 +65,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
         advicePanel.refresh();
     };
 
-    setStatus ("Tip: use 'Learn from tracks...' to build a target from your own reference masters.", false);
+    showIdleStatus();
 
     setResizable (true, true);
     setResizeLimits (1120, 780, 2200, 1300);
@@ -102,8 +102,10 @@ void ThemisEditor::timerCallback()
         proc.updateListen(); // the preview and reference gains follow the loudness measured so far
         advicePanel.refresh();
     }
-    if (statusTicks > 0 && --statusTicks == 0)
-        statusLabel.setText ({}, juce::dontSendNotification);
+    if (statusTicks > 0)
+        --statusTicks;
+    if (statusTicks == 0)
+        showIdleStatus(); // nothing is being said: say how the plugin is being used, or the tip
 }
 
 void ThemisEditor::copyTonalEq()
@@ -124,6 +126,29 @@ void ThemisEditor::copyTonalEq()
         return;
     }
     setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s) and the target curve: paste them in " + ui::linkDestination (moves) + " (PASTE on its band panel).", false);
+}
+
+usage::Input ThemisEditor::usageInput() const
+{
+    usage::Input in;
+    in.signal = proc.stereoScope().hasData();
+    in.auditionActive = proc.auditionSwitches().active();
+    in.comparing = proc.streamingPreview() || proc.referenceOn();
+    in.analysedSeconds = proc.loudnessMonitor().seconds();
+    return in;
+}
+
+// The status window between messages: the first note about how the plugin is being used (a warning in amber), else the tip.
+void ThemisEditor::showIdleStatus()
+{
+    const auto notes = usage::notesFor (usageInput());
+    const juce::String text = notes.empty() ? juce::String (usage::idleTip()) : juce::String (notes.front().text);
+    const auto colour = ! notes.empty() && notes.front().severity == ui::Severity::warning ? colours::warn : colours::amber.withAlpha (0.8f);
+    if (statusLabel.getText() != text || statusLabel.findColour (juce::Label::textColourId) != colour)
+    {
+        statusLabel.setColour (juce::Label::textColourId, colour);
+        statusLabel.setText (text, juce::dontSendNotification);
+    }
 }
 
 void ThemisEditor::setStatus (const juce::String& text, bool isError)
@@ -251,7 +276,8 @@ void ThemisEditor::resized()
     loudnessBox.setBounds (row2.removeFromLeft (170).withSizeKeepingCentre (170, 26));
     row2.removeFromLeft (14);
     statusWindow = row2.withSizeKeepingCentre (row2.getWidth(), 26);
-    statusLabel.setBounds (statusWindow.reduced (8, 0));
+    guideButton.setBounds (statusWindow.withTrimmedLeft (statusWindow.getWidth() - 62).reduced (3));
+    statusLabel.setBounds (statusWindow.withTrimmedRight (62).reduced (8, 0));
 
     auto history = r.removeFromBottom (kHistoryHeight);
     r.removeFromBottom (8);

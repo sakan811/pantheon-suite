@@ -10,6 +10,9 @@
 #include "StereoScopeView.h"
 #include "ThemisUi.h"
 #include "TonalBalanceView.h"
+#include "UsageNotes.h"
+
+#include <pantheon/ui/Advice.h>
 
 #include <functional>
 #include <memory>
@@ -23,9 +26,14 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    juce::TextButton& guide() noexcept { return guideButton; }                       // for the smoke test
+    std::vector<ui::Note> notes() const { return usage::notesFor (usageInput()); }   // what the status window says when idle, for the smoke test
+
 private:
     void timerCallback() override;
     void setStatus (const juce::String& text, bool isError);
+    void showIdleStatus();
+    usage::Input usageInput() const;
     void copyTonalEq();
 
     void launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int chooserFlags,
@@ -57,6 +65,7 @@ private:
     juce::TextButton learnButton { "Learn from tracks..." }, saveButton { "Save curve" }, loadButton { "Load curve" },
         resetButton { "Reset" }, copyEqButton { "Copy EQ" };
     juce::Label statusLabel;
+    ui::GuideButton guideButton { usage::guideTitle(), usage::guideText() };
     ui::Knob avgKnob, toleranceKnob;
     juce::TooltipWindow tooltipWindow { this, 600 };
 

@@ -39,7 +39,7 @@ Source/Dsp/          no JUCE; everything here is covered by Tests/Tests.cpp
   Psola.h             findMarks (once per file), render (the stretches an edit touches), matchLoudness, applyGain
 Source/Session.h     the recording and everything done to it: audio, contour, marks, notes, key, plan, output, undo, project XML, WAV export
 Source/Playback.h    the audio-thread reader of the session (corrected / original, loop, reference tone)
-Source/UI/           OrpheusUi.h (words, note text, verdict colours), PitchRoll.h (the display and its mouse), MainComponent.{h,cpp} (window, panels, keys, files, analysis thread)
+Source/UI/           Advice.h (the notes of the strip at the foot and the GUIDE text; plain C++, no JUCE), OrpheusUi.h (words, note text, verdict colours), PitchRoll.h (the display and its mouse), MainComponent.{h,cpp} (window, panels, keys, files, analysis thread)
 Source/Main.cpp      the application and its window
 ../../shared/ui/     the look (and ValueKnob.h, the knob for a value that is not a plugin parameter, added for this app)
 Tests/               Tests.cpp (DSP), UiCheck.cpp (session, player, window), Snapshot.cpp (window -> PNG), TestSignals.h (the synthetic singer), Check.h
@@ -91,6 +91,7 @@ so. Notes that are each off in their own way give a "reference" that is only rou
 
 - scale list and masks, key snapping, the grid offset of a reference tuning -> `Scales.h` (the combo boxes, the display's rows and the engine all read it)
 - the planned pitch of a frame -> `Plan::build` (the display draws `plan.outMidi`, the renderer spaces marks by it, the tests measure against it)
+- what the app warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `UI/Advice.h`; `MainComponent::adviceInput()` fills it and `ui::drawNoteStrip` draws it. The window's size is `MainComponent::kDesignWidth/Height` (the strip is part of it: tests and the snapshot use it too)
 - how a note is written ("A3 +12ct"), the time, the verdict colours -> `UI/OrpheusUi.h`
 - the project's two words ("Orpheus", "Pitch Editor") -> `kProjectWord` / `kSecondWord` in `UI/OrpheusUi.h`
 - every pixel of the interface and the knobs -> `shared/ui`; `PitchRoll` is the display (like Iris' `EqView`) and draws with the kit's colours and glass
