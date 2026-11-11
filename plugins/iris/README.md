@@ -165,7 +165,7 @@ Range -4 dB, listening to the kick; or a shelf on the pads that dips while the v
 - The sidechain is **never heard**, only measured, and a band that is not dynamic ignores it.
 - The band's **Works on** says which part of *this* track moves; of the sidechain both channels are measured and the louder one counts, so a
   sidechain on one side moves a Mid, a Side or a one-channel band alike.
-- **Without a sidechain connected** the band listens to itself, exactly as on Self, and the DYNAMICS panel says NO SIDECHAIN.
+- **Without a sidechain connected** the band listens to itself, exactly as on Self, and the DYNAMICS panel says NO SIDECHAIN; with one, the panel's level reading is the sidechain's and is labelled SC LEVEL.
 - In a Linear mode the band hears the sidechain as it arrives while the sound it acts on is the reported latency late, as with its own signal.
 
 Measured (test [16]): a track 10 dB under the threshold is cut by the full range (-12.00 dB) while the sidechain is loud in the band, and passes at
