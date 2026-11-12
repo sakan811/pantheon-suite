@@ -3,6 +3,7 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 
 IrisProcessor::IrisProcessor()
     : AudioProcessor (BusesProperties()
@@ -98,7 +99,7 @@ void IrisProcessor::setStateInformation (const void* data, int size)
 
 juce::AudioProcessorEditor* IrisProcessor::createEditor()
 {
-    return new IrisEditor (*this);
+    return new ui::ScaledEditor<IrisEditor> (*this, apvts.state, *this);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

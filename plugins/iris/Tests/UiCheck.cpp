@@ -10,6 +10,7 @@
 #include "Check.h"
 #include "Advice.h"
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 #include "PluginProcessor.h"
 #include "TestSignals.h"
 
@@ -268,7 +269,7 @@ int main()
     std::printf ("\nEditor\n");
     {
         std::unique_ptr<juce::AudioProcessorEditor> made (proc.createEditor());
-        auto& editor = static_cast<IrisEditor&> (*made);
+        auto& editor = ui::innerOf<IrisEditor> (*made);
         made->setVisible (true);
         pump (150);
 

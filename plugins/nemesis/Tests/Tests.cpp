@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 The Pantheon authors
+
+// Headless tests of the de-esser: no plugin, no GUI. Every number the README quotes is measured here.
+
+#include "Check.h"
+#include "DSP/Engine.h"
+#include <random>
+
+using namespace nemesis;
+using test::check;
+using test::fmt;
+
+namespace
+{
+constexpr double kFs = 48000.0;
+
+struct Stereo
+{
+    std::vector<float> l, r;
+};
+
+// A sum of tones: {frequency, level in dBFS (peak)} pairs, the same in both channels.
+Stereo tones (std::initializer_list<std::pair<double, double>> parts, int n)
+{
+    Stereo s { std::vector<float> ((size_t) n, 0.0f), std::vector<float> ((size_t) n, 0.0f) };
+    for (const auto& [hz, db] : parts)
+        for (int i = 0; i < n; ++i)
+        {
+            const float v = (float) (std::pow (10.0, db / 20.0) * std::sin (2.0 * M_PI * hz * i / kFs));
+            s.l[(size_t) i] += v;
+            s.r[(size_t) i] += v;
+        }
+    return s;
+}
+
+Stereo run (Engine& e, Stereo in, const EngineParams& p, int block = 512)
+{
+    for (int start = 0; start < (int) in.l.size(); start += block)
+    {
+        const int m = std::min (block, (int) in.l.size() - start);
+        e.process (in.l.data() + start, in.r.data() + start, m, p);
+    }
+    return in;
+}
+
+double db (double lin) { return 20.0 * std::log10 (std::fmax (lin, 1e-12)); }
+
+// The level of one frequency in a signal's last half second, in dB (a single-bin DFT: the other tones do not count).
+double levelAt (const std::vector<float>& x, double hz)
+{
+    const size_t from = x.size() - 24000;
+    double re = 0.0, im = 0.0;
+    for (size_t i = from; i < x.size(); ++i)
+    {
+        re += x[i] * std::cos (2.0 * M_PI * hz * (double) i / kFs);
+        im += x[i] * std::sin (2.0 * M_PI * hz * (double) i / kFs);
+    }
+    return db (2.0 * std::sqrt (re * re + im * im) / 24000.0);
+}
+
+// What a tone's level changes by, in dB, in a signal of several.
+double changeAt (const Stereo& in, const Stereo& out, double hz) { return levelAt (out.l, hz) - levelAt (in.l, hz); }
+}
+
+int main()
+{
+    std::printf ("Nemesis tests (48 kHz)\n");
+    const int n = 48000 * 2;
+
+    // [1] The law.
+    std::printf ("\n[1] The reduction\n");
+    {
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.rangeDb = 24.0f;
+        Engine e;
+        e.prepare (kFs);
+        const auto in = tones ({ { 6500.0, -20.0 } }, n);
+        const auto out = run (e, in, p);
+        check (std::fabs (changeAt (in, out, 6500.0) + 10.0) < 0.3, fmt ("a sibilant at -20 dBFS over a -30 dB threshold: turned down by %.2f dB (the law: 10: it holds the band at the threshold)", -changeAt (in, out, 6500.0)));
+        p.rangeDb = 6.0f;
+        Engine f;
+        f.prepare (kFs);
+        const auto out2 = run (f, in, p);
+        check (std::fabs (changeAt (in, out2, 6500.0) + 6.0) < 0.2, fmt ("RANGE 6 dB: the reduction stops at %.2f dB", -changeAt (in, out2, 6500.0)));
+    }
+
+    // [2] Only the band: SPLIT-BAND turns down the sibilance and leaves the rest.
+    std::printf ("\n[2] Split-band and wideband\n");
+    {
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.rangeDb = 12.0f;
+        const auto in = tones ({ { 300.0, -12.0 }, { 6500.0, -16.0 } }, n);
+        Engine e;
+        e.prepare (kFs);
+        const auto split = run (e, in, p);
+        p.mode = Mode::wideband;
+        Engine f;
+        f.prepare (kFs);
+        const auto wide = run (f, in, p);
+        check (std::fabs (changeAt (in, split, 300.0)) < 0.3 && changeAt (in, split, 6500.0) < -8.0,
+               fmt ("SPLIT-BAND: the vowel at 300 Hz changes by %+.2f dB, the sibilant at 6.5 kHz by %+.1f dB", changeAt (in, split, 300.0), changeAt (in, split, 6500.0)));
+        check (changeAt (in, wide, 300.0) < -8.0 && std::fabs (changeAt (in, wide, 300.0) - changeAt (in, wide, 6500.0)) < 0.3,
+               fmt ("WIDEBAND: the whole sound is turned down together (300 Hz %+.1f dB, 6.5 kHz %+.1f dB)", changeAt (in, wide, 300.0), changeAt (in, wide, 6500.0)));
+        // Selectivity: a tone far from the band, as loud as the sibilant, is not touched.
+        p.mode = Mode::splitBand;
+        const auto far = tones ({ { 1500.0, -16.0 } }, n);
+        Engine g;
+        g.prepare (kFs);
+        const auto outFar = run (g, far, p);
+        check (std::fabs (changeAt (far, outFar, 1500.0)) < 0.05, fmt ("a tone at 1.5 kHz as loud as the sibilant is not touched (%+.3f dB): the detector listens to the band", changeAt (far, outFar, 1500.0)));
+    }
+
+    // [3] Listen.
+    std::printf ("\n[3] Listen\n");
+    {
+        EngineParams p;
+        p.listen = true;
+        const auto in = tones ({ { 300.0, -12.0 }, { 6500.0, -16.0 } }, n);
+        Engine e;
+        e.prepare (kFs);
+        const auto out = run (e, in, p);
+        check (levelAt (out.l, 300.0) < levelAt (in.l, 300.0) - 25.0 && std::fabs (changeAt (in, out, 6500.0)) < 0.1,
+               fmt ("LISTEN: you hear the band the detector hears: the 6.5 kHz tone passes (%+.2f dB), the 300 Hz one is %.0f dB down", changeAt (in, out, 6500.0), -changeAt (in, out, 300.0)));
+    }
+
+    // [4] Nothing to do: the input, bit for bit.
+    std::printf ("\n[4] Transparency\n");
+    {
+        EngineParams p;
+        std::mt19937 gen (5);
+        std::uniform_real_distribution<float> white (-1.0f, 1.0f);
+        Stereo in { std::vector<float> (96000), std::vector<float> (96000) };
+        for (auto& v : in.l) v = 0.01f * white (gen); // -40 dBFS: under the threshold
+        for (auto& v : in.r) v = 0.01f * white (gen);
+        for (const Mode m : { Mode::splitBand, Mode::wideband })
+        {
+            p.mode = m;
+            Engine e;
+            e.prepare (kFs);
+            const auto out = run (e, in, p);
+            check (out.l == in.l && out.r == in.r, fmt ("%s: a signal under the threshold comes out as it went in, bit for bit", m == Mode::splitBand ? "SPLIT-BAND" : "WIDEBAND"));
+        }
+        Engine e;
+        e.prepare (kFs);
+        run (e, tones ({ { 6500.0, -8.0 } }, 24000), p);
+        const auto quiet = tones ({ { 6500.0, -50.0 }, { 200.0, -30.0 } }, 96000);
+        const auto out = run (e, quiet, p);
+        check (std::equal (out.l.begin() + 72000, out.l.end(), quiet.l.begin() + 72000), "half a second after a loud sibilant the gain is back at exactly 1: the quiet sound is the input, bit for bit");
+    }
+
+    // [5] Release.
+    std::printf ("\n[5] Release\n");
+    {
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.rangeDb = 24.0f;
+        p.releaseMs = 50.0f;
+        // A sibilant for a second, then a quiet 7.2 kHz tone (under the threshold) that shows the gain coming back: read in windows of 5 ms.
+        Stereo in = tones ({ { 6500.0, -14.0 } }, 48000 * 3);
+        const auto quiet = tones ({ { 6500.0, -60.0 } }, 48000 * 3);
+        for (int i = 48000; i < 48000 * 3; ++i)
+            in.l[(size_t) i] = in.r[(size_t) i] = quiet.l[(size_t) i];
+        Engine e;
+        e.prepare (kFs);
+        const auto out = run (e, in, p, 64);
+        const auto windowDb = [&] (const std::vector<float>& x, double seconds)
+        {
+            const size_t c = (size_t) (seconds * kFs);
+            double peak = 0.0;
+            for (size_t i = c; i < c + 240; ++i)
+                peak = std::fmax (peak, std::fabs ((double) x[i]));
+            return db (peak);
+        };
+        const double reduction0 = windowDb (in.l, 1.001) - windowDb (out.l, 1.001), reduction50 = windowDb (in.l, 1.05) - windowDb (out.l, 1.05);
+        const double full = windowDb (in.l, 0.9) - windowDb (out.l, 0.9);
+        check (full > 15.0 && reduction50 / reduction0 > 0.25 && reduction50 / reduction0 < 0.5 && windowDb (in.l, 2.0) - windowDb (out.l, 2.0) < 0.05,
+               fmt ("RELEASE 50 ms: the reduction is %.1f dB at the end of the sibilant, %.0f%% of it (%.1f dB) 50 ms later, and gone after a second", reduction0, 100.0 * reduction50 / reduction0, reduction50));
+    }
+
+    // [6] Relative detection: the threshold follows the level of the sound.
+    std::printf ("\n[6] Absolute and relative\n");
+    {
+        EngineParams p;
+        p.rangeDb = 24.0f;
+        p.detection = Detection::relative;
+        p.thresholdDb = -8.0f; // the sibilant is allowed to be 8 dB under the whole sound's level
+        const auto loud = tones ({ { 300.0, -12.0 }, { 6500.0, -12.0 } }, n);
+        const auto soft = tones ({ { 300.0, -42.0 }, { 6500.0, -42.0 } }, n);
+        Engine e, f;
+        e.prepare (kFs);
+        f.prepare (kFs);
+        const auto ol = run (e, loud, p), os = run (f, soft, p);
+        const double a = changeAt (loud, ol, 6500.0), b = changeAt (soft, os, 6500.0);
+        check (a < -1.0 && std::fabs (a - b) < 0.5, fmt ("RELATIVE: the same sound 30 dB quieter is turned down by the same amount (%.2f dB loud, %.2f dB soft)", -a, -b));
+        p.detection = Detection::absolute;
+        p.thresholdDb = -30.0f;
+        Engine g, h;
+        g.prepare (kFs);
+        h.prepare (kFs);
+        const double c = changeAt (loud, run (g, loud, p), 6500.0), d = changeAt (soft, run (h, soft, p), 6500.0);
+        check (c < -5.0 && std::fabs (d) < 0.05, fmt ("ABSOLUTE: the quiet one is not touched at all (%.2f dB loud, %+.3f dB soft)", -c, d));
+    }
+
+    // [7] Stereo link, block size, bad samples.
+    std::printf ("\n[7] Link, block size, bad samples\n");
+    {
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.rangeDb = 12.0f;
+        Stereo in = tones ({ { 6500.0, -14.0 } }, n);
+        for (auto& v : in.r) v *= 0.1f;
+        Engine e;
+        e.prepare (kFs);
+        const auto out = run (e, in, p);
+        check (std::fabs (changeAt (in, out, 6500.0) - (levelAt (out.r, 6500.0) - levelAt (in.r, 6500.0))) < 0.01, "a loud left and a quiet right get the same gain: the image does not move");
+        std::mt19937 gen (9);
+        std::uniform_real_distribution<float> white (-1.0f, 1.0f);
+        Stereo noise { std::vector<float> (60000), std::vector<float> (60000) };
+        for (size_t i = 0; i < noise.l.size(); ++i)
+        {
+            const float burst = (i / 6000) % 2 == 0 ? 0.6f : 0.05f;
+            noise.l[i] = burst * white (gen);
+            noise.r[i] = burst * white (gen);
+        }
+        EngineParams q;
+        q.detection = Detection::relative;
+        q.thresholdDb = -6.0f;
+        Engine a;
+        a.prepare (kFs);
+        const auto ref = run (a, noise, q, 512);
+        bool same = true;
+        for (const int block : { 1, 7, 64, 333, 4096 })
+        {
+            Engine b;
+            b.prepare (kFs);
+            const auto o = run (b, noise, q, block);
+            same = same && o.l == ref.l && o.r == ref.r;
+        }
+        check (same, "blocks of 1, 7, 64, 333 and 4096 samples give the output of 512, bit for bit");
+        auto bad = noise;
+        bad.l[2000] = std::nanf ("");
+        bad.r[3000] = INFINITY;
+        Engine c;
+        c.prepare (kFs);
+        const auto o = run (c, bad, q);
+        bool fine = true;
+        for (size_t i = 0; i < o.l.size(); ++i)
+            fine = fine && std::isfinite (o.l[i]) && std::isfinite (o.r[i]);
+        check (fine, "a NaN and an infinity in the input are silence: the output is finite");
+    }
+
+    return test::finish ("NemesisTests");
+}

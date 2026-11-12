@@ -125,6 +125,7 @@ The order of `channelNames` is the order of `Channels`.
   threshold has to read the band, not the input.
 - `ui::Choice` and `ui::Toggle` are bound to one parameter for good, so every strip owns its controls (`AtlasEditor::Strip`).
 - In an editor constructor call `setSize()` **last**.
+- `createEditor()` returns a `ui::ScaledEditor<AtlasEditor>` (shared/ui Scaled.h), not the editor: the window opens at 70% and scales. Tests and snapshots reach the editor with `ui::innerOf<AtlasEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
 
 ## Conventions
 

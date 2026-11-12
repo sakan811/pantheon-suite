@@ -7,6 +7,7 @@
 #include "Advice.h"
 #include "Check.h"
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 
 using namespace atlas;
 using test::check;
@@ -54,7 +55,7 @@ int main()
     auto& monitor = proc.engine.monitor;
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
-        auto& editor = static_cast<AtlasEditor&> (*holder);
+        auto& editor = ui::innerOf<AtlasEditor> (*holder);
         editor.setVisible (true);
         check (editor.getWidth() > 900 && editor.strips[5]->bounds.getRight() <= editor.getWidth() && editor.strips[5]->crossover == nullptr && editor.strips[0]->crossover != nullptr,
                "six strips fit the window; every band but the top one has the knob of its upper edge");
