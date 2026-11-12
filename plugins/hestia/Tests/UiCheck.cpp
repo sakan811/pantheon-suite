@@ -38,7 +38,7 @@ int main()
     check (proc.getParameters().size() == 11, fmt ("%d parameters: role, mix, importance, carve, reach, attack, release, output, depth, and the sidechain's role and importance", proc.getParameters().size()));
     check (roleNames().size() == kNumRoles && mixNames.size() == kMaxGroups + 1, "the choice lists match the engine's roles and mixes");
     const auto defaults = readParams (proc.apvts);
-    check (defaults.role == Role::fullRange && defaults.carveDb == 6.0f && defaults.distance == 0.0f && defaults.scRole == Role::fullRange && std::fabs (defaults.importance - 0.5f) < 1e-6f && defaults.outDb == 0.0f,
+    check (defaults.role == Role::fullRange && std::fabs (defaults.carveDb - 6.0f) < 1e-3f && std::fabs (defaults.distance) < 1e-6f && defaults.scRole == Role::fullRange && std::fabs (defaults.importance - 0.5f) < 1e-6f && std::fabs (defaults.outDb) < 1e-3f, // (a stepped range lands within a rounding error of its default, and which way depends on the build)
            "a new instance is Full Range, importance 50%, carve 6 dB, at the front (depth 0%), output 0");
     {
         HestiaProcessor fresh;
