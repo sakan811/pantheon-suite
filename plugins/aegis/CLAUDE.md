@@ -15,14 +15,15 @@ cmake --build build --target AegisSnapshot && ./build/AegisSnapshot_artefacts/Re
 
 - Building the plugin targets does **not** install them (`AEGIS_INSTALL_AFTER_BUILD`, off by default).
 - `AegisTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP/Engine.h` has no JUCE in it, so the DSP tests also
-  compile with a plain `g++ -std=c++20 -O2 -ISource -ITests Tests/Tests.cpp` (a quick loop).
+  compile with `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop).
 - Definition of done for a DSP change: `AegisTests` passes **and** the numbers the README quotes still match its output.
 - Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
 
 ## Layout
 
 ```
-Source/DSP/Engine.h  no GUI, no JUCE: SlidingMin, TruePeakReader, Engine (the whole signal path); covered by Tests/Tests.cpp
+Source/DSP/Engine.h  no GUI, no JUCE: SlidingMin, Engine (the whole signal path); covered by Tests/Tests.cpp
+../../shared/dsp/    TruePeak.h (`pdsp::TruePeakReader`: the 8x, 64-tap reader; shared with Hermes, so run HermesTests too when you change it)
 Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`)
@@ -39,8 +40,8 @@ A mean is never above the smallest value it covers, so `G[n] <= required` of bot
 until it passes.
 
 **The reader needs its taps.** A 12-tap reader missed a peak by 1.5 dB on a programme with energy up to Nyquist, 32 taps by 0.7 dB, and a 4x reader reads up to 0.7 dB low
-by construction (the peak between two points). It is 64 taps at 8x on purpose; do not shorten it for speed without redoing test [8]. The cost is 7 x 64 multiplies per
-sample per channel and a delay of 32 samples (`kDetectorDelay`), which is constant (TRUE PEAK off does not change it, so the latency does not move with a switch).
+by construction (the peak between two points). It is 64 taps at 8x on purpose (`shared/dsp` TruePeak.h, which Hermes reads its meter with too); do not shorten it for speed without redoing test [8]. The cost is 7 x 64 multiplies per
+sample per channel and a delay of 32 samples (`kDetectorDelay`, `pdsp::kTruePeakDelay`), which is constant (TRUE PEAK off does not change it, so the latency does not move with a switch).
 
 **Gain smoothing is what keeps the peaks from coming back.** With one mean (a plain moving average) the gain's own modulation made peaks between samples that the
 reader had not seen (0.3 to 0.7 dB over on noise). Two means of half the width fix that: do not collapse them into one.

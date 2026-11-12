@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <pantheon/dsp/TruePeak.h>
 #include <vector>
 
 // The whole limiter: no GUI, no JUCE. Everything is sized in prepare() / configure(); process() allocates and locks nothing.
@@ -17,10 +18,7 @@ inline constexpr int kNumLookahead = 4;
 inline constexpr double kLookaheadMs[kNumLookahead] = { 0.5, 1.0, 2.0, 5.0 };
 inline constexpr int kDefaultLookahead = 2;
 
-inline constexpr int kTaps = 64;           // the true-peak interpolator: thirty-two taps for each of the points between two samples
-inline constexpr int kRatio = 8;           // 8x: seven points between two samples (a 4x reader can read a peak 0.7 dB low; an 8x one 0.2 dB)
-inline constexpr int kCentre = kTaps / 2 - 1; // the history slot the interpolation is centred on (the newest is kTaps - 1)
-inline constexpr int kDetectorDelay = kTaps - 1 - kCentre; // samples the detector reads behind the newest input: the audio waits this much longer than the look-ahead
+inline constexpr int kDetectorDelay = pdsp::kTruePeakDelay; // samples the detector reads behind the newest input: the audio waits this much longer than the look-ahead
 inline constexpr float kMaxGainDb = 24.0f;
 
 struct EngineParams
@@ -71,49 +69,6 @@ private:
     std::vector<uint64_t> index;
     std::vector<double> value;
     uint64_t mask = 15, head = 0, tail = 0, count = 0;
-};
-
-// The level of a stream between its samples: the newest kTaps samples, and seven interpolated points between the two in the middle.
-// A true peak is the largest of those and the samples themselves (BS.1770 reads it at 4x at least). The point it reports is kDetectorDelay samples behind the input.
-class TruePeakReader
-{
-public:
-    TruePeakReader()
-    {
-        for (int phase = 0; phase < kRatio - 1; ++phase)
-            for (int j = 0; j < kTaps; ++j)
-            {
-                const double t = (double) (phase + 1) / (double) kRatio, x = (double) kCentre + t - (double) j; // the distance from the tap to the point
-                const double sinc = std::fabs (x) < 1e-12 ? 1.0 : std::sin (M_PI * x) / (M_PI * x);
-                const double window = 0.5 + 0.5 * std::cos (M_PI * x / (0.5 * kTaps + 0.5)); // Hann, one more sample wide than the taps
-                kernel[(size_t) phase][(size_t) j] = sinc * window;
-            }
-        reset();
-    }
-
-    void reset() noexcept { history.fill (0.0); }
-
-    // Push a sample; returns the peak around the middle of the history. `between`: read the points between the samples too.
-    inline double push (double x, bool between) noexcept
-    {
-        for (int j = 0; j < kTaps - 1; ++j)
-            history[(size_t) j] = history[(size_t) (j + 1)];
-        history[kTaps - 1] = x;
-        double peak = std::fabs (history[kCentre]);
-        if (between)
-            for (const auto& k : kernel)
-            {
-                double sum = 0.0;
-                for (int j = 0; j < kTaps; ++j)
-                    sum += k[(size_t) j] * history[(size_t) j];
-                peak = std::fmax (peak, std::fabs (sum));
-            }
-        return peak;
-    }
-
-private:
-    std::array<std::array<double, kTaps>, kRatio - 1> kernel {};
-    std::array<double, kTaps> history {};
 };
 
 class Engine
@@ -235,7 +190,7 @@ private:
     double fs = 48000.0;
     int choice = kDefaultLookahead, look = 96, ring = 1024;
     SlidingMin mins;
-    TruePeakReader readerL, readerR;
+    pdsp::TruePeakReader readerL, readerR;
     std::vector<double> delayL, delayR, avg1, avg2;
     uint64_t position = 0;
     double sum1 = 1.0, sum2 = 1.0, release = 1.0, gainNow = 1.0;
