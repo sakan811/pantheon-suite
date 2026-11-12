@@ -8,6 +8,7 @@
 //   bands=N   join bands from the top until N are left
 
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 #include <random>
 
 int main (int argc, char** argv)
@@ -73,7 +74,8 @@ int main (int argc, char** argv)
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
     }
 
-    const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.5f);
+    auto& designed = ui::innerOf<AtlasEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);

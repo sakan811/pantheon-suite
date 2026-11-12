@@ -3,6 +3,7 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 
 AtlasProcessor::AtlasProcessor()
     : AudioProcessor (BusesProperties()
@@ -104,6 +105,6 @@ void AtlasProcessor::setStateInformation (const void* data, int size)
         }
 }
 
-juce::AudioProcessorEditor* AtlasProcessor::createEditor() { return new AtlasEditor (*this); }
+juce::AudioProcessorEditor* AtlasProcessor::createEditor() { return new ui::ScaledEditor<AtlasEditor> (*this, apvts.state, *this); }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new AtlasProcessor(); }

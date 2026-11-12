@@ -3,6 +3,7 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 
 HephaestusProcessor::HephaestusProcessor()
     : AudioProcessor (BusesProperties()
@@ -88,7 +89,7 @@ void HephaestusProcessor::setStateInformation (const void* data, int size)
 
 juce::AudioProcessorEditor* HephaestusProcessor::createEditor()
 {
-    return new HephaestusEditor (*this);
+    return new ui::ScaledEditor<HephaestusEditor> (*this, apvts.state, *this);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

@@ -7,6 +7,7 @@
 #include "Advice.h"
 #include "Check.h"
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 #include <cstring>
 
 using namespace hestia;
@@ -46,7 +47,7 @@ int main()
 
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
-        auto& editor = static_cast<HestiaEditor&> (*holder);
+        auto& editor = ui::innerOf<HestiaEditor> (*holder);
         editor.setVisible (true);
         check (editor.roleBox.getNumItems() == kNumRoles && editor.mixBox.getNumItems() == kMaxGroups + 1, "the role and mix selectors have the parameters' items");
         editor.roleBox.setSelectedItemIndex ((int) Role::bass, juce::sendNotificationSync);
@@ -182,6 +183,31 @@ int main()
             reflections = std::fmax (reflections, std::fabs (back[i]));
         check (front[10] == 1.0f && back[10] < 0.8f && reflections > 0.02f,
                fmt ("depth 100%% through the processor: an impulse is %.2f at the front and %.2f at the back, with reflections of %.3f after it", front[10], back[10], reflections));
+    }
+
+    // The window: opens smaller than it is drawn, scales with the corner, remembers the scale with the session.
+    {
+        HestiaProcessor q;
+        std::unique_ptr<juce::AudioProcessorEditor> first (q.createEditor());
+        auto& drawn = ui::innerOf<HestiaEditor> (*first);
+        check (first->isResizable() && std::abs (first->getWidth() - juce::roundToInt ((float) drawn.getWidth() * ui::kDefaultEditorScale)) <= 1
+                   && first->getConstrainer() != nullptr,
+               fmt ("the editor opens at %d x %d, %.0f%% of the %d x %d it is drawn at, and can be resized", first->getWidth(), first->getHeight(), 100.0f * ui::kDefaultEditorScale, drawn.getWidth(), drawn.getHeight()));
+        check (std::abs (drawn.getTransform().mat00 - ui::kDefaultEditorScale) < 0.01f, "the editor inside is scaled by a transform: it is laid out at its own size");
+        first->setSize (drawn.getWidth(), drawn.getHeight());
+        check (std::abs (drawn.getTransform().mat00 - 1.0f) < 0.01f && drawn.getWidth() > 800, "dragged to full size the scale is 1, and the editor inside has not changed size");
+        auto* limits = first->getConstrainer();
+        check (limits->getMinimumWidth() == juce::roundToInt ((float) drawn.getWidth() * ui::kMinEditorScale) && limits->getMaximumWidth() == juce::roundToInt ((float) drawn.getWidth() * ui::kMaxEditorScale)
+                   && std::abs (limits->getFixedAspectRatio() - (double) drawn.getWidth() / (double) drawn.getHeight()) < 1e-6,
+               "the corner scales it between half and one and a half times, and keeps its proportions");
+        first->setSize (juce::roundToInt ((float) drawn.getWidth() * 0.9f), juce::roundToInt ((float) drawn.getHeight() * 0.9f));
+        juce::MemoryBlock state;
+        q.getStateInformation (state);
+        first.reset();
+        HestiaProcessor other;
+        other.setStateInformation (state.getData(), (int) state.getSize());
+        std::unique_ptr<juce::AudioProcessorEditor> again (other.createEditor());
+        check (std::abs ((float) again->getWidth() / (float) ui::innerOf<HestiaEditor> (*again).getWidth() - 0.9f) < 0.01f, "the scale is saved with the session: another instance opens at 90%");
     }
 
     // Mono host.

@@ -122,6 +122,7 @@ index is the group, 0 off) is stored in sessions: add at the end, never reorder.
   rest to Off, or they would see each other. `HestiaTests` builds its own `Bus` for each scenario.
 - A reader that gathers *every* live stem of a group also gets the ones other tests published: use a `Bus` of your own in DSP tests.
 - In an editor constructor call `setSize()` **last**.
+- `createEditor()` returns a `ui::ScaledEditor<HestiaEditor>` (shared/ui Scaled.h), not the editor: the window opens at 70% and scales. Tests and snapshots reach the editor with `ui::innerOf<HestiaEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
 - `ui::Choice` and `ui::Toggle` are bound to one parameter for good.
 
 ## Conventions
