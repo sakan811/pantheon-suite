@@ -82,6 +82,7 @@ public:
         deltaMix.reset (0.0f);
         distanceNow = 0.0f;
         shownDistance = -1.0f;
+        airOn = false;
         scFed = 0;
         scLive = false;
         std::fill (std::begin (ownLevel), std::end (ownLevel), kFloorDb);
@@ -111,8 +112,11 @@ public:
                 carver.process (wetL, wetR);
                 double reflectedL, reflectedR;
                 reflections.process (wetL, wetR, reflectedL, reflectedR);
-                wetL = air[0].process (wetL);
-                wetR = air[1].process (wetR);
+                if (airOn) // left out at the front, not run at 0 dB: see Carver::setTarget
+                {
+                    wetL = air[0].process (wetL);
+                    wetR = air[1].process (wetR);
+                }
                 const double side = 0.5 * (wetL - wetR), loss = (double) widthLoss.advance(), room = (double) reflect.advance();
                 wetL = wetL - loss * side + room * reflectedL;
                 wetR = wetR + loss * side + room * reflectedR;
@@ -235,8 +239,13 @@ private:
         if (std::fabs (distanceNow - shownDistance) > 1e-9f)
         {
             shownDistance = distanceNow;
-            air[0].setHighShelf (fs, kAirHz, 0.7071, cues.airDb);
-            air[1].setHighShelf (fs, kAirHz, 0.7071, cues.airDb);
+            airOn = distanceNow > 0.0f;
+            for (auto& a : air)
+            {
+                a = pdsp::Biquad(); // a shelf that is off has no state; one that is wanted again starts from rest
+                if (airOn)
+                    a.setHighShelf (fs, kAirHz, 0.7071, cues.airDb);
+            }
         }
 
         // Output gain, the level of the distance, the width, the room and the monitor ramp over the next tick; what was aimed at has been reached by now.
@@ -260,6 +269,6 @@ private:
     Ramp gain, widthLoss, reflect, deltaMix;
     float distanceNow = 0.0f, shownDistance = -1.0f;
     int scFed = 0;
-    bool scLive = false;
+    bool scLive = false, airOn = false;
 };
 } // namespace hestia

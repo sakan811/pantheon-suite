@@ -41,6 +41,7 @@ public:
             for (auto& b : bell[(size_t) c])
                 b = pdsp::Biquad();
         gainDb.fill (0.0);
+        active.fill (false);
         reset();
     }
 
@@ -62,12 +63,23 @@ public:
             g = std::fmax (std::fmin (g, kMaxBellDb), -kMaxBellDb);
             const bool none = std::fabs (g) < 0.005;
             if (none)
-                g = 0.0; // exactly no bell: a bell of 0 dB is the identity, bit for bit
+                g = 0.0;
             if (std::fabs (g - gainDb[(size_t) j]) < (none ? 1e-12 : 0.01))
                 continue; // nothing to change (a bell is not redesigned for a hundredth of a dB)
             gainDb[(size_t) j] = g;
             if (! reachable (j))
                 continue;
+            if (none)
+            {
+                // No bell: it is not run, so the band is the input exactly. A bell of 0 dB is the identity on paper (b == a), but a compiler that contracts
+                // b1*x - a1*y into a fused multiply-add (any build for a machine with FMA) leaves rounding noise in it: so the bell is left out, not run at 0.
+                // A bell that is the identity has no state, so it is reset here and starts from rest when it is wanted again.
+                bell[0][(size_t) j] = pdsp::Biquad();
+                bell[1][(size_t) j] = pdsp::Biquad();
+                active[(size_t) j] = false;
+                continue;
+            }
+            active[(size_t) j] = true;
             bell[0][(size_t) j].setPeak (fs, bandCentreHz (j), kQ, g);
             // Both channels get the same coefficients and keep their own state.
             auto& l = bell[0][(size_t) j];
@@ -79,10 +91,11 @@ public:
     inline void process (double& left, double& right) noexcept
     {
         for (int j = 0; j < kBands; ++j)
-        {
-            left = bell[0][(size_t) j].process (left);
-            right = bell[1][(size_t) j].process (right);
-        }
+            if (active[(size_t) j])
+            {
+                left = bell[0][(size_t) j].process (left);
+                right = bell[1][(size_t) j].process (right);
+            }
     }
 
     // The response of the whole cascade at a frequency, in dB.
@@ -137,5 +150,6 @@ private:
     std::array<std::array<pdsp::Biquad, kBands>, 2> bell;
     std::array<std::array<double, kBands>, kBands> inverse {};
     std::array<double, kBands> gainDb {};
+    std::array<bool, kBands> active {}; // the bells that are run: those with a gain
 };
 } // namespace hestia
