@@ -34,7 +34,9 @@ Tests/                     Tests.cpp (DSP), UiCheck.cpp (editor on the real proc
 
 **Latency is a whole number of samples.** Stage 0 has 65 taps (half-length M = 32), the others 33 (M = 16); a stage's round trip delays by M samples of its lower rate, so the total is 32, 32 + 8 = 40 and 32 + 8 + 4 = 44
 samples (`oversamplingLatency`). The decimator returns the filter's value at the *even* sample of each pair (it computes it when the first arrives and hands it out with the second): taking the odd one added half a sample per stage
-and made the wet path one sample later than the dry delay (test [4], the impulse). The dry sound waits in a ring of `latency + 1` samples. Change a tap count and the latency formula, the test and the README move together.
+and made the wet path one sample later than the dry delay (test [4], the impulse). The dry sound waits in a ring of `latency + 1` samples (a fixed array of `kMaxLatency + 1`). Change a tap count and the latency formula, the test and the README move together.
+
+**The stages are half-bands, and the code uses it.** Every tap an even distance from the centre is exactly 0, the centre is 1/2, the filter is symmetric: `up` gives its first output as the delayed input and its second from the odd taps in pairs, `down` is the centre plus the odd taps in pairs, and each history is written twice (`taps` apart) so a window is contiguous, with no modulo. That is about a fifth of the CPU of the plain convolution it replaced (8x went from 25-50% to about 4% of a core, stereo at 48 kHz) with the same output to 1e-15. Taps must stay odd with (taps - 1) / 2 even and at most `HalfbandStage::kMaxTaps`. `Engine::process` measures AUTO GAIN only when the shape, drive or bias moves (`compensationFor`: it is a loop of 256 curve evaluations, which at small host blocks cost more than the oversampler).
 
 **Gain 2 on the way up.** Zero-stuffing halves the level; the up filter has a gain of 2 (`first = 2 x a`). The fundamental is the same at every oversampling (test [3]).
 
@@ -45,7 +47,7 @@ whenever either is in use (`dcOn`) and is reset while it is not. `compensation()
 
 **MIX.** 100% takes the saturated sound itself (not `dry + mix x (wet - dry)`), 0% the delayed dry sound itself: exact at both ends. The wet path runs all the time so its states are warm.
 
-**Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()` / `configure()` (a change of oversampling restarts the saturator and is reported through `DionysusProcessor::handleAsyncUpdate`).
+**Real time.** `Engine::process` allocates and locks nothing; everything is a fixed array or sized in `prepare()` (`configure()` allocates nothing, so a change of oversampling on the audio thread is safe; a change of oversampling restarts the saturator and is reported through `DionysusProcessor::handleAsyncUpdate`).
 **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
 **Parameters.** Ids (`dionysus::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
