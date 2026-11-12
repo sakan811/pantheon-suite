@@ -78,6 +78,54 @@ juce::TextButton* findButton (juce::Component& parent, const juce::String& text)
 }
 }
 
+// In a function of its own: main's frame already holds many processors (each about a megabyte), and two more overflow the stack.
+__attribute__ ((noinline)) void peerMaskingCheck()
+{
+    // Another Iris in the same host is found by its track name and masked against, with nothing routed to a sidechain.
+    {
+        auto srcPtr = std::make_unique<IrisProcessor>(), dstPtr = std::make_unique<IrisProcessor>(); // on the heap: main has used most of the stack
+        IrisProcessor& src = *srcPtr;
+        IrisProcessor& dst = *dstPtr;
+        juce::AudioProcessor::TrackProperties kick;
+        kick.name = juce::String ("Kick");
+        src.updateTrackProperties (kick);
+        auto dvPtr = std::make_unique<gui::EqView> (dst.engine, dst.apvts, dst.currentSampleRate);
+        gui::EqView& dv = *dvPtr;
+        dv.setSidechain (&dst.sidechainTap, &dst.sidechainConnected);
+        dv.setPeers (&dst.peer);
+        pump (600); // the list of others is refreshed twice a second
+        bool listed = false; // (other processors made earlier in this run are still alive, so only the one named here is looked for)
+        for (const auto& info : PeerRegistry::get().others (&dst.peer))
+            listed = listed || info.label == "Kick";
+        check (listed && dv.maskingStatus().containsIgnoreCase ("OTHER IRIS FOUND"), "another Iris in the host is listed by its track name and announced, with nothing connected: " + dv.maskingStatus().toStdString());
+        dv.setMaskSource ("Kick");
+        check (dst.apvts.state.getProperty ("maskSource").toString() == "Kick", "the choice is kept in the project state");
+        test::PinkNoise nSrc (11), nDst (12);
+        juce::AudioBuffer<float> bs (2, 512), bd (2, 512);
+        juce::MidiBuffer midi;
+        for (int block = 0; block < 400; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+                for (int c = 0; c < 2; ++c)
+                {
+                    bs.setSample (c, i, 0.3f * nSrc.next());
+                    bd.setSample (c, i, 0.3f * nDst.next());
+                }
+            src.processBlock (bs, midi);
+            dst.processBlock (bd, midi);
+            if (block % 3 == 0)
+                pump (34);
+        }
+        check (dv.maskingStatus().startsWith ("MASKING AGAINST KICK") && ! dv.currentClashes().empty(),
+               "two tracks of equal noise mask each other, found through the other instance: " + dv.maskingStatus().toStdString());
+        check (! dst.sidechainConnected.load(), "... and no sidechain was involved");
+        dv.setMaskSource ("Nobody");
+        check (dv.maskingStatus().containsIgnoreCase ("NOT LOADED") && dv.currentClashes().empty(), "a track that is not there is waited for, and the old zones are dropped: " + dv.maskingStatus().toStdString());
+        dv.setMaskSource ({});
+        check (dv.maskSource().isEmpty(), "choosing the sidechain input again clears it");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -362,6 +410,20 @@ int main()
         c.setStateInformation (cleared.getData(), (int) cleared.getSize());
         gui::EqView none (c.engine, c.apvts, c.currentSampleRate);
         check (! none.hasReference(), "... also from the saved state");
+
+        // Masking says what it is waiting for instead of showing nothing, but only once a sidechain is there (or help is asked for).
+        {
+            IrisProcessor m;
+            gui::EqView mv (m.engine, m.apvts, m.currentSampleRate);
+            check (mv.maskingStatus().isEmpty() && mv.maskingStatus (true).isEmpty(), "a view with no sidechain tap says nothing about masking");
+            mv.setSidechain (&m.sidechainTap, &m.sidechainConnected);
+            check (mv.maskingStatus().isEmpty(), "no sidechain connected: no pill by itself");
+            check (mv.maskingStatus (true).containsIgnoreCase ("sidechain"), "... but 'Why is there no masking?' explains what to connect");
+            m.sidechainConnected = true;
+            check (mv.maskingStatus().containsIgnoreCase ("PLAY"), "a sidechain connected and nothing playing: asks for audio");
+        }
+
+        peerMaskingCheck();
 
         // A curve pasted along with Themis' bands.
         std::string curve = "pantheon-bands 1\nbell freq=270 gain=-2.5 q=1.40 place=mid\ncurve f0=20 oct=6 name=Modern_Pop db=";
