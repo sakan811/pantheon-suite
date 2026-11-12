@@ -1,0 +1,86 @@
+# Hera Bond
+
+A **compressor** (VST3 + AU + Standalone) for a track or a bus: a peak or RMS detector, a soft knee, attack and release (or a release that follows the programme),
+makeup (or one that makes up what the compression takes), a parallel **mix**, a **stereo link**, and a **sidechain** with a high-pass on what the detector hears
+(or another track as the key).
+
+## Name origin
+
+*Hera* is the goddess of marriage and of what holds together: the compressor's work is to bring the loud and the quiet closer so that they hold together as one.
+(CMake targets, namespaces and plugin codes use the short name "Hera".)
+
+## What it does
+
+| | |
+|---|---|
+| **Threshold** | -60 to 0 dB, -18 by default: the level (the peak of a sine) above which the sound is turned down. |
+| **Ratio** | 1:1 to 20:1, 2:1 by default: how many dB it takes past the threshold for 1 dB more to come out. |
+| **Attack / Release** | 0.1 to 200 ms (10) and 10 ms to 2 s (150): the time the gain takes to go 63% of the way down and of the way back. |
+| **Knee** | 0 to 24 dB, 6 by default: how gradually it starts, around the threshold. |
+| **Makeup** | 0 to +24 dB. **Auto makeup** adds what the compression takes from a signal at 0 dBFS, so a full-scale input is full scale out. |
+| **Mix** | 0 to 100%, 100 by default: the compressed sound blended with the dry one (parallel compression). |
+| **Link** | 0 to 100%, 100 by default: the share of the louder channel's level that both channels see, so the image does not move (0: each channel on its own). |
+| **SC high-pass** | 20 to 500 Hz, off at 20: a high-pass on what the detector listens to (not on the sound). |
+| **Detector** | Peak (quick, follows transients) or RMS (10 ms, closer to the ear; the default). Both read the peak of a sine, so THRESH means the same on both. |
+| **Auto release** | Program-dependent: two followers, one of 50 ms and one of 600 ms that is 20 times slower to go down; the gain is the larger. A short peak lets go quickly, a long loud passage slowly. RELEASE is not used. |
+| **Key** | Listen to the **sidechain** input (a second input, off until the host routes a track to it) instead of the sound. With nothing connected it listens to itself. |
+
+The display is the transfer curve (input level across, output up; the diagonal is "no compression", the dot is the level now) and the reduction of the last ten seconds.
+
+## How it works
+
+1. The key (the sound, or the sidechain) goes through the detector's high-pass (a 2nd-order Butterworth when it is on) and the detector: for each channel the **peak** is an envelope that
+   takes any peak at once and lets it fall over 15 ms (so a low tone does not make the gain ripple), the **RMS** is the square root of a mean square of 10 ms, times the square root of 2.
+2. LINK: each channel sees its own level plus LINK of the way to the louder one.
+3. The gain computer turns the level in dB into a reduction in dB: `(1 - 1/ratio) x over` with a quadratic soft knee of `KNEE` dB around the threshold.
+4. The reduction goes through the follower: one-pole attack when it grows, one-pole release when it shrinks. At rest (under 0.001 dB with nothing to reduce) it is let go to exactly 0, so the gain is exactly 1.
+5. The gain (with makeup) is applied to the sound, and MIX blends it with the dry sound. MIX at 100% is the compressed sound itself, not a blend.
+
+## Measured (`HeraTests`, 48 kHz)
+
+- The law: a sine at -6 dBFS over a -24 dB threshold at 4:1 with no knee is turned down by 13.48 dB with the peak detector and 13.52 dB with the RMS one (13.5 by the law); 20:1: 17.13 dB (17.1).
+  With a 12 dB knee, exactly at the threshold the reduction is 1.14 dB (1.125), and 8 dB under it none.
+- Under the threshold the output is the input, bit for bit; three seconds after a loud passage the gain is back at exactly 1 and the quiet tone is the input, bit for bit.
+- ATTACK 20 ms: after 20 ms the reduction has come 63% of the way to its value (20.9 dB; the law 21). RELEASE 200 ms: 200 ms after the tone stops 41% is left (a one-pole is 37%; the peak detector's 15 ms fall adds the rest), after 1.4 s 0.02 dB.
+- AUTO release: the reduction halves 93 ms after a 30 ms burst but 1008 ms after a 1.5 s one.
+- LINK 100%: a loud left and a right 26 dB under it get the same gain (-13.5 dB both); LINK 0%: the left is turned down by 13.5 dB and the right by 0.00.
+- SIDECHAIN: a quiet tone is turned down by 13.4 dB by a loud key it never contained; with KEY off the sidechain is ignored (the tone is untouched). A 250 Hz detector high-pass: a 50 Hz tone that is turned down 13.4 dB without it is turned down 0.0 dB with it.
+- MAKEUP +6 dB: -7.49 dB net (13.5 down, 6 up). AUTO makeup: a full-scale tone comes out at +0.01 dBFS. MIX 50%: -4.35 dB (-4.36 expected).
+- A train of clicks: the peak detector turns it down by 15.7 dB, the RMS one by 0.0 dB.
+- The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
+
+## Limits
+
+- **It compresses; it does not limit.** It reads no true peak and has no look-ahead: a fast peak gets through before ATTACK closes. Put a limiter after it (Aegis).
+- **Taking off 10 dB or more pumps.** Raise THRESH or lower RATIO. A very fast ATTACK on the peak detector takes the transient away.
+- **MIX under 100% blends the compressed path with the dry one**; the meter and the transfer curve show the compressed path, not the blend. There is no delay on either (no look-ahead), so the blend does not comb.
+- **The RMS detector's 10 ms** means a very short peak (a click) is hardly seen: use the peak detector for them.
+- **KEY with nothing connected listens to itself**, so a session saved with it still works without a sidechain.
+- It has not been built on macOS or run through `auval`, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+
+## Building
+
+Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target Hera_VST3 Hera_AU Hera_Standalone -j 10
+```
+
+Building does **not** install the plugins; add `-DHERA_INSTALL_AFTER_BUILD=ON` for that (macOS).
+
+## Development
+
+```bash
+cmake --build build --target HeraTests && ./build/HeraTests_artefacts/Release/HeraTests            # DSP: no plugin, no GUI
+cmake --build build --target HeraUiCheck && ./build/HeraUiCheck_artefacts/Release/HeraUiCheck      # the editor on the real processor
+cmake --build build --target HeraSnapshot && ./build/HeraSnapshot_artefacts/Release/HeraSnapshot docs/screenshot.png
+```
+
+`docs/screenshot.png` is the output of `HeraSnapshot` (arguments in the file's header), never edited by hand. See
+[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+
+## Licence
+
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
+the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
