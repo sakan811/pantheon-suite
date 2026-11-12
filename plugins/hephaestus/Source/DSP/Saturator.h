@@ -140,16 +140,23 @@ public:
             // Fade a band in or out across the block so switching it never clicks.
             const float target = band.active ? 1.0f : 0.0f;
             const float step = (target - st.gain) / (float) n;
+            const bool toSolo = soloOut != nullptr && b == soloBand;
             for (int c = 0; c < nCh; ++c)
             {
                 float g = st.gain;
-                for (int i = 0; i < n; ++i)
-                {
-                    g += step;
-                    out[c][i] += data[c][i] * g;
-                    if (soloOut != nullptr && b == soloBand)
+                if (toSolo)
+                    for (int i = 0; i < n; ++i)
+                    {
+                        g += step;
+                        out[c][i] += data[c][i] * g;
                         soloOut[c][i] = data[c][i] * g;
-                }
+                    }
+                else
+                    for (int i = 0; i < n; ++i)
+                    {
+                        g += step;
+                        out[c][i] += data[c][i] * g;
+                    }
             }
             st.gain = target;
         }
@@ -164,6 +171,7 @@ private:
         std::array<pdsp::Bandpass, maxChannels> filter;
         std::array<AdaaState, maxChannels> adaa;
         double cutLo = -1.0, cutHi = -1.0, drive = 1.0;
+        double designedLo = -1.0, designedHi = -1.0; // the edges the filters' coefficients were last computed for
         float gain = 0.0f; // fade level of the band's contribution
         bool running = false;
     };
@@ -223,6 +231,12 @@ private:
         st.cutLo = st.cutLo < 0.0 ? loGoal : st.cutLo + 0.25 * (loGoal - st.cutLo);
         st.cutHi = st.cutHi < 0.0 ? hiGoal : st.cutHi + 0.25 * (hiGoal - st.cutHi);
 
+        // The glide converges, and then the design (eight biquads, a few trig calls each, per channel) would give the same coefficients every block: skip it.
+        // The design keeps the filters' memory, so skipping it changes nothing audible.
+        if (st.cutLo == st.designedLo && st.cutHi == st.designedHi)
+            return;
+        st.designedLo = st.cutLo;
+        st.designedHi = st.cutHi;
         for (auto& f : st.filter)
             f.setup (fs, 4, st.cutLo, 4, st.cutHi);
     }
