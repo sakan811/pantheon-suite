@@ -3,13 +3,15 @@
 
 // Renders the plugin editor to a PNG: a lead vocal in a mix with a kick, a bass and a guitar, each fed a programme so the display shows real activity.
 //
-//   HestiaSnapshot <out.png> [delta] [alone] [sc]
+//   HestiaSnapshot <out.png> [delta] [alone] [sc] [window]
 //
+//   window  the window as the host shows it (scaled to its default size), not the editor at the size it is drawn
 //   delta   DELTA on
 //   alone   no other stems: the empty mix
 //   sc      a pad on the sidechain input
 
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 #include <random>
 
 namespace
@@ -21,16 +23,17 @@ int main (int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::printf ("usage: HestiaSnapshot <out.png> [delta] [alone] [sc]\n");
+        std::printf ("usage: HestiaSnapshot <out.png> [delta] [alone] [sc] [window]\n");
         return 2;
     }
     juce::ScopedJuceInitialiser_GUI gui;
-    bool alone = false, delta = false, sc = false;
+    bool alone = false, delta = false, sc = false, window = false;
     for (int i = 2; i < argc; ++i)
     {
         alone = alone || juce::String (argv[i]) == "alone";
         delta = delta || juce::String (argv[i]) == "delta";
         sc = sc || juce::String (argv[i]) == "sc";
+        window = window || juce::String (argv[i]) == "window";
     }
 
     const hestia::Role roles[] = { hestia::Role::leadVocal, hestia::Role::kick, hestia::Role::bass, hestia::Role::guitar };
@@ -134,7 +137,8 @@ int main (int argc, char** argv)
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
 
-    const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.5f);
+    auto& designed = ui::innerOf<HestiaEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const auto image = window ? editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f) : designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);

@@ -3,6 +3,7 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 
 HestiaProcessor::HestiaProcessor()
     : AudioProcessor (BusesProperties()
@@ -73,6 +74,6 @@ void HestiaProcessor::setStateInformation (const void* data, int size)
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
-juce::AudioProcessorEditor* HestiaProcessor::createEditor() { return new HestiaEditor (*this); }
+juce::AudioProcessorEditor* HestiaProcessor::createEditor() { return new ui::ScaledEditor<HestiaEditor> (*this, apvts.state, *this); }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new HestiaProcessor(); }

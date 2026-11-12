@@ -10,6 +10,7 @@
 //   sub      a sub-bass note that comes and goes, with nothing above it
 
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 #include "PluginProcessor.h"
 #include "TestSignals.h"
 
@@ -34,7 +35,7 @@ int main (int argc, char** argv)
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
     if (argc > 4)
-        static_cast<HephaestusEditor&> (*editor).selectBand (juce::String (argv[4]).getIntValue() - 1);
+        ui::innerOf<HephaestusEditor> (*editor).selectBand (juce::String (argv[4]).getIntValue() - 1);
 
     const bool sub = argc > 3 && juce::String (argv[3]) == "sub";
     test::MissingFundamentalProgramme missing;
@@ -51,7 +52,8 @@ int main (int argc, char** argv)
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
 
-    const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.5f);
+    auto& designed = ui::innerOf<HephaestusEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     juce::File out (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);

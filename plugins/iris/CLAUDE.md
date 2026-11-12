@@ -163,6 +163,7 @@ alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arriv
 
 ## Gotchas already paid for
 
+- `createEditor()` returns a `ui::ScaledEditor<IrisEditor>` (shared/ui Scaled.h), not the editor: the window opens at 70% and scales. Tests and snapshots reach the editor with `ui::innerOf<IrisEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
 - In an editor constructor call `setSize()` **last**; `resized()` runs inside it and only positions controls that exist.
 - A choice (`ui::Choice`) or a switch (`ui::Toggle`) is bound to one parameter for good; a knob (`ui::Knob`) can be re-bound. That is why
   each band has its own type / placement / slope / dynamic-mode box and dynamic switch (only the selected band's is shown) while the

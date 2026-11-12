@@ -13,6 +13,7 @@
 //   reference  learn a brighter track as the reference first, then play the programme and press MATCH EQ: the reference curve and the match
 
 #include "PluginEditor.h"
+#include <pantheon/ui/Scaled.h>
 #include "PluginProcessor.h"
 #include "TestSignals.h"
 
@@ -42,7 +43,7 @@ int main (int argc, char** argv)
     {
         const juce::String arg (argv[i]);
         if (arg.startsWith ("band="))
-            static_cast<IrisEditor&> (*editor).selectBand (arg.fromFirstOccurrenceOf ("=", false, false).getIntValue() - 1);
+            ui::innerOf<IrisEditor> (*editor).selectBand (arg.fromFirstOccurrenceOf ("=", false, false).getIntValue() - 1);
         else if (arg.startsWith ("region="))
             proc.engine.monitor.regions = (unsigned) arg.fromFirstOccurrenceOf ("=", false, false).getIntValue();
         else if (arg.startsWith ("solo="))
@@ -64,7 +65,7 @@ int main (int argc, char** argv)
     if (reference)
     {
         // A brighter track plays first and is learned as the reference (what the LEARN REF button does).
-        auto& view = static_cast<IrisEditor&> (*editor).display();
+        auto& view = ui::innerOf<IrisEditor> (*editor).display();
         view.toggleLearning();
         test::PinkNoise referenceNoise (5);
         float previous = 0.0f;
@@ -118,7 +119,7 @@ int main (int argc, char** argv)
     }
     if (reference)
     {
-        static_cast<IrisEditor&> (*editor).display().matchToReference();
+        ui::innerOf<IrisEditor> (*editor).display().matchToReference();
         for (int block = 0; block < 12; ++block)
         {
             programme.fill (buffer);
@@ -128,7 +129,8 @@ int main (int argc, char** argv)
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
 
-    const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.5f);
+    auto& designed = ui::innerOf<IrisEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     juce::File out (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);

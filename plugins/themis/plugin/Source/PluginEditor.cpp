@@ -69,7 +69,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
 
     setResizable (true, true);
     setResizeLimits (1120, 780, 2200, 1300);
-    setSize (1440, 900);
+    setSize (1120, 780); // opens at the smallest size it supports; the corner scales it up (setResizeLimits above)
     advicePanel.refresh();
     startTimerHz (30);
 }
