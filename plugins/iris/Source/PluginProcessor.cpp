@@ -57,6 +57,11 @@ void IrisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         main.clear (c, 0, main.getNumSamples());
 
     engine.process (main, iris::readParams (apvts), side.getNumChannels() > 0 ? &side : nullptr);
+    if (main.getNumChannels() > 0)
+    {
+        const float* out[2] = { main.getReadPointer (0), main.getReadPointer (main.getNumChannels() > 1 ? 1 : 0) };
+        peer.publish (out, main.getNumChannels(), main.getNumSamples(), engine.outPeak.load (std::memory_order_relaxed));
+    }
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
 }

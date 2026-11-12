@@ -31,6 +31,16 @@ public:
         double q = 4.3;
     };
 
+    // What the meter can say about itself, so the display can explain an empty result instead of showing nothing.
+    enum class Status { silent, otherSilent, measuring, clear, found };
+
+    // Where both tracks are loud, and how far apart they are there (this track minus the other, mean of those bands).
+    struct Overlap
+    {
+        int bands = 0;
+        float gapDb = 0.0f;
+    };
+
     MaskingMeter() { reset(); }
 
     static double centreHz (int band) { return kFirstHz * std::pow (2.0, band / 3.0); }
@@ -38,6 +48,7 @@ public:
     void reset()
     {
         seconds = 0.0f;
+        ownSilent = otherSilent = true;
         own.fill (-200.0f);
         other.fill (-200.0f);
     }
@@ -46,7 +57,9 @@ public:
     void update (const float* ownDb, const float* otherDb, int numBins, double binHz, float dtSeconds)
     {
         std::array<float, kBands> a {}, b {};
-        if (! bandLevels (ownDb, numBins, binHz, a) || ! bandLevels (otherDb, numBins, binHz, b))
+        ownSilent = ! bandLevels (ownDb, numBins, binHz, a);
+        otherSilent = ! bandLevels (otherDb, numBins, binHz, b);
+        if (ownSilent || otherSilent)
             return;
         const float w = seconds <= 0.0f ? 1.0f : 1.0f - std::exp (-dtSeconds / kAverageSeconds);
         for (size_t i = 0; i < (size_t) kBands; ++i)
@@ -58,6 +71,40 @@ public:
     }
 
     bool hasData() const { return seconds >= kMinSeconds; }
+    float measuredSeconds() const { return seconds; }
+
+    // Whether the last update heard something on each side (a stopped transport, or a sidechain nobody routed, is silence).
+    bool hearsOwn() const { return ! ownSilent; }
+    bool hearsOther() const { return ! otherSilent; }
+
+    Status status() const
+    {
+        if (ownSilent)
+            return Status::silent;
+        if (otherSilent)
+            return Status::otherSilent;
+        if (! hasData())
+            return Status::measuring;
+        return clashes().empty() ? Status::clear : Status::found;
+    }
+
+    // Why there is no clash: the bands where both are loud, and whether one of them is simply louder than the other there.
+    Overlap overlap() const
+    {
+        Overlap o;
+        if (! hasData())
+            return o;
+        const float ownTop = *std::max_element (own.begin(), own.end()), otherTop = *std::max_element (other.begin(), other.end());
+        double sum = 0.0;
+        for (size_t i = 0; i < (size_t) kBands; ++i)
+            if (own[i] >= ownTop - kLoudDb && other[i] >= otherTop - kLoudDb)
+            {
+                ++o.bands;
+                sum += own[i] - other[i];
+            }
+        o.gapDb = o.bands > 0 ? (float) (sum / o.bands) : 0.0f;
+        return o;
+    }
 
     std::vector<Clash> clashes() const
     {
@@ -118,5 +165,6 @@ private:
 
     std::array<float, kBands> own {}, other {};
     float seconds = 0.0f;
+    bool ownSilent = true, otherSilent = true;
 };
 } // namespace iris

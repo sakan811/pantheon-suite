@@ -170,7 +170,8 @@ IrisEditor::IrisEditor (IrisProcessor& p)
 
     // Size last: resized() lays out the controls, which must all exist by then.
     setSize (editorWidth, editorHeight);
-    view.setSidechain (&p.sidechainTap);
+    view.setSidechain (&p.sidechainTap, &p.sidechainConnected);
+    view.setPeers (&p.peer);
     startTimerHz (kTimerHz);
 }
 

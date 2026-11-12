@@ -34,7 +34,8 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   Band.h             BandType, Placement, BandParams, BandFilter (biquad or Butterworth cascade), bandResponseDb(): the curve the display draws
   Dynamics.h         Detector (band-matched filter + smoothed mean square) and dynamicOffsetDb(): the gain computer; DynamicsUsage (the editor's "never moves / always at full range" check)
   ResonanceFinder.h  narrow, lasting peaks in a spectrum (the display's markers); GUI-free, fed by the display's timer
-  Masking.h          MaskingMeter: where this track and the sidechain mask each other (the display's clash zones); GUI-free, fed by the display's timer
+  Masking.h          MaskingMeter: where this track and the sidechain (or another instance) mask each other (the display's clash zones); GUI-free, fed by the display's timer
+  Peers.h            PeerRing / Peer / PeerRegistry / PeerListener: other Iris instances in the host process, found by track name; GUI-free
   ReferenceMatch.h   SpectrumProfile (the display's spectrum averaged on a 1/6-octave grid), Shape (a profile with the level taken out), the reference as text, match::matchBands; GUI-free, fed by the display's timer
   LinearPhase.h      LinearFilter: the linear-phase modes (kernels from the bands' |H|^2, FFT overlap-save, the delay line, the solo curve); PhaseMode, LinearSpec, latencyFor()
   Saturator.h        Shaper: three curves, residual ADAA, DC block
@@ -126,9 +127,16 @@ a mono-in-one-channel key would vanish from a Side band. With no sidechain (`scI
 itself; a change of what it listens to resets the detectors. Non-finite samples are zeroed on the way in, as on the main input. `HostCheck` builds
 its layouts with the sidechain bus in them; a layout with one input bus is not this plugin's.
 
+**Other instances (`Peers.h`).** Every `IrisProcessor` owns a `Peer`, which registers itself in the process-wide `PeerRegistry`; the masking view (`EqView`, through a `PeerListener`) can read another instance's *output* instead of the sidechain. The rules:
+- **The audio thread never takes the registry's mutex.** `Peer::publish` (called at the end of `processBlock`) stores the level and, only while `listening > 0`, copies the block into the `PeerRing` (one writer, many readers, relaxed atomics for the samples and release / acquire for the position; a reader more than half a ring behind skips ahead). Everything that takes the lock (constructor and destructor, which hosts may run on any thread; `setTrackName`; the editor's timer) is off the audio thread. `~Peer` tells the listeners under the lock, so a listener never holds a dangling pointer.
+- **The ring is on the heap** (`std::make_unique`, 256 KB), and so is the view's `peerTap`: UiCheck's `main` keeps many processors on one stack frame, and a 256 KB member overflowed it (exit 139, no output, because stdout is buffered: run it under `lldb -b -o run`). A check that makes more processors goes in a function of its own, with the processors on the heap.
+- **The choice is the project's, not the view's**: the label is the state property `maskSource` (`""` = the sidechain input); `EqView::syncMaskSource` follows it from the timer, so a host restoring a session changes the source too. A label is the host's track name (`updateTrackProperties`) or "Iris", with `(2)`, `(3)` in load order for equal ones, so it can change when a twin is unloaded. It is not a stable id, on purpose: a duplicated track carries the same state.
+- **A peer that is not playing is fed as silence** (`-200` dB) into the meter: a host that stops calling `processBlock` would otherwise leave the last spectrum frozen and "masking" for ever.
+- What is published is the output after the equaliser (and after a band solo or DELTA, if one is on: they are monitoring, and a peer soloing hears itself soloed).
+
 **Display analysis is not audio analysis.** The resonance markers, the masking zones and the dynamics-usage check read the display's
 analyzers on the editor's timer: nothing runs on the audio thread, they need the editor open, and their limits are rules of thumb
-(named constants in their headers, quoted in the README; tests [11] to [14]). A band they suggest is made with `addBand` like any other.
+(named constants in their headers, quoted in the README; tests [11] to [14], and [17] for finding other instances). A band they suggest is made with `addBand` like any other.
 
 **Reference and match.** Everything runs on the display's timer (`EqView`), never the audio thread: the input spectrum without the display's tilt is averaged into `liveProfile` (always) and `learnProfile` (while LEARN REF is on). The reference is a `Shape` kept in `apvts.state` as the properties `referenceCurve` / `referenceName` (so it is saved with the project like the display settings, with no processor code); a band with no level is `kNoLevelDb`, not 0, so a silent top of a lowpassed track is not matched. `match::matchBands` is pure and tested without a UI; `addExistingCurve` (Parameters.h) adds what the stereo bands already on do before matching, so matching twice does not stack bands. Do not make a match more eager than the smoothing and the Q limits: matching single notes was tried first and cut 11 dB notches into a bass line.
 
