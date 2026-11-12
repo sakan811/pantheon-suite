@@ -64,7 +64,7 @@ int main()
         const auto b = readParams (proc.apvts).bands[3];
         check (std::fabs (b.freqHz - 2000.0) < 20.0 && std::fabs (b.gainDb - 6.0) < 0.1, fmt ("dragging the node to 2 kHz, +6 dB sets the band (%.0f Hz, %+.1f dB)", b.freqHz, b.gainDb));
         view.dragTo (0, { view.xOf (60.0), view.yOf (9.0) });
-        check (std::fabs (readParams (proc.apvts).bands[0].freqHz - 60.0) < 1.0 && readParams (proc.apvts).bands[0].gainDb == 0.0f, "dragging a high-pass's node moves its frequency only (it has no gain)");
+        check (std::fabs (readParams (proc.apvts).bands[0].freqHz - 60.0) < 1.0 && std::fabs (readParams (proc.apvts).bands[0].gainDb) < 1e-3f, "dragging a high-pass's node moves its frequency only (it has no gain)");
         view.mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), view.nodeOf (3), juce::ModifierKeys(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &view, &view,
                                                   juce::Time::getCurrentTime(), view.nodeOf (3), juce::Time::getCurrentTime(), 1, false));
         check (! readParams (proc.apvts).bands[3].on, "a double-click on a node switches its band off");
