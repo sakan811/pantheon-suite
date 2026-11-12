@@ -5,6 +5,7 @@
 
 #include <atomic>
 
+#include "DSP/Peers.h"
 #include "Parameters.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -42,7 +43,16 @@ public:
     pdsp::StereoTap sidechainTap;
     // Whether the host handed the last block a sidechain: the editor says so next to a band set to listen to it.
     std::atomic<bool> sidechainConnected { false };
+    // This instance as the other Iris instances in the host see it: they can mask against what it sends out (see DSP/Peers.h).
+    iris::Peer peer;
     double currentSampleRate = 48000.0;
+
+    // The host's name for the track, when it tells: it is what the list of other instances shows.
+    void updateTrackProperties (const TrackProperties& properties) override
+    {
+        AudioProcessor::updateTrackProperties (properties);
+        peer.setTrackName (properties.name.has_value() ? properties.name->toStdString() : std::string());
+    }
 
 private:
     // The latency changes with the phase mode, which a host or the editor can change at any time; setLatencySamples belongs to the

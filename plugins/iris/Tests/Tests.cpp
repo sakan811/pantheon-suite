@@ -8,6 +8,7 @@
 #include "Check.h"
 #include "DSP/Engine.h"
 #include "DSP/Masking.h"
+#include "DSP/Peers.h"
 #include "DSP/ReferenceMatch.h"
 #include "DSP/ResonanceFinder.h"
 #include "TestSignals.h"
@@ -994,6 +995,37 @@ void testMasking()
     check (run (own, shape (8000.0, 12000.0, -70.0f, 30.0f)).empty(), "tracks loud in different ranges do not clash");
     std::vector<float> silent (4096, -140.0f);
     check (run (own, silent).empty(), "a silent sidechain reports nothing");
+
+    // The meter says why there is nothing to show, so the display does not have to stay blank.
+    const auto feed = [&] (MaskingMeter& m, const std::vector<float>& a, const std::vector<float>& b, int ticks)
+    {
+        for (int i = 0; i < ticks; ++i)
+            m.update (a.data(), b.data(), (int) a.size(), binHz, 1.0f / 30.0f);
+    };
+    using S = MaskingMeter::Status;
+    {
+        MaskingMeter m;
+        check (m.status() == S::silent && ! m.hearsOwn() && ! m.hearsOther(), "before any audio: silent on both sides");
+        feed (m, own, silent, 5);
+        check (m.status() == S::otherSilent && m.hearsOwn() && ! m.hearsOther(), "this track playing and no sidechain signal: the sidechain is silent");
+        feed (m, silent, own, 1);
+        check (m.status() == S::silent, "nothing coming in: silent");
+        MaskingMeter w;
+        feed (w, own, other, 30);
+        check (w.status() == S::measuring && w.hearsOther(), "under 2 s of both: still measuring, and the sidechain is heard at once");
+        feed (w, own, other, 60);
+        check (w.status() == S::found, "after 2 s of a clash: found");
+    }
+    {
+        MaskingMeter m;
+        feed (m, own, shape (8000.0, 12000.0, -70.0f, 30.0f), 90);
+        check (m.status() == S::clear && m.overlap().bands == 0, "loud in different ranges: clear, and no shared range");
+        MaskingMeter q;
+        feed (q, own, shape (200.0, 500.0, -70.0f, 14.0f), 90); // 16 dB quieter than this track in the same range
+        const auto o = q.overlap();
+        check (q.status() == S::clear && o.bands > 0 && o.gapDb > MaskingMeter::kCloseDb,
+               fmt ("a shared range with the sidechain %.0f dB quieter: clear, and the gap is reported (%d bands)", o.gapDb, o.bands));
+    }
 }
 
 void testReferenceMatch()
@@ -1539,6 +1571,82 @@ void testSidechain()
     check (std::fabs (linGain + 12.0) < 0.3, fmt ("Linear: %+.2f dB (want -12.00)", linGain));
 }
 
+void testPeers()
+{
+    std::printf ("\n[17] Other Iris instances in the host: found without routing, listened to only on request\n");
+    const auto ramp = [] (std::vector<float>& v, float from)
+    {
+        for (size_t i = 0; i < v.size(); ++i)
+            v[i] = from + (float) i;
+    };
+    std::vector<float> a (1000), b (1000);
+    ramp (a, 0.0f);
+    ramp (b, 5000.0f);
+    const float* stereo[2] = { a.data(), b.data() };
+    const float* mono[1] = { a.data() };
+
+    {
+        PeerRing ring;
+        std::uint64_t pos = 0;
+        std::vector<float> l (4096), r (4096);
+        ring.push (stereo, 2, 1000);
+        check (ring.read (pos, l.data(), r.data(), 4096) == 1000 && l[999] == 999.0f && r[0] == 5000.0f, "what the writer pushed is what the reader gets, per channel");
+        check (ring.read (pos, l.data(), r.data(), 4096) == 0, "... once");
+        ring.push (mono, 1, 10);
+        ring.read (pos, l.data(), r.data(), 4096);
+        check (l[9] == 9.0f && r[9] == 9.0f, "a mono signal feeds both sides");
+        for (int i = 0; i < 100; ++i)
+            ring.push (stereo, 2, 1000);
+        int total = 0;
+        for (int got; (got = ring.read (pos, l.data(), r.data(), 4096)) > 0;)
+            total += got;
+        check (total == PeerRing::maxPush / 2 && pos == ring.position(), fmt ("a reader far behind skips ahead and gets the recent stretch only (%d samples)", total));
+        std::vector<float> big (PeerRing::capacity * 2);
+        ramp (big, 0.0f);
+        const float* bigp[1] = { big.data() };
+        ring.push (bigp, 1, (int) big.size());
+        pos = 0;
+        std::vector<float> bl (PeerRing::capacity), br (PeerRing::capacity);
+        const int n = ring.read (pos, bl.data(), br.data(), PeerRing::capacity);
+        check (n > 0 && n <= PeerRing::maxPush && bl[(size_t) n - 1] == (float) (big.size() - 1), "a block longer than the ring keeps its tail");
+    }
+
+    {
+        std::vector<float> l (4096), r (4096);
+        bool found = false, playing = false;
+        auto kick = std::make_unique<Peer>();
+        Peer me, other;
+        kick->setTrackName ("Kick");
+        other.setTrackName ("Kick");
+        me.setTrackName ("Bass");
+        const auto list = PeerRegistry::get().others (&me);
+        check (list.size() == 2 && list[0].label == "Kick" && list[1].label == "Kick (2)", "the others are listed by track name, equal names numbered");
+        check (PeerRegistry::get().others (&other).size() == 2 && PeerRegistry::get().others (&other)[1].label == "Bass", "an instance never lists itself");
+
+        kick->publish (stereo, 2, 1000, 0.5f);
+        PeerListener listener (me);
+        check (listener.pull (l.data(), r.data(), 4096, found, playing) == 0 && ! found, "listening to nobody gives nothing");
+        listener.select ("Kick");
+        check (listener.pull (l.data(), r.data(), 4096, found, playing) == 0 && found && playing, "found, and playing; what was sent before listening is not replayed");
+        kick->publish (stereo, 2, 1000, 0.5f);
+        check (listener.pull (l.data(), r.data(), 4096, found, playing) == 1000 && l[5] == 5.0f && r[5] == 5005.0f, "what is sent while listening arrives");
+        kick->publish (stereo, 2, 1000, 0.0f);
+        listener.pull (l.data(), r.data(), 4096, found, playing);
+        check (found && ! playing, "a silent instance is found but not playing");
+        listener.select ("Nothing");
+        check (listener.pull (l.data(), r.data(), 4096, found, playing) == 0 && ! found, "a label nobody has is not found (it may load later)");
+        listener.select ("Kick");
+        kick->publish (stereo, 2, 1000, 0.5f);
+        listener.pull (l.data(), r.data(), 4096, found, playing);
+        other.setTrackName ("Snare"); // or the other "Kick" would take the name over
+        kick.reset();
+        check (listener.pull (l.data(), r.data(), 4096, found, playing) == 0 && ! found, "an instance that is unloaded while listened to is simply gone");
+        check (PeerRegistry::get().others (&me).size() == 1, "... and leaves the list");
+        listener.select ("");
+        other.publish (stereo, 2, 1000, 0.5f); // nobody listens: nothing is copied, and nothing can go wrong
+    }
+}
+
 int main()
 {
     testTransparent();
@@ -1557,5 +1665,6 @@ int main()
     testReferenceMatch();
     testLinearPhase();
     testSidechain();
+    testPeers();
     return finish ("IrisTests");
 }

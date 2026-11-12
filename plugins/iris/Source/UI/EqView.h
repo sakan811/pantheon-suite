@@ -12,6 +12,7 @@
 #include <pantheon/ui/FreqAxis.h>
 
 #include "../DSP/Masking.h"
+#include "../DSP/Peers.h"
 #include "../DSP/ReferenceMatch.h"
 #include "../DSP/ResonanceFinder.h"
 
@@ -58,7 +59,72 @@ public:
     }
 
     // The tap that carries the sidechain input (another track) for the masking view; nullptr = none.
-    void setSidechain (pdsp::StereoTap* tap) { sidechain = tap; }
+    // `connected` is the processor's flag that the host handed the last block a sidechain (nullptr = unknown, treated as not connected).
+    void setSidechain (pdsp::StereoTap* tap, const std::atomic<bool>* connected = nullptr)
+    {
+        sidechain = tap;
+        sidechainConnected = connected;
+    }
+
+    // The other Iris instances in the host (DSP/Peers.h): the masking view can listen to one of them instead of the sidechain input.
+    // The choice is the label of the instance, kept in the project like the display settings; "" is the sidechain input.
+    void setPeers (iris::Peer* self)
+    {
+        selfPeer = self;
+        listener = self != nullptr ? std::make_unique<iris::PeerListener> (*self) : nullptr;
+    }
+
+    juce::String maskSource() const { return apvts.state.getProperty (maskSourceKey).toString(); }
+
+    void setMaskSource (const juce::String& label)
+    {
+        apvts.state.setProperty (maskSourceKey, label, nullptr);
+        syncMaskSource();
+        flash (label.isEmpty() ? "MASKING AGAINST THE SIDECHAIN INPUT" : "MASKING AGAINST " + label.toUpperCase());
+    }
+
+    // What the masking view is doing, in words (empty when it has nothing to say): shown as a pill at the bottom left of the display, and
+    // a click on it opens the list of what to mask against. `help` also answers when nothing to mask against is there, which is otherwise
+    // silent (or a hint that other instances exist) so that a plugin used on its own shows nothing.
+    juce::String maskingStatus (bool help = false) const
+    {
+        const bool peerMode = listener != nullptr && maskSource().isNotEmpty();
+        const bool connected = peerMode ? peerFound
+                                        : ((sidechainConnected != nullptr && sidechainConnected->load (std::memory_order_relaxed)) || masking.hearsOther());
+        if (! connected)
+        {
+            if (peerMode)
+                return "MASKING: '" + maskSource().toUpperCase() + "' IS NOT LOADED, WAITING FOR IT";
+            if (! others.empty())
+                return juce::String ((int) others.size()) + " OTHER IRIS FOUND: CLICK HERE TO MASK AGAINST ONE";
+            if (sidechain == nullptr || ! help)
+                return {};
+            return "MASKING NEEDS ANOTHER TRACK: LOAD IRIS ON IT TOO, OR SEND IT TO THE SIDECHAIN INPUT";
+        }
+        const juce::String other = peerMode ? maskSource().toUpperCase() : juce::String ("THE SIDECHAIN");
+        switch (masking.status())
+        {
+            case MaskingMeter::Status::silent:
+                return "MASKING: PLAY THIS TRACK (NOTHING IS COMING IN)";
+            case MaskingMeter::Status::otherSilent:
+                return "MASKING: " + other + " IS SILENT, PLAY THE OTHER TRACK";
+            case MaskingMeter::Status::measuring:
+                return "MASKING: MEASURING " + juce::String (masking.measuredSeconds(), 1) + " / " + juce::String (MaskingMeter::kMinSeconds, 0) + " s";
+            case MaskingMeter::Status::clear:
+            {
+                const auto o = masking.overlap();
+                if (o.bands == 0)
+                    return "NO MASKING: THE TWO TRACKS ARE LOUD IN DIFFERENT RANGES";
+                if (std::fabs (o.gapDb) > MaskingMeter::kCloseDb)
+                    return "NO MASKING: " + other + " IS " + juce::String (std::fabs (o.gapDb), 0) + " dB " + (o.gapDb > 0.0f ? "QUIETER" : "LOUDER")
+                           + " WHERE BOTH ARE LOUD, SO ONE STANDS CLEAR";
+                return "NO MASKING: ONE OF THE TWO STANDS CLEAR IN EVERY SHARED RANGE";
+            }
+            case MaskingMeter::Status::found:
+                return peerMode ? "MASKING AGAINST " + other + ": " + juce::String ((int) clashes.size()) + " ZONE(S)" : juce::String();
+        }
+        return {};
+    }
     const std::vector<MaskingMeter::Clash>& currentClashes() const noexcept { return clashes; }
 
     // The resonances found so far (for the snapshot and the checks).
@@ -222,7 +288,7 @@ public:
         drawGrid (g, plot);
         drawTrace (g, plot, inTrace, colours::dim.withAlpha (0.7f), colours::dim.withAlpha (0.12f));
         drawTrace (g, plot, outTrace, colours::text.withAlpha (0.85f), colours::text.withAlpha (0.10f));
-        if (masking.hasData())
+        if (masking.hearsOther()) // as soon as there is something on the sidechain: the trace is how you know it arrived
             drawTrace (g, plot, sideTrace, colours::accent.withAlpha (0.55f), juce::Colours::transparentBlack);
         drawClashes (g, plot);
         drawReference (g, plot);
@@ -235,6 +301,7 @@ public:
         drawStrip (g, crossover);
         drawSoloPill (g, plot);
         drawReferencePill (g, plot);
+        drawMaskingPill (g, plot);
         ui::hw::drawGlassOverlay (g, window, 4.0f, true);
     }
 
@@ -244,6 +311,8 @@ public:
         if (stripArea().contains (e.position))
             setMouseCursor (boundaryAt (e.position.x) >= 0 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::PointingHandCursor);
         else if (pillArea().contains (e.position) && anySolo())
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        else if (maskingPillArea (maskingStatus()).contains (e.position))
             setMouseCursor (juce::MouseCursor::PointingHandCursor);
         else
             setMouseCursor (nodeAt (e.position) >= 0 ? juce::MouseCursor::DraggingHandCursor
@@ -264,6 +333,12 @@ public:
         if (pillArea().contains (e.position) && anySolo())
         {
             clearSolos();
+            return;
+        }
+
+        if (maskingPillArea (maskingStatus()).contains (e.position))
+        {
+            showMaskMenu();
             return;
         }
 
@@ -933,6 +1008,14 @@ private:
         actions.push_back ([this] { clearReference(); });
         menu.addItem (nextId++, "Restart this track's average");
         actions.push_back ([this] { restartAverage(); });
+        menu.addSectionHeader ("Mask against");
+        addMaskSourceItems (menu, nextId, actions);
+        menu.addItem (nextId++, "Why is there no masking?");
+        actions.push_back ([this]
+        {
+            const auto text = maskingStatus (true);
+            flash (text.isEmpty() ? "MASKING: " + juce::String ((int) clashes.size()) + " ZONE(S) SHOWN, DOUBLE-CLICK A LABEL FOR A BAND" : text);
+        });
         for (Setting* setting : { &gainScale, &spectrumRange, &speed, &tilt, &markers, &referenceShown })
         {
             menu.addSeparator();
@@ -1002,15 +1085,35 @@ private:
         else
             found.clear();
 
-        // Masking: this track against whatever arrives at the sidechain input, both without the display's tilt.
-        if (sidechain != nullptr)
+        // Masking: this track against whatever arrives at the sidechain input, or against another Iris instance, both without the display's tilt.
+        syncMaskSource();
+        const bool peerMode = listener != nullptr && listener->selected().length() > 0;
+        if (refresh)
+            others = selfPeer != nullptr ? iris::PeerRegistry::get().others (selfPeer) : std::vector<iris::PeerInfo>();
+        if (sidechain != nullptr || peerMode)
         {
             sideTrace.setSampleRate (sampleRate);
             sideTrace.setTilt (tilt.value());
             sideTrace.setReleaseSeconds (speed.value());
-            sideTrace.update (*sidechain);
+            bool playing = true;
+            if (peerMode)
+            {
+                peerFound = false;
+                for (bool found = false;;)
+                {
+                    const int n = listener->pull (peerBlock[0].data(), peerBlock[1].data(), (int) peerBlock[0].size(), found, playing);
+                    peerFound = found;
+                    if (n <= 0)
+                        break;
+                    const float* both[2] = { peerBlock[0].data(), peerBlock[1].data() };
+                    peerTap->push (both, 2, n);
+                }
+                sideTrace.update (*peerTap);
+            }
+            else if (sidechain != nullptr)
+                sideTrace.update (*sidechain);
             for (int i = 0; i < pdsp::SpectrumAnalyzer::numBins; ++i)
-                sideUntilted[(size_t) i] = untilt (sideTrace, i);
+                sideUntilted[(size_t) i] = peerMode && ! playing ? -200.0f : untilt (sideTrace, i); // a peer that stopped sends nothing, which would leave its last spectrum
             masking.update (untilted.data(), sideUntilted.data(), pdsp::SpectrumAnalyzer::numBins, inTrace.binFrequency (1), 1.0f / 30.0f);
             if (refresh)
                 clashes = masking.clashes();
@@ -1103,9 +1206,20 @@ private:
             text = "REF  " + juce::String (referenceName).toUpperCase() + (liveProfile.hasData() ? juce::String() : "  (WAITS FOR AUDIO)");
         if (text.isEmpty())
             return;
+        drawStatusPill (g, plot, text, lit, true, plot.getY() + 5.0f);
+    }
+
+    static juce::Rectangle<float> statusPillRect (juce::Rectangle<float> plot, const juce::String& text, bool atRight, float y)
+    {
+        const float width = juce::jmin (plot.getWidth() - 12.0f, juce::GlyphArrangement::getStringWidth (ui::labelFont (10.0f), text) + 30.0f);
+        return { atRight ? plot.getRight() - width - 6.0f : plot.getX() + 6.0f, y, width, 18.0f };
+    }
+
+    // A rounded pill with a lamp and a line of text, at the right or the left of the display.
+    static void drawStatusPill (juce::Graphics& g, juce::Rectangle<float> plot, const juce::String& text, bool lit, bool atRight, float y)
+    {
         const auto font = ui::labelFont (10.0f);
-        const float width = juce::jmin (plot.getWidth() - 12.0f, juce::GlyphArrangement::getStringWidth (font, text) + 30.0f);
-        const auto pill = juce::Rectangle<float> (plot.getRight() - width - 6.0f, plot.getY() + 5.0f, width, 18.0f);
+        const auto pill = statusPillRect (plot, text, atRight, y);
         const auto colour = lit ? colours::amber : colours::accent;
         g.setColour (colours::glass.withAlpha (0.9f));
         g.fillRoundedRectangle (pill, 9.0f);
@@ -1118,6 +1232,84 @@ private:
     }
 
     // ---- masking -----------------------------------------------------------------------------------
+    static constexpr const char* maskSourceKey = "maskSource";
+
+    // The project's choice is the truth (a host can restore it at any time): follow it, and start the averages again when it changes.
+    void syncMaskSource()
+    {
+        if (listener == nullptr)
+            return;
+        const auto want = maskSource().toStdString();
+        if (want == listener->selected())
+            return;
+        listener->select (want);
+        masking.reset();
+        clashes.clear();
+        peerFound = false;
+        float l[256], r[256];
+        for (bool f, p; listener->pull (l, r, 256, f, p) > 0;) {} // what the last source left behind
+        for (auto& ch : peerBlock)
+            ch.fill (0.0f);
+        while (peerTap->channel[0].pull (peerBlock[0].data(), (int) peerBlock[0].size()) > 0 || peerTap->channel[1].pull (peerBlock[1].data(), (int) peerBlock[1].size()) > 0) {}
+    }
+
+    juce::Rectangle<float> maskingPillArea (const juce::String& text) const
+    {
+        return text.isEmpty() ? juce::Rectangle<float>() : statusPillRect (plotArea(), text, false, plotArea().getBottom() - 38.0f);
+    }
+
+    void drawMaskingPill (juce::Graphics& g, juce::Rectangle<float> plot) const
+    {
+        const auto text = maskingStatus();
+        if (text.isNotEmpty())
+            drawStatusPill (g, plot, text, masking.status() == MaskingMeter::Status::measuring, false, plot.getBottom() - 38.0f);
+    }
+
+    // What to mask against: the sidechain input and every other Iris in the host, ticked when chosen. One action per item, in order.
+    void addMaskSourceItems (juce::PopupMenu& menu, int& nextId, std::vector<std::function<void()>>& actions)
+    {
+        if (selfPeer != nullptr)
+            others = iris::PeerRegistry::get().others (selfPeer);
+        const auto current = maskSource();
+        menu.addItem (nextId++, "Sidechain input", true, current.isEmpty());
+        actions.push_back ([this] { setMaskSource ({}); });
+        bool listed = current.isEmpty();
+        for (const auto& peerInfo : others)
+        {
+            const juce::String label (peerInfo.label);
+            listed = listed || label == current;
+            menu.addItem (nextId++, label + (peerInfo.playing ? "" : "  (silent)"), true, label == current);
+            actions.push_back ([this, label] { setMaskSource (label); });
+        }
+        if (! listed)
+        {
+            menu.addItem (nextId++, current + "  (not loaded)", true, true);
+            actions.push_back ([] {});
+        }
+        if (others.empty())
+        {
+            menu.addItem (nextId++, "No other Iris found: load one on another track", false);
+            actions.push_back ([] {});
+        }
+    }
+
+    void showMaskMenu()
+    {
+        juce::PopupMenu menu;
+        int nextId = 1;
+        std::vector<std::function<void()>> actions;
+        menu.addSectionHeader ("Mask against");
+        addMaskSourceItems (menu, nextId, actions);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [this, actions] (int result)
+        {
+            if (result > 0)
+            {
+                actions[(size_t) result - 1]();
+                repaint();
+            }
+        });
+    }
+
     // Each clash zone is shaded across the display with a label at the top saying how far to cut this track there.
     juce::Rectangle<float> clashLabel (const MaskingMeter::Clash& c) const
     {
@@ -1243,6 +1435,13 @@ private:
     std::vector<ResonanceFinder::Resonance> found;
     int findTicks = 0;
     pdsp::StereoTap* sidechain = nullptr;
+    const std::atomic<bool>* sidechainConnected = nullptr;
+    iris::Peer* selfPeer = nullptr;
+    std::unique_ptr<iris::PeerListener> listener;
+    std::vector<iris::PeerInfo> others;       // the other instances, refreshed twice a second
+    std::unique_ptr<pdsp::StereoTap> peerTap = std::make_unique<pdsp::StereoTap>(); // (256 KB, so on the heap) what the chosen instance sent, on its way into sideTrace
+    std::array<std::array<float, 4096>, 2> peerBlock {};
+    bool peerFound = false;
     pdsp::SpectrumAnalyzer sideTrace;
     std::array<float, (size_t) pdsp::SpectrumAnalyzer::numBins> sideUntilted {};
     MaskingMeter masking;
