@@ -69,15 +69,16 @@ the output-gain and monitor ramps) steps every `Engine::kTick` = 64 samples, cou
 That is what makes one stem's output the same for any host block size (test [8], bit for bit, with a neighbour on the bus that does not change).
 A ramp is set to its target at the next tick, so a value at rest is exact (a gain of 1 is exactly 1; a monitor of 0 is exactly 0).
 
-**The cut is bit-exact when it is none.** A bell of 0 dB is the identity, bit for bit, as long as the coefficients are computed the same way for the
-numerator and the denominator (`setPeak`: `A = 1` makes `b == a`). `Carver::setTarget` sets a bell to exactly 0 dB when its gain is under 0.005 dB, and
-`Engine::tick` sets the cut to exactly 0 when it has come back and its target is 0. Tests [4] and [5] pin both. Do not skip the bells that are at 0: they
-keep their own state, and skipping them in and out would leave a stale state behind.
+**The cut is bit-exact when it is none, because the bells that are none are not run.** A bell of 0 dB is the identity on paper (`setPeak` with `A = 1` makes `b == a`), but
+`b1*x - a1*y` only cancels to exactly 0 if the compiler does not fuse it into a multiply-add, and any build for a machine with FMA does (CI's does; the plain local build did not,
+which is how this went unseen until CI). So `Carver::setTarget` takes a bell whose gain is under 0.005 dB out (`active[j] = false`, its coefficients and state reset to the identity
+and to rest) and `Carver::process` runs only the active ones; `Engine::tick` sets the cut to exactly 0 when it has come back and its target is 0. The same for the air shelf
+(`airOn`, only while the depth is above 0). A bell that is the identity has no state, so starting from rest when it is wanted again is right. Tests [4], [5], [10] and [13] pin it:
+run `HestiaTests` also with `-march=native` (the g++ one-liner above with `-O3 -march=native`, and `-ffast-math`): they must pass in all three.
 
 **Depth is cues, not a room.** `cuesFor(distance)` gives a high shelf at `kAirHz` (to -9 dB), a level (to -4 dB), a loss of the side signal (to 30%) and the gain of the
 first reflections (0.45); `EarlyReflections` is four taps on each channel, summed through a one-pole at 3.5 kHz, each heard once. Nothing feeds back, so there is no tail and
-nothing to decay; keep it so (test [13] checks 45 ms after an impulse is silence), and keep the direct sound undelayed. All of it is exactly nothing at distance 0: a shelf
-of 0 dB is the identity (`b == a`, as for the bells), the width loss and the room gain are ramped to exactly 0 (the delay line runs all the time and its output is multiplied by that 0, so it adds exactly nothing). The room is fed the stem *after* the carve and *before* the shelf. The distance moves to its target over a few ticks (`distanceNow`) and the
+nothing to decay; keep it so (test [13] checks 45 ms after an impulse is silence), and keep the direct sound undelayed. All of it is exactly nothing at distance 0: the shelf is not run (`airOn`), and the width loss and the room gain are ramped to exactly 0 (the delay line runs all the time and its output is multiplied by that 0, so it adds exactly nothing). The room is fed the stem *after* the carve and *before* the shelf. The distance moves to its target over a few ticks (`distanceNow`) and the
 shelf is redesigned only when it moved. A stem's distance is published with its role and importance, and `claims()` takes it: a stem at the back has up to `kDistanceYield` (35%)
 less claim. The depth map in the display reads the published distances.
 
