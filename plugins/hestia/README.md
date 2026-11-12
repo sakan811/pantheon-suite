@@ -48,7 +48,7 @@ not a separate analysis.
 ## Measured (`HestiaTests`, 48 kHz)
 
 - The cut: a flat -6 dB is within 0.4 dB of -6 at every band centre; one band cut by 9 dB is 9 dB down within 0.4 dB at its own centre, whichever
-  of the thirty it is, and three or more bands away it is untouched within 0.4 dB. With nothing to cut the bells are the identity bit for bit.
+  of the thirty it is, and three or more bands away it is untouched within 0.4 dB. With nothing to cut the bells are not run, so the stem is the input bit for bit (also in a build that fuses multiplies and adds).
 - The level bank: a sine on the centre of any band reads its level within 0.8 dB; three bands away it is 20 dB under, six or more 40 dB.
 - A bass and a lead vocal on the same tone at 79 Hz: the vocal is cut by 5.9 dB (DEPTH 6), the bass by 0.0 dB; on 2 kHz it is the other way round;
   on different tones neither is cut.
