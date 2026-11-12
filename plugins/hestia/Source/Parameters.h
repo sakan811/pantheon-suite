@@ -11,13 +11,15 @@ namespace hestia
 {
 namespace id
 {
-inline const juce::String role { "role" }, mix { "mix" }, importance { "importance" }, depth { "depth" }, reach { "reach" },
+inline const juce::String role { "role" }, mix { "mix" }, importance { "importance" }, carve { "carve" }, reach { "reach" },
                           attack { "attack" }, release { "release" }, out { "out" };
+inline const juce::String distance { "distance" };         // the Depth knob: how far back the stem sits
+inline const juce::String scRole { "sc_role" }, scImportance { "sc_importance" }; // what the sidechain input is
 }
 
 inline const juce::StringArray mixNames { "Off", "A", "B", "C", "D", "E", "F", "G", "H" }; // index = the group of the bus; 0 is off
 inline constexpr int kDefaultMix = 1;
-inline constexpr float kMaxDepthDb = 18.0f;
+inline constexpr float kMaxCarveDb = 18.0f;
 
 inline juce::StringArray roleNames()
 {
@@ -56,11 +58,15 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::role, 1 }, "Role", roleNames(), (int) d.role));
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::mix, 1 }, "Mix", mixNames, kDefaultMix));
     F (id::importance, "Importance", { 0.0f, 100.0f, 1.0f }, d.importance * 100.0f, Attr().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v)) + " %"; }));
-    F (id::depth, "Depth", { 0.0f, kMaxDepthDb, 0.1f }, d.depthDb, Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; }));
+    F (id::carve, "Carve", { 0.0f, kMaxCarveDb, 0.1f }, d.carveDb, Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; }));
     F (id::reach, "Reach", { 0.0f, 36.0f, 0.5f }, d.reachDb, Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; }));
     F (id::attack, "Attack", skewed (1.0f, 500.0f, 1.0f, 40.0f), d.attackMs, Attr().withStringFromValueFunction (ms).withValueFromStringFunction (msValue));
     F (id::release, "Release", skewed (20.0f, 3000.0f, 1.0f, 300.0f), d.releaseMs, Attr().withStringFromValueFunction (ms).withValueFromStringFunction (msValue));
     F (id::out, "Output", { -24.0f, 24.0f, 0.1f }, d.outDb, Attr().withStringFromValueFunction (db));
+    const auto percent = [] (float v, int) { return String (roundToInt (v)) + " %"; };
+    F (id::distance, "Depth", { 0.0f, 100.0f, 1.0f }, d.distance * 100.0f, Attr().withStringFromValueFunction (percent));
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::scRole, 1 }, "Sidechain Role", roleNames(), (int) d.scRole));
+    F (id::scImportance, "Sidechain Importance", { 0.0f, 100.0f, 1.0f }, d.scImportance * 100.0f, Attr().withStringFromValueFunction (percent));
     return { p.begin(), p.end() };
 }
 
@@ -72,7 +78,10 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.role = (Role) std::clamp ((int) v (id::role), 0, kNumRoles - 1);
     e.group = std::clamp ((int) v (id::mix), 0, kMaxGroups);
     e.importance = v (id::importance) / 100.0f;
-    e.depthDb = v (id::depth);
+    e.carveDb = v (id::carve);
+    e.distance = v (id::distance) / 100.0f;
+    e.scRole = (Role) std::clamp ((int) v (id::scRole), 0, kNumRoles - 1);
+    e.scImportance = v (id::scImportance) / 100.0f;
     e.reachDb = v (id::reach);
     e.attackMs = v (id::attack);
     e.releaseMs = v (id::release);

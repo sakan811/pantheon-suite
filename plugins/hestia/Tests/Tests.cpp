@@ -279,7 +279,7 @@ int main()
 
         Bus bus3;
         Stem1 d (bus3, Role::bass), e (bus3, Role::leadVocal);
-        e.params.depthDb = 0.0f;
+        e.params.carveDb = 0.0f;
         clock = 1000;
         const auto zero = run ({ &d, &e }, 1.0, 256, [] (int, long long n) { return sine (79.06, 0.25, n); }, clock);
         check (zero.out[1] == zero.in[1], "a depth of 0 dB cuts nothing, bit for bit");
@@ -376,6 +376,7 @@ int main()
             EngineParams p;
             p.role = Role::leadVocal;
             p.outDb = -3.0f;
+            p.distance = 0.6f;
             std::vector<float> l ((size_t) kFs), r ((size_t) kFs);
             for (size_t i = 0; i < l.size(); ++i)
                 l[i] = 0.4f * noise ((long long) i) * (i < 20000 ? 1.0f : 0.1f), r[i] = 0.4f * noise ((long long) i, 5);
@@ -384,7 +385,7 @@ int main()
             {
                 const int n = (int) std::min<size_t> ((size_t) block, l.size() - start);
                 // The neighbour is a bass, there all the time: its frame is kept fresh at the same clock.
-                bus.publish (neighbour, 1, Role::bass, 0.5f, levels, 5000);
+                bus.publish (neighbour, 1, Role::bass, 0.5f, 0.0f, levels, 5000);
                 engine.process (l.data() + start, r.data() + start, n, p, 5000);
             }
             out = l;
@@ -398,11 +399,11 @@ int main()
         bool changed = false;
         for (size_t i = 0; i < 20000; ++i)
             changed = changed || std::fabs (results[0][i] - 0.4f * noise ((long long) i) * 0.70794578f) > 1e-3f;
-        check (changed, "... and it is not the input at -3 dB: the cut was working");
+        check (changed, "... and it is not the input at -3 dB: the cut and the depth (60%) were working");
     }
 
     // ---- [9] the monitor and the output ------------------------------------------------------------------------------------------------------------
-    std::printf ("[9] the cut alone, and the output gain\n");
+    std::printf ("[9] the monitor, and the output gain\n");
     {
         Bus bus;
         Stem1 bass (bus, Role::bass), vocal (bus, Role::leadVocal);
@@ -413,7 +414,7 @@ int main()
         vocal.engine.deltaOn = true;
         const auto delta = run ({ &bass, &vocal }, 0.5, 256, [&] (int, long long n) { return sine (tone, 0.25, n); }, clock);
         // The cut alone: what it takes away. 0.25 sine cut by 6 dB takes 0.25 * (1 - 0.5) = 0.125 away.
-        check (std::fabs (tailDb (delta.out[1], 0.2) - toDb (0.125)) < 1.2, fmt ("DELTA is what the cut takes away: %.2f dB (a 6 dB cut of 0.25 takes %.2f)", tailDb (delta.out[1], 0.2), toDb (0.125)));
+        check (std::fabs (tailDb (delta.out[1], 0.2) - toDb (0.125)) < 1.2, fmt ("DELTA is what Hestia takes away: %.2f dB (a 6 dB cut of 0.25 takes %.2f)", tailDb (delta.out[1], 0.2), toDb (0.125)));
         check (tailDb (normal.out[1], 0.2) < tailDb (normal.in[1], 0.2) - 4.0, "... and without it the stem is the cut stem");
         vocal.engine.deltaOn = false;
         vocal.params.outDb = -6.0f;
@@ -461,13 +462,13 @@ int main()
         float lv[kBands];
         std::fill (lv, lv + kBands, -30.0f);
         for (int i = 0; i < 5; ++i)
-            bus.publish (slots[i], i < 3 ? 1 : 2, Role::keys, 0.5f, lv, 100);
+            bus.publish (slots[i], i < 3 ? 1 : 2, Role::keys, 0.5f, 0.0f, lv, 100);
         check (bus.liveCount (1, 100) == 3 && bus.liveCount (2, 100) == 2 && bus.liveCount (3, 100) == 0 && bus.liveCount (0, 100) == 0, "stems see only their own mix, and the mix Off sees nobody");
         Stem got[kMaxStems];
         check (bus.gather (slots[0], 1, 100, got) == 2, "a stem does not gather itself");
         check (bus.liveCount (1, 100 + kFreshMs - 1) == 3 && bus.liveCount (1, 100 + kFreshMs) == 0, "a stem that has not published for 500 ms is gone");
-        bus.publish (slots[0], 1, Role::kick, 0.8f, lv, 4294967200u);
-        bus.publish (slots[2], 1, Role::keys, 0.5f, lv, 4294967250u);
+        bus.publish (slots[0], 1, Role::kick, 0.8f, 0.0f, lv, 4294967200u);
+        bus.publish (slots[2], 1, Role::keys, 0.5f, 0.0f, lv, 4294967250u);
         const int seen = bus.gather (slots[1], 1, 4294967200u + 300u, got); // 4294967500 wraps to 204
         bool foundKick = false;
         for (int i = 0; i < seen; ++i)
@@ -483,6 +484,186 @@ int main()
         check (pressureOn (0.1f, 0.9f, -20.0f, -90.0f, 12.0f) == 0.0f, "a bigger claim that is not there (-90 dB) takes nothing");
         check (std::fabs (pressureOn (0.1f, 0.35f, -20.0f, -20.0f, 12.0f) - 0.5f) < 1e-6f, "a claim 0.25 bigger takes half");
         check (std::fabs (pressureOn (0.1f, 0.9f, -20.0f, -26.0f, 12.0f) - 0.5f) < 1e-6f, "an owner 6 dB under with a reach of 12 takes half");
+    }
+
+    // ---- [13] depth ---------------------------------------------------------------------------------------------------------------------------------
+    std::printf ("[13] depth: how far back a stem sits\n");
+    {
+        const auto front = cuesFor (0.0f), back = cuesFor (1.0f);
+        check (front.airDb == 0.0f && front.levelGain == 1.0f && front.widthLoss == 0.0f && front.reflections == 0.0f, "at the front every cue is exactly nothing");
+        check (std::fabs (back.airDb + kAirMaxCutDb) < 1e-6f && std::fabs (20.0f * std::log10 (back.levelGain) + kLevelMaxCutDb) < 1e-4f
+                   && std::fabs (back.widthLoss - kWidthMaxLoss) < 1e-6f && std::fabs (back.reflections - kReflectMax) < 1e-6f && cuesFor (7.0f).airDb == back.airDb,
+               "at the back they are what Depth.h says (9 dB of air, 4 dB of level, 30% of the sides, 0.45 of room), and a distance past 1 is 1");
+
+        // The impulse response of a stem that sits at the back, stereo, alone in its mix.
+        Bus bus;
+        Engine engine (bus);
+        engine.prepare (kFs);
+        EngineParams p;
+        p.distance = 1.0f;
+        p.group = 0;
+        const int total = (int) (1.0 * kFs), at = (int) (0.5 * kFs);
+        std::vector<float> l ((size_t) total, 0.0f), r ((size_t) total, 0.0f);
+        l[(size_t) at] = 1.0f; // left only: the width shows
+        for (int start = 0; start < total; start += 480)
+            engine.process (l.data() + start, r.data() + start, std::min (480, total - start), p, 1000);
+        // After half a second the depth has settled; the impulse comes through the settled stem. Run it again from there: the first run was the settling.
+        std::vector<float> il ((size_t) total, 0.0f), ir ((size_t) total, 0.0f);
+        il[(size_t) 2000] = 1.0f;
+        for (int start = 0; start < total; start += 480)
+            engine.process (il.data() + start, ir.data() + start, std::min (480, total - start), p, 1000);
+        const double fsd = kFs;
+        pdsp::Biquad shelf;
+        shelf.setHighShelf (fsd, (double) kAirHz, 0.7071, -(double) kAirMaxCutDb);
+        const double side = 0.5 * (1.0 - 0.0), loss = (double) kWidthMaxLoss * side;
+        const double expectL = (shelf.b0 - loss * shelf.b0) * back.levelGain, expectR = (loss * shelf.b0) * back.levelGain;
+        check (std::fabs (il[2000] - expectL) < 1e-4 && std::fabs (ir[2000] - expectR) < 1e-4,
+               fmt ("the direct sound at the back: left %.4f (expected %.4f), right %.4f (expected %.4f): the high shelf, the narrowing and the level", il[2000], expectL, ir[2000], expectR));
+
+        // The reflections: each tap, on the channel it belongs to, at its gain times the room, through the one-pole.
+        const double a = 1.0 - std::exp (-2.0 * kPi * EarlyReflections::kDampHz / kFs);
+        bool taps = true;
+        double worst = 0.0;
+        for (int t = 0; t < EarlyReflections::kTaps; ++t)
+        {
+            const int index = 2000 + (int) std::lround (EarlyReflections::kDelayMs[0][t] * 0.001 * kFs);
+            // The room is fed the stem before the shelf, and what comes out is multiplied by the level like everything else.
+            const double expect = (double) kReflectMax * (double) EarlyReflections::kTapGain[t] * a * (double) back.levelGain;
+            worst = std::fmax (worst, std::fabs (il[(size_t) index] - expect) / expect);
+            taps = taps && std::fabs (il[(size_t) index] - expect) < 0.05 * expect;
+        }
+        double rightRoom = 0.0;
+        for (int t = 0; t < EarlyReflections::kTaps; ++t)
+            rightRoom = std::fmax (rightRoom, std::fabs (ir[(size_t) (2000 + (int) std::lround (EarlyReflections::kDelayMs[1][t] * 0.001 * kFs))]));
+        check (taps && rightRoom < 1e-5, fmt ("a left impulse: its four reflections come on the left at 6.3, 13.1, 21.7 and 31.9 ms, at 0.45 x (0.5, 0.4, 0.3, 0.2) x the damping pole x the level (worst %.1f%% off), and the right has none", 100.0 * worst));
+        double after = 0.0;
+        for (int i = 2000 + (int) (0.045 * kFs); i < total; ++i)
+            after = std::fmax (after, std::fmax (std::fabs (il[(size_t) i]), std::fabs (ir[(size_t) i])));
+        check (after < 1e-4, fmt ("no reverb tail: 45 ms after the impulse there is nothing left (%.1e)", after));
+        check (EarlyReflections::longestMs() < 40.0, "the longest reflection is under 40 ms");
+
+        // At the front the stem is untouched, whatever it was before.
+        p.distance = 0.0f;
+        std::vector<float> fl ((size_t) total), fr ((size_t) total);
+        for (int i = 0; i < total; ++i) fl[(size_t) i] = fr[(size_t) i] = 0.3f * noise (i);
+        const auto keep = fl;
+        for (int start = 0; start < total; start += 480)
+            engine.process (fl.data() + start, fr.data() + start, std::min (480, total - start), p, 1000);
+        bool back0 = true;
+        for (int i = (int) (0.6 * kFs); i < total; ++i)
+            back0 = back0 && fl[(size_t) i] == keep[(size_t) i] && fr[(size_t) i] == keep[(size_t) i];
+        check (back0, "taken back to 0% the depth ends exactly: bit for bit the input again, after it has settled");
+
+        // A stem at the back gives way to one at the front.
+        Bus bus2;
+        Stem1 near (bus2, Role::guitar), far (bus2, Role::guitar);
+        far.params.distance = 0.8f;
+        std::uint32_t clock = 1000;
+        const auto pair = run ({ &near, &far }, 2.0, 256, [&] (int, long long n) { return sine (bandCentreHz (17), 0.25, n); }, clock);
+        Bus bus3;
+        Stem1 alone (bus3, Role::guitar);
+        alone.params.distance = 0.8f;
+        alone.params.group = 0;
+        std::uint32_t clock3 = 1000;
+        const auto lone = run ({ &alone }, 2.0, 256, [&] (int, long long n) { return sine (bandCentreHz (17), 0.25, n); }, clock3);
+        const double carved = (tailDb (pair.out[1], 0.5) - tailDb (pair.in[1], 0.5)) - (tailDb (lone.out[0], 0.5) - tailDb (lone.in[0], 0.5));
+        // The far one has 0.8 x 0.35 = 28% less claim: 0.224 of a span of 0.5 is 45% of the carve (6 dB), 2.7 dB.
+        check (tailDb (pair.out[0], 0.5) - tailDb (pair.in[0], 0.5) > -0.2 && std::fabs (carved + 2.7) < 0.7,
+               fmt ("two guitars on one tone, one at 80%% depth: the near one is untouched, the far one gives up %.1f dB (expected 2.7) on top of what its depth does by itself", -carved));
+        Stem got[kMaxStems];
+        check (bus2.gather (near.engine.slotIndex(), 1, clock, got) == 1 && std::fabs (got[0].distance - 0.8f) < 1e-6f, "a stem's depth is published to the others");
+        check (std::fabs (claims (Role::guitar, 0.5f, 1.0f)[10] - (1.0f - kDistanceYield) * claims (Role::guitar, 0.5f)[10]) < 1e-6f, "a claim at the back is kDistanceYield less");
+    }
+
+    // ---- [14] the sidechain -----------------------------------------------------------------------------------------------------------------------
+    std::printf ("[14] the sidechain: any track, with or without Hestia on it\n");
+    {
+        const double lowTone = bandCentreHz (5);
+        const auto runWith = [&] (Engine& e, EngineParams p, bool connected, double seconds, int block, double keyAmp, std::vector<float>& out)
+        {
+            const int total = (int) (seconds * kFs);
+            std::vector<float> l ((size_t) total), r ((size_t) total), key ((size_t) total);
+            for (int i = 0; i < total; ++i)
+            {
+                l[(size_t) i] = r[(size_t) i] = sine (lowTone, 0.25, i);
+                key[(size_t) i] = sine (lowTone, keyAmp, i);
+            }
+            for (int start = 0; start < total; start += block)
+            {
+                const int n = std::min (block, total - start);
+                e.process (l.data() + start, r.data() + start, n, p, 1000, connected ? key.data() + start : nullptr, connected ? key.data() + start : nullptr);
+            }
+            out = l;
+        };
+        std::vector<float> out;
+        std::vector<float> input ((size_t) kFs * 2);
+        for (size_t i = 0; i < input.size(); ++i) input[i] = sine (lowTone, 0.25, (long long) i);
+
+        Bus bus;
+        Engine voice (bus);
+        voice.prepare (kFs);
+        EngineParams p;
+        p.role = Role::leadVocal;
+        p.scRole = Role::bass;
+        runWith (voice, p, true, 2.0, 256, 0.25, out);
+        const double sidechainCut = tailDb (out, 0.5) - tailDb (input, 0.5);
+        check (tailDb (out, 0.5) - tailDb (input, 0.5) < -5.0 && voice.linkedStems() == 1 && voice.sidechainActive.load(),
+               fmt ("a vocal with a bass on the sidechain, on the same tone: cut %.2f dB, and it counts the sidechain as the one stem it sees", tailDb (out, 0.5) - tailDb (input, 0.5)));
+        check (voice.sidechainLevel[5].load() > -14.0f && voice.sidechainLevel[5].load() < -10.0f, fmt ("what the sidechain hears is published for the display: %.1f dB (a 0.25 sine is -12)", voice.sidechainLevel[5].load()));
+
+        Bus bus2;
+        Engine none (bus2);
+        none.prepare (kFs);
+        runWith (none, p, false, 2.0, 256, 0.25, out);
+        check (out == input && ! none.sidechainActive.load() && none.linkedStems() == 0, "with no sidechain connected the stem passes bit for bit");
+
+        Bus bus3;
+        Engine off (bus3);
+        off.prepare (kFs);
+        EngineParams q = p;
+        q.group = 0;
+        runWith (off, q, true, 2.0, 256, 0.25, out);
+        check (out == input, "with the mix Off the sidechain is not listened to: the stem is not linked to anything");
+
+        Bus bus4;
+        Engine quiet (bus4);
+        quiet.prepare (kFs);
+        runWith (quiet, p, true, 2.0, 256, 0.0, out);
+        check (out == input, "a silent sidechain takes nothing");
+
+        // The sidechain that goes away is forgotten, and comes back from clean filters.
+        Bus bus5;
+        Engine gone (bus5);
+        gone.prepare (kFs);
+        runWith (gone, p, true, 1.5, 256, 0.25, out);
+        const float cutWith = gone.cutShown[5].load();
+        runWith (gone, p, false, 3.0, 256, 0.25, out);
+        check (cutWith < -5.0f && std::fabs (gone.cutShown[5].load()) < 0.05f && gone.sidechainLevel[5].load() == kFloorDb, "a sidechain that is disconnected ends its cut and its level on the display");
+
+        // Same output for any host block size.
+        std::vector<std::vector<float>> results;
+        for (int block : { 1, 7, 64, 100, 512, 4096 })
+        {
+            Bus b;
+            Engine e (b);
+            e.prepare (kFs);
+            EngineParams z = p;
+            z.distance = 0.5f;
+            std::vector<float> o;
+            runWith (e, z, true, 1.0, block, 0.2, o);
+            results.push_back (o);
+        }
+        bool same = true;
+        for (size_t i = 1; i < results.size(); ++i) same = same && results[i] == results[0];
+        check (same, "with a sidechain and a depth of 50%, blocks of 1, 7, 64, 100, 512 and 4096 samples give the very same output");
+
+        // A track with Hestia on it and a track on the sidechain are the same to the rule: the same tone, the same cut.
+        Bus bus6;
+        Stem1 bass (bus6, Role::bass), vocal (bus6, Role::leadVocal);
+        std::uint32_t clock = 1000;
+        const auto viaBus = run ({ &bass, &vocal }, 2.0, 256, [&] (int, long long n) { return sine (lowTone, 0.25, n); }, clock);
+        const double busCut = tailDb (viaBus.out[1], 0.5) - tailDb (viaBus.in[1], 0.5);
+        check (std::fabs (busCut - sidechainCut) < 0.3, fmt ("the same cut by the bus (%.2f dB) as by the sidechain (%.2f dB)", busCut, sidechainCut));
     }
 
     return test::finish ("HestiaTests");

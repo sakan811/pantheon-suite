@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 The Pantheon authors
 
-// Builds the editor on the real processor and checks what a host and a user would meet: the parameters, the name, the controls, that CUT ONLY is
+// Builds the editor on the real processor and checks what a host and a user would meet: the parameters, the name, the controls, that DELTA is
 // monitoring that ends with the window, the notes, and two processors finding each other through the shared bus.
 
 #include "Advice.h"
@@ -34,11 +34,11 @@ int main()
     setValue (proc.apvts, id::mix, 0.0f); // this one is on its own; the pair below meet in mix H
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 8, fmt ("%d parameters: role, mix, importance, depth, reach, attack, release, output", proc.getParameters().size()));
+    check (proc.getParameters().size() == 11, fmt ("%d parameters: role, mix, importance, carve, reach, attack, release, output, depth, and the sidechain's role and importance", proc.getParameters().size()));
     check (roleNames().size() == kNumRoles && mixNames.size() == kMaxGroups + 1, "the choice lists match the engine's roles and mixes");
     const auto defaults = readParams (proc.apvts);
-    check (defaults.role == Role::fullRange && defaults.depthDb == 6.0f && std::fabs (defaults.importance - 0.5f) < 1e-6f && defaults.outDb == 0.0f,
-           "a new instance is Full Range, importance 50%, depth 6 dB, output 0");
+    check (defaults.role == Role::fullRange && defaults.carveDb == 6.0f && defaults.distance == 0.0f && defaults.scRole == Role::fullRange && std::fabs (defaults.importance - 0.5f) < 1e-6f && defaults.outDb == 0.0f,
+           "a new instance is Full Range, importance 50%, carve 6 dB, at the front (depth 0%), output 0");
     {
         HestiaProcessor fresh;
         check (readParams (fresh.apvts).group == kDefaultMix && mixNames[kDefaultMix] == "A", "a new instance is in mix A, so the stems of a session find each other without being set up");
@@ -54,11 +54,11 @@ int main()
         check (readParams (proc.apvts).role == Role::bass && readParams (proc.apvts).group == 3, "the selectors set the role and the mix");
         check (editor.getWidth() > 800 && editor.importance.getRight() < editor.getWidth() && editor.release.getBottom() < editor.getHeight(), "the knobs fit the window");
 
-        editor.cutOnly.triggerClick();
+        editor.deltaButton.triggerClick();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
-        check (proc.engine.deltaOn.load() && editor.cutOnly.getToggleState(), "CUT ONLY listens to the cut and lights its button");
+        check (proc.engine.deltaOn.load() && editor.deltaButton.getToggleState(), "DELTA listens to what Hestia changes and lights its button");
     }
-    check (! proc.engine.deltaOn.load(), "closing the editor ends CUT ONLY");
+    check (! proc.engine.deltaOn.load(), "closing the editor ends DELTA");
 
     // Two stems in one mix, through the processors a host would make.
     {
@@ -92,14 +92,17 @@ int main()
                fmt ("a vocal and a bass in mix H on one tone: the vocal comes out %.1f dB under what went in", tailDb (in) - tailDb (out)));
 
         // A state round trip: role, mix and everything else come back in another instance.
-        setValue (vocal.apvts, id::depth, 11.0f);
+        setValue (vocal.apvts, id::carve, 11.0f);
+        setValue (vocal.apvts, id::distance, 40.0f);
+        setValue (vocal.apvts, id::scRole, (float) (int) Role::kick);
         setValue (vocal.apvts, id::importance, 80.0f);
         juce::MemoryBlock state;
         vocal.getStateInformation (state);
         HestiaProcessor other;
         other.setStateInformation (state.getData(), (int) state.getSize());
         const auto r = readParams (other.apvts);
-        check (r.role == Role::leadVocal && r.group == 8 && std::fabs (r.depthDb - 11.0f) < 0.05f && std::fabs (r.importance - 0.8f) < 0.01f, "a saved state comes back in another instance");
+        check (r.role == Role::leadVocal && r.group == 8 && std::fabs (r.carveDb - 11.0f) < 0.05f && std::fabs (r.distance - 0.4f) < 0.01f && r.scRole == Role::kick && std::fabs (r.importance - 0.8f) < 0.01f,
+               "a saved state comes back in another instance");
     }
     {
         // An instance that goes gives its place back.
@@ -110,6 +113,75 @@ int main()
         }
         HestiaProcessor next;
         check (slot >= 0 && next.engine.slotIndex() == slot, "the place of a closed instance is the next instance's");
+    }
+
+    // The sidechain bus and the depth, through the processor a host would make.
+    {
+        HestiaProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        auto layout = q.getBusesLayout();
+        layout.inputBuses.getReference (1) = juce::AudioChannelSet::stereo();
+        check (q.isBusesLayoutSupported (layout) && q.setBusesLayout (layout), "a stereo sidechain input is accepted");
+        auto bad = q.getBusesLayout();
+        bad.inputBuses.getReference (1) = juce::AudioChannelSet::create5point1();
+        check (! q.isBusesLayoutSupported (bad), "... and a 5.1 one is not");
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::mix, 5.0f); // E
+        setValue (q.apvts, id::role, (float) (int) Role::leadVocal);
+        setValue (q.apvts, id::scRole, (float) (int) Role::bass);
+        juce::AudioBuffer<float> four (4, 512);
+        juce::MidiBuffer midi;
+        const double tone = bandCentreHz (5);
+        const auto measure = [&] (float key)
+        {
+            q.reset();
+            std::vector<float> in, out;
+            for (int block = 0; block < 190; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float t = (float) (block * 512 + i) / 48000.0f;
+                    const float voice = 0.25f * std::sin ((float) (2.0 * 3.14159265358979 * tone * t)), kick = key * std::sin ((float) (2.0 * 3.14159265358979 * tone * t));
+                    four.setSample (0, i, voice); four.setSample (1, i, voice); four.setSample (2, i, kick); four.setSample (3, i, kick);
+                }
+                q.processBlock (four, midi);
+                if (block >= 170)
+                    for (int i = 0; i < 512; ++i) { in.push_back (0.25f * std::sin ((float) (2.0 * 3.14159265358979 * tone * (double) (block * 512 + i) / 48000.0))); out.push_back (four.getSample (0, i)); }
+            }
+            return tailDb (in) - tailDb (out);
+        };
+        const float without = measure (0.0f), with = measure (0.25f);
+        check (q.sidechainConnected.load() && without < 0.2f && with > 4.5f,
+               fmt ("a bass on the sidechain: the vocal is %.1f dB down with a silent key and %.1f dB down with the bass playing the same tone", without, with));
+
+        // Depth: a stem at 100% is not the stem at 0%, and comes back to it.
+        setValue (q.apvts, id::mix, 0.0f);
+        const auto burst = [&]
+        {
+            std::vector<float> out;
+            q.reset();
+            for (int block = 0; block < 12; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float x = block == 0 && i == 10 ? 1.0f : 0.0f;
+                    four.setSample (0, i, x); four.setSample (1, i, 0.0f); four.setSample (2, i, 0.0f); four.setSample (3, i, 0.0f);
+                }
+                q.processBlock (four, midi);
+                for (int i = 0; i < 512; ++i) out.push_back (four.getSample (0, i));
+            }
+            return out;
+        };
+        for (int block = 0; block < 500; ++block) { four.clear(); q.processBlock (four, midi); } // the cut of the test before lets go (250 ms release, to under 0.0005 dB)
+        const auto front = burst();
+        setValue (q.apvts, id::distance, 100.0f);
+        for (int block = 0; block < 100; ++block) { four.clear(); q.processBlock (four, midi); } // let it settle
+        const auto back = burst();
+        float reflections = 0.0f;
+        for (size_t i = 12 + 200; i < 12 + 1600; ++i)
+            reflections = std::fmax (reflections, std::fabs (back[i]));
+        check (front[10] == 1.0f && back[10] < 0.8f && reflections > 0.02f,
+               fmt ("depth 100%% through the processor: an impulse is %.2f at the front and %.2f at the back, with reflections of %.3f after it", front[10], back[10], reflections));
     }
 
     // Mono host.
@@ -138,20 +210,28 @@ int main()
         check (adviceFor (fine).empty(), "a bass in a mix with two others, 6 dB depth: nothing to say");
 
         auto in = fine; in.delta = true;
-        check (has (adviceFor (in), "CUT ONLY is on", Severity::warning), "CUT ONLY on: a warning");
+        check (has (adviceFor (in), "DELTA is on", Severity::warning), "DELTA on: a warning");
         in = fine; in.params.group = 0;
         check (has (adviceFor (in), "MIX is Off", Severity::warning), "the mix Off: nothing is cut, and it says so");
         in = fine; in.others = 0;
         check (has (adviceFor (in), "No other stem", Severity::warning), "nobody else playing in the mix: a warning");
-        in = fine; in.params.depthDb = 0.0f;
-        check (has (adviceFor (in), "DEPTH is 0", Severity::warning), "a depth of 0: a warning");
+        in = fine; in.params.carveDb = 0.0f;
+        check (has (adviceFor (in), "CARVE is 0 dB and DEPTH is 0", Severity::warning), "no carve and no depth: Hestia changes nothing, and says so");
+        in.params.distance = 0.4f;
+        check (adviceFor (in).empty(), "... but with a depth there is something to do, and nothing to say");
+        in = fine; in.params.distance = 0.9f;
+        check (has (adviceFor (in), "far back", Severity::info), "a depth of 90%: it is far back, and not for a lead");
+        in = fine; in.sidechain = true; in.params.scRole = Role::fullRange;
+        check (has (adviceFor (in), "set SC ROLE", Severity::info), "a sidechain with its role left on Full Range: set it");
+        in.params.scRole = Role::kick;
+        check (adviceFor (in).empty(), "... and not once it is a kick");
         in = fine; in.sameClaim = 1;
         check (has (adviceFor (in), "this role and about this IMPORTANCE", Severity::info), "another stem of the same role and importance: neither gives way");
         in = fine; in.params.role = Role::fullRange;
         check (has (adviceFor (in), "Full Range", Severity::info), "role Full Range: pick the real one");
-        in = fine; in.params.depthDb = 12.0f; in.strongestCutDb = -11.0f;
+        in = fine; in.params.carveDb = 12.0f; in.strongestCutDb = -11.0f;
         check (has (adviceFor (in), "hollow", Severity::warning) && has (adviceFor (in), "11 dB", Severity::warning), "a cut of 11 dB: the stem can sound hollow");
-        in.params.depthDb = 6.0f; in.strongestCutDb = -6.0f;
+        in.params.carveDb = 6.0f; in.strongestCutDb = -6.0f;
         check (! has (adviceFor (in), "hollow", Severity::warning), "... but not at 6 dB");
         in = fine; in.params.releaseMs = 30.0f;
         check (has (adviceFor (in), "RELEASE under 60 ms", Severity::info), "a 30 ms release: the cuts can flutter");
@@ -164,7 +244,10 @@ int main()
             AdviceInput all;
             all.params.role = (mask & 1) ? Role::fullRange : Role::bass;
             all.params.group = (mask & 2) ? 0 : 1;
-            all.params.depthDb = (mask & 4) ? 0.0f : ((mask & 8) ? 18.0f : 6.0f);
+            all.params.carveDb = (mask & 4) ? 0.0f : ((mask & 8) ? 18.0f : 6.0f);
+            all.params.distance = (mask & 1024) ? 0.9f : 0.0f;
+            all.params.scRole = (mask & 2048) ? Role::fullRange : Role::kick;
+            all.sidechain = mask & 2048;
             all.params.releaseMs = (mask & 16) ? 20.0f : 250.0f;
             all.params.importance = (mask & 32) ? 0.0f : 0.5f;
             all.others = (mask & 64) ? 0 : 3;
@@ -183,7 +266,7 @@ int main()
         HestiaEditor editor (q);
         check (has (editor.notes(), "No other stem", Severity::warning), "the editor reads the real mix: a stem alone in G is told so");
         q.engine.deltaOn = true;
-        check (has (editor.notes(), "CUT ONLY", Severity::warning), "CUT ONLY in the engine reaches the editor's notes");
+        check (has (editor.notes(), "DELTA", Severity::warning), "DELTA in the engine reaches the editor's notes");
         q.engine.deltaOn = false;
         check (editor.guide().isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
                "the GUIDE button is there and its text says what the plugin is not for");

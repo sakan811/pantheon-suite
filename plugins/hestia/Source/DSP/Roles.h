@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "Depth.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -77,11 +78,12 @@ inline double claimAt (Role r, double hz) noexcept
 }
 
 // A role's claim on each band, scaled by how important the stem is: importance 0.5 leaves the claim as it is, 0 halves it, 1 makes it one and a
-// half times (so an important stem can out-claim a role that usually owns the band).
-inline std::array<float, kBands> claims (Role r, float importance) noexcept
+// half times (so an important stem can out-claim a role that usually owns the band). A stem placed at the back (`distance` 1) has about a third
+// less claim (Depth.h, kDistanceYield): what is far gives way to what is near.
+inline std::array<float, kBands> claims (Role r, float importance, float distance = 0.0f) noexcept
 {
     std::array<float, kBands> c {};
-    const float scale = 0.5f + std::clamp (importance, 0.0f, 1.0f);
+    const float scale = (0.5f + std::clamp (importance, 0.0f, 1.0f)) * (1.0f - kDistanceYield * std::clamp (distance, 0.0f, 1.0f));
     for (int k = 0; k < kBands; ++k)
         c[(size_t) k] = (float) claimAt (r, bandCentreHz (k)) * scale;
     return c;

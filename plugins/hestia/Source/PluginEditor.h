@@ -9,7 +9,8 @@
 #include "UI/SpaceView.h"
 #include <pantheon/ui/Advice.h>
 
-// The display of the mix's space, the stem's role and mix in the header, and the five knobs that say how it gives room. Everything drawn is the
+// The display of the mix's space, the stem's role and mix in the header, the knobs that say how far back it sits and how it gives room, and the
+// sidechain's role. Everything drawn is the
 // shared kit's (shared/ui).
 class HestiaEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
@@ -20,9 +21,9 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    ui::Choice roleBox, mixBox;
-    ui::Knob importance, depth, reach, attack, release, outKnob;
-    juce::TextButton cutOnly { "CUT ONLY" };
+    ui::Choice roleBox, mixBox, scRoleBox;
+    ui::Knob importance, distance, carve, reach, attack, release, outKnob, scImportance;
+    juce::TextButton deltaButton { "DELTA" };
     ui::GuideButton guideButton { hestia::guideTitle(), hestia::guideText() };
     hestia::gui::SpaceView view;
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -35,7 +36,7 @@ private:
     HestiaProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, roleLabel, mixLabel, knobPanel, noteStrip;
+    juce::Rectangle<int> nameplate, roleLabel, mixLabel, scPanel, scLabel, knobPanel, noteStrip;
     float inLevel = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HestiaEditor)
