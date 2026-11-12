@@ -27,6 +27,7 @@ struct Stem
     int slot = -1;
     Role role = Role::fullRange;
     float importance = 0.5f;
+    float distance = 0.0f;              // 0 at the front, 1 at the back; a stem from the sidechain has none
     std::array<float, kBands> level {}; // dB (the peak of a sine that fills the band), kFloorDb for silence
 };
 
@@ -63,7 +64,7 @@ public:
     }
 
     // The owner of `slot` says what it is and how loud each band of its input is. Group 0 hides it.
-    void publish (int slot, int group, Role role, float importance, const float* levelDb, std::uint32_t nowMs) noexcept
+    void publish (int slot, int group, Role role, float importance, float distance, const float* levelDb, std::uint32_t nowMs) noexcept
     {
         if (slot < 0)
             return;
@@ -72,6 +73,7 @@ public:
             s.level[(size_t) k].store (levelDb[k], std::memory_order_relaxed);
         s.role.store ((int) role, std::memory_order_relaxed);
         s.importance.store (importance, std::memory_order_relaxed);
+        s.distance.store (distance, std::memory_order_relaxed);
         s.beat.store (nowMs, std::memory_order_relaxed);
         s.group.store ((std::uint32_t) group, std::memory_order_release);
     }
@@ -93,6 +95,7 @@ public:
             o.slot = i;
             o.role = (Role) std::clamp (s.role.load (std::memory_order_relaxed), 0, kNumRoles - 1);
             o.importance = s.importance.load (std::memory_order_relaxed);
+            o.distance = s.distance.load (std::memory_order_relaxed);
             for (int k = 0; k < kBands; ++k)
                 o.level[(size_t) k] = s.level[(size_t) k].load (std::memory_order_relaxed);
         }
@@ -110,7 +113,7 @@ private:
     {
         std::atomic<std::uint32_t> owner { 0 }, group { 0 }, beat { 0 };
         std::atomic<int> role { 0 };
-        std::atomic<float> importance { 0.5f };
+        std::atomic<float> importance { 0.5f }, distance { 0.0f };
         std::array<std::atomic<float>, kBands> level;
         Slot() { for (auto& l : level) l.store (kFloorDb, std::memory_order_relaxed); }
     };

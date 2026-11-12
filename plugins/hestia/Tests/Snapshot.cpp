@@ -3,10 +3,11 @@
 
 // Renders the plugin editor to a PNG: a lead vocal in a mix with a kick, a bass and a guitar, each fed a programme so the display shows real activity.
 //
-//   HestiaSnapshot <out.png> [cut] [alone]
+//   HestiaSnapshot <out.png> [delta] [alone] [sc]
 //
-//   cut     CUT ONLY on
+//   delta   DELTA on
 //   alone   no other stems: the empty mix
+//   sc      a pad on the sidechain input
 
 #include "PluginEditor.h"
 #include <random>
@@ -20,15 +21,16 @@ int main (int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::printf ("usage: HestiaSnapshot <out.png> [cut] [alone]\n");
+        std::printf ("usage: HestiaSnapshot <out.png> [delta] [alone] [sc]\n");
         return 2;
     }
     juce::ScopedJuceInitialiser_GUI gui;
-    bool alone = false, cutOnly = false;
+    bool alone = false, delta = false, sc = false;
     for (int i = 2; i < argc; ++i)
     {
         alone = alone || juce::String (argv[i]) == "alone";
-        cutOnly = cutOnly || juce::String (argv[i]) == "cut";
+        delta = delta || juce::String (argv[i]) == "delta";
+        sc = sc || juce::String (argv[i]) == "sc";
     }
 
     const hestia::Role roles[] = { hestia::Role::leadVocal, hestia::Role::kick, hestia::Role::bass, hestia::Role::guitar };
@@ -43,17 +45,28 @@ int main (int argc, char** argv)
         hestia::setValue (p.apvts, hestia::id::role, (float) (int) roles[s]);
         hestia::setValue (p.apvts, hestia::id::mix, 8.0f); // H: nobody else is in it
     }
-    hestia::setValue (procs[0]->apvts, hestia::id::depth, 9.0f);
+    hestia::setValue (procs[0]->apvts, hestia::id::carve, 9.0f);
+    const float depths[] = { 12.0f, 18.0f, 40.0f, 75.0f }; // the vocal up front, the guitar at the back
+    for (int s = 0; s < stems; ++s)
+        hestia::setValue (procs[(size_t) s]->apvts, hestia::id::distance, depths[s]);
+    if (sc)
+    {
+        auto layout = procs[0]->getBusesLayout();
+        layout.inputBuses.getReference (1) = juce::AudioChannelSet::stereo();
+        procs[0]->setBusesLayout (layout);
+        procs[0]->prepareToPlay (kFs, 512);
+        hestia::setValue (procs[0]->apvts, hestia::id::scRole, (float) (int) hestia::Role::pad);
+    }
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (procs[0]->createEditor());
     editor->setVisible (true);
-    if (cutOnly)
+    if (delta)
         procs[0]->engine.deltaOn = true;
 
     // A programme: a voice (harmonics on a moving pitch), a kick every beat, a bass line, a strummed guitar (noise through two poles).
     std::mt19937 gen (7);
     std::uniform_real_distribution<float> white (-1.0f, 1.0f);
-    juce::AudioBuffer<float> buffer (2, 512);
+    juce::AudioBuffer<float> buffer (2, 512), withSide (4, 512);
     juce::MidiBuffer midi;
     double voicePhase = 0.0, bassPhase = 0.0;
     float g1 = 0.0f, g2 = 0.0f;
@@ -102,7 +115,19 @@ int main (int argc, char** argv)
                 buffer.setSample (0, i, x);
                 buffer.setSample (1, i, x);
             }
-            procs[(size_t) s]->processBlock (buffer, midi);
+            if (s == 0 && sc)
+            {
+                // A pad on the sidechain: a few sustained notes' harmonics, mostly the low mids.
+                for (int i = 0; i < 512; ++i)
+                {
+                    const double t = (double) ((long long) block * 512 + i) / kFs;
+                    const float pad = (float) (0.08 * (std::sin (2.0 * kPi * 196.0 * t) + std::sin (2.0 * kPi * 246.9 * t) + 0.6 * std::sin (2.0 * kPi * 392.0 * t) + 0.4 * std::sin (2.0 * kPi * 987.8 * t)));
+                    for (int c = 0; c < 2; ++c) { withSide.setSample (c, i, buffer.getSample (c, i)); withSide.setSample (2 + c, i, pad); }
+                }
+                procs[0]->processBlock (withSide, midi);
+            }
+            else
+                procs[(size_t) s]->processBlock (buffer, midi);
         }
         if (block % 4 == 0)
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34);

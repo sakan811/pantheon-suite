@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Hestia Space: a JUCE stem spacer (VST3 / AU / Standalone). One instance sits on each stem; the instances of a session see each other's spectra
-through a table in the plugin binary, and each cuts only its own stem, in thirty third-octave bands, where a stem with a bigger claim is playing.
+through a table in the plugin binary, and each cuts only its own stem, in thirty third-octave bands, where a stem with a bigger claim is playing, and
+puts it back from the front with distance cues (no reverb). A sidechain input brings in a track that has no Hestia on it as one more stem.
 See `README.md` for what it does and what has been measured; this file is what you need to change it safely.
 
 ## Build and verify
@@ -29,7 +30,8 @@ Source/DSP/        no GUI dependencies, no JUCE; covered by Tests/Tests.cpp
   Bus.h              the table of 32 slots the instances publish to and read from; sharedBus() is the plugin binary's one
   Analysis.h         LevelBank: thirty fourth-order band-passes and their mean squares -> dB per band
   Carver.h           the cut: thirty peaking bells in series, and the inverse of their overlap
-  Engine.h           the signal path and the rule (pressureOn()), the tick, the monitor, the output gain
+  Depth.h            the distance cues (cuesFor(): air, level, width, room) and EarlyReflections (eight taps up to 37 ms)
+  Engine.h           the signal path and the rule (pressureOn()), the tick, the sidechain stem, the monitor, the output gain
 Source/Advice.h      the notes of the strip under the knobs and the GUIDE text; plain C++, no JUCE
 Source/Parameters.h  parameter layout, readParams()                                                     <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/SpaceView.h` is the display
@@ -72,6 +74,18 @@ numerator and the denominator (`setPeak`: `A = 1` makes `b == a`). `Carver::setT
 `Engine::tick` sets the cut to exactly 0 when it has come back and its target is 0. Tests [4] and [5] pin both. Do not skip the bells that are at 0: they
 keep their own state, and skipping them in and out would leave a stale state behind.
 
+**Depth is cues, not a room.** `cuesFor(distance)` gives a high shelf at `kAirHz` (to -9 dB), a level (to -4 dB), a loss of the side signal (to 30%) and the gain of the
+first reflections (0.45); `EarlyReflections` is four taps on each channel, summed through a one-pole at 3.5 kHz, each heard once. Nothing feeds back, so there is no tail and
+nothing to decay; keep it so (test [13] checks 45 ms after an impulse is silence), and keep the direct sound undelayed. All of it is exactly nothing at distance 0: a shelf
+of 0 dB is the identity (`b == a`, as for the bells), the width loss and the room gain are ramped to exactly 0 (the delay line runs all the time and its output is multiplied by that 0, so it adds exactly nothing). The room is fed the stem *after* the carve and *before* the shelf. The distance moves to its target over a few ticks (`distanceNow`) and the
+shelf is redesigned only when it moved. A stem's distance is published with its role and importance, and `claims()` takes it: a stem at the back has up to `kDistanceYield` (35%)
+less claim. The depth map in the display reads the published distances.
+
+**The sidechain is one more stem.** `Engine::process`'s last two arguments (null: none) feed `scBank`, a second `LevelBank` that hears only the sidechain; at the tick it is
+appended to the gathered stems as a `Stem` with `slot -1`, the role and importance of `scRole` / `scImportance`, and distance 0; it is only used while the mix is not Off. It is
+latched per tick (`scFed > 0`), reset when it goes away (so it returns from clean filters), and published to the editor in `Engine::sidechainLevel`. It is never heard, it is not
+on the bus (another Hestia cannot see it), and `linkedStems()` counts it. The bus is the processor's second input, off by default, and `sidechainConnected` is what the editor reads.
+
 **The overlap is inverted.** The bells overlap (a third of an octave apart, Q 3.6), so setting each to its band's wanted gain over-cuts wherever
 neighbours are cut too. `Carver::prepare` measures, for the sample rate, the dB each bell makes at each centre and inverts that matrix once; `setTarget`
 multiplies the target by it. The result is the wanted curve *at the centres*; between them it is whatever the bells draw (`responseDb` reads it back). A
@@ -83,17 +97,17 @@ on a band's centre reads `20 log10 A`: every threshold and the -80/-60 dB presen
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`Engine::finite`).
 
-**Monitoring is not state.** CUT ONLY lives in `Engine::deltaOn` (an atomic), not in a parameter, and the editor ends it in its destructor. It fades
-over a tick through `deltaMix`; the output is `wet - deltaMix x dry`.
+**Monitoring is not state.** DELTA lives in `Engine::deltaOn` (an atomic), not in a parameter, and the editor ends it in its destructor. It fades
+over a tick through `deltaMix`; the output is `wet - deltaMix x dry`, `wet` being the stem after the cut and the depth.
 
-**Parameters.** Ids (`hestia::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs
+**Parameters.** Ids (`hestia::id`) are stored in sessions and automation: never rename or remove one once a release has them (`carve` was `depth` before the Depth knob existed and the plugin had not been released; the user-facing names are Carve for the cut and Depth for the distance, the ids `carve` and `distance`). All are `ParameterID` version 1; a new one needs
 a higher version, an entry in `readParams()` and a place in the editor. The order of the roles (`Role`, `roleNames()`) and of the mixes (`mixNames`: the
 index is the group, 0 off) is stored in sessions: add at the end, never reorder.
 
 ## DRY: where each thing lives
 
 - the bands, the roles and their claims -> `Roles.h` (the engine, the display and the tests read them); the anchors are the only place a role is defined
-- the rule and its constants -> `Engine.h` (`pressureOn`, `kDominanceSpan`, `kPresenceLoDb` / `kPresenceHiDb`)
+- the rule and its constants -> `Engine.h` (`pressureOn`, `kDominanceSpan`, `kPresenceLoDb` / `kPresenceHiDb`); the depth's cues and constants -> `Depth.h` (`cuesFor`, `kAirHz`, `kAirMaxCutDb`, `kLevelMaxCutDb`, `kWidthMaxLoss`, `kReflectMax`, `kDistanceYield`)
 - parameter ranges, defaults, choice lists -> `Parameters.h`; the defaults -> `EngineParams`
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor fills `AdviceInput` (`adviceInput()`) and
   draws the notes with `ui::drawNoteStrip`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's Advice

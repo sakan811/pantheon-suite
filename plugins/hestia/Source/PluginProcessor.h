@@ -35,6 +35,8 @@ public:
 
     hestia::Engine engine; // makes its place on the shared bus when the instance is made and gives it back when it goes
     juce::AudioProcessorValueTreeState apvts;
+    // Whether the host handed the last block a sidechain: the editor says so.
+    std::atomic<bool> sidechainConnected { false };
 
 private:
     std::vector<float> monoRight; // a mono host: the engine's second channel
