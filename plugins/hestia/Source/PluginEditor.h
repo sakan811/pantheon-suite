@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 The Pantheon authors
+
+#pragma once
+
+#include "Advice.h"
+#include "PluginProcessor.h"
+#include "UI/HestiaUi.h"
+#include "UI/SpaceView.h"
+#include <pantheon/ui/Advice.h>
+
+// The display of the mix's space, the stem's role and mix in the header, and the five knobs that say how it gives room. Everything drawn is the
+// shared kit's (shared/ui).
+class HestiaEditor : public juce::AudioProcessorEditor, private juce::Timer
+{
+public:
+    explicit HestiaEditor (HestiaProcessor&);
+    ~HestiaEditor() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    ui::Choice roleBox, mixBox;
+    ui::Knob importance, depth, reach, attack, release, outKnob;
+    juce::TextButton cutOnly { "CUT ONLY" };
+    ui::GuideButton guideButton { hestia::guideTitle(), hestia::guideText() };
+    hestia::gui::SpaceView view;
+    juce::TextButton& guide() noexcept { return guideButton; }
+    std::vector<ui::Note> notes() const { return hestia::adviceFor (adviceInput()); } // what the strip under the knobs says, for the checks
+
+private:
+    void timerCallback() override;
+    hestia::AdviceInput adviceInput() const;
+
+    HestiaProcessor& proc;
+    HardwareLookAndFeel look;
+    juce::TooltipWindow tooltips { this, 600 };
+    juce::Rectangle<int> nameplate, roleLabel, mixLabel, knobPanel, noteStrip;
+    float inLevel = 0.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HestiaEditor)
+};
