@@ -24,8 +24,8 @@ apps/<name>/     one self-contained standalone application each (no plugin forma
 
 ## shared/ui
 
-- All the plugins and apps draw with it (Themis, Hephaestus, Harmonia, Iris, Atlas, Orpheus); nothing in one draws its own panel, lamp, knob, button,
-  selector or nameplate. What a plugin adds on top is small and lives in it (`ThemisUi.h`, `HephaestusUi.h`, `HarmoniaUi.h`, `IrisUi.h`, `AtlasUi.h`: its
+- All the plugins and apps draw with it (Themis, Hephaestus, Harmonia, Iris, Atlas, Hestia, Orpheus); nothing in one draws its own panel, lamp, knob, button,
+  selector or nameplate. What a plugin adds on top is small and lives in it (`ThemisUi.h`, `HephaestusUi.h`, `HarmoniaUi.h`, `IrisUi.h`, `AtlasUi.h`, `HestiaUi.h`: its
   words, its verdict, mode or placement colours). A plugin's own namespaces must not be called `ui`, which is the kit's.
 - It owns every pixel of the interface: [Hardware.h](shared/ui/include/pantheon/ui/Hardware.h) (`colours::`, fonts, `ui::hw`
   panels, glass, lamps, buttons, knobs, the header plate and the nameplate), [HardwareLookAndFeel.h](shared/ui/include/pantheon/ui/HardwareLookAndFeel.h),
@@ -79,7 +79,7 @@ Delete an item here when it is done; this list is the only place that says what 
 
 - **Installing on build.** Both set `COPY_PLUGIN_AFTER_BUILD TRUE` unconditionally, so building a plugin target copies it into
   `~/Library/Audio/Plug-Ins`. Themis makes this an option (`THEMIS_INSTALL_AFTER_BUILD`), which CI relies on.
-- **CI** builds and tests Themis (macOS and Linux), runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)) Atlas' `AtlasTests` and `AtlasUiCheck` on Linux ([atlas.yml](.github/workflows/atlas.yml)) and Orpheus' `OrpheusTests` and `OrpheusUiCheck` on Linux ([orpheus.yml](.github/workflows/orpheus.yml)). Iris, Atlas and Orpheus have no macOS job yet (universal binary, AU and `auval` for Iris and Atlas), Atlas has no `HostCheck` and has not been built on macOS or run through `auval`, the Atlas and Orpheus workflows have not run yet, and Hephaestus and Harmonia are in no workflow.
+- **CI** builds and tests Themis (macOS and Linux), runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)) Atlas' `AtlasTests` and `AtlasUiCheck` on Linux ([atlas.yml](.github/workflows/atlas.yml)), Hestia's `HestiaTests` and `HestiaUiCheck` on Linux ([hestia.yml](.github/workflows/hestia.yml)) and Orpheus' `OrpheusTests` and `OrpheusUiCheck` on Linux ([orpheus.yml](.github/workflows/orpheus.yml)). Iris, Atlas, Hestia and Orpheus have no macOS job yet (universal binary, AU and `auval` for Iris and Atlas), Atlas and Hestia have no `HostCheck` and have not been built on macOS or run through `auval`, the Atlas, Hestia and Orpheus workflows have not run yet, and Hephaestus and Harmonia are in no workflow.
 - **Harmonia has no CLAUDE.md.** Its architecture, invariants and gotchas are not written down yet; its README is the only description.
 - **The spectrogram and its finder in Iris and Themis.** `ui::Spectrogram` and `pdsp::IssueFinder` are in `shared/` for all three, but only Atlas uses them. Iris still has its own
   `ResonanceFinder` (the same idea as the finder's peaks, on its own grid) and no spectrogram or JUMPS markers; Themis has its own spectrogram (`core/.../Spectrogram.h`, `HistoryViews.h`, on its `BandGrid`) with no markers.
