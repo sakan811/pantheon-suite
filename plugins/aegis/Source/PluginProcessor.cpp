@@ -59,6 +59,7 @@ void AegisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
 
 void AegisProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -67,7 +68,10 @@ void AegisProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            programs.loadFrom (apvts.state);
+        }
 }
 
 juce::AudioProcessorEditor* AegisProcessor::createEditor() { return new ui::ScaledEditor<AegisEditor> (*this, apvts.state, *this); }
