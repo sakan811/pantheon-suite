@@ -19,4 +19,4 @@ A parameter's id is stored in every saved session and every automation lane. Wor
 7. **Tests.** The parameter count and the default in `UiCheck`; a DSP test that measures what the parameter does (not just that it is stored); a processor-level check if the host is told something.
 8. **Docs.** The README table row, the "Measured" line with the number the test prints, and every sentence in the README, `Advice.h` (notes and GUIDE) and the plugin's CLAUDE.md that says the plugin does not have it. A note is at
    most `ui::kMaxNoteChars` characters. The CLAUDE.md "Parameters" rule lists which ids are not version 1.
-9. **Check.** `scripts/build.sh <name> check snap`, then look at `docs/screenshot.png`. Not done until the check passes and you have looked.
+9. **Check.** `scripts/build.sh <name> check snap`, then look at `docs/screenshot.png` and every other image the README embeds that the change touches, and make the captions say what they now show. Not done until the check passes and you have looked.
