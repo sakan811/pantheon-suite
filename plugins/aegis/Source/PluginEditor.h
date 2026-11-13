@@ -25,6 +25,7 @@ public:
     ui::Knob gainKnob, ceilingKnob, releaseKnob;
     ui::Choice lookaheadBox;
     ui::Toggle truePeakButton;
+    ui::PresetBox presetBox;
     ui::GuideButton guideButton { aegis::guideTitle(), aegis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return aegis::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
@@ -37,7 +38,7 @@ private:
     AegisProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, display, lookaheadLabel, noteStrip, latencyLabel;
+    juce::Rectangle<int> nameplate, presetLabel, display, lookaheadLabel, noteStrip, latencyLabel;
     std::array<float, kHistory> history {}; // the reduction in dB (positive), oldest first
     float shownReduction = 0.0f, inLevelDb = aegis::gui::kLevelFloorDb;
 

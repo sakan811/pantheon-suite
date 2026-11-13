@@ -13,7 +13,7 @@ cmake --build build --target AegisUiCheck && ./build/AegisUiCheck_artefacts/Rele
 cmake --build build --target AegisSnapshot && ./build/AegisSnapshot_artefacts/Release/AegisSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`AEGIS_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`AEGIS_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh aegis` is the way to build and check (see the repository's CLAUDE.md).
 - `AegisTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP/Engine.h` has no JUCE in it, so the DSP tests also
   compile with `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop).
 - Definition of done for a DSP change: `AegisTests` passes **and** the numbers the README quotes still match its output.
@@ -24,6 +24,7 @@ cmake --build build --target AegisSnapshot && ./build/AegisSnapshot_artefacts/Re
 ```
 Source/DSP/Engine.h  no GUI, no JUCE: SlidingMin, Engine (the whole signal path); covered by Tests/Tests.cpp
 ../../shared/dsp/    TruePeak.h (`pdsp::TruePeakReader`: the 8x, 64-tap reader; shared with Hermes, so run HermesTests too when you change it)
+Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`)
@@ -55,6 +56,9 @@ input bit for bit (test [3]). The smoothed input GAIN starts at its target (`gai
 **The final clamp** compares with `ceiling * (1 + 1e-9)`: the gain brings a sample *to* the ceiling, and a comparison without the margin counts rounding.
 
 **Bad samples.** NaN and infinity are replaced by 0 on the way in (`finite()`).
+
+**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
+(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
 **Parameters.** Ids (`aegis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in
 `readParams()` and a place in the editor.

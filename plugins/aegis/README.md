@@ -17,6 +17,7 @@ The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. 
 | **Release** | 10 ms to 1 s, 100 ms by default: how long the gain takes to come back 63% of the way after a peak. |
 | **Look-ahead** | 0.5, 1, 2 (default) or 5 ms: how long before a peak the gain starts going down. Longer is smoother; it is also the delay. |
 | **True peak** | On by default: the detector reads 7 points between every two samples (8x) with a 64-tap windowed sinc. Off: only the samples. |
+| **Presets** | Six starting points (Init, Streaming Master, Loud Master, Gentle Peak Catch, Broadcast Safe, Tracking Safety). A preset sets every control, GAIN included; what it does not list goes back to its default. Set GAIN by ear afterwards. |
 
 The display is the reduction of the last nine seconds (hanging from the top, in dB), the number now, and the input level.
 
@@ -52,7 +53,7 @@ The display is the reduction of the last nine seconds (hanging from the top, in 
 - **The true peak is read at 8x.** That is the standard's 4x with a margin; a converter or a codec that reconstructs differently can still differ by a few hundredths of a dB. -1 dBTP is the usual ceiling for that reason.
 - **It delays the sound** by the look-ahead + 32 samples (the host compensates it); changing LOOK-AHEAD while playing restarts the limiter.
 - It does not measure loudness (a loudness meter is a different tool) and does not clip.
-- It has not been built on macOS or run through `auval`, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
 

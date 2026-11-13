@@ -23,10 +23,11 @@ AegisEditor::AegisEditor (AegisProcessor& p)
       lookaheadBox (p.apvts, id::lookahead, "How long before a peak the limiter starts turning the sound down. Longer is smoother, shorter is a smaller delay. The sound is delayed by "
                                            "this plus a fraction of a millisecond (the host compensates). Changing it while playing restarts the limiter."),
       truePeakButton (p.apvts, id::truePeak, "TRUE PEAK", "Read the peaks between the samples too (8x), as a converter or a codec will: the ceiling is then in dBTP. Off, only the samples are held."),
+      presetBox (p, presets(), "Everything is set by a preset, GAIN too (set it by ear afterwards); what it does not list goes back to its default."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &gainKnob, &ceilingKnob, &releaseKnob, &lookaheadBox, &truePeakButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &gainKnob, &ceilingKnob, &releaseKnob, &lookaheadBox, &truePeakButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (kWidth, headerHeight + 10 + displayHeight + 10 + controlsHeight + 8 + ui::kNoteStripHeight + 12);
@@ -42,6 +43,10 @@ void AegisEditor::resized()
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
     header.removeFromRight (12);
     latencyLabel = header.removeFromRight (110);
+    header.removeFromLeft (24);
+    auto presetRow = header.withTrimmedTop (28).withHeight (28);
+    presetLabel = { presetRow.getX() + 2, presetRow.getY() - 15, 120, 12 };
+    presetBox.setBounds (presetRow.removeFromLeft (190));
 
     bounds.removeFromTop (10);
     display = bounds.removeFromTop (displayHeight);
@@ -78,6 +83,7 @@ void AegisEditor::paint (juce::Graphics& g)
     hw::drawHeaderPlate (g, getLocalBounds().removeFromTop (headerHeight).toFloat());
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "True-peak limiter", inLevelDb > gui::kLevelFloorDb, 25.0f);
     const int latency = proc.engine.latencySamples.load();
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms", latencyLabel, juce::Justification::centredRight, colours::dim, 9.5f);
     hw::drawLabel (g, "Look-ahead", lookaheadLabel, juce::Justification::left, colours::dim, 9.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
@@ -135,5 +141,6 @@ void AegisEditor::timerCallback()
     shownReduction = now >= shownReduction ? now : std::max (now, shownReduction - fall);
     const float in = proc.engine.inPeak.exchange (0.0f);
     inLevelDb = in > 1e-5f ? 20.0f * std::log10 (in) : gui::kLevelFloorDb;
+    presetBox.sync();
     repaint();
 }

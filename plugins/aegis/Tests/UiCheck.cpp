@@ -114,5 +114,48 @@ int main()
         check (! tooLong, "every note fits a line of the strip");
     }
 
+    // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
+    {
+        AegisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 6;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        const auto indexOf = [&] (const char* name)
+        {
+            for (int i = 0; i < q.getNumPrograms(); ++i)
+                if (q.getProgramName (i) == name)
+                    return i;
+            check (false, std::string ("a preset called ") + name);
+            return 0;
+        };
+        const auto raw = [&] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
+        q.setCurrentProgram (indexOf ("Streaming Master"));
+        check (std::fabs (raw (id::gain) - 3.0f) < 0.01f && std::fabs (raw (id::ceiling) + 1.0f) < 0.01f && (int) raw (id::lookahead) == 2, "Streaming Master: 3 dB of gain, -1 dBTP, 2 ms of look-ahead");
+        q.setCurrentProgram (indexOf ("Tracking Safety"));
+        check (std::fabs (raw (id::gain)) < 0.01f && std::fabs (raw (id::ceiling) + 3.0f) < 0.01f && (int) raw (id::lookahead) == 0, "Tracking Safety: -3 dBTP and 0.5 ms, and the gain back to 0 (a preset does not inherit the last one)");
+        q.setCurrentProgram (0);
+        check (std::fabs (raw (id::gain)) < 0.01f && std::fabs (raw (id::ceiling) + 1.0f) < 0.01f && std::fabs (raw (id::release) - 100.0f) < 0.5f && raw (id::truePeak) > 0.5f, "Init is the defaults");
+        const int chosen = indexOf ("Loud Master");
+        q.setCurrentProgram (chosen);
+        check (std::fabs (raw (id::gain) - 6.0f) < 0.01f, "Loud Master: 6 dB of gain");
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        AegisProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == chosen, "the chosen preset is saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<AegisEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == chosen + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
+    }
+
     return test::finish ("AegisUiCheck");
 }
