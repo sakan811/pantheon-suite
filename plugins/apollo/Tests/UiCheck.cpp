@@ -106,6 +106,26 @@ int main()
                 peak = std::max (peak, buffer.getMagnitude (0, 512));
         }
         check (std::fabs (20.0f * std::log10 (peak / 0.1f) - 12.0f) < 0.1f, fmt ("a 12 dB bell at 1 kHz lifts a tone through the processor by %.2f dB", 20.0f * std::log10 (peak / 0.1f)));
+
+        // The analyser behind the curve reads the sound before and after the bands: the bell's 12 dB shows between the two traces.
+        gui::CurveView display (q.apvts, [&q] { return q.getSampleRate(); }, q.tapIn, q.tapOut);
+        display.setSize (800, 262);
+        check (display.analyzerOn(), "the analyser is on in a new instance");
+        display.tick();
+        const float before = display.inTrace.levelAtFrequency (1000.0), after = display.outTrace.levelAtFrequency (1000.0);
+        check (std::fabs (before + 20.0f) < 2.5f, fmt ("the analyser reads the tone before the bands at %.1f dB (a 0.1 tone is -20 dBFS)", before));
+        check (std::fabs ((after - before) - 12.0f) < 1.0f, fmt ("... and after the 12 dB bell %.1f dB higher", after - before));
+        display.mouseDown (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), display.analyzerButton().getCentre(), juce::ModifierKeys(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &display, &display,
+                                             juce::Time::getCurrentTime(), display.analyzerButton().getCentre(), juce::Time::getCurrentTime(), 1, false));
+        check (! display.analyzerOn() && ! (bool) q.apvts.state.getProperty ("analyzer", true), "the ANALYZER switch turns it off, and that is kept in the session's state");
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        for (int i = 0; i < 512; ++i)
+            for (int c = 0; c < 2; ++c)
+                buffer.setSample (c, i, 0.0f);
+        for (int block = 0; block < 40; ++block)
+            q.processBlock (buffer, midi);
+        display.tick();
+        check (std::fabs (display.outTrace.levelAtFrequency (1000.0) - after) < 0.01f, "off, the traces are not read or moved");
     }
 
     // The notes.
@@ -135,6 +155,56 @@ int main()
                 std::printf ("  too long (%d): %s\n", (int) n.text.size(), n.text.c_str());
             }
         check (! tooLong, "every note fits a line of the strip");
+    }
+
+    // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
+    {
+        ApolloProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 6;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        const auto indexOf = [&] (const char* name)
+        {
+            for (int i = 0; i < q.getNumPrograms(); ++i)
+                if (q.getProgramName (i) == name)
+                    return i;
+            check (false, std::string ("a preset called ") + name);
+            return 0;
+        };
+        const auto raw = [&] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
+        setValue (q.apvts, id::phase, 1.0f);
+        setValue (q.apvts, id::out, 3.0f);
+        q.setCurrentProgram (indexOf ("Telephone"));
+        check (raw (bandIds (0).on) > 0.5f && std::fabs (raw (bandIds (0).freq) - 500.0f) < 1.0f && (int) raw (bandIds (7).type) == (int) Type::lowPass && raw (bandIds (7).on) > 0.5f, "Telephone: a high-pass at 500 Hz and a low-pass, both on");
+        q.setCurrentProgram (indexOf ("Mud Cut"));
+        check (std::fabs (raw (bandIds (2).gain) + 3.0f) < 0.01f && raw (bandIds (0).on) < 0.5f && raw (bandIds (7).on) < 0.5f, "Mud Cut: a 3 dB dip at 300 Hz, and the Telephone's passes are off again (a preset does not inherit the last one)");
+        check ((int) raw (id::phase) == 1 && std::fabs (raw (id::out) - 3.0f) < 0.01f, "PHASE and OUTPUT are kept by a preset");
+        q.setCurrentProgram (indexOf ("Sides Open Top"));
+        check ((int) raw (bandIds (0).target) == (int) Target::side && (int) raw (bandIds (6).target) == (int) Target::side, "Sides Open Top works on the sides");
+        q.setCurrentProgram (0);
+        bool silent = true;
+        for (int i = 0; i < kBands; ++i)
+            silent = silent && isIdentity (readParams (q.apvts).bands[(size_t) i]);
+        check (silent, "Init: no band changes the sound");
+        const int chosen = indexOf ("Vocal Presence");
+        q.setCurrentProgram (chosen);
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        ApolloProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == chosen, "the chosen preset is saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<ApolloEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == chosen + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
     }
 
     return test::finish ("ApolloUiCheck");

@@ -37,7 +37,8 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
                                     "stereo image stay together), at the price of about 48 ms of delay (the host compensates) and a softer low end (about 12 Hz resolution). "
                                     "Changing it while playing restarts the equaliser."),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after every band."),
-      view (p.apvts, [&p] { return p.getSampleRate(); }),
+      view (p.apvts, [&p] { return p.getSampleRate(); }, p.tapIn, p.tapOut),
+      presetBox (p, presets(), "The bands it does not use go back to 0 dB. PHASE and OUTPUT are kept."),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -48,7 +49,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
             addChildComponent (*c);
     }
     view.onSelect = [this] (int) { repaint(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12);
@@ -70,6 +71,9 @@ void ApolloEditor::resized()
     phaseBox.setBounds (row.removeFromLeft (130));
     row.removeFromLeft (14);
     latencyLabel = row.removeFromLeft (120);
+    row.removeFromLeft (14);
+    presetLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
+    presetBox.setBounds (row.removeFromLeft (190));
     guideButton.setBounds (row.removeFromRight (64));
 
     bounds.removeFromTop (10);
@@ -131,6 +135,7 @@ void ApolloEditor::paint (juce::Graphics& g)
     g.fillAll (colours::background);
     hw::drawHeaderPlate (g, getLocalBounds().removeFromTop (headerHeight).toFloat());
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Parametric equaliser", true, 25.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Phase", phaseLabel, juce::Justification::left, colours::dim, 9.0f);
     const int latency = proc.engine.latencySamples.load();
     hw::drawLabel (g, latency == 0 ? juce::String ("No delay") : "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms",
@@ -159,5 +164,7 @@ void ApolloEditor::timerCallback()
         signature = signature * 7 + (int) b.type;
     if (signature != shownTypes)
         showTypes();
+    view.tick();
+    presetBox.sync();
     repaint();
 }

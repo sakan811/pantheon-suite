@@ -5,17 +5,43 @@
 
 #include "../Parameters.h"
 #include "ApolloUi.h"
+#include <pantheon/dsp/SpectrumAnalyzer.h>
 #include <pantheon/ui/FreqAxis.h>
 
 namespace apollo::gui
 {
 // The curve of the bands on glass, and a node for each: drag it sideways for the frequency and up and down for the gain, turn the wheel over it for the width,
 // double-click it to switch the band on or off. The curve is `responseDb` of the settings, so it is the filter that runs (minimum phase and linear phase have
-// the same magnitude).
+// the same magnitude). Behind the curve, an analyser draws the sound before the bands (dim) and after them (bright), on its own scale (kAnalyzerTopDb down
+// kAnalyzerRangeDb) with the tilt every analyser of the repository has; the ANALYZER switch in the corner turns it off, and it is kept with the session.
 class CurveView : public juce::Component
 {
 public:
-    CurveView (juce::AudioProcessorValueTreeState& state, std::function<double()> sampleRateOf) : apvts (state), sampleRate (std::move (sampleRateOf)) {}
+    CurveView (juce::AudioProcessorValueTreeState& state, std::function<double()> sampleRateOf, pdsp::StereoTap& before, pdsp::StereoTap& after)
+        : apvts (state), sampleRate (std::move (sampleRateOf)), tapBefore (before), tapAfter (after) {}
+
+    static constexpr float kAnalyzerTopDb = -10.0f, kAnalyzerRangeDb = 90.0f;
+    pdsp::SpectrumAnalyzer inTrace, outTrace;
+
+    bool analyzerOn() const { return (bool) apvts.state.getProperty (analyzerProperty, true); }
+    void setAnalyzer (bool on) { apvts.state.setProperty (analyzerProperty, on, nullptr); repaint(); }
+    juce::Rectangle<float> analyzerButton() const { return getLocalBounds().toFloat().removeFromTop (22.0f).removeFromRight (84.0f).reduced (4.0f, 3.0f); }
+
+    // The editor's timer calls this: it takes what the audio thread has sent and updates the two traces. Off, nothing is read (and nothing is computed).
+    void tick()
+    {
+        if (! analyzerOn())
+            return;
+        const double fs = std::max (sampleRate(), 8000.0);
+        if (fs != analyzerRate)
+        {
+            analyzerRate = fs;
+            inTrace.setSampleRate (fs);
+            outTrace.setSampleRate (fs);
+        }
+        inTrace.update (tapBefore);
+        outTrace.update (tapAfter);
+    }
 
     std::function<void (int)> onSelect;
     int selected = 0;
@@ -62,6 +88,11 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (analyzerButton().contains (e.position))
+        {
+            setAnalyzer (! analyzerOn());
+            return;
+        }
         dragged = nodeNear (e.position);
         if (dragged < 0)
             return;
@@ -125,6 +156,12 @@ public:
             g.drawText (hz < 1000.0 ? juce::String ((int) hz) : juce::String ((int) (hz / 1000.0)) + "k", juce::Rectangle<float> (xOf (hz) - 16.0f, r.getBottom() + 1.0f, 32.0f, 11.0f), juce::Justification::centred);
         }
 
+        if (analyzerOn())
+        {
+            drawTrace (g, inTrace, colours::dim.withAlpha (0.7f), colours::dim.withAlpha (0.12f));
+            drawTrace (g, outTrace, colours::text.withAlpha (0.85f), colours::text.withAlpha (0.10f));
+        }
+
         const auto curve = [&] (const std::array<BandParams, kBands>& bands, Target path)
         {
             juce::Path p;
@@ -176,10 +213,45 @@ public:
             g.setFont (ui::lcdFont (10.0f, juce::Font::bold));
             g.drawText (juce::String (i + 1), juce::Rectangle<float> (c.x - 8.0f, c.y - 8.0f, 16.0f, 16.0f), juce::Justification::centred);
         }
+        const auto button = analyzerButton();
+        ui::hw::drawPushButton (g, button, analyzerOn(), colours::accent);
+        g.setColour (analyzerOn() ? colours::lampInk : colours::dim);
+        g.setFont (ui::lcdFont (9.0f, juce::Font::bold));
+        g.drawText ("ANALYZER", button, juce::Justification::centred);
         ui::hw::drawGlassOverlay (g, glass, 4.0f, false);
     }
 
 private:
+    float analyzerY (float db) const
+    {
+        const auto r = plot();
+        return r.getY() + (1.0f - (juce::jlimit (kAnalyzerTopDb - kAnalyzerRangeDb, kAnalyzerTopDb, db) - (kAnalyzerTopDb - kAnalyzerRangeDb)) / kAnalyzerRangeDb) * r.getHeight();
+    }
+
+    // A pixel narrower than a bin: interpolate; wider: the strongest bin it covers.
+    void drawTrace (juce::Graphics& g, const pdsp::SpectrumAnalyzer& analyzer, juce::Colour line, juce::Colour fill) const
+    {
+        const auto r = plot();
+        const int width = (int) r.getWidth();
+        const float binHz = (float) analyzer.binFrequency (1);
+        juce::Path path;
+        for (int px = 0; px <= width; ++px)
+        {
+            const float f0 = ui::FreqAxis::toHz ((float) px / (float) width), f1 = ui::FreqAxis::toHz ((float) (px + 1) / (float) width);
+            const float db = (f1 - f0) < binHz ? analyzer.levelAtFrequency (0.5 * (f0 + f1)) : analyzer.peakInRange (f0, f1);
+            const float x = r.getX() + (float) px, y = analyzerY (db);
+            px == 0 ? path.startNewSubPath (x, y) : path.lineTo (x, y);
+        }
+        juce::Path filled (path);
+        filled.lineTo (r.getRight(), r.getBottom());
+        filled.lineTo (r.getX(), r.getBottom());
+        filled.closeSubPath();
+        g.setColour (fill);
+        g.fillPath (filled);
+        g.setColour (line);
+        g.strokePath (path, juce::PathStrokeType (1.2f));
+    }
+
     void select (int band)
     {
         selected = band;
@@ -195,6 +267,10 @@ private:
 
     juce::AudioProcessorValueTreeState& apvts;
     std::function<double()> sampleRate;
+    pdsp::StereoTap& tapBefore;
+    pdsp::StereoTap& tapAfter;
+    double analyzerRate = 0.0;
+    inline static const juce::Identifier analyzerProperty { "analyzer" };
     int dragged = -1;
 };
 } // namespace apollo::gui

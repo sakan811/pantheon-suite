@@ -4,7 +4,9 @@
 #pragma once
 
 #include "Parameters.h"
+#include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <pantheon/dsp/AnalyzerTap.h>
 
 class ApolloProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
@@ -25,17 +27,19 @@ public:
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return "Default"; }
+    int getNumPrograms() override { return programs.count(); }
+    int getCurrentProgram() override { return programs.current(); }
+    void setCurrentProgram (int index) override { programs.set (index); }
+    const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
     apollo::Engine engine;
+    pdsp::StereoTap tapIn, tapOut; // the sound before and after the bands, for the display's analyser (the audio thread writes, the editor reads)
     juce::AudioProcessorValueTreeState apvts;
+    ui::Programs programs { apvts, apollo::presets(), apollo::keepsParameter }; // after apvts
 
 private:
     // The latency can move with a setting; setLatencySamples belongs to the message thread, so the audio thread only asks for it.
