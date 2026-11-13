@@ -5,13 +5,15 @@
 
 #include "DSP/Engine.h"
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <pantheon/dsp/BandLink.h>
 
 // The single source of truth for parameters: ids, ranges, defaults, choice lists, and readParams().
 namespace aegis
 {
 namespace id
 {
-inline const juce::String gain { "gain" }, ceiling { "ceiling" }, release { "release" }, lookahead { "look" }, truePeak { "tp" };
+inline const juce::String gain { "gain" }, ceiling { "ceiling" }, release { "release" }, lookahead { "look" }, truePeak { "tp" },
+    autoRelease { "autorel" }; // version 2: a session saved before it opens with it off, the old behaviour
 }
 
 inline juce::StringArray lookaheadNames()
@@ -46,6 +48,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::release, 1 }, "Release", releaseRange, d.releaseMs, Attr().withStringFromValueFunction (ms).withValueFromStringFunction (msValue)));
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 1 }, "Look-ahead", lookaheadNames(), d.lookahead));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::truePeak, 1 }, "True Peak", d.truePeak));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::autoRelease, 2 }, "Auto Release", d.autoRelease));
     return { p.begin(), p.end() };
 }
 
@@ -59,6 +62,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.releaseMs = v (id::release);
     e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookahead - 1);
     e.truePeak = v (id::truePeak) > 0.5f;
+    e.autoRelease = v (id::autoRelease) > 0.5f;
     return e;
 }
 
@@ -67,5 +71,32 @@ inline void setValue (juce::AudioProcessorValueTreeState& s, const juce::String&
 {
     auto* p = s.getParameter (pid);
     p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
+
+// A limiter setting another plugin of the repository handed over as text (pdsp::link, Themis' COPY on a plan item): the ceiling to set and how far to
+// move GAIN. Returns the line the editor says about it, empty when the text holds no limiter setting (nothing is touched then). A ceiling in dBTP is only
+// true with TRUE PEAK on, so a paste that names one switches it on. GAIN stops at its ends (and says so): the plan asked for more than the range has.
+inline std::string pasteLimiter (juce::AudioProcessorValueTreeState& s, const juce::String& text)
+{
+    pdsp::LinkLimiter l;
+    if (! pdsp::link::decodeLimiter (text.toStdString(), l))
+        return {};
+    std::string said = "Pasted from the plan:";
+    if (l.hasCeiling)
+    {
+        if (s.getRawParameterValue (id::truePeak)->load() < 0.5f)
+            setValue (s, id::truePeak, 1.0f);
+        setValue (s, id::ceiling, std::clamp ((float) l.ceilingDb, -12.0f, 0.0f));
+        said += " CEILING " + juce::String (s.getRawParameterValue (id::ceiling)->load(), 1).toStdString() + " dBTP";
+    }
+    if (l.hasGainChange)
+    {
+        const float before = s.getRawParameterValue (id::gain)->load(), wanted = before + (float) l.gainChangeDb, now = std::clamp (wanted, 0.0f, kMaxGainDb);
+        setValue (s, id::gain, now);
+        said += std::string (l.hasCeiling ? "," : "") + " GAIN " + juce::String (before, 1).toStdString() + " to " + juce::String (s.getRawParameterValue (id::gain)->load(), 1).toStdString() + " dB";
+        if (std::fabs (wanted - now) > 0.05f)
+            said += " (the end of its range)";
+    }
+    return said + ".";
 }
 } // namespace aegis

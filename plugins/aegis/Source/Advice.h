@@ -55,7 +55,11 @@ inline const char* guideText()
            "(true peak), so a converter or a codec after it cannot go over.\n\n"
            "HOW\n"
            "It looks ahead (LOOK-AHEAD) and turns the sound down before a peak arrives, so there is no click, and lets go at RELEASE. "
-           "Both channels share one gain, so the stereo image does not move.\n\n"
+           "Both channels share one gain, so the stereo image does not move. AUTO RELEASE lets a short peak go sooner than RELEASE. "
+           "OUT PEAK is the highest true peak that leaves.\n\n"
+           "WITH THEMIS\n"
+           "Put Themis after it. COPY on its plan's ceiling or loudness item, then PASTE here: it sets CEILING and moves GAIN by the amount "
+           "Themis measured. Aegis does not measure loudness; Themis does.\n\n"
            "NOT FOR\n"
            "Not a substitute for a compressor: taking off more than about 6 dB squashes the sound, and a fast RELEASE distorts bass. "
            "It does not clip, and does not measure loudness.";

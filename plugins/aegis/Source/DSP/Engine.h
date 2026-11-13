@@ -21,6 +21,13 @@ inline constexpr int kDefaultLookahead = 2;
 inline constexpr int kDetectorDelay = pdsp::kTruePeakDelay; // samples the detector reads behind the newest input: the audio waits this much longer than the look-ahead
 inline constexpr float kMaxGainDb = 24.0f;
 
+// AUTO RELEASE: the gain comes back at RELEASE only after a sustained reduction; after a short peak it comes back faster. How much reduction counts as
+// sustained (a mean of the gain over kAutoMeanMs, in linear gain: 0.4 is about 4.4 dB), and how much faster a short peak is let go (a fraction of RELEASE, never under 2 ms).
+inline constexpr double kAutoMeanMs = 150.0;
+inline constexpr double kAutoDepth = 0.4;
+inline constexpr double kAutoFastShare = 0.2;
+inline constexpr double kAutoFastFloorMs = 2.0;
+
 struct EngineParams
 {
     float gainDb = 0.0f;       // before the limiter
@@ -28,6 +35,7 @@ struct EngineParams
     float releaseMs = 100.0f;  // the time the gain takes to come back 63% of the way
     int lookahead = kDefaultLookahead;
     bool truePeak = true;      // read the peaks between the samples too
+    bool autoRelease = false;  // a short peak is let go faster than RELEASE, a sustained reduction at RELEASE
 };
 
 inline int lookaheadSamples (double fs, int choice) noexcept
@@ -94,6 +102,8 @@ public:
         mins.reset();
         readerL.reset();
         readerR.reset();
+        outReaderL.reset();
+        outReaderR.reset();
         std::fill (delayL.begin(), delayL.end(), 0.0);
         std::fill (delayR.begin(), delayR.end(), 0.0);
         std::fill (avg1.begin(), avg1.end(), 1.0);
@@ -105,6 +115,7 @@ public:
         sum1 = (double) widthOne;
         sum2 = (double) widthTwo;
         release = 1.0;
+        sustained = 1.0;
         gainNow = 1.0;
         gainStarted = false;
     }
@@ -127,13 +138,17 @@ public:
         const double gainTarget = std::pow (10.0, (double) std::clamp (p.gainDb, 0.0f, kMaxGainDb) / 20.0);
         const double releaseStep = 1.0 - std::exp (-1.0 / std::max (0.001 * (double) p.releaseMs * fs, 1.0));
         const double gainSmooth = 1.0 - std::exp (-1.0 / (0.005 * fs));
+        // AUTO RELEASE moves the step between a fast one and RELEASE's, by how long the reduction has lasted. Whatever the step, the envelope is never above `held`, so the ceiling does not depend on it.
+        const double fastMs = std::min ((double) p.releaseMs, std::max (kAutoFastFloorMs, kAutoFastShare * (double) p.releaseMs));
+        const double fastStep = 1.0 - std::exp (-1.0 / std::max (0.001 * fastMs * fs, 1.0));
+        const double meanStep = 1.0 - std::exp (-1.0 / (0.001 * kAutoMeanMs * fs));
         if (! gainStarted)
         {
             gainNow = gainTarget;
             gainStarted = true;
         }
         const uint64_t mask = (uint64_t) (ring - 1), wait = (uint64_t) (look + kDetectorDelay), w1 = (uint64_t) widthOne, w2 = (uint64_t) widthTwo;
-        float peakIn = 0.0f;
+        float peakIn = 0.0f, peakOut = 0.0f;
         double deepest = 1.0;
 
         for (int i = 0; i < n; ++i)
@@ -146,7 +161,11 @@ public:
             const double peak = std::fmax (readerL.push (xl, p.truePeak), readerR.push (xr, p.truePeak));
             const double required = peak > ceiling ? ceiling / peak : 1.0;
             const double held = mins.push (required, look + 1); // the two detector points either side of the sample that is heard now: see the README
-            release = std::fmin (held, release + (1.0 - release) * releaseStep);
+            double step = releaseStep;
+            if (p.autoRelease)
+                step = fastStep + (releaseStep - fastStep) * std::clamp ((1.0 - sustained) / kAutoDepth, 0.0, 1.0); // fast after a short peak, RELEASE's once the reduction has lasted
+            release = std::fmin (held, release + (1.0 - release) * step);
+            sustained += (release - sustained) * meanStep;
 
             // Two means, each over about half the look-ahead (the window of both together is the look-ahead): a fall is spread over it with a rounded shape, so the
             // gain changes slowly next to a sample and the peaks between the samples are not made again by the gain itself. A mean never exceeds the smallest value it covers.
@@ -168,6 +187,8 @@ public:
                 ++clamped;
             left[i] = (float) std::clamp (yl, -ceiling, ceiling);
             right[i] = (float) std::clamp (yr, -ceiling, ceiling);
+            // What leaves, read the way the detector reads: the number OUT shows (and what a true-peak meter after the limiter should find).
+            peakOut = std::max (peakOut, (float) std::fmax (outReaderL.push (left[i], p.truePeak), outReaderR.push (right[i], p.truePeak)));
             ++position;
         }
 
@@ -176,6 +197,8 @@ public:
             reductionMeter.store (reduction, std::memory_order_relaxed);
         if (peakIn > inPeak.load (std::memory_order_relaxed))
             inPeak.store (peakIn, std::memory_order_relaxed);
+        if (peakOut > outPeak.load (std::memory_order_relaxed))
+            outPeak.store (peakOut, std::memory_order_relaxed);
     }
 
     uint64_t clamped = 0; // samples the final clamp had to touch (for the tests: with the limiter working it stays 0)
@@ -183,6 +206,7 @@ public:
     std::atomic<int> latencySamples { 0 };
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB (positive)
     std::atomic<float> inPeak { 0.0f };         // the largest input sample since the editor last asked (linear)
+    std::atomic<float> outPeak { 0.0f };        // the largest true peak (sample peak with TRUE PEAK off) of the output since the editor last asked (linear)
 
 private:
     static inline double finite (float v) noexcept { return std::isfinite (v) ? (double) v : 0.0; }
@@ -190,10 +214,10 @@ private:
     double fs = 48000.0;
     int choice = kDefaultLookahead, look = 96, ring = 1024;
     SlidingMin mins;
-    pdsp::TruePeakReader readerL, readerR;
+    pdsp::TruePeakReader readerL, readerR, outReaderL, outReaderR;
     std::vector<double> delayL, delayR, avg1, avg2;
     uint64_t position = 0;
-    double sum1 = 1.0, sum2 = 1.0, release = 1.0, gainNow = 1.0;
+    double sum1 = 1.0, sum2 = 1.0, release = 1.0, sustained = 1.0, gainNow = 1.0;
     int widthOne = 1, widthTwo = 1; // the two means: widthOne + widthTwo = look + 2, so together they reach back look samples
     bool gainStarted = false;
 };

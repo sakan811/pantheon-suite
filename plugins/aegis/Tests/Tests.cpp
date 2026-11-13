@@ -103,10 +103,12 @@ int main()
     {
         for (const float ceilingDb : { -0.3f, -1.0f, -6.0f })
             for (const int look : { 0, 2, 3 })
+              for (const bool autoRelease : { false, true })
             {
                 Engine e;
                 e.prepare (kFs, look);
                 EngineParams p;
+                p.autoRelease = autoRelease;
                 p.gainDb = 12.0f;
                 p.ceilingDb = ceilingDb;
                 p.lookahead = look;
@@ -115,7 +117,7 @@ int main()
                 const size_t from = (size_t) e.latencySamples.load() * 2;
                 const double sp = samplePeak (out.l, from), tp = std::fmax (truePeakOf (out.l, from), truePeakOf (out.r, from));
                 check (db (std::fmax (sp, samplePeak (out.r, from))) <= ceilingDb + 0.001f && e.clamped == 0,
-                       fmt ("ceiling %.1f dB, look-ahead %.1f ms: sample peak %.3f dBFS, and the final clamp never had to act (%llu)", ceilingDb, kLookaheadMs[look],
+                       fmt ("ceiling %.1f dB, look-ahead %.1f ms, auto release %s: sample peak %.3f dBFS, and the final clamp never had to act (%llu)", ceilingDb, kLookaheadMs[look], autoRelease ? "on" : "off",
                             db (std::fmax (sp, samplePeak (out.r, from))), (unsigned long long) e.clamped));
                 check (db (tp) <= ceilingDb + 0.1f, fmt ("    true peak %.3f dBTP (limit %.1f + 0.1)", db (tp), ceilingDb));
             }
@@ -299,6 +301,51 @@ int main()
         auto out = run (e, { x, x }, p);
         const double gain = samplePeak (std::vector<float> (out.l.begin() + 24000, out.l.end())) / 0.1;
         check (std::fabs (db (gain) - 6.0f) < 0.05f, fmt ("GAIN +6 dB lifts a quiet tone by %.2f dB (nothing to limit)", db (gain)));
+    }
+
+    // [11] Auto release: a short peak is let go sooner than RELEASE, a sustained reduction at RELEASE.
+    std::printf ("\n[11] Auto release\n");
+    {
+        // 25 ms burst (or 1 s of it) at +12 dB over the ceiling, then quiet material at 0.25 whose level follows the gain; 250 ms after the burst ends, how much of the deficit is left.
+        const auto deficitAfter = [&] (bool autoRelease, int burstSamples)
+        {
+            Engine e;
+            e.prepare (kFs, 2);
+            EngineParams p;
+            p.ceilingDb = -6.0f;
+            p.releaseMs = 400.0f;
+            p.autoRelease = autoRelease;
+            p.truePeak = false;
+            const size_t start = 4000, end = start + (size_t) burstSamples;
+            std::vector<float> y (end + 48000, 0.25f);
+            for (size_t i = start; i < end; ++i)
+                y[i] = 1.0f;
+            auto out = run (e, { y, y }, p, 64);
+            const size_t at = end + (size_t) e.latencySamples.load();
+            return std::pair<double, double> { 1.0 - out.l[at + 40] / 0.25, 1.0 - out.l[at + 12000] / 0.25 }; // just after the burst, and 250 ms later
+        };
+        const auto shortManual = deficitAfter (false, 1200), shortAuto = deficitAfter (true, 1200);
+        check (shortAuto.second < 0.5 * shortManual.second, fmt ("after a 25 ms burst the deficit 250 ms later is %.3f with AUTO against %.3f with RELEASE at 400 ms: the peak is let go sooner", shortAuto.second, shortManual.second));
+        const auto longManual = deficitAfter (false, 48000), longAuto = deficitAfter (true, 48000);
+        check (std::fabs (longAuto.second - longManual.second) < 0.08, fmt ("after 1 s of reduction AUTO releases at RELEASE: the deficit 250 ms later is %.3f against %.3f", longAuto.second, longManual.second));
+    }
+
+    // [12] OUT: the output's own peak, read the way the detector reads, agrees with an independent measure and is never over the ceiling.
+    std::printf ("\n[12] Output meter\n");
+    {
+        for (const bool tp : { true, false })
+        {
+            Engine e;
+            e.prepare (kFs, 2);
+            EngineParams p;
+            p.gainDb = 12.0f;
+            p.ceilingDb = -1.0f;
+            p.truePeak = tp;
+            const auto out = run (e, programme (48000 * 2, 0.0), p);
+            const double shown = e.outPeak.load(), measured = tp ? std::fmax (truePeakOf (out.l), truePeakOf (out.r)) : std::fmax (samplePeak (out.l), samplePeak (out.r));
+            check (std::fabs (db (shown) - db (measured)) < 0.1f && db (shown) <= -1.0f + 0.1f,
+                   fmt ("TRUE PEAK %s: OUT reads %.3f dB, an independent reading of the output says %.3f dB, the ceiling is -1", tp ? "on" : "off", db (shown), db (measured)));
+        }
     }
 
     return test::finish ("AegisTests");
