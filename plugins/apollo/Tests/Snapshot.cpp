@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 The Pantheon authors
 
-// Renders the plugin editor to a PNG with a curve worth looking at: a high-pass, a low shelf cut, a dip, two boosts, a notch at the top and a side-only band.
+// Renders the plugin editor to a PNG with a curve worth looking at, over a programme for the analyser: a high-pass, a low shelf cut, a dip, two boosts, a notch at the top and a side-only band.
 //
 //   ApolloSnapshot <out.png> [linear] [select=BAND]
 
@@ -40,6 +40,32 @@ int main (int argc, char** argv)
     set (bandIds (7).on, 1.0f);
     set (bandIds (7).freq, 17000.0f);
 
+    // A programme for the analyser behind the curve: a low note with its harmonics over noise that falls with frequency, the same every run.
+    {
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        unsigned seed = 12345u;
+        float lowpass = 0.0f, lowpass2 = 0.0f;
+        for (int block = 0; block < 120; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                seed = seed * 1664525u + 1013904223u;
+                const float white = (float) (seed >> 8) / (float) (1 << 24) * 2.0f - 1.0f;
+                lowpass += 0.12f * (white - lowpass);
+                lowpass2 += 0.5f * (lowpass - lowpass2);
+                const float t = (float) (block * 512 + i) / 48000.0f;
+                float tone = 0.0f;
+                for (int k = 1; k <= 12; ++k)
+                    tone += std::sin (2.0f * 3.14159265f * 82.0f * (float) k * t) / (float) k;
+                const float x = 0.045f * tone + 0.9f * lowpass2;
+                buffer.setSample (0, i, x);
+                buffer.setSample (1, i, 0.9f * x);
+            }
+            proc.processBlock (buffer, midi);
+        }
+    }
+
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
     auto& designed = ui::innerOf<ApolloEditor> (*editor);
@@ -51,6 +77,7 @@ int main (int argc, char** argv)
         else if (arg.startsWith ("select="))
             designed.view.selected = arg.fromFirstOccurrenceOf ("=", false, false).getIntValue() - 1;
     }
+    designed.view.tick(); // what the programme above left in the taps
     juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
     designed.showTypes();
 

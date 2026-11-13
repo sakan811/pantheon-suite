@@ -13,7 +13,7 @@ cmake --build build --target ApolloUiCheck && ./build/ApolloUiCheck_artefacts/Re
 cmake --build build --target ApolloSnapshot && ./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`APOLLO_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`APOLLO_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh apollo` is the way to build and check (see the repository's CLAUDE.md).
 - `ApolloTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it (the FFT is its own), so the DSP tests also compile
   with `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`.
 - Definition of done for a DSP change: `ApolloTests` passes **and** the numbers the README quotes still match its output.
@@ -25,6 +25,7 @@ cmake --build build --target ApolloSnapshot && ./build/ApolloSnapshot_artefacts/
 Source/DSP/Bands.h         BandParams, Section (the filter of a band), isIdentity(), responseDb()  <- the curve the editor draws and the filter the engine runs
 Source/DSP/LinearPhase.h   Fft, LinearSizes, Convolver (the kernel from the magnitude, FFT overlap-save, the exact delay for the idle case)
 Source/DSP/Engine.h        the signal path, the tick, the smoothing, Mid/Side, the phase mode, latency
+Source/Presets.h           the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h            the notes of the strip under the bands and the GUIDE text; plain C++
 Source/Parameters.h        parameter layout, bandIds(), defaultBand(), readParams()                <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/CurveView.h` is the display and its nodes
@@ -57,9 +58,16 @@ and come back as `m + s` and `m - s`. With no band in a path the `Convolver` ret
 **The display is the settings, not the engine.** `responseDb()` designs each band from the parameters as they are (no smoothing); the engine's curve is the same once it has caught up. Draw it, test with it, do not
 duplicate a formula for the curve.
 
+**The analyser is the display's, not the engine's.** The processor pushes the sound before and after the bands into `tapIn` / `tapOut` (`pdsp::StereoTap`, lock-free, from `processBlock`; the engine does not know them); `CurveView::tick()`, called by the editor's timer,
+reads them into two `pdsp::SpectrumAnalyzer`s and does nothing when ANALYZER is off (the switch is the `analyzer` property of the session's state, not a parameter, so it is not automatable and no id is added). Its scale is its own (`kAnalyzerTopDb`, `kAnalyzerRangeDb`), not the
+curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCheck`.
+
 **Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()` (the FFT tables, the rings, the kernels). A change of phase mode restarts the equaliser (`configure()`).
 
 **Bad samples.** NaN and infinity are replaced by 0 on the way in.
+
+**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
+(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
 **Parameters.** Ids (`apollo::id`, `bandIds (i)`: `b1_on` ... `b8_target`) are stored in sessions and automation: never rename or remove one, nor reorder the choice lists (`typeNames`, `targetNames`, `slopeNames`,
 `phaseNames` follow the enums). All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.

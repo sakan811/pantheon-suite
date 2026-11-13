@@ -19,6 +19,7 @@ A **parametric equaliser** (VST3 + AU + Standalone) for mixing and mastering: ei
 | **Channels** | Stereo (left and right alike), Mid (only what both channels share) or Side (only what differs between them). |
 | **Phase** | Minimum (no delay) or Linear (no phase shift; about 48 ms of delay, and a softer low end). |
 | **Output** | -24 to +24 dB after every band. |
+| **Presets** | Nine starting points (Init, Low Cut, Vocal Presence, Mud Cut, Air Lift, Bass Weight, Master Smile, Sides Open Top, Telephone). A preset sets the bands it needs; the others go back to 0 dB. PHASE and OUTPUT are kept. |
 
 On the display, drag a node sideways for the frequency and up and down for the gain; the wheel over a node changes the Q; a double click switches the band
 on or off. The amber curve is the response of the settings; a teal one appears when a band works on the sides only (it is the sides' response). The curve is the
@@ -55,8 +56,8 @@ filter that runs, not a drawing of it.
 - **Linear phase resolves about 12 Hz** (4096 points at 48 kHz). A band below about 60 Hz, or a steep high-pass there, is softer than the curve shows. Use minimum phase down there.
 - **Linear phase delays the sound** by about 48 ms (the host compensates it); switching phase mode while playing restarts the equaliser (it clicks). It also has a little pre-ringing before a sharp boost: that is what linear phase is.
 - **A narrow, strong bell rings in minimum phase.** That is the filter, not a fault; cut instead of boosting, or use linear phase.
-- **It is static.** It does what the curve says, always; there is no analyser and no dynamics (Iris is the dynamic equaliser).
-- It has not been built on macOS or run through `auval`, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+- **It is static.** It does what the curve says, always; there is no dynamics (Iris is the dynamic equaliser). The analyser behind the curve (the sound before the bands, dim, and after them, bright; 8192-point FFT, 90 dB scale, 4.5 dB per octave tilt, the same as Iris and Hephaestus) is for looking, not measuring: the tilt moves the levels, and it only runs while the editor is open. ANALYZER in the corner of the display turns it off (kept with the session).
+- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
 

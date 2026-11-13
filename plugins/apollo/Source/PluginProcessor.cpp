@@ -39,6 +39,8 @@ void ApolloProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     const auto params = apollo::readParams (apvts);
     auto main = getBusBuffer (buffer, false, 0);
     const int n = main.getNumSamples();
+    if (main.getNumChannels() > 0)
+        tapIn.push (main.getArrayOfReadPointers(), main.getNumChannels(), n);
     if (main.getNumChannels() >= 2)
         engine.process (main.getWritePointer (0), main.getWritePointer (1), n, params);
     else if (main.getNumChannels() == 1)
@@ -53,12 +55,15 @@ void ApolloProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             start += m;
         }
     }
+    if (main.getNumChannels() > 0)
+        tapOut.push (main.getArrayOfReadPointers(), main.getNumChannels(), n);
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
 }
 
 void ApolloProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -67,7 +72,10 @@ void ApolloProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            programs.loadFrom (apvts.state);
+        }
 }
 
 juce::AudioProcessorEditor* ApolloProcessor::createEditor() { return new ui::ScaledEditor<ApolloEditor> (*this, apvts.state, *this); }

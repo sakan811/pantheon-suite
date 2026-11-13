@@ -79,6 +79,7 @@ inline const char* guideText()
            "transients and stereo image intact when several bands work together, at the price of a delay of about 48 ms (the host compensates) and of "
            "a softer low end (about 12 Hz resolution).\n\n"
            "NOT FOR\n"
-           "It is not a dynamic equaliser (Iris is) and has no analyser: it does what the curve says, always.";
+           "It is not a dynamic equaliser (Iris is): it does what the curve says, always. The analyser behind the curve shows the sound before (dim) and after "
+           "(bright) the bands; ANALYZER turns it off.";
 }
 } // namespace apollo

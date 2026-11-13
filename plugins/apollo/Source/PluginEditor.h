@@ -33,6 +33,7 @@ public:
     ui::Choice phaseBox;
     ui::Knob outKnob;
     apollo::gui::CurveView view;
+    ui::PresetBox presetBox;
     ui::GuideButton guideButton { apollo::guideTitle(), apollo::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return apollo::adviceFor (adviceInput()); } // what the strip under the bands says, for the checks
@@ -45,7 +46,7 @@ private:
     ApolloProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, phaseLabel, latencyLabel, noteStrip, stripArea;
+    juce::Rectangle<int> nameplate, presetLabel, phaseLabel, latencyLabel, noteStrip, stripArea;
     int shownTypes = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ApolloEditor)
