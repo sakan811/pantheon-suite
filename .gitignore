@@ -7,7 +7,9 @@ cmake-build-*/
 .DS_Store
 .vscode/
 .idea/
-.claude/
+# Claude Code: local state stays out, the project's skills are committed (.claude/skills/)
+.claude/*
+!.claude/skills/
 
 # an offline JUCE checkout, see cmake/Juce.cmake
 third_party/
