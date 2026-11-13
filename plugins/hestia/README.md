@@ -12,6 +12,10 @@ can join the mix through the **sidechain** input, with Hestia on it or not.
 *Hestia* is the goddess of the hearth, the fire at the middle of the house around which everyone has a place. Her gift is that there is
 room for all of them. (CMake targets, namespaces and plugin codes use the short name "Hestia".)
 
+![Hestia Space](docs/screenshot.png)
+
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A lead vocal (this instance, teal) in a mix with a kick, a bass and a guitar, each fed a programme, on mix H. The curves are the stems' spectra; the strip of colours under them says which stem owns each band, and the amber bars are how far this instance cuts there (CARVE 9 dB, REACH 12 dB): it gives way to the kick and the bass below about 350 Hz and is untouched where it owns the band. DEPTH is 12%; the map on the right is the stems' distances. The strip warns that cutting 9 dB in a band can leave a stem hollow. Regenerate with the command under "Development".*
+
 ## What it does
 
 | | |

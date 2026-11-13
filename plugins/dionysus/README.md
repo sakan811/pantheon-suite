@@ -8,6 +8,10 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 
 *Dionysus* is the god of wine and of excess: the tame form of it is warmth. (CMake targets, namespaces and plugin codes use the short name "Dionysus".)
 
+![Dionysus Warmth](docs/screenshot.png)
+
+*Headless render of the editor (the hardware-style interface shared with the other plugins). The tape curve at +16 dB of drive with BIAS +25%, TONE +20%, MIX 85%, 4x oversampling and AUTO GAIN on. On the left, the curve the signal goes through (input across, output up); on the right, the harmonics it makes from a sine at -12 dBFS, odd ones amber and even ones teal (the bias is what brings the even ones). The strip explains the bias' DC blocker and the delayed dry sound under 100% MIX. Regenerate with the command under "Development".*
+
 ## What it does
 
 | | |

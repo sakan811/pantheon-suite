@@ -8,6 +8,10 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 
 *Nemesis* is the goddess of what is out of measure being brought back to it. (CMake targets, namespaces and plugin codes use the short name "Nemesis".)
 
+![Nemesis Hush](docs/screenshot.png)
+
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB and RELEASE 40 ms. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-2.0 dB now) and rests at 0 between them. Regenerate with the command under "Development".*
+
 ## What it does
 
 | | |

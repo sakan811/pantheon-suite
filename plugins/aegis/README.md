@@ -8,6 +8,10 @@ included**, under a ceiling, so a converter or a lossy codec after it cannot go 
 
 The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. (CMake targets, namespaces and plugin codes use the short name "Aegis".)
 
+![Aegis Ceiling](docs/screenshot.png)
+
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A loud programme with a beat, GAIN +8 dB, CEILING -1.0 dBTP, RELEASE 100 ms, look-ahead 2 ms and TRUE PEAK on. The amber trace is the reduction over the last seconds (-5.1 dB now, down to about -10 dB on the peaks); OUT PEAK reads -1.0 dBTP, held until CLEAR; the IN and OUT bars are on the right. The strip under the controls warns that taking off 10 dB or more will sound squashed and says what the look-ahead costs in delay. Regenerate with the command under "Development".*
+
 ## What it does
 
 | | |
