@@ -59,6 +59,7 @@ void DionysusProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
 void DionysusProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -67,7 +68,10 @@ void DionysusProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            programs.loadFrom (apvts.state);
+        }
 }
 
 juce::AudioProcessorEditor* DionysusProcessor::createEditor() { return new ui::ScaledEditor<DionysusEditor> (*this, apvts.state, *this); }

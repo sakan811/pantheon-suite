@@ -20,6 +20,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 | **Output** | -24 to +12 dB, after everything. |
 | **Auto gain** | On by default: the gain that brings the RMS of a sine at -12 dBFS back to what it was before the curve (the AC part: the DC is taken off). |
 | **Oversampling** | Off, 2x, 4x or 8x: half-band, linear phase (a 65-tap stage and then 33-tap stages), delay 0, 32, 40 or 44 samples. |
+| **Presets** | Eight starting points (Init, Tape Warmth, Tube Glow, Transformer Thick, Parallel Grit, Bass Harmonics, Fold Fuzz, Hard Clip Edge). A preset sets every control, oversampling included; what it does not list goes back to its default. |
 
 ## How it works
 
@@ -57,7 +58,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
   even at 8x.
 - **Oversampling delays the sound** (up to 44 samples) and costs CPU; switching it while playing restarts the saturator (it clicks).
 - Each channel is saturated on its own, so a hard-panned sound stays where it is; the two channels' harmonics are not linked.
-- It has not been built on macOS or run through `auval`, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
 
