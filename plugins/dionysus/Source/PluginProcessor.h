@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Parameters.h"
+#include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
 class DionysusProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
@@ -25,10 +26,10 @@ public:
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return "Default"; }
+    int getNumPrograms() override { return programs.count(); }
+    int getCurrentProgram() override { return programs.current(); }
+    void setCurrentProgram (int index) override { programs.set (index); }
+    const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
@@ -36,6 +37,7 @@ public:
 
     dionysus::Engine engine;
     juce::AudioProcessorValueTreeState apvts;
+    ui::Programs programs { apvts, dionysus::presets() }; // after apvts
 
 private:
     // The latency can move with a setting; setLatencySamples belongs to the message thread, so the audio thread only asks for it.

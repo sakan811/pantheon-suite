@@ -126,5 +126,46 @@ int main()
         check (! tooLong, "every note fits a line of the strip");
     }
 
+    // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
+    {
+        DionysusProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 6;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        const auto indexOf = [&] (const char* name)
+        {
+            for (int i = 0; i < q.getNumPrograms(); ++i)
+                if (q.getProgramName (i) == name)
+                    return i;
+            check (false, std::string ("a preset called ") + name);
+            return 0;
+        };
+        const auto raw = [&] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
+        q.setCurrentProgram (indexOf ("Fold Fuzz"));
+        check ((int) raw (id::shape) == 4 && (int) raw (id::oversampling) == 3 && std::fabs (raw (id::mix) - 60.0f) < 0.5f, "Fold Fuzz: the fold curve, 8x oversampling, 60% mix");
+        q.setCurrentProgram (0);
+        check ((int) raw (id::shape) == 0 && (int) raw (id::oversampling) == 1 && std::fabs (raw (id::mix) - 100.0f) < 0.5f && std::fabs (raw (id::drive) - 12.0f) < 0.1f, "Init is the defaults");
+        const int chosen = indexOf ("Parallel Grit");
+        q.setCurrentProgram (chosen);
+        check ((int) raw (id::shape) == 3 && std::fabs (raw (id::mix) - 30.0f) < 0.5f, "Parallel Grit: the diode curve under the dry sound");
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        DionysusProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == chosen, "the chosen preset is saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<DionysusEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == chosen + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
+    }
+
     return test::finish ("DionysusUiCheck");
 }

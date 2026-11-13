@@ -12,7 +12,7 @@ cmake --build build --target DionysusUiCheck && ./build/DionysusUiCheck_artefact
 cmake --build build --target DionysusSnapshot && ./build/DionysusSnapshot_artefacts/Release/DionysusSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`DIONYSUS_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`DIONYSUS_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh dionysus` is the way to build and check (see the repository's CLAUDE.md).
 - `DionysusTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
   `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
 - Definition of done for a DSP change: `DionysusTests` passes **and** the numbers the README quotes still match its output.
@@ -24,6 +24,7 @@ cmake --build build --target DionysusSnapshot && ./build/DionysusSnapshot_artefa
 Source/DSP/Shapes.h        the curves, saturate() (curve + bias), harmonicsDb() (what the editor shows), compensation() (AUTO GAIN)   <- one source for the engine, the display and the tests
 Source/DSP/Oversampler.h   HalfbandStage (one doubling), Oversampler (the chain of one channel), oversamplingLatency()
 Source/DSP/Engine.h        the signal path: drive, the oversampler around the curve, DC block, tone, the delayed dry sound, mix, output
+Source/Presets.h           the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h            the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h        parameter layout, readParams()                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`)
@@ -49,6 +50,9 @@ whenever either is in use (`dcOn`) and is reset while it is not. `compensation()
 
 **Real time.** `Engine::process` allocates and locks nothing; everything is a fixed array or sized in `prepare()` (`configure()` allocates nothing, so a change of oversampling on the audio thread is safe; a change of oversampling restarts the saturator and is reported through `DionysusProcessor::handleAsyncUpdate`).
 **Bad samples:** NaN and infinity are replaced by 0 on the way in.
+
+**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
+(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
 **Parameters.** Ids (`dionysus::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `shapeNames` is the order of `Shape`; of `oversamplingNames`, the index of `kOversamplingFactor`.

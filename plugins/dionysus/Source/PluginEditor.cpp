@@ -30,10 +30,11 @@ DionysusEditor::DionysusEditor (DionysusProcessor& p)
                     "Runs the curve at 2, 4 or 8 times the sample rate, so the harmonics above half the rate do not fold back as tones that were never there. Adds a delay (the host compensates) "
                     "and processor load; the dry sound is delayed to match. Changing it while playing restarts the saturator."),
       autoGain (p.apvts, id::autoGain, "AUTO GAIN", "Keeps the loudness of the sound the same whatever DRIVE is (measured on a sine at -12 dBFS), so you judge the tone, not the level."),
+      presetBox (p, presets(), "Everything is set by a preset, oversampling included."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &drive, &bias, &tone, &mix, &out, &shape, &oversampling, &autoGain, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &drive, &bias, &tone, &mix, &out, &shape, &oversampling, &autoGain, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
@@ -49,6 +50,10 @@ void DionysusEditor::resized()
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
     header.removeFromRight (12);
     latencyLabel = header.removeFromRight (120);
+    header.removeFromLeft (24);
+    auto presetRow = header.withTrimmedTop (28).withHeight (28);
+    presetLabel = { presetRow.getX() + 2, presetRow.getY() - 15, 120, 12 };
+    presetBox.setBounds (presetRow.removeFromLeft (190));
 
     bounds.removeFromTop (10);
     auto display = bounds.removeFromTop (displayHeight);
@@ -86,6 +91,7 @@ void DionysusEditor::paint (juce::Graphics& g)
     g.fillAll (colours::background);
     hw::drawHeaderPlate (g, getLocalBounds().removeFromTop (headerHeight).toFloat());
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Saturator", level > 0.001f, 25.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Curve", shapeLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Oversampling", oversamplingLabel, juce::Justification::left, colours::dim, 9.0f);
     const int latency = proc.engine.latencySamples.load();
@@ -155,5 +161,6 @@ void DionysusEditor::paint (juce::Graphics& g)
 void DionysusEditor::timerCallback()
 {
     level = proc.engine.outPeak.exchange (0.0f);
+    presetBox.sync();
     repaint();
 }
