@@ -44,7 +44,7 @@ if [ ! -f "$build/CMakeCache.txt" ]; then
 fi
 
 targets="$(cmake --build "$build" --target help 2>/dev/null || true)"
-has() { grep -qE "(^|[ .])$1( |$)" <<< "$targets"; }
+has() { grep -qE "(^|[ .])$1(:| |$)" <<< "$targets"; }  # Makefiles list "... Name", Ninja lists "Name: phony"
 
 build_list=(); run_list=()
 add() { # add <target> <run?>
