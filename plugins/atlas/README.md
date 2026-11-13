@@ -102,7 +102,7 @@ input -> split into six bands -> per band:  level (the band's, or the sidechain'
   In Zero Latency a split that is switched off is parked at the top of the spectrum, where its crossover still turns the phase a little above 16 kHz.
 - Linear mode resolves a crossover down to 40 Hz, which is why XOVER stops there. Its FFT is single precision: the floor is about -135 dB.
 - Changing Phase, Oversampling or Look-ahead while playing restarts the bands from silence (a short gap) and changes the latency.
-- Not yet built on macOS, run through `auval` or loaded in a host by a check tool; there is no `HostCheck` yet. CI builds the VST3 on Linux.
+- Built on macOS (VST3 and AU, by hand on 2026-11-13) and `auval -v` passes for the AU; not loaded in a host by a check tool (there is no `HostCheck` yet), and no macOS CI job. CI builds the VST3 on Linux.
 
 ## Building
 
