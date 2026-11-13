@@ -24,6 +24,7 @@ cmake --build build --target AegisSnapshot && ./build/AegisSnapshot_artefacts/Re
 ```
 Source/DSP/Engine.h  no GUI, no JUCE: SlidingMin, Engine (the whole signal path); covered by Tests/Tests.cpp
 ../../shared/dsp/    TruePeak.h (`pdsp::TruePeakReader`: the 8x, 64-tap reader; shared with Hermes, so run HermesTests too when you change it)
+../../shared/dsp/    BandLink.h too: `decodeLimiter` reads what Themis' COPY wrote (PASTE); run Themis' `make test` and `ThemisSmoke` when you change the `limiter` line
 Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
@@ -47,6 +48,12 @@ sample per channel and a delay of 32 samples (`kDetectorDelay`, `pdsp::kTruePeak
 **Gain smoothing is what keeps the peaks from coming back.** With one mean (a plain moving average) the gain's own modulation made peaks between samples that the
 reader had not seen (0.3 to 0.7 dB over on noise). Two means of half the width fix that: do not collapse them into one.
 
+**AUTO RELEASE only changes the release step.** `release = fmin (held, ...)` whatever the step, so the ceiling's chain of inequalities does not depend on it (test [1] runs with it on and off); do not move the `fmin`. With it off the step is RELEASE's exactly (the old behaviour, bit for bit). `sustained` is a mean of the envelope that decides how far from the fast step to the slow one it is (`kAutoMeanMs`, `kAutoDepth`, `kAutoFastShare`: tuned on test [11], where a short burst must let go much sooner and a long one at RELEASE).
+
+**OUT PEAK reads the output with its own `TruePeakReader`s** (`outPeak`), after the final clamp, so it is what leaves. It is the same reader as the detector's: it proves the clamp and the gain, not the reader (test [8] and [12] do, with an independent one). It costs a second pair of readers; do not drop them for speed.
+
+**PASTE** (`pasteLimiter` in `Parameters.h`) reads the `limiter` line of `pdsp::link` (`shared/dsp` BandLink.h, written by Themis' COPY): the ceiling is absolute, the gain change is relative to GAIN, and both are clamped to the parameters' ranges. A ceiling switches TRUE PEAK on. It says what it did in the strip (`AegisEditor::shownNotes`), for eight seconds.
+
 **Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()`. `configure()` (a change of look-ahead) clears the state: it clicks, so
 it is a choice, not a knob, and the latency is reported through `AegisProcessor::handleAsyncUpdate` on the message thread.
 
@@ -60,7 +67,7 @@ input bit for bit (test [3]). The smoothed input GAIN starts at its target (`gai
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
-**Parameters.** Ids (`aegis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in
+**Parameters.** Ids (`aegis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `autorel` (version 2, off: a session saved before it has the old behaviour; UiCheck pins it); a new one needs a higher version, an entry in
 `readParams()` and a place in the editor.
 
 ## DRY: where each thing lives

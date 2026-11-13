@@ -24,12 +24,16 @@ public:
 
     ui::Knob gainKnob, ceilingKnob, releaseKnob;
     ui::Choice lookaheadBox;
-    ui::Toggle truePeakButton;
+    ui::Toggle truePeakButton, autoReleaseButton;
+    juce::TextButton pasteButton { "PASTE" }, clearOutButton { "CLEAR" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { aegis::guideTitle(), aegis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return aegis::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     float heldReductionDb() const noexcept; // the most the limiter took off in the history
+    float outHoldDb() const noexcept { return outHold; } // the highest true peak of the output since CLEAR (or since CEILING or TRUE PEAK changed)
+    std::vector<ui::Note> shownNotes() const; // the notes, with what the last PASTE did first while it is shown
+    void pasteFromClipboard (const juce::String& text); // what PASTE does with the clipboard's text (a limiter setting from Themis' plan)
 
 private:
     void timerCallback() override;
@@ -40,7 +44,11 @@ private:
     juce::TooltipWindow tooltips { this, 600 };
     juce::Rectangle<int> nameplate, presetLabel, display, lookaheadLabel, noteStrip, latencyLabel;
     std::array<float, kHistory> history {}; // the reduction in dB (positive), oldest first
-    float shownReduction = 0.0f, inLevelDb = aegis::gui::kLevelFloorDb;
+    float shownReduction = 0.0f, inLevelDb = aegis::gui::kLevelFloorDb, outLevelDb = aegis::gui::kLevelFloorDb, outHold = aegis::gui::kLevelFloorDb;
+    float shownCeilingDb = -1.0f;
+    bool shownTruePeak = true;
+    std::string pasteSaid;
+    int pasteTicks = 0; // timer ticks left to show pasteSaid
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AegisEditor)
 };

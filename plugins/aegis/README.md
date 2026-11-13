@@ -16,10 +16,12 @@ The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. 
 | **Ceiling** | -12 to 0 dBTP, -1 by default: the most the output reaches. With TRUE PEAK off it is in dBFS. |
 | **Release** | 10 ms to 1 s, 100 ms by default: how long the gain takes to come back 63% of the way after a peak. |
 | **Look-ahead** | 0.5, 1, 2 (default) or 5 ms: how long before a peak the gain starts going down. Longer is smoother; it is also the delay. |
+| **Auto release** | Off by default (the gain always comes back at RELEASE). On: a short peak is let go sooner (a fifth of RELEASE, never under 2 ms), a reduction that has lasted about 4 dB for 150 ms or so is let go at RELEASE, which is then the slow end. Smoother on music with transients; the ceiling does not depend on it. |
 | **True peak** | On by default: the detector reads 7 points between every two samples (8x) with a 64-tap windowed sinc. Off: only the samples. |
-| **Presets** | Six starting points (Init, Streaming Master, Loud Master, Gentle Peak Catch, Broadcast Safe, Tracking Safety). A preset sets every control, GAIN included; what it does not list goes back to its default. Set GAIN by ear afterwards. |
+| **Presets** | Six starting points (Init, Streaming Master, Loud Master, Gentle Peak Catch, Broadcast Safe, Tracking Safety; the first three of the music ones have AUTO RELEASE on). A preset sets every control, GAIN included; what it does not list goes back to its default. Set GAIN by ear afterwards. |
+| **Paste** | **PASTE** takes the limiter setting that [Themis](../themis/README.md) copied from its master plan (COPY on the ceiling or the loudness item): it sets CEILING (and switches TRUE PEAK on, because a ceiling in dBTP needs it) and moves GAIN by the amount Themis measured, stopping at the ends of GAIN's range and saying so. Anything else on the clipboard changes nothing. |
 
-The display is the reduction of the last nine seconds (hanging from the top, in dB), the number now, and the input level.
+The display is the reduction of the last nine seconds (hanging from the top, in dB), the number now, the input level, and **OUT PEAK**: the highest true peak that has left (read the way the detector reads, a bar beside IN with a mark at the ceiling), held until **CLEAR** or until CEILING or TRUE PEAK changes, red if it is ever over the ceiling.
 
 ## How it works
 
@@ -43,6 +45,8 @@ The display is the reduction of the last nine seconds (hanging from the top, in 
 - White noise up to Nyquist driven 12 dB (the worst case for any interpolator): true peak -0.99 dBTP with the ceiling at -1 (a 32-tap reader missed by 0.7 dB; this is why it has 64).
 - With nothing to limit the output is the input, delayed, bit for bit. The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit.
 - A step to full scale arrives at the ceiling (-6.00 dB for a ceiling of -6) at the sample it is heard, with the gain having come down over the look-ahead.
+- AUTO RELEASE (RELEASE 400 ms, a burst of 25 ms at 6 dB over the ceiling): 250 ms later the deficit of the gain is 0.064 with AUTO against 0.268 without; after 1 s of the same burst it is 0.264 against 0.268 (it releases at RELEASE). The ceiling test above also runs with AUTO on.
+- OUT PEAK against an independent reading of the output (8x, a 64-point Hann sinc): -1.000 and -0.998 dB with the ceiling at -1 (TRUE PEAK on); -1.000 and -1.000 with it off.
 - RELEASE 200 ms: 200 ms after a burst the deficit of the gain is 0.37 of what it was (1/e).
 - Latency, as reported to the host: 56, 80, 128 and 272 samples for 0.5, 1, 2 and 5 ms (look-ahead + 32), an impulse is heard exactly that late.
 - A loud left and a quiet right keep their ratio (0.1000 in, 0.1000 out). NaN and infinity in the input are silence.
@@ -52,7 +56,7 @@ The display is the reduction of the last nine seconds (hanging from the top, in 
 - **It limits; it does not compress.** More than about 6 dB of reduction sounds squashed, and a RELEASE under about 40 ms follows the bass and distorts it. Compress before it.
 - **The true peak is read at 8x.** That is the standard's 4x with a margin; a converter or a codec that reconstructs differently can still differ by a few hundredths of a dB. -1 dBTP is the usual ceiling for that reason.
 - **It delays the sound** by the look-ahead + 32 samples (the host compensates it); changing LOOK-AHEAD while playing restarts the limiter.
-- It does not measure loudness (a loudness meter is a different tool) and does not clip.
+- It does not measure loudness and does not clip. Loudness is Themis' job: put Themis after it, read its plan, COPY the ceiling or loudness item and PASTE it here. Themis' true peak is a 4x reading, so it reads the same or a little under what OUT PEAK reads.
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building

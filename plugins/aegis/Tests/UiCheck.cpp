@@ -22,11 +22,26 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 5, fmt ("%d parameters: gain, ceiling, release, look-ahead and true peak", proc.getParameters().size()));
+    check (proc.getParameters().size() == 6, fmt ("%d parameters: gain, ceiling, release, look-ahead, true peak and auto release", proc.getParameters().size()));
     check (lookaheadNames().size() == kNumLookahead, "the look-ahead choices match the engine's");
     const auto d = readParams (proc.apvts);
-    check (std::fabs (d.gainDb) < 1e-4f && std::fabs (d.ceilingDb + 1.0f) < 1e-4f && std::fabs (d.releaseMs - 100.0f) < 0.01f && d.lookahead == kDefaultLookahead && d.truePeak,
-           fmt ("a new instance has GAIN 0, CEILING -1 dBTP, RELEASE 100 ms, 2 ms of look-ahead and TRUE PEAK on (%.3f, %.3f, %.3f, %d, %d)", d.gainDb, d.ceilingDb, d.releaseMs, d.lookahead, (int) d.truePeak));
+    check (std::fabs (d.gainDb) < 1e-4f && std::fabs (d.ceilingDb + 1.0f) < 1e-4f && std::fabs (d.releaseMs - 100.0f) < 0.01f && d.lookahead == kDefaultLookahead && d.truePeak && ! d.autoRelease,
+           fmt ("a new instance has GAIN 0, CEILING -1 dBTP, RELEASE 100 ms, 2 ms of look-ahead, TRUE PEAK on and AUTO RELEASE off (%.3f, %.3f, %.3f, %d, %d, %d)", d.gainDb, d.ceilingDb, d.releaseMs, d.lookahead, (int) d.truePeak, (int) d.autoRelease));
+    {
+        // A session saved before AUTO RELEASE existed has no such parameter: it opens with it off, the old behaviour.
+        AegisProcessor old;
+        auto state = old.apvts.copyState();
+        for (int i = state.getNumChildren() - 1; i >= 0; --i)
+            if (state.getChild (i).getProperty ("id").toString() == id::autoRelease)
+                state.removeChild (i, nullptr);
+        auto xml = state.createXml();
+        juce::MemoryBlock block;
+        juce::AudioProcessor::copyXmlToBinary (*xml, block);
+        AegisProcessor loaded;
+        setValue (loaded.apvts, id::autoRelease, 1.0f);
+        loaded.setStateInformation (block.getData(), (int) block.getSize());
+        check (! readParams (loaded.apvts).autoRelease, "a session saved without AUTO RELEASE opens with it off");
+    }
 
     // The latency the host is told is the engine's, and follows the look-ahead.
     check (proc.getLatencySamples() == lookaheadSamples (48000.0, kDefaultLookahead) + kDetectorDelay, fmt ("the host is told %d samples of latency", proc.getLatencySamples()));
@@ -75,6 +90,64 @@ int main()
         check (! readParams (proc.apvts).truePeak, "the TRUE PEAK switch sets the parameter");
         check (ui::hasNote (editor.notes(), "TRUE PEAK is off", ui::Severity::warning), "with TRUE PEAK off, a note says the sound between the samples can go over");
         editor.truePeakButton.triggerClick();
+    }
+
+    // PASTE: a limiter setting copied from Themis' plan sets the ceiling and moves GAIN, and says what it did.
+    {
+        AegisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::gain, 5.0f);
+        setValue (q.apvts, id::ceiling, -0.2f);
+        setValue (q.apvts, id::truePeak, 0.0f);
+        const auto said = pasteLimiter (q.apvts, "pantheon-bands 1\nlimiter ceiling=-1.0 gainchange=-3.2");
+        const auto p = readParams (q.apvts);
+        check (std::fabs (p.ceilingDb + 1.0f) < 0.01f && std::fabs (p.gainDb - 1.8f) < 0.01f && p.truePeak,
+               fmt ("a pasted ceiling of -1 and a gain change of -3.2 dB take CEILING to %.1f and GAIN from 5.0 to %.1f, with TRUE PEAK switched on", p.ceilingDb, p.gainDb));
+        check ((int) said.size() <= ui::kMaxNoteChars, fmt ("what it says fits a line of the strip (%d characters): %s", (int) said.size(), said.c_str()));
+        pasteLimiter (q.apvts, "pantheon-bands 1\nlimiter gainchange=-6.0");
+        check (readParams (q.apvts).gainDb == 0.0f && pasteLimiter (q.apvts, "pantheon-bands 1\nlimiter gainchange=-6.0").find ("end of its range") != std::string::npos,
+               "taking off more than GAIN has stops at 0 and says so");
+        setValue (q.apvts, id::gain, 22.0f);
+        pasteLimiter (q.apvts, "pantheon-bands 1\nlimiter gainchange=5.0");
+        check (readParams (q.apvts).gainDb <= kMaxGainDb + 1e-4f, "raising it stops at the top of the range");
+        const auto before = readParams (q.apvts);
+        check (pasteLimiter (q.apvts, "pantheon-bands 1\nbell freq=270 gain=-2.0 q=0.70 place=mid").empty() && pasteLimiter (q.apvts, "hello").empty()
+                   && readParams (q.apvts).gainDb == before.gainDb && readParams (q.apvts).ceilingDb == before.ceilingDb,
+               "a band list or any other text pastes nothing and changes nothing");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<AegisEditor> (*holder);
+        editor.setVisible (true);
+        editor.pasteFromClipboard ("hello");
+        check (ui::hasNote (editor.shownNotes(), "Nothing to paste", ui::Severity::info), "PASTE with nothing to paste says what to copy, in the strip");
+        check (editor.pasteButton.getRight() < editor.guideButton.getX() && editor.presetBox.getRight() < editor.pasteButton.getX(), "the PASTE button fits the header beside GUIDE");
+        check (editor.autoReleaseButton.getRight() < editor.getWidth() && editor.autoReleaseButton.getBottom() < editor.getHeight() && ! editor.autoReleaseButton.getBounds().intersects (editor.truePeakButton.getBounds()),
+               "AUTO RELEASE fits beside TRUE PEAK");
+    }
+
+    // OUT PEAK: what leaves, never over the ceiling, held until CLEAR or until the ceiling changes.
+    {
+        AegisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::gain, 12.0f);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<AegisEditor> (*holder);
+        editor.setVisible (true);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        for (int block = 0; block < 60; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+                for (int c = 0; c < 2; ++c)
+                    buffer.setSample (c, i, 0.7f * std::sin (0.07f * (float) (block * 512 + i) * (float) (c + 1)));
+            q.processBlock (buffer, midi);
+        }
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (150);
+        check (editor.outHoldDb() > -1.5f && editor.outHoldDb() <= -1.0f + 0.1f, fmt ("OUT PEAK reads %.2f dBTP with the ceiling at -1", editor.outHoldDb()));
+        setValue (q.apvts, id::ceiling, -6.0f);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (150);
+        check (editor.outHoldDb() < -30.0f, "changing CEILING clears the hold (the old peak was read against another limit)");
     }
 
     // The state survives a round trip.
@@ -137,9 +210,9 @@ int main()
         };
         const auto raw = [&] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
         q.setCurrentProgram (indexOf ("Streaming Master"));
-        check (std::fabs (raw (id::gain) - 3.0f) < 0.01f && std::fabs (raw (id::ceiling) + 1.0f) < 0.01f && (int) raw (id::lookahead) == 2, "Streaming Master: 3 dB of gain, -1 dBTP, 2 ms of look-ahead");
+        check (std::fabs (raw (id::gain) - 3.0f) < 0.01f && std::fabs (raw (id::ceiling) + 1.0f) < 0.01f && (int) raw (id::lookahead) == 2 && raw (id::autoRelease) > 0.5f, "Streaming Master: 3 dB of gain, -1 dBTP, 2 ms of look-ahead, AUTO RELEASE on");
         q.setCurrentProgram (indexOf ("Tracking Safety"));
-        check (std::fabs (raw (id::gain)) < 0.01f && std::fabs (raw (id::ceiling) + 3.0f) < 0.01f && (int) raw (id::lookahead) == 0, "Tracking Safety: -3 dBTP and 0.5 ms, and the gain back to 0 (a preset does not inherit the last one)");
+        check (std::fabs (raw (id::gain)) < 0.01f && std::fabs (raw (id::ceiling) + 3.0f) < 0.01f && (int) raw (id::lookahead) == 0 && raw (id::autoRelease) < 0.5f, "Tracking Safety: -3 dBTP and 0.5 ms, and the gain and AUTO RELEASE back to their defaults (a preset does not inherit the last one)");
         q.setCurrentProgram (0);
         check (std::fabs (raw (id::gain)) < 0.01f && std::fabs (raw (id::ceiling) + 1.0f) < 0.01f && std::fabs (raw (id::release) - 100.0f) < 0.5f && raw (id::truePeak) > 0.5f, "Init is the defaults");
         const int chosen = indexOf ("Loud Master");
