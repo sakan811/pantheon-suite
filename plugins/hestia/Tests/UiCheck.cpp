@@ -298,5 +298,51 @@ int main()
                "the GUIDE button is there and its text says what the plugin is not for");
     }
 
+    // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
+    {
+        HestiaProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 6;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        const auto indexOf = [&] (const char* name)
+        {
+            for (int i = 0; i < q.getNumPrograms(); ++i)
+                if (q.getProgramName (i) == name)
+                    return i;
+            check (false, std::string ("a preset called ") + name);
+            return 0;
+        };
+        const auto raw = [&] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
+        setValue (q.apvts, id::mix, 3.0f);
+        setValue (q.apvts, id::out, -2.0f);
+        q.setCurrentProgram (indexOf ("Pads and Strings"));
+        check ((int) raw (id::role) == 8 && std::fabs (raw (id::distance) - 55.0f) < 0.5f && std::fabs (raw (id::importance) - 25.0f) < 0.5f, "Pads and Strings: the pad role, importance 25%, DEPTH 55%");
+        check ((int) raw (id::mix) == 3 && std::fabs (raw (id::out) + 2.0f) < 0.01f, "the mix letter and OUTPUT are kept by a preset");
+        q.setCurrentProgram (indexOf ("Kick"));
+        check ((int) raw (id::role) == 0 && std::fabs (raw (id::distance)) < 0.5f, "Kick: the kick role, and DEPTH back at the front (a preset does not inherit the last one)");
+        q.setCurrentProgram (0);
+        check ((int) raw (id::role) == 12 && std::fabs (raw (id::importance) - 50.0f) < 0.5f && std::fabs (raw (id::carve) - 6.0f) < 0.05f, "Init is the defaults (Full Range, 50%, 6 dB)");
+        const int chosen = indexOf ("Lead Vocal");
+        q.setCurrentProgram (chosen);
+        check ((int) raw (id::role) == 4 && (int) raw (id::mix) == 3, "Lead Vocal: the lead vocal role, in the same mix");
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        HestiaProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == chosen, "the chosen preset is saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HestiaEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == chosen + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
+    }
+
     return test::finish ("UI CHECK");
 }

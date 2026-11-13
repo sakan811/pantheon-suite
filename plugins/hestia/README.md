@@ -26,6 +26,7 @@ room for all of them. (CMake targets, namespaces and plugin codes use the short 
 | **Attack / Release** | How fast a cut comes in (30 ms) and goes out (250 ms). |
 | **Output** | Gain after the cut. |
 | **Delta** | Listen to what Hestia changes in the stem (its output minus its input: the cut and the depth). Monitoring, not saved with the session. |
+| **Presets** | Ten starting points, one for each kind of stem (Init, Kick, Bass, Drum Bus, Lead Vocal, Backing Vocals, Guitars, Lead Synth, Pads and Strings, FX and Ambience): a role, an importance, a cut and a depth. The mix letter, the sidechain's role and importance, and OUTPUT are kept. |
 
 The display (above, all the stems' levels, in the colour of each, and the sidechain as a white line; the strip, who owns each band; the amber bars, the cut
 this stem is making now; on the right, the depth map: where each stem of the mix sits from the front to the back) is what the plugin reads and decides,

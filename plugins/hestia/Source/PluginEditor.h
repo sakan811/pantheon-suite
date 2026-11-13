@@ -24,6 +24,7 @@ public:
     ui::Choice roleBox, mixBox, scRoleBox;
     ui::Knob importance, distance, carve, reach, attack, release, outKnob, scImportance;
     juce::TextButton deltaButton { "DELTA" };
+    ui::PresetBox presetBox;
     ui::GuideButton guideButton { hestia::guideTitle(), hestia::guideText() };
     hestia::gui::SpaceView view;
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -36,7 +37,7 @@ private:
     HestiaProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, roleLabel, mixLabel, scPanel, scLabel, knobPanel, noteStrip;
+    juce::Rectangle<int> nameplate, presetLabel, roleLabel, mixLabel, scPanel, scLabel, knobPanel, noteStrip;
     float inLevel = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HestiaEditor)

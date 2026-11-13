@@ -15,10 +15,10 @@ cmake --build build --target HestiaUiCheck && ./build/HestiaUiCheck_artefacts/Re
 cmake --build build --target HestiaSnapshot && ./build/HestiaSnapshot_artefacts/Release/HestiaSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`HESTIA_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`HESTIA_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh hestia` is the way to build and check (see the repository's CLAUDE.md).
 - `HestiaTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Tests.cpp` has no JUCE in it: it includes only `Source/DSP`
   and `shared/dsp`'s Biquad.h, so it also compiles with `g++ -std=c++20 -I Source -I Tests -I ../../shared/dsp/include Tests/Tests.cpp`.
-- There is no `HostCheck`; the plugin has not been built on macOS or run through `auval` (the repository's CLAUDE.md lists it under "Not yet in line").
+- There is no `HostCheck` and no macOS CI job; the plugin builds on macOS and `auval -v` passes for the AU (by hand, 2026-11-13; the repository's CLAUDE.md lists the rest under "Not yet in line").
 - Definition of done for a DSP change: `HestiaTests` passes **and** the numbers the README quotes still match its output.
 - Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
 
@@ -32,6 +32,7 @@ Source/DSP/        no GUI dependencies, no JUCE; covered by Tests/Tests.cpp
   Carver.h           the cut: thirty peaking bells in series, and the inverse of their overlap
   Depth.h            the distance cues (cuesFor(): air, level, width, room) and EarlyReflections (eight taps up to 37 ms)
   Engine.h           the signal path and the rule (pressureOn()), the tick, the sidechain stem, the monitor, the output gain
+Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the knobs and the GUIDE text; plain C++, no JUCE
 Source/Parameters.h  parameter layout, readParams()                                                     <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/SpaceView.h` is the display
@@ -101,6 +102,9 @@ on a band's centre reads `20 log10 A`: every threshold and the -80/-60 dB presen
 **Monitoring is not state.** DELTA lives in `Engine::deltaOn` (an atomic), not in a parameter, and the editor ends it in its destructor. It fades
 over a tick through `deltaMix`; the output is `wet - deltaMix x dry`, `wet` being the stem after the cut and the depth.
 
+**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
+(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
+
 **Parameters.** Ids (`hestia::id`) are stored in sessions and automation: never rename or remove one once a release has them (`carve` was `depth` before the Depth knob existed and the plugin had not been released; the user-facing names are Carve for the cut and Depth for the distance, the ids `carve` and `distance`). All are `ParameterID` version 1; a new one needs
 a higher version, an entry in `readParams()` and a place in the editor. The order of the roles (`Role`, `roleNames()`) and of the mixes (`mixNames`: the
 index is the group, 0 off) is stored in sessions: add at the end, never reorder.
@@ -123,7 +127,7 @@ index is the group, 0 off) is stored in sessions: add at the end, never reorder.
   rest to Off, or they would see each other. `HestiaTests` builds its own `Bus` for each scenario.
 - A reader that gathers *every* live stem of a group also gets the ones other tests published: use a `Bus` of your own in DSP tests.
 - In an editor constructor call `setSize()` **last**.
-- `createEditor()` returns a `ui::ScaledEditor<HestiaEditor>` (shared/ui Scaled.h), not the editor: the window opens at 70% and scales. Tests and snapshots reach the editor with `ui::innerOf<HestiaEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
+- `createEditor()` returns a `ui::ScaledEditor<HestiaEditor>` (shared/ui Scaled.h), not the editor: the window opens at 100% and scales. Tests and snapshots reach the editor with `ui::innerOf<HestiaEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
 - `ui::Choice` and `ui::Toggle` are bound to one parameter for good.
 
 ## Conventions
