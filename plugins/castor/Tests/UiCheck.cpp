@@ -116,5 +116,49 @@ int main()
         check (! tooLong, "every note fits a line of the strip");
     }
 
+    // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
+    {
+        CastorProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 6;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        const auto indexOf = [&] (const char* name)
+        {
+            for (int i = 0; i < q.getNumPrograms(); ++i)
+                if (q.getProgramName (i) == name)
+                    return i;
+            check (false, std::string ("a preset called ") + name);
+            return 0;
+        };
+        const auto raw = [&] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
+        setValue (q.apvts, id::balance, 40.0f);
+        setValue (q.apvts, id::out, 2.0f);
+        q.setCurrentProgram (indexOf ("Club Safe"));
+        check (std::fabs (raw (id::width (0))) < 0.5f && std::fabs (raw (id::width (1)) - 40.0f) < 0.5f && std::fabs (raw (id::width (4)) - 100.0f) < 0.5f && std::fabs (raw (id::monoBelow) - 150.0f) < 0.5f, "Club Safe: the sub in mono, the bass at 40%, the rest at 100%, mono below 150 Hz");
+        check (std::fabs (raw (id::balance) - 40.0f) < 0.5f && std::fabs (raw (id::out) - 2.0f) < 0.01f, "BALANCE and OUTPUT are kept by a preset");
+        q.setCurrentProgram (0);
+        check (std::fabs (raw (id::width (0)) - 100.0f) < 0.5f && std::fabs (raw (id::monoBelow) - kMonoOffHz) < 0.5f, "Init: the widths are back at 100% and the mono bass is off");
+        const int chosen = indexOf ("Widen Highs");
+        q.setCurrentProgram (chosen);
+        check (raw (id::width (5)) > 150.0f, "Widen Highs opens the top band");
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        CastorProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == chosen, "the chosen preset is saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<CastorEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == chosen + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
+    }
+
     return test::finish ("CastorUiCheck");
 }

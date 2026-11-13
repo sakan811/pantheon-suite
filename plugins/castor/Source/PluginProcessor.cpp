@@ -52,6 +52,7 @@ void CastorProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
 void CastorProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -60,7 +61,10 @@ void CastorProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            programs.loadFrom (apvts.state);
+        }
 }
 
 juce::AudioProcessorEditor* CastorProcessor::createEditor() { return new ui::ScaledEditor<CastorEditor> (*this, apvts.state, *this); }

@@ -24,6 +24,7 @@ public:
 
     std::array<std::unique_ptr<ui::Knob>, castor::kBands> widths;
     ui::Knob midKnob, sideKnob, monoKnob, balanceKnob, outKnob;
+    ui::PresetBox presetBox;
     ui::GuideButton guideButton { castor::guideTitle(), castor::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return castor::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
@@ -36,7 +37,7 @@ private:
     CastorProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, gonio, correlationBar, noteStrip, bandsLabel, otherLabel;
+    juce::Rectangle<int> nameplate, presetLabel, gonio, correlationBar, noteStrip, bandsLabel, otherLabel;
     std::array<float, kPoints> pointL {}, pointR {};
     std::vector<float> scratchL, scratchR;
     float correlation = 1.0f;

@@ -24,6 +24,7 @@ CastorEditor::CastorEditor (CastorProcessor& p)
       monoKnob (p.apvts, id::monoBelow, "MONO BELOW", "Takes the sides away below this frequency (a 24 dB/oct high-pass on them), so the bass is in the middle: safe for mono, club systems and vinyl. Off at 20 Hz.", ui::Knob::Layout::below),
       balanceKnob (p.apvts, id::balance, "BALANCE", "Turns one channel down (not a pan: the loudness changes).", ui::Knob::Layout::below),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything.", ui::Knob::Layout::below),
+      presetBox (p, presets(), "BALANCE and OUTPUT are kept; the widths, MID, SIDE and MONO BELOW are set."),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -35,7 +36,7 @@ CastorEditor::CastorEditor (CastorProcessor& p)
                                                          ui::Knob::Layout::below);
         addAndMakeVisible (*widths[(size_t) b]);
     }
-    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     scratchL.resize (4096);
     scratchR.resize (4096);
@@ -51,6 +52,10 @@ void CastorEditor::resized()
     auto header = bounds.removeFromTop (headerHeight).withTrimmedTop (8).withTrimmedBottom (8);
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
+    header.removeFromLeft (24);
+    auto presetRow = header.withTrimmedTop (28).withHeight (28);
+    presetLabel = { presetRow.getX() + 2, presetRow.getY() - 15, 120, 12 };
+    presetBox.setBounds (presetRow.removeFromLeft (190));
 
     bounds.removeFromTop (10);
     auto body = bounds.removeFromTop (2 * cellHeight + 40);
@@ -85,6 +90,7 @@ void CastorEditor::paint (juce::Graphics& g)
     g.fillAll (colours::background);
     hw::drawHeaderPlate (g, getLocalBounds().removeFromTop (headerHeight).toFloat());
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Stereo imager", live, 25.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Width of the sides, by band", bandsLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Whole sound", otherLabel, juce::Justification::left, colours::dim, 9.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
@@ -144,5 +150,6 @@ void CastorEditor::timerCallback()
     }
     live = n > 0;
     correlation += 0.3f * (proc.engine.correlation.load (std::memory_order_relaxed) - correlation);
+    presetBox.sync();
     repaint();
 }
