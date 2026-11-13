@@ -22,12 +22,13 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 8, fmt ("%d parameters: frequency, width, threshold, range, release, mode, detection and listen", proc.getParameters().size()));
+    check (proc.getParameters().size() == 9, fmt ("%d parameters: frequency, width, threshold, range, release, mode, detection, listen and look-ahead", proc.getParameters().size()));
+    check (lookaheadNames.size() == kNumLookaheads, "the look-ahead list matches the engine's");
     check (modeNames.size() == kNumModes && detectionNames.size() == kNumDetections, "the choice lists match the engine's");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.freqHz - 6500.0f) < 5.0f && std::fabs (d.q - 1.5f) < 0.01f && std::fabs (d.thresholdDb + 30.0f) < 0.01f && std::fabs (d.rangeDb - 8.0f) < 0.01f && std::fabs (d.releaseMs - 40.0f) < 0.01f &&
-               d.mode == Mode::splitBand && d.detection == Detection::absolute && ! d.listen && proc.getLatencySamples() == 0,
-           "a new instance: 6.5 kHz, Q 1.5, -30 dB, 8 dB range, 40 ms, split-band, absolute, no latency");
+               d.mode == Mode::splitBand && d.detection == Detection::absolute && ! d.listen && d.lookahead == 0 && proc.getLatencySamples() == 0,
+           "a new instance: 6.5 kHz, Q 1.5, -30 dB, 8 dB range, 40 ms, split-band, absolute, no look-ahead, no latency");
 
     // The audio path through the real processor: a loud tone in the band is turned down, a quiet one is not.
     {
@@ -66,6 +67,68 @@ int main()
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         check (readParams (proc.apvts).listen && ui::hasNote (editor.notes(), "LISTEN is on", ui::Severity::warning), "LISTEN sets the parameter, and a note says you hear only the band");
         editor.listen.triggerClick();
+    }
+
+    // The look-ahead is a delay the host is told about.
+    {
+        NemesisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::lookahead, 4.0f);
+        juce::AudioBuffer<float> buffer (2, 512);
+        buffer.clear();
+        juce::MidiBuffer midi;
+        q.processBlock (buffer, midi);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (q.getLatencySamples() == 240, fmt ("LOOK-AHEAD 5 ms: the host is told %d samples (240)", q.getLatencySamples()));
+        NemesisProcessor r;
+        setValue (r.apvts, id::lookahead, 2.0f);
+        r.setPlayConfigDetails (2, 2, 48000.0, 512);
+        r.prepareToPlay (48000.0, 512);
+        check (r.getLatencySamples() == 48, "a session opened with LOOK-AHEAD 1 ms tells the host 48 samples at once");
+    }
+
+    // Presets: each applies, has a name and a one-line purpose, and the chosen one is kept with the session.
+    {
+        NemesisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 5;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        int male = 0, find = 0, broadcast = 0;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            if (q.getProgramName (i) == "Male Vocal") male = i;
+            if (q.getProgramName (i) == "Find the S") find = i;
+            if (q.getProgramName (i) == "Broadcast Voice") broadcast = i;
+        }
+        q.setCurrentProgram (broadcast);
+        check (readParams (q.apvts).mode == Mode::wideband && readParams (q.apvts).detection == Detection::relative, "Broadcast Voice is wideband with relative detection");
+        q.setCurrentProgram (find);
+        check (readParams (q.apvts).listen && readParams (q.apvts).q > 2.5f, "Find the S switches LISTEN on with a narrow band");
+        q.setCurrentProgram (male);
+        const auto m = readParams (q.apvts);
+        check (! m.listen && m.mode == Mode::splitBand && m.lookahead == 2 && std::fabs (m.freqHz - 5500.0f) < 5.0f, "Male Vocal: 5.5 kHz, split-band, 1 ms of look-ahead, and LISTEN back off (a preset does not inherit the last one)");
+        q.setCurrentProgram (0);
+        const auto d0 = readParams (q.apvts);
+        check (std::fabs (d0.freqHz - 6500.0f) < 5.0f && std::fabs (d0.thresholdDb + 30.0f) < 0.01f && d0.detection == Detection::absolute && d0.lookahead == 0, "Init is the defaults");
+        q.setCurrentProgram (male);
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        NemesisProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == male && readParams (other.apvts).detection == Detection::relative, "the chosen preset and its settings are saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<NemesisEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == male + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.lookahead.getRight() < editor.getWidth() - 70 && editor.lookahead.getNumItems() == kNumLookaheads, "the preset box and LOOK-AHEAD fit the header beside the GUIDE button");
     }
 
     // The state survives a round trip.

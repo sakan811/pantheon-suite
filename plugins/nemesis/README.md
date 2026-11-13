@@ -20,6 +20,8 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 | **Mode** | *Split-band:* only the band is turned down (the rest of the voice is not touched). *Wideband:* the whole sound is turned down. |
 | **Detection** | *Absolute* or *Relative* (see Thresh). |
 | **Listen** | Hear the band the detector hears. Monitoring: switch it off before a bounce. |
+| **Look-ahead** | Off (default), 0.5, 1, 2 or 5 ms: the detector hears the sound as it arrives and the sound is heard that long after, so the first of a loud s is already turned down. It is a delay (the host compensates). |
+| **Presets** | Seven starting points (Init, Male Vocal, Female Vocal, Gentle Touch, Hard Sibilance, Broadcast Voice, Find the S). A preset sets every control; what it does not list goes back to its default. Find the s with LISTEN and move FREQ onto it first. |
 
 The display shows the response of the band the detector hears and the reduction of the last eight seconds.
 
@@ -41,15 +43,16 @@ The display shows the response of the band the detector hears and the reduction 
 - Under the threshold the output is the input, bit for bit, in both modes; half a second after a loud sibilant the gain is back at exactly 1 and a quiet sound is the input, bit for bit.
 - RELEASE 50 ms: 14.8 dB at the end of a one-second sibilant, 38% of it (5.6 dB) 50 ms later, and gone after a second.
 - Relative detection: the same sound 30 dB quieter is turned down by the same amount (5.09 dB both). Absolute: 18.10 dB for the loud one and +0.000 dB for the quiet one.
+- LOOK-AHEAD 1 ms: with nothing to turn down the output is the input 48 samples later, bit for bit; in the first 0.3 ms of a -10 dBFS burst (wideband) the output peaks at -11.0 dBFS without it and -21.7 dBFS with it; a change of the setting while running moves the latency (240 samples for 5 ms).
 - A loud left and a quiet right get the same gain. The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
 
 ## Limits
 
-- **It has no look-ahead**, so the first 0.3 ms of a very loud s gets through before the attack closes.
+- **With LOOK-AHEAD off** the first 0.3 ms of a very loud s gets through before the attack closes; with it on the gain is already down (in split-band the band-pass itself takes about 70 microseconds to answer, so the very first cycle of a burst is still not turned down). LOOK-AHEAD delays the sound by its time (the host compensates); changing it while playing restarts the de-esser (a short gap).
 - **Taking off 10 dB or more makes a lisp.** Raise THRESH or lower RANGE. In wideband mode the whole voice ducks with the s.
 - **One band.** It cannot follow a voice whose s moves much in frequency; widen the band (a low Q) or use two instances. It is not a dynamic equaliser (Iris is).
 - **The detector reads the band, not "the s":** a cymbal or a hi-hat in the band is turned down too. Use it on the voice alone.
-- It has not been built on macOS or run through `auval`, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
 

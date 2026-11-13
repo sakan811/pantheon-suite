@@ -252,5 +252,69 @@ int main()
         check (fine, "a NaN and an infinity in the input are silence: the output is finite");
     }
 
+    // [8] Look-ahead.
+    std::printf ("\n[8] Look-ahead\n");
+    {
+        const int index = 2; // 1 ms
+        const int delay = (int) std::lround (0.001 * kLookaheadMs[(size_t) index] * kFs);
+        EngineParams quiet;
+        quiet.lookahead = index;
+        const auto in = tones ({ { 6500.0, -50.0 }, { 300.0, -30.0 } }, 24000); // far under the threshold: nothing is turned down
+        Engine e;
+        e.prepare (kFs, index);
+        const auto out = run (e, in, quiet);
+        Stereo expected { std::vector<float> (in.l.size(), 0.0f), std::vector<float> (in.l.size(), 0.0f) };
+        for (int i = delay; i < (int) in.l.size(); ++i)
+        {
+            expected.l[(size_t) i] = in.l[(size_t) (i - delay)];
+            expected.r[(size_t) i] = in.r[(size_t) (i - delay)];
+        }
+        check (out.l == expected.l && out.r == expected.r && e.latencySamples.load() == delay, fmt ("nothing to turn down: the output is the input %d samples later (1 ms), bit for bit, and the engine says so", delay));
+
+        // A burst of sibilance at -10 dBFS after near silence: the attack is 0.3 ms, so without look-ahead the first 0.3 ms gets through. (Wideband: in split-band the band-pass
+        // itself takes about 70 us to answer, so the first cycle of a burst is not turned down whatever the look-ahead.)
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.rangeDb = 12.0f;
+        p.mode = Mode::wideband;
+        const int step = 4800, window = 14;
+        auto burst = tones ({ { 6500.0, -70.0 } }, step);
+        const auto loud = tones ({ { 6500.0, -10.0 } }, 4800);
+        burst.l.insert (burst.l.end(), loud.l.begin(), loud.l.end());
+        burst.r = burst.l;
+        EngineParams withLookahead = p;
+        withLookahead.lookahead = index;
+        Engine plain, ahead;
+        plain.prepare (kFs);
+        ahead.prepare (kFs, index);
+        const auto a = run (plain, burst, p), b = run (ahead, burst, withLookahead);
+        const auto peakOf = [] (const std::vector<float>& x, int from, int count)
+        {
+            double peak = 0.0;
+            for (int i = from; i < from + count; ++i)
+                peak = std::fmax (peak, std::fabs ((double) x[(size_t) i]));
+            return peak;
+        };
+        const double without = db (peakOf (a.l, step, window)), with = db (peakOf (b.l, step + delay, window));
+        check (with < without - 6.0, fmt ("the first 0.3 ms of a -10 dBFS sibilant: %.1f dBFS without look-ahead, %.1f dBFS with 1 ms (already turned down)", without, with));
+
+        bool same = true;
+        for (const int block : { 1, 7, 333, 4096 })
+        {
+            Engine c;
+            c.prepare (kFs, index);
+            const auto o = run (c, burst, withLookahead, block);
+            same = same && o.l == b.l && o.r == b.r;
+        }
+        check (same, "with look-ahead, blocks of 1, 7, 333 and 4096 samples give the output of 512, bit for bit");
+        Engine d;
+        d.prepare (kFs);
+        EngineParams two = p;
+        two.lookahead = 4;
+        auto tiny = tones ({ { 6500.0, -70.0 } }, 256);
+        run (d, tiny, two);
+        check (d.latencySamples.load() == (int) std::lround (0.005 * kFs), "changing the look-ahead while running changes the latency the engine reports (5 ms: 240 samples)");
+    }
+
     return test::finish ("NemesisTests");
 }

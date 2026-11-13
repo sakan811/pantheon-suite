@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <pantheon/dsp/Biquad.h>
+#include <vector>
 
 // The whole de-esser: no GUI, no JUCE. Nothing is allocated in process().
 namespace nemesis
@@ -24,6 +25,11 @@ inline constexpr double kKneeDb = 6.0;
 inline constexpr double kRestDb = 1e-3;        // a reduction under this, with nothing to reduce, is let go to exactly 0
 inline constexpr double kFloorDb = -120.0;
 
+// LOOK-AHEAD: the detector hears the sound as it arrives and the sound is heard this long after, so the first of a loud s is already turned down.
+// The choice is an index into this list (Off first), so a session keeps its meaning if a value is ever added at the end.
+inline constexpr std::array<float, 5> kLookaheadMs { 0.0f, 0.5f, 1.0f, 2.0f, 5.0f };
+inline constexpr int kNumLookaheads = (int) kLookaheadMs.size();
+
 struct EngineParams
 {
     float freqHz = 6500.0f;     // the centre of the sibilance
@@ -34,6 +40,7 @@ struct EngineParams
     Mode mode = Mode::splitBand;
     Detection detection = Detection::absolute;
     bool listen = false;        // hear the band the detector hears
+    int lookahead = 0;          // an index into kLookaheadMs: the sound is delayed by it, the detector is not
 };
 
 // The reduction for a level `over` the threshold: it holds the band at the threshold (infinite ratio), softly over a knee, up to the range.
@@ -53,9 +60,17 @@ inline double reductionDb (double levelDb, double thresholdDb, double rangeDb) n
 class Engine
 {
 public:
-    void prepare (double sampleRate)
+    void prepare (double sampleRate, int lookaheadIndex = 0)
     {
         fs = sampleRate;
+        ringSize = (int) std::ceil (0.001 * (double) kLookaheadMs.back() * fs) + 2;
+        for (auto& c : ch)
+        {
+            c.ringSound.assign ((size_t) ringSize, 0.0);
+            c.ringBand.assign ((size_t) ringSize, 0.0);
+        }
+        delaySamples = delayOf (lookaheadIndex);
+        latencySamples = delaySamples;
         attackCoef = coefOf (kAttackMs);
         envFall = std::exp (-1.0 / (0.001 * kEnvelopeFallMs * fs));
         bodyCoef = coefOf (kBodyMs);
@@ -65,7 +80,15 @@ public:
     void reset() noexcept
     {
         for (auto& c : ch)
+        {
+            auto sound = std::move (c.ringSound), band = std::move (c.ringBand);
             c = Channel();
+            c.ringSound = std::move (sound);
+            c.ringBand = std::move (band);
+            std::fill (c.ringSound.begin(), c.ringSound.end(), 0.0);
+            std::fill (c.ringBand.begin(), c.ringBand.end(), 0.0);
+        }
+        writePos = 0;
         gr = 0.0;
         designedFor = { -1.0, -1.0 };
         started = false;
@@ -80,6 +103,17 @@ public:
             designedFor = { f, q };
             for (auto& c : ch)
                 c.band.setBandpass (fs, f, q); // the coefficients move, the states stay
+        }
+        if (const int wanted = delayOf (p.lookahead); wanted != delaySamples)
+        {
+            // A new look-ahead restarts the delay (a short gap), as every plugin of the repository does with a setting that moves its latency.
+            delaySamples = wanted;
+            latencySamples = wanted;
+            for (auto& c : ch)
+            {
+                std::fill (c.ringSound.begin(), c.ringSound.end(), 0.0);
+                std::fill (c.ringBand.begin(), c.ringBand.end(), 0.0);
+            }
         }
         const double releaseCoef = coefOf (p.releaseMs);
         float deepest = 0.0f;
@@ -108,34 +142,49 @@ public:
             const double gain = gr == 0.0 ? 1.0 : std::exp (-gr * 0.11512925464970229);
             deepest = std::max (deepest, (float) gr);
 
+            // What is heard is the delayed sound and its delayed band (the same as the input when there is no look-ahead); the gain is the one just found.
+            const int readPos = (writePos + ringSize - delaySamples) % ringSize;
             for (int c = 0; c < 2; ++c)
             {
+                auto& s = ch[(size_t) c];
+                s.ringSound[(size_t) writePos] = x[c];
+                s.ringBand[(size_t) writePos] = band[c];
+                const double heard = s.ringSound[(size_t) readPos], heardBand = s.ringBand[(size_t) readPos];
                 double y;
                 if (p.listen)
-                    y = band[c];
+                    y = heardBand;
                 else if (p.mode == Mode::wideband)
-                    y = x[c] * gain;
+                    y = heard * gain;
                 else
-                    y = x[c] - (1.0 - gain) * band[c]; // the band turned down, the rest left alone (and exactly the input when the gain is 1)
+                    y = heard - (1.0 - gain) * heardBand; // the band turned down, the rest left alone (and exactly the input when the gain is 1)
                 (c == 0 ? left : right)[i] = (float) y;
             }
+            writePos = (writePos + 1) % ringSize;
         }
         if (deepest > reductionMeter.load (std::memory_order_relaxed))
             reductionMeter.store (deepest, std::memory_order_relaxed);
     }
 
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB
+    std::atomic<int> latencySamples { 0 };      // the look-ahead in samples: the processor tells the host
 
 private:
     struct Channel
     {
         pdsp::Biquad band;
         double env = 0.0, body = 0.0;
+        std::vector<double> ringSound, ringBand; // the last look-ahead of the sound and of its band, for the delay
     };
 
     static inline double finite (float v) noexcept { return std::isfinite (v) ? (double) v : 0.0; }
     double coefOf (double ms) const noexcept { return 1.0 - std::exp (-1.0 / std::fmax (0.001 * ms * fs, 1.0)); }
 
+    int delayOf (int index) const noexcept
+    {
+        return std::clamp ((int) std::lround (0.001 * (double) kLookaheadMs[(size_t) std::clamp (index, 0, kNumLookaheads - 1)] * fs), 0, ringSize - 2);
+    }
+
+    int ringSize = 2, writePos = 0, delaySamples = 0;
     double fs = 48000.0, attackCoef = 0.05, envFall = 0.97, bodyCoef = 0.001, gr = 0.0;
     std::array<double, 2> designedFor { -1.0, -1.0 };
     bool started = false;

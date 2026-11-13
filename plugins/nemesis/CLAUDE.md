@@ -12,7 +12,7 @@ cmake --build build --target NemesisUiCheck && ./build/NemesisUiCheck_artefacts/
 cmake --build build --target NemesisSnapshot && ./build/NemesisSnapshot_artefacts/Release/NemesisSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`NEMESIS_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`NEMESIS_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh nemesis` is the way to build and check (see the repository's CLAUDE.md).
 - `NemesisTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
   `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
 - Definition of done for a DSP change: `NemesisTests` passes **and** the numbers the README quotes still match its output.
@@ -22,6 +22,7 @@ cmake --build build --target NemesisSnapshot && ./build/NemesisSnapshot_artefact
 
 ```
 Source/DSP/Engine.h  no GUI, no JUCE: reductionDb() (the law), Engine (the band, the envelope, the follower, split-band / wideband / listen); covered by Tests/Tests.cpp
+Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`)
@@ -33,6 +34,11 @@ Tests/               Tests.cpp (DSP), UiCheck.cpp (editor on the real processor)
 **Split-band is a subtraction, not a filter in the signal path.** `y = x - (1 - gain) x band(x)`: the band-pass (constant 0 dB at the centre) is the same one the detector uses, so the band is turned down
 by exactly the gain at its centre and the rest is not touched, and at a gain of exactly 1 the product `0 x band` is exactly 0 and `y == x` bit for bit even when the compiler fuses multiplies and adds.
 A notch or a shelf in the path at 0 dB would not be exact (that is the lesson of Hestia's carver). Do not replace it by a dynamic filter.
+
+**Look-ahead delays the sound and its band, not the detector.** The detector's band-pass reads what is arriving; the sound and that band are written into a ring (`Channel::ringSound`, `ringBand`) and what is heard is `delaySamples` back, so `y = heard - (1 - gain) x heardBand` is still the subtraction above (the delayed band is the band of the delayed sound).
+With `delaySamples == 0` the ring returns the input, so the engine is bit-identical to the one without. A change of the setting clears the rings (a short gap) and moves `latencySamples`, which the processor hands to the host on the message thread (`handleAsyncUpdate`). The list is `kLookaheadMs`, in the order of `lookaheadNames`.
+
+**Presets** are `ui::Preset`s in `Presets.h`; the processor's `ui::Programs` applies them (every parameter back to its default first) and saves the chosen index with the session.
 
 **One gain for both channels.** The louder band envelope decides; the gain is applied to both. Do not detect per channel: a sibilant panned to one side would move.
 
@@ -47,7 +53,7 @@ block-size dependence only exists while a knob moves).
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
-**Parameters.** Ids (`nemesis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`nemesis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `modeNames` and `detectionNames` is the order of `Mode` and `Detection`.
 
 ## DRY: where each thing lives

@@ -26,11 +26,14 @@ NemesisEditor::NemesisEditor (NemesisProcessor& p)
       release (p.apvts, id::release, "RELEASE", "How fast the gain comes back after an s (63% of the way in this time). The attack is fixed at 0.3 ms.", ui::Knob::Layout::below),
       mode (p.apvts, id::mode, "SPLIT-BAND: only the band is turned down; the rest of the voice is not touched.\nWIDEBAND: the whole sound is turned down, as with a compressor."),
       detection (p.apvts, id::detection, "ABSOLUTE: THRESH is a level in dBFS: it has to be set for each recording.\nRELATIVE: the band is compared with the whole sound, so one setting works for quiet and loud passages."),
+      lookahead (p.apvts, id::lookahead, "The sound is heard this long after the detector has seen it, so the first of a loud s is already turned down (the attack is 0.3 ms).\n"
+                                         "It is a delay: the host compensates it. Changing it while playing restarts the de-esser (a short gap)."),
+      presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default."),
       listen (p.apvts, id::listen, "LISTEN", "Hear only the band the detector hears, to find the s. Not saved as a sound: switch it off before you bounce."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &release, &mode, &detection, &listen, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &release, &mode, &detection, &lookahead, &presetBox, &listen, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
@@ -44,6 +47,15 @@ void NemesisEditor::resized()
     auto header = bounds.removeFromTop (headerHeight).withTrimmedTop (8).withTrimmedBottom (8);
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
+    header.removeFromLeft (20);
+    auto headerRow = header.withTrimmedTop (28).withHeight (28);
+    presetLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
+    presetBox.setBounds (headerRow.removeFromLeft (160));
+    headerRow.removeFromLeft (12);
+    lookaheadLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
+    lookahead.setBounds (headerRow.removeFromLeft (100));
+    headerRow.removeFromLeft (10);
+    latencyLabel = headerRow.removeFromLeft (100);
 
     bounds.removeFromTop (10);
     auto display = bounds.removeFromTop (displayHeight);
@@ -84,6 +96,11 @@ void NemesisEditor::paint (juce::Graphics& g)
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "De-esser", shownReduction > 0.05f, 25.0f);
     hw::drawLabel (g, "Mode", modeLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Detection", detectionLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Look-ahead", lookaheadLabel, juce::Justification::left, colours::dim, 9.0f);
+    const int latency = proc.engine.latencySamples.load();
+    hw::drawLabel (g, latency == 0 ? juce::String ("No delay") : "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms", latencyLabel,
+                   juce::Justification::centredLeft, colours::dim, 9.5f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
     const auto params = readParams (proc.apvts);
 
@@ -171,5 +188,6 @@ void NemesisEditor::timerCallback()
     std::copy (history.begin() + 1, history.end(), history.begin());
     history.back() = now;
     shownReduction = now >= shownReduction ? now : std::max (now, shownReduction - gui::kReductionRangeDb / (float) kTimerHz);
+    presetBox.sync();
     repaint();
 }
