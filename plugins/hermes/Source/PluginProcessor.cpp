@@ -54,6 +54,7 @@ void HermesProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
 void HermesProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     auto state = apvts.copyState();
     state.setProperty ("refPath", referencePath, nullptr);
     if (auto xml = state.createXml())
@@ -68,6 +69,7 @@ void HermesProcessor::setStateInformation (const void* data, int size)
             auto tree = juce::ValueTree::fromXml (*xml);
             const auto path = tree.getProperty ("refPath").toString();
             apvts.replaceState (tree);
+            programs.loadFrom (apvts.state);
             if (path.isNotEmpty() && path != referencePath && juce::File (path).existsAsFile())
                 juce::MessageManager::callAsync ([weak = juce::WeakReference<HermesProcessor> (this), path] { if (weak != nullptr) weak->loadReference (juce::File (path)); });
         }

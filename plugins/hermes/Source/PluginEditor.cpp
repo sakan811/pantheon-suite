@@ -31,6 +31,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
       polarity (p.apvts, id::polarity, "POLARITY", "Inverts both channels. It sounds the same alone and different against other tracks."),
       reference (p.apvts, id::reference, "REF (B)", "Hear the reference instead of your sound (A). The switch is a short crossfade, and the reference plays on while you listen to A."),
       levelMatch (p.apvts, id::levelMatch, "LEVEL MATCH", "Brings the reference to the integrated loudness of your sound, so you compare the tone and not the level. Let the meter run first: until it has read a few seconds there is nothing to match."),
+      presetBox (p, presets(), "LISTEN and the reference are set; TRIM, POLARITY and REF TRIM are kept."),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -50,7 +51,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
     };
     restartButton.onClick = [this] { proc.engine.restartReference(); };
     resetButton.onClick = [this] { proc.engine.resetMeters(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
@@ -70,6 +71,10 @@ void HermesEditor::resized()
     auto header = bounds.removeFromTop (headerHeight).withTrimmedTop (8).withTrimmedBottom (8);
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
+    header.removeFromLeft (24);
+    auto presetRow = header.withTrimmedTop (28).withHeight (28);
+    presetLabel = { presetRow.getX() + 2, presetRow.getY() - 15, 120, 12 };
+    presetBox.setBounds (presetRow.removeFromLeft (190));
 
     bounds.removeFromTop (10);
     auto display = bounds.removeFromTop (displayHeight);
@@ -121,6 +126,7 @@ void HermesEditor::paint (juce::Graphics& g)
     g.fillAll (colours::background);
     hw::drawHeaderPlate (g, getLocalBounds().removeFromTop (headerHeight).toFloat());
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Gain staging and loudness", momentary > gui::kNothing, 25.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Listen", listenLabel, juce::Justification::left, colours::dim, 9.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
 
@@ -222,5 +228,6 @@ void HermesEditor::timerCallback()
     momentaryHistory.back() = momentary;
     shortTermHistory.back() = shortTerm;
     ++ticks;
+    presetBox.sync();
     repaint();
 }

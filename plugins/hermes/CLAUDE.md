@@ -12,7 +12,7 @@ cmake --build build --target HermesUiCheck && ./build/HermesUiCheck_artefacts/Re
 cmake --build build --target HermesSnapshot && ./build/HermesSnapshot_artefacts/Release/HermesSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`HERMES_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`HERMES_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh hermes` is the way to build and check (see the repository's CLAUDE.md).
 - `HermesTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
   `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
 - Definition of done for a DSP change: `HermesTests` passes **and** the numbers the README quotes still match its output.
@@ -24,6 +24,7 @@ cmake --build build --target HermesSnapshot && ./build/HermesSnapshot_artefacts/
 Source/DSP/Loudness.h  no GUI, no JUCE: K-weighting for any rate, LoudnessMeter (momentary, short-term, integrated, range from fixed histograms)
 Source/DSP/Engine.h    the trim, the listening modes, the meters, the reference (Reference, the A/B crossfade, the level match); covered by Tests/Tests.cpp
 ../../shared/dsp/      TruePeak.h (`pdsp::TruePeakReader`: the 8x, 64-tap reader; shared with Aegis, so run AegisTests too when you change it)
+Source/Presets.h       the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h        the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h    parameter layout, readParams()                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper (it also decodes the reference file) and editor (the look is `shared/ui`)
@@ -55,6 +56,9 @@ is a flag the audio thread takes (`restart`), never a write to `position` from a
 `prepareToPlay` loads it again if the sample rate changed.
 
 **Real time.** `Engine::process` allocates and locks nothing (the histograms are fixed arrays). **Bad samples:** NaN and infinity are replaced by 0 on the way in.
+
+**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
+(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
 **Parameters.** Ids (`hermes::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `listenNames` is the order of `Listen`.

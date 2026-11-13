@@ -26,6 +26,7 @@ public:
     ui::Choice listen;
     ui::Toggle polarity, reference, levelMatch;
     juce::TextButton loadButton { "LOAD" }, restartButton { "RESTART" }, resetButton { "RESET" };
+    ui::PresetBox presetBox;
     ui::GuideButton guideButton { hermes::guideTitle(), hermes::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return hermes::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
@@ -41,7 +42,7 @@ private:
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
     std::unique_ptr<juce::FileChooser> chooser;
-    juce::Rectangle<int> nameplate, readouts, graph, listenLabel, referenceArea, noteStrip;
+    juce::Rectangle<int> nameplate, presetLabel, readouts, graph, listenLabel, referenceArea, noteStrip;
     std::array<float, kHistory> momentaryHistory, shortTermHistory;
     float momentary = -200.0f, shortTerm = -200.0f, integrated = -200.0f, range = 0.0f, truePeak = -200.0f, samplePeak = -200.0f, position = 0.0f;
     int ticks = 0;

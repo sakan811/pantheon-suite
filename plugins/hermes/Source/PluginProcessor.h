@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Parameters.h"
+#include "Presets.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -26,10 +27,10 @@ public:
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return "Default"; }
+    int getNumPrograms() override { return programs.count(); }
+    int getCurrentProgram() override { return programs.current(); }
+    void setCurrentProgram (int index) override { programs.set (index); }
+    const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
@@ -37,6 +38,7 @@ public:
 
     hermes::Engine engine;
     juce::AudioProcessorValueTreeState apvts;
+    ui::Programs programs { apvts, hermes::presets(), hermes::keepsParameter }; // after apvts
 
     // On the message thread. Decodes the whole file (at most kMaxReferenceMinutes), brings it to the session's sample rate, measures its loudness and hands it to the engine.
     // Returns an empty string on success, else why not.
