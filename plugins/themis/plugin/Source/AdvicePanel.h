@@ -147,10 +147,10 @@ public:
         const int row = rowAt (e.position.toInt());
         if (row >= 0 && overCopy (e.position.toInt()))
         {
-            const auto& moves = advice.items[static_cast<size_t> (row)].moves;
-            juce::SystemClipboard::copyTextToClipboard (ui::linkText (moves));
+            const auto& item = advice.items[static_cast<size_t> (row)];
+            juce::SystemClipboard::copyTextToClipboard (ui::linkText (item.moves, nullptr, item.limiter));
             if (onCopied)
-                onCopied ("Copied: paste it in " + ui::linkDestination (moves) + " (PASTE on its band panel).");
+                onCopied ("Copied: paste it in " + ui::linkDestination (item.moves, item.limiter) + " (PASTE on its " + (item.moves.empty() ? "panel)." : "band panel)."));
             return;
         }
         if (row < 0 || !advice.items[static_cast<size_t> (row)].hear.active())
@@ -188,8 +188,8 @@ public:
                    "only the HEAR chips and the AUDITION buttons change what you hear.";
         const auto& item = advice.items[static_cast<size_t> (hoverRow)];
         if (hoverCopy)
-            return "Copy the band(s) that make this change, to paste in " + ui::linkDestination (item.moves)
-                   + ". The amounts come from the measurement; judge the result by ear (SNAP first, to compare before and after).";
+            return juce::String (item.moves.empty() ? "Copy the limiter setting that makes this change" : "Copy the band(s) that make this change") + ", to paste in "
+                   + ui::linkDestination (item.moves, item.limiter) + ". The amounts come from the measurement; judge the result by ear (SNAP first, to compare before and after).";
         juce::String text = juce::String (item.headline) + "\n\n" + juce::String (item.why);
         if (item.hear.active())
             text += "\n\nClick to hear it: solo " + juce::String (themis::soloText (item.hear)) + ". Click again to release.";
@@ -215,7 +215,7 @@ private:
     bool overCopy (juce::Point<int> p) const
     {
         for (int r = 0; r < visibleRows(); ++r)
-            if (firstRow + r < static_cast<int> (advice.items.size()) && !advice.items[static_cast<size_t> (firstRow + r)].moves.empty()
+            if (firstRow + r < static_cast<int> (advice.items.size()) && advice.items[static_cast<size_t> (firstRow + r)].canCopy()
                 && copyChip (chipColumn (rowBounds (r))).contains (p))
                 return true;
         return false;
@@ -239,7 +239,7 @@ private:
         ui::hw::drawLamp (g, { static_cast<float> (row.getX()) + 5.0f, static_cast<float> (row.getY()) + 7.5f }, 4.5f, colour);
         row.removeFromLeft (17);
 
-        if (item.hear.active() || !item.moves.empty())
+        if (item.hear.active() || item.canCopy())
         {
             const auto column = row.removeFromRight (kChipWidth);
             row.removeFromRight (4);
@@ -252,7 +252,7 @@ private:
                 g.setFont (ui::labelFont (9.5f));
                 g.drawText (on ? "STOP" : "HEAR", hearChip (column), juce::Justification::centred);
             }
-            if (!item.moves.empty())
+            if (item.canCopy())
             {
                 ui::hw::drawPushButton (g, copyChip (column).toFloat(), false, colours::amber, false, hovered && hoverCopy);
                 g.setColour (colours::text);

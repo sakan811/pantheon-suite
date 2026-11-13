@@ -57,7 +57,7 @@ installs, so it is user-invoked) and `shared-change` (check every user of a chan
   for drawing and tests), [AnalyzerTap.h](shared/dsp/include/pantheon/dsp/AnalyzerTap.h) (the lock-free FIFOs from the audio thread to a display) and
   [SpectrumAnalyzer.h](shared/dsp/include/pantheon/dsp/SpectrumAnalyzer.h) (the calibrated FFT analyzer, GUI-free), used by Hephaestus, Iris and Apollo (its display's analyser: `ApolloUiCheck` pins that it reads what the processor's taps send); and [TruePeak.h](shared/dsp/include/pantheon/dsp/TruePeak.h) (`pdsp::TruePeakReader`: the peak between the samples, read at 8x by a 64-tap windowed sinc, plain C++, delayed by `kTruePeakDelay` samples), which Aegis limits by and Hermes meters by, so the two cannot disagree about what a true peak is; and
   [BandLink.h](shared/dsp/include/pantheon/dsp/BandLink.h) (`pdsp::link`: bands handed between plugins as clipboard text, plain C++), which
-  Themis writes (COPY, Copy EQ) and Iris and Hephaestus read (PASTE). Its format is versioned (`pantheon-bands 1`): add keys, never change
+  Themis writes (COPY, Copy EQ) and Iris and Hephaestus read (PASTE); its `limiter` line (a ceiling to set and a gain change, from Themis' plan items) is read by Aegis' PASTE (`decodeLimiter`), and `decode` skips it. Its format is versioned (`pantheon-bands 1`): add keys, never change
   what one means, and keep the readers ignoring what they do not know. It also carries one `curve` line (a spectrum shape on a log-frequency
   grid: Themis' Copy EQ writes its target, Iris reads it as its reference; a reader without curves skips the line like any unknown kind).
   And [MusicBands.h](shared/dsp/include/pantheon/dsp/MusicBands.h) (`pdsp::bands`: the six main frequency bands of music, Sub 20–60 Hz, Bass 60–250 Hz,
@@ -68,7 +68,7 @@ installs, so it is user-invoked) and `shared-change` (check every user of a chan
   whose level keeps jumping over its average; plain C++, fed from a display's timer), written to be shared and used by Atlas so far; AtlasTests [9] pins it.
 - It knows nothing about any plugin and has no GUI. The namespace is `pdsp` (not `dsp`, which would collide with `juce::dsp`).
 - **A change here changes every plugin that uses it.** Run each one's DSP tests (Hephaestus: `HephaestusTests`; Iris: `IrisTests`; Atlas: `AtlasTests`, for MusicBands.h and Biquad.h; Aegis: `AegisTests` and Hermes: `HermesTests`, for TruePeak.h; Castor: `CastorTests`, for MusicBands.h (its `BandSplitter`); Apollo, Hera and Nemesis: `ApolloTests`, `HeraTests` and `NemesisTests`, for Biquad.h; Themis: `make test`, for MusicBands.h); the
-  analyzer's calibration is pinned by Hephaestus' test [10]; BandLink by both `UiCheck`s (PASTE) and Themis' `ThemisSmoke` build. The files are
+  analyzer's calibration is pinned by Hephaestus' test [10]; BandLink by the three `UiCheck`s that paste (Iris, Hephaestus, Aegis) and Themis' `ThemisSmoke` build. The files are
   tested through the plugins that use them, not on their own.
 
 ## Licence and CI

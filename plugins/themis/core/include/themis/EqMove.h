@@ -22,4 +22,14 @@ struct EqMove
 };
 
 using EqMoves = std::vector<EqMove>;
+
+// A change Themis suggests that a limiter can make as it stands: where its ceiling should be (an absolute level, dBTP) and/or how far its input
+// gain should move (a change in dB, negative to turn it down). Handed to Aegis the same way as the bands (pdsp::link in shared/dsp).
+struct LimiterMove
+{
+    bool setsCeiling = false, changesGain = false;
+    float ceilingDb = -1.0f, gainChangeDb = 0.0f;
+
+    bool active() const { return setsCeiling || changesGain; }
+};
 } // namespace themis

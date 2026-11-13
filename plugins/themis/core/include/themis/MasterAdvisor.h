@@ -50,6 +50,9 @@ struct Advice
     std::string why;      // what was measured and what it means
     Switches hear;        // the Solo / Mute setting that lets you listen to it (nothing = no suggestion)
     EqMoves moves;        // the band(s) that make the change, where an equaliser or a harmonic generator can (empty = none)
+    LimiterMove limiter;  // the ceiling and/or gain change that makes it, where a limiter can (not active = none)
+
+    bool canCopy() const { return !moves.empty() || limiter.active(); } // COPY has something to put on the clipboard
 };
 
 struct MasterInputs
@@ -172,6 +175,9 @@ inline MasterAdvice advise (const MasterInputs& in)
                                                static_cast<double> (history::clip::kTruePeakWarnDb)),
                                        format ("True peak is %+.1f dBTP. AAC, MP3 and Ogg encodes overshoot the peaks they are fed, so a master above %.0f dBTP can clip after conversion.",
                                                static_cast<double> (in.clip.truePeakDb), static_cast<double> (history::clip::kTruePeakWarnDb))));
+        // Aegis (or any limiter that takes the text) can set the ceiling it names; an item about flat tops alone has no ceiling to name.
+        if (overDb >= 0.05f && (in.clip.clipEvents > 0 || in.clip.overSamples > 0 || level != Level::good))
+            out.items.back().limiter = { true, false, history::clip::kTruePeakWarnDb, 0.0f };
     }
 
     // ---- DC offset: the mean of the samples, once it has been averaged for long enough to be one ----
@@ -214,6 +220,7 @@ inline MasterAdvice advise (const MasterInputs& in)
                                                                             static_cast<double> (master::kStreamingLufs), static_cast<double> (in.integratedLufs - master::kStreamingLufs))
                                                                   : format ("%.1f LU above the target.", static_cast<double> (deltaLu)))
                                                + plrText));
+                out.items.back().limiter = { false, true, 0.0f, -deltaLu };
             }
             else
             {
@@ -228,6 +235,7 @@ inline MasterAdvice advise (const MasterInputs& in)
                                            format ("Raise the level about %s dB: %.1f LUFS against a %.0f LUFS %s target", master::rounded (raise).c_str(),
                                                    static_cast<double> (in.integratedLufs), static_cast<double> (in.targetLufs), in.deliveryName.c_str()),
                                            why + plrText));
+                out.items.back().limiter = { false, true, 0.0f, raise };
             }
         }
     }

@@ -2472,6 +2472,44 @@ TEST (advisor_compares_loudness_with_the_delivery_target)
     CHECK (pick (in, Topic::loudness) == nullptr);
 }
 
+TEST (advisor_hands_the_ceiling_and_the_gain_to_a_limiter)
+{
+    // Too loud: the gain to take off is the distance to the target, and no ceiling is named (the peaks are fine).
+    auto in = cleanMaster();
+    in.integratedLufs = -8.0f;
+    in.clip.truePeakDb = -1.0f;
+    auto* l = pick (in, Topic::loudness);
+    CHECK (l != nullptr && l->canCopy() && l->limiter.changesGain && !l->limiter.setsCeiling && l->moves.empty());
+    CHECK (l != nullptr && std::abs (l->limiter.gainChangeDb + 6.0f) < 1e-4f);
+
+    // Too quiet: the same amount the headline says, upwards.
+    in.integratedLufs = -19.0f;
+    in.clip.truePeakDb = -7.0f;
+    l = pick (in, Topic::loudness);
+    CHECK (l != nullptr && l->limiter.changesGain && std::abs (l->limiter.gainChangeDb - 5.0f) < 1e-4f);
+
+    // A peak over the ceiling, with or without flat tops: the ceiling is -1 dBTP, the limit the headline names, and no gain change.
+    in = cleanMaster();
+    in.clip.truePeakDb = -0.4f;
+    auto* c = pick (in, Topic::clipping);
+    CHECK (c != nullptr && c->limiter.setsCeiling && !c->limiter.changesGain && std::abs (c->limiter.ceilingDb - history::clip::kTruePeakWarnDb) < 1e-6f);
+    in.clip.clipEvents = 30;
+    in.clip.truePeakDb = 0.4f;
+    c = pick (in, Topic::clipping);
+    CHECK (c != nullptr && c->limiter.setsCeiling && std::abs (c->limiter.ceilingDb - history::clip::kTruePeakWarnDb) < 1e-6f);
+
+    // Flat tops under the ceiling: there is no ceiling to lower, so nothing to copy.
+    in.clip.truePeakDb = -1.2f;
+    c = pick (in, Topic::clipping);
+    CHECK (c != nullptr && !c->canCopy());
+
+    // Items that are neither: nothing to copy to a limiter.
+    in = cleanMaster();
+    in.lowCrestDb = 2.0f;
+    for (const auto& item : advise (in).items)
+        CHECK (item.topic == Topic::clipping || item.topic == Topic::loudness || !item.limiter.active());
+}
+
 TEST (advisor_speaks_for_each_stereo_problem)
 {
     auto in = cleanMaster();
