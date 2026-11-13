@@ -12,7 +12,7 @@ cmake --build build --target CastorUiCheck && ./build/CastorUiCheck_artefacts/Re
 cmake --build build --target CastorSnapshot && ./build/CastorSnapshot_artefacts/Release/CastorSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`CASTOR_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`CASTOR_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh castor` is the way to build and check (see the repository's CLAUDE.md).
 - `CastorTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
   `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
 - Definition of done for a DSP change: `CastorTests` passes **and** the numbers the README quotes still match its output.
@@ -22,6 +22,7 @@ cmake --build build --target CastorSnapshot && ./build/CastorSnapshot_artefacts/
 
 ```
 Source/DSP/Engine.h  no GUI, no JUCE: the width of each band (pdsp::BandSplitter), the crossfade, mid / side / mono below / balance / output, the correlation; covered by Tests/Tests.cpp
+Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); the processor feeds `tapOut` (a `pdsp::StereoTap`) for the goniometer
@@ -45,6 +46,9 @@ neutral, so `l = l0 + 0 + 0`. BALANCE and OUTPUT multiply by `leftGain x outGain
 
 **Real time.** `Engine::process` allocates and locks nothing. The goniometer is fed by the processor through the shared lock-free `pdsp::StereoTap`; nothing of it runs on the audio thread except the push.
 **Bad samples:** NaN and infinity are replaced by 0 on the way in.
+
+**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
+(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
 **Parameters.** Ids (`castor::id`: `width1` ... `width6`, `mid`, `side`, `mono`, `balance`, `out`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one
 needs a higher version, an entry in `readParams()` and a place in the editor. The width ids follow the order of `pdsp::bands::kBands`.

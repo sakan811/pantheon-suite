@@ -17,6 +17,7 @@ namespaces and plugin codes use the short name "Castor".)
 | **Mono below** | 20 Hz (off) to 500 Hz: the sides go through a 24 dB/oct high-pass at this frequency, so below it the sound is in the middle: safe for mono playback, club systems and vinyl. |
 | **Balance** | L 100 to R 100: turns one channel down (not a pan). |
 | **Output** | -12 to +12 dB. |
+| **Presets** | Seven starting points (Init, Mono Bass, Club Safe, Widen Highs, Wide Master, Narrow Mix, Vocal Forward). A preset sets the widths, MID, SIDE and MONO BELOW; BALANCE and OUTPUT are kept. |
 
 The goniometer draws the last 1536 samples of the output as a cloud, left and right turned a quarter (a vertical line is mono, a horizontal one out of phase); the bar under it is the
 correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase.
@@ -49,7 +50,7 @@ correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase.
   band edge is slightly smeared. At 100% everywhere the sound is not touched at all.
 - **The six bands are fixed** (the bands of music of `shared/dsp`), not movable.
 - It has no delay and does not clip or limit: a wider image can raise the peaks.
-- It has not been built on macOS or run through `auval`, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
 
