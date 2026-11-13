@@ -11,11 +11,12 @@ namespace nemesis
 {
 namespace id
 {
-inline const juce::String freq { "freq" }, q { "q" }, threshold { "thresh" }, range { "range" }, release { "release" }, mode { "mode" }, detection { "detect" }, listen { "listen" };
+inline const juce::String freq { "freq" }, q { "q" }, threshold { "thresh" }, range { "range" }, release { "release" }, mode { "mode" }, detection { "detect" }, listen { "listen" }, lookahead { "lookahead" };
 }
 
 inline const juce::StringArray modeNames { "Split-band", "Wideband" };
 inline const juce::StringArray detectionNames { "Absolute", "Relative" };
+inline const juce::StringArray lookaheadNames { "Off", "0.5 ms", "1 ms", "2 ms", "5 ms" }; // kLookaheadMs, in order
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 {
@@ -46,6 +47,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::mode, 1 }, "Mode", modeNames, (int) d.mode));
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::detection, 1 }, "Detection", detectionNames, (int) d.detection));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::listen, 1 }, "Listen", d.listen));
+    // Added after the first release: version 2, so a session saved before it has no value and gets the default (Off, the plug-in as it was).
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames, d.lookahead));
     return { p.begin(), p.end() };
 }
 
@@ -62,6 +65,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.mode = (Mode) std::clamp ((int) v (id::mode), 0, kNumModes - 1);
     e.detection = (Detection) std::clamp ((int) v (id::detection), 0, kNumDetections - 1);
     e.listen = v (id::listen) > 0.5f;
+    e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookaheads - 1);
     return e;
 }
 

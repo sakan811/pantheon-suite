@@ -22,7 +22,8 @@ public:
     static constexpr int kHistory = 240;
 
     ui::Knob freq, width, threshold, range, release;
-    ui::Choice mode, detection;
+    ui::Choice mode, detection, lookahead;
+    ui::PresetBox presetBox;
     ui::Toggle listen;
     ui::GuideButton guideButton { nemesis::guideTitle(), nemesis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -36,7 +37,7 @@ private:
     NemesisProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, bandArea, historyArea, modeLabel, detectionLabel, noteStrip;
+    juce::Rectangle<int> nameplate, bandArea, historyArea, modeLabel, detectionLabel, presetLabel, lookaheadLabel, latencyLabel, noteStrip;
     std::array<float, kHistory> history {}; // the reduction in dB (positive), oldest first
     float shownReduction = 0.0f;
 

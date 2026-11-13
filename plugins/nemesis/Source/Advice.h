@@ -57,7 +57,7 @@ inline const char* guideText()
            "Switch LISTEN on and move FREQ until you hear the hiss of the s: that is the band the detector hears. RELATIVE detection compares the band with the "
            "whole sound, so one threshold works for a quiet and a loud passage.\n\n"
            "NOT FOR\n"
-           "Not a cure for a harsh recording: taking off more than about 10 dB makes a lisp. It has no look-ahead, so the very first millisecond of a loud s gets through. "
+           "Not a cure for a harsh recording: taking off more than about 10 dB makes a lisp. With LOOK-AHEAD off, the very first millisecond of a loud s gets through. "
            "It is not a dynamic equaliser (Iris is).";
 }
 } // namespace nemesis

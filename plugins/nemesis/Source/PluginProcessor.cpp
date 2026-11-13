@@ -21,9 +21,16 @@ bool NemesisProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 
 void NemesisProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    engine.prepare (sampleRate);
+    engine.prepare (sampleRate, nemesis::readParams (apvts).lookahead);
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
-    setLatencySamples (0);
+    reportedLatency = engine.latencySamples.load();
+    setLatencySamples (reportedLatency.load());
+}
+
+void NemesisProcessor::handleAsyncUpdate()
+{
+    reportedLatency = engine.latencySamples.load();
+    setLatencySamples (reportedLatency.load());
 }
 
 void NemesisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -46,10 +53,13 @@ void NemesisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             start += m;
         }
     }
+    if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
+        triggerAsyncUpdate();
 }
 
 void NemesisProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -58,7 +68,10 @@ void NemesisProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            programs.loadFrom (apvts.state);
+        }
 }
 
 juce::AudioProcessorEditor* NemesisProcessor::createEditor() { return new ui::ScaledEditor<NemesisEditor> (*this, apvts.state, *this); }

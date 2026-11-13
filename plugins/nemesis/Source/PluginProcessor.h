@@ -4,13 +4,14 @@
 #pragma once
 
 #include "Parameters.h"
+#include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
-class NemesisProcessor : public juce::AudioProcessor
+class NemesisProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
 public:
     NemesisProcessor();
-    ~NemesisProcessor() override = default;
+    ~NemesisProcessor() override { cancelPendingUpdate(); }
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -25,10 +26,10 @@ public:
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return "Default"; }
+    int getNumPrograms() override { return programs.count(); }
+    int getCurrentProgram() override { return programs.current(); }
+    void setCurrentProgram (int index) override { programs.set (index); }
+    const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
@@ -36,8 +37,12 @@ public:
 
     nemesis::Engine engine;
     juce::AudioProcessorValueTreeState apvts;
+    ui::Programs programs { apvts, nemesis::presets() }; // after apvts
 
 private:
+    // The latency moves with LOOK-AHEAD; setLatencySamples belongs to the message thread, so the audio thread only asks for it.
+    void handleAsyncUpdate() override;
+    std::atomic<int> reportedLatency { 0 };
     std::vector<float> monoRight; // a mono host: the engine's second channel
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NemesisProcessor)
