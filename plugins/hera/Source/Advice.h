@@ -63,6 +63,6 @@ inline const char* guideText()
            "SIDECHAIN\n"
            "The detector can listen to a high-passed copy (SC HIGH-PASS) so the bass does not trigger it, or to another track routed to the sidechain input (KEY).\n\n"
            "NOT FOR\n"
-           "Not a limiter: it reads no true peak and has no look-ahead. Not a multiband compressor (Atlas is) and not a dynamic equaliser (Iris is).";
+           "Not a limiter: it reads no true peak, and its look-ahead is a few milliseconds. Not a multiband compressor (Atlas is) and not a dynamic equaliser (Iris is).";
 }
 } // namespace hera

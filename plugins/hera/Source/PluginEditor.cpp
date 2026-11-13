@@ -29,13 +29,16 @@ HeraEditor::HeraEditor (HeraProcessor& p)
       link (p.apvts, id::link, "LINK", "100%: both channels get the same gain (the louder one decides), so the image does not move. 0%: each channel on its own.", ui::Knob::Layout::below),
       hpf (p.apvts, id::hpf, "SC HPF", "A high-pass on what the detector listens to (not on the sound), so the bass does not make the compressor pump. Off at 20 Hz.", ui::Knob::Layout::below),
       detector (p.apvts, id::detector, "Peak: reads each peak, so it is quick and follows transients.\nRMS: reads the average over 10 ms, closer to what the ear hears and gentler on peaks."),
+      lookahead (p.apvts, id::lookahead, "The sound is heard this long after the detector has seen it, so the gain is already down when a peak arrives (a fast attack no longer lets the first of it through).\n"
+                                         "It is a delay: the host compensates it. Changing it while playing restarts the compressor (a short gap)."),
+      presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default."),
       autoRelease (p.apvts, id::autoRelease, "AUTO REL", "Program-dependent release: a short peak lets go quickly (50 ms), a long loud passage slowly (600 ms). RELEASE is not used."),
       autoMakeup (p.apvts, id::autoMakeup, "AUTO MAKEUP", "Adds what the compression takes from a signal at 0 dBFS, so a full-scale input is full scale out. MAKEUP adds to it."),
       key (p.apvts, id::external, "KEY", "The detector listens to the sidechain input (another track routed in the host) instead of this one. With nothing connected it listens to itself."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf, &detector, &autoRelease, &autoMakeup, &key, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (24 + kKnobs * cellWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + rowHeight + 10 + ui::kNoteStripHeight + 12);
@@ -49,6 +52,15 @@ void HeraEditor::resized()
     auto header = bounds.removeFromTop (headerHeight).withTrimmedTop (8).withTrimmedBottom (8);
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
+    header.removeFromLeft (24);
+    auto headerRow = header.withTrimmedTop (28).withHeight (28);
+    presetLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
+    presetBox.setBounds (headerRow.removeFromLeft (190));
+    headerRow.removeFromLeft (14);
+    lookaheadLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
+    lookahead.setBounds (headerRow.removeFromLeft (110));
+    headerRow.removeFromLeft (14);
+    latencyLabel = headerRow.removeFromLeft (120);
 
     bounds.removeFromTop (10);
     auto display = bounds.removeFromTop (displayHeight);
@@ -89,7 +101,12 @@ void HeraEditor::paint (juce::Graphics& g)
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Compressor", inDb > -80.0f, 25.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
     hw::drawLabel (g, "Detector", detectorLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Look-ahead", lookaheadLabel, juce::Justification::left, colours::dim, 9.0f);
     const auto params = readParams (proc.apvts);
+    const int latency = proc.engine.latencySamples.load();
+    hw::drawLabel (g, latency == 0 ? juce::String ("No delay") : "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms", latencyLabel,
+                   juce::Justification::centredLeft, colours::dim, 9.5f);
 
     // The transfer curve: input level across, output level up; the diagonal is "no compression".
     {
@@ -170,5 +187,6 @@ void HeraEditor::timerCallback()
     const float in = proc.engine.inPeak.exchange (0.0f);
     proc.engine.outPeak.store (0.0f);
     inDb = in > 1e-5f ? 20.0f * std::log10 (in) : -90.0f;
+    presetBox.sync();
     repaint();
 }

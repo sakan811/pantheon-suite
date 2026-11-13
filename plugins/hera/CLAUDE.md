@@ -12,7 +12,7 @@ cmake --build build --target HeraUiCheck && ./build/HeraUiCheck_artefacts/Releas
 cmake --build build --target HeraSnapshot && ./build/HeraSnapshot_artefacts/Release/HeraSnapshot docs/screenshot.png
 ```
 
-- Building the plugin targets does **not** install them (`HERA_INSTALL_AFTER_BUILD`, off by default).
+- Building the plugin targets does **not** install them (`HERA_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh hera` is the way to build and check (see the repository's CLAUDE.md).
 - `HeraTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
   `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
 - Definition of done for a DSP change: `HeraTests` passes **and** the numbers the README quotes still match its output.
@@ -22,6 +22,7 @@ cmake --build build --target HeraSnapshot && ./build/HeraSnapshot_artefacts/Rele
 
 ```
 Source/DSP/Engine.h  no GUI, no JUCE: reductionDb() (the gain computer), autoMakeupDb(), Engine (the detector, the followers, makeup, mix); covered by Tests/Tests.cpp
+Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`)
@@ -45,11 +46,17 @@ moves both. The release times are fixed (`kFastAutoReleaseMs`, `kSlowAutoRelease
 **The sidechain** is read only when KEY is on and the host connected one (`keyL != nullptr`); a mono key is given with `keyR == nullptr`. The detector's high-pass is on the key, whichever it is. The key is never heard.
 The bus is the processor's second input, off by default, and `sidechainConnected` is what the editor's note reads.
 
+**Look-ahead delays the sound, not the detector.** `Engine::process` writes each input sample into a ring (`Channel::ring`) and reads the sound that is heard `delaySamples` back; the detector reads what is arriving (or the sidechain). `dry` (what MIX blends, and what the gain is applied to) is the delayed one, so a blend does not comb. With
+`delaySamples == 0` the ring returns the input itself, so the engine is bit-identical to the one without look-ahead. A change of the setting clears the ring (a short gap) and moves `latencySamples`, which the processor hands to the host on the message thread (`handleAsyncUpdate`, as Apollo does). The list is `kLookaheadMs`;
+its order is the order of `lookaheadNames`, the parameter's choice.
+
+**Presets** are `ui::Preset`s in `Presets.h`; the processor's `ui::Programs` applies them (every parameter back to its default first) and saves the chosen index with the session. A new parameter needs to be thought about in each preset (it goes back to its default unless the preset lists it).
+
 **Smoothing.** Makeup and mix are smoothed per sample (5 ms); everything else is per sample by nature, so the output does not depend on the host's block size (test [8], bit for bit). The first block starts them at their targets.
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
-**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `detectorNames` is the order of `Detector`.
 
 ## DRY: where each thing lives

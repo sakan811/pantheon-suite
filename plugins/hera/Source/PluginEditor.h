@@ -22,7 +22,8 @@ public:
     static constexpr int kHistory = 300;
 
     ui::Knob threshold, ratio, attack, release, knee, makeup, mix, link, hpf;
-    ui::Choice detector;
+    ui::Choice detector, lookahead;
+    ui::PresetBox presetBox;
     ui::Toggle autoRelease, autoMakeup, key;
     ui::GuideButton guideButton { hera::guideTitle(), hera::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -36,7 +37,7 @@ private:
     HeraProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, curveArea, historyArea, detectorLabel, noteStrip;
+    juce::Rectangle<int> nameplate, curveArea, historyArea, detectorLabel, presetLabel, lookaheadLabel, latencyLabel, noteStrip;
     std::array<float, kHistory> history {}; // the reduction in dB (positive), oldest first
     float shownReduction = 0.0f, inDb = -90.0f;
 

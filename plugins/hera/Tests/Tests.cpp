@@ -317,5 +317,70 @@ int main()
         check (fine, "a NaN and an infinity in the input are silence: the output is finite");
     }
 
+    // [9] Look-ahead.
+    std::printf ("\n[9] Look-ahead\n");
+    {
+        const int index = 3; // 5 ms
+        const int delay = (int) std::lround (0.001 * kLookaheadMs[(size_t) index] * kFs);
+        EngineParams quiet;
+        quiet.thresholdDb = -6.0f;
+        quiet.lookahead = index;
+        std::mt19937 gen (9);
+        std::uniform_real_distribution<float> white (-0.08f, 0.08f);
+        Stereo in { std::vector<float> (24000), std::vector<float> (24000) };
+        for (auto& v : in.l) v = white (gen);
+        for (auto& v : in.r) v = white (gen);
+        Engine e;
+        e.prepare (kFs, index);
+        const auto out = run (e, in, quiet);
+        Stereo expected { std::vector<float> (in.l.size(), 0.0f), std::vector<float> (in.l.size(), 0.0f) };
+        for (int i = delay; i < (int) in.l.size(); ++i)
+        {
+            expected.l[(size_t) i] = in.l[(size_t) (i - delay)];
+            expected.r[(size_t) i] = in.r[(size_t) (i - delay)];
+        }
+        const bool exact = out.l == expected.l && out.r == expected.r;
+        check (exact && e.latencySamples.load() == delay, fmt ("nothing to compress: the output is the input %d samples later (5 ms), bit for bit, and the engine says so", delay));
+
+        // A step from -40 to 0 dBFS at 20:1 with a 5 ms attack: without look-ahead the first millisecond gets through almost whole; with it the gain has been going down for 5 ms.
+        EngineParams p;
+        p.thresholdDb = -18.0f;
+        p.ratio = 20.0f;
+        p.kneeDb = 0.0f;
+        p.attackMs = 5.0f;
+        p.detector = Detector::peak;
+        const int step = 9600;
+        auto stepIn = sine (1000.0, -40.0, step);
+        const auto loud = sine (1000.0, 0.0, 4800);
+        stepIn.l.insert (stepIn.l.end(), loud.l.begin(), loud.l.end());
+        stepIn.r = stepIn.l;
+        Engine plain, ahead;
+        plain.prepare (kFs);
+        EngineParams withLookahead = p;
+        withLookahead.lookahead = index;
+        ahead.prepare (kFs, index);
+        const auto a = run (plain, stepIn, p), b = run (ahead, stepIn, withLookahead);
+        const double without = db (peakOf (a.l, (size_t) step, (size_t) step + 48)), with = db (peakOf (b.l, (size_t) (step + delay), (size_t) (step + delay + 48)));
+        check (with < without - 3.0, fmt ("the first millisecond of a 0 dBFS step: %.1f dBFS without look-ahead, %.1f dBFS with 5 ms (the gain is already down)", without, with));
+
+        // The block size does not change the output, and a new look-ahead moves the latency the engine reports.
+        bool same = true;
+        for (const int block : { 1, 7, 333, 4096 })
+        {
+            Engine c;
+            c.prepare (kFs, index);
+            const auto o = run (c, stepIn, withLookahead, block);
+            same = same && o.l == b.l && o.r == b.r;
+        }
+        check (same, "with look-ahead, blocks of 1, 7, 333 and 4096 samples give the output of 512, bit for bit");
+        Engine d;
+        d.prepare (kFs);
+        EngineParams two = p;
+        two.lookahead = 2;
+        auto tiny = sine (1000.0, -40.0, 256);
+        run (d, tiny, two);
+        check (d.latencySamples.load() == (int) std::lround (0.002 * kFs), "changing the look-ahead while running changes the latency the engine reports (2 ms: 96 samples)");
+    }
+
     return test::finish ("HeraTests");
 }

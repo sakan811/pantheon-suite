@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <pantheon/dsp/Biquad.h>
+#include <vector>
 
 // The whole compressor: no GUI, no JUCE. Nothing is allocated in process().
 namespace hera
@@ -23,6 +24,11 @@ inline constexpr double kPeakFallMs = 15.0;       // the peak detector holds a p
 inline constexpr double kFloorDb = -120.0;
 inline constexpr double kRestDb = 1e-3;           // a reduction under this, with nothing to reduce, is let go to exactly 0 (-78 dB of the gain: not audible, and the gain is then exactly 1)
 
+// LOOK-AHEAD: the detector reads the sound as it arrives and the sound is heard this long after, so the gain is already down when a peak gets to the output.
+// The choice is an index into this list (Off first), so a session keeps its meaning if a value is ever added at the end.
+inline constexpr std::array<float, 5> kLookaheadMs { 0.0f, 1.0f, 2.0f, 5.0f, 10.0f };
+inline constexpr int kNumLookaheads = (int) kLookaheadMs.size();
+
 struct EngineParams
 {
     float thresholdDb = -18.0f;
@@ -37,6 +43,7 @@ struct EngineParams
     bool autoRelease = false;  // program-dependent release: RELEASE is ignored
     bool autoMakeup = false;   // makes up what the compression takes from a full-scale signal
     bool external = false;     // listen to the sidechain input
+    int lookahead = 0;         // an index into kLookaheadMs: the sound is delayed by it, the detector is not
 };
 
 // The gain computer: how many dB the level is turned down, in a soft knee of `kneeDb` around the threshold. Positive.
@@ -58,9 +65,14 @@ inline double autoMakeupDb (double thresholdDb, double ratio, double kneeDb) noe
 class Engine
 {
 public:
-    void prepare (double sampleRate)
+    void prepare (double sampleRate, int lookaheadIndex = 0)
     {
         fs = sampleRate;
+        ringSize = (int) std::ceil (0.001 * (double) kLookaheadMs.back() * fs) + 2;
+        for (auto& c : ch)
+            c.ring.assign ((size_t) ringSize, 0.0);
+        delaySamples = delayOf (lookaheadIndex);
+        latencySamples = delaySamples;
         rmsCoef = 1.0 - std::exp (-1.0 / (0.001 * kRmsMs * fs));
         peakFall = std::exp (-1.0 / (0.001 * kPeakFallMs * fs));
         reset();
@@ -69,7 +81,13 @@ public:
     void reset() noexcept
     {
         for (auto& c : ch)
+        {
+            auto ring = std::move (c.ring);
             c = Channel();
+            c.ring = std::move (ring);
+            std::fill (c.ring.begin(), c.ring.end(), 0.0);
+        }
+        writePos = 0;
         started = false;
         hpfFor = -1.0;
     }
@@ -78,6 +96,14 @@ public:
     void process (float* left, float* right, int n, const EngineParams& p, const float* keyL = nullptr, const float* keyR = nullptr) noexcept
     {
         const bool useKey = p.external && keyL != nullptr;
+        if (const int wanted = delayOf (p.lookahead); wanted != delaySamples)
+        {
+            // A new look-ahead restarts the delay line (a short gap), as every plugin of the repository does with a setting that moves its latency.
+            delaySamples = wanted;
+            latencySamples = wanted;
+            for (auto& c : ch)
+                std::fill (c.ring.begin(), c.ring.end(), 0.0);
+        }
         if (p.hpfHz != hpfFor)
         {
             hpfFor = p.hpfHz;
@@ -105,8 +131,17 @@ public:
         {
             makeup += (makeupTarget - makeup) * smooth;
             mix += (mixTarget - mix) * smooth;
-            const double dry[2] = { finite (left[i]), finite (right[i]) };
-            const double key[2] = { useKey ? finite (keyL[i]) : dry[0], useKey ? finite (keyR != nullptr ? keyR[i] : keyL[i]) : dry[1] };
+            const double now[2] = { finite (left[i]), finite (right[i]) };
+            // The sound that is heard is the delayed one (the same as the input when there is no look-ahead); the detector reads what is arriving.
+            double dry[2];
+            for (int c = 0; c < 2; ++c)
+            {
+                auto& ring = ch[(size_t) c].ring;
+                ring[(size_t) writePos] = now[c];
+                dry[c] = ring[(size_t) ((writePos + ringSize - delaySamples) % ringSize)];
+            }
+            writePos = (writePos + 1) % ringSize;
+            const double key[2] = { useKey ? finite (keyL[i]) : now[0], useKey ? finite (keyR != nullptr ? keyR[i] : keyL[i]) : now[1] };
 
             // The detector: the key, high-passed, as a peak or as RMS (read as the peak of a sine).
             double level[2];
@@ -156,7 +191,7 @@ public:
             const double out0 = pure ? wet[0] : dry[0] + mix * (wet[0] - dry[0]), out1 = pure ? wet[1] : dry[1] + mix * (wet[1] - dry[1]);
             left[i] = (float) out0;
             right[i] = (float) out1;
-            peakIn = std::max (peakIn, (float) std::fmax (std::fabs (dry[0]), std::fabs (dry[1])));
+            peakIn = std::max (peakIn, (float) std::fmax (std::fabs (now[0]), std::fabs (now[1])));
             peakOut = std::max (peakOut, (float) std::fmax (std::fabs (out0), std::fabs (out1)));
         }
         if ((float) deepest > reductionMeter.load (std::memory_order_relaxed))
@@ -168,6 +203,7 @@ public:
     }
 
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB
+    std::atomic<int> latencySamples { 0 };      // the look-ahead in samples: the processor tells the host
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
 
 private:
@@ -175,11 +211,18 @@ private:
     {
         pdsp::Biquad hpf;
         double ms = 0.0, env = 0.0, fast = 0.0, slow = 0.0;
+        std::vector<double> ring; // the sound of the last look-ahead, for the delay
     };
 
     static inline double finite (float v) noexcept { return std::isfinite (v) ? (double) v : 0.0; }
     double coefOf (double ms) const noexcept { return 1.0 - std::exp (-1.0 / std::fmax (0.001 * ms * fs, 1.0)); }
 
+    int delayOf (int index) const noexcept
+    {
+        return std::clamp ((int) std::lround (0.001 * (double) kLookaheadMs[(size_t) std::clamp (index, 0, kNumLookaheads - 1)] * fs), 0, ringSize - 2);
+    }
+
+    int ringSize = 2, writePos = 0, delaySamples = 0;
     double fs = 48000.0, rmsCoef = 0.002, peakFall = 0.99, makeup = 1.0, mix = 1.0, hpfFor = -1.0;
     bool started = false;
     std::array<Channel, 2> ch;
