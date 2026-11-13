@@ -24,9 +24,16 @@ bool HeraProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 
 void HeraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    engine.prepare (sampleRate);
+    engine.prepare (sampleRate, hera::readParams (apvts).lookahead);
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
-    setLatencySamples (0);
+    reportedLatency = engine.latencySamples.load();
+    setLatencySamples (reportedLatency.load());
+}
+
+void HeraProcessor::handleAsyncUpdate()
+{
+    reportedLatency = engine.latencySamples.load();
+    setLatencySamples (reportedLatency.load());
 }
 
 void HeraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -57,10 +64,13 @@ void HeraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
             start += m;
         }
     }
+    if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
+        triggerAsyncUpdate();
 }
 
 void HeraProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -69,7 +79,10 @@ void HeraProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            programs.loadFrom (apvts.state);
+        }
 }
 
 juce::AudioProcessorEditor* HeraProcessor::createEditor() { return new ui::ScaledEditor<HeraEditor> (*this, apvts.state, *this); }

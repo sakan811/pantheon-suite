@@ -22,12 +22,13 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 13, fmt ("%d parameters: nine knobs, the detector and three switches", proc.getParameters().size()));
+    check (proc.getParameters().size() == 14, fmt ("%d parameters: nine knobs, the detector, three switches and the look-ahead", proc.getParameters().size()));
+    check (lookaheadNames.size() == kNumLookaheads, "the look-ahead list matches the engine's");
     check (detectorNames.size() == kNumDetectors, "the choice list matches the engine's detectors");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.thresholdDb + 18.0f) < 1e-3f && std::fabs (d.ratio - 2.0f) < 1e-3f && std::fabs (d.attackMs - 10.0f) < 0.01f && std::fabs (d.releaseMs - 150.0f) < 0.1f &&
-               std::fabs (d.kneeDb - 6.0f) < 1e-3f && d.mix > 0.999f && d.link > 0.999f && d.detector == Detector::rms && ! d.autoRelease && ! d.autoMakeup && ! d.external && proc.getLatencySamples() == 0,
-           "a new instance: -18 dB, 2:1, 10 ms, 150 ms, 6 dB knee, MIX and LINK 100%, RMS, no latency");
+               std::fabs (d.kneeDb - 6.0f) < 1e-3f && d.mix > 0.999f && d.link > 0.999f && d.detector == Detector::rms && ! d.autoRelease && ! d.autoMakeup && ! d.external && d.lookahead == 0 && proc.getLatencySamples() == 0,
+           "a new instance: -18 dB, 2:1, 10 ms, 150 ms, 6 dB knee, MIX and LINK 100%, RMS, no look-ahead, no latency");
 
     // The sidechain bus is there, off, and a mono layout is supported.
     check (proc.getBusCount (true) == 2 && ! proc.getBus (true, 1)->isEnabledByDefault(), "a second input, the sidechain, is off until the host routes a track to it");
@@ -69,6 +70,67 @@ int main()
         check (readParams (proc.apvts).autoRelease && readParams (proc.apvts).external, "the switches set their parameters");
         check (ui::hasNote (editor.notes(), "KEY is on, but no sidechain", ui::Severity::warning), "KEY on with nothing connected: a note says it listens to itself");
         check (ui::hasNote (editor.notes(), "AUTO release", ui::Severity::info), "AUTO release: a note says RELEASE is not used");
+    }
+
+    // The look-ahead is a delay the host is told about.
+    {
+        HeraProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::lookahead, 3.0f);
+        juce::AudioBuffer<float> buffer (2, 512);
+        buffer.clear();
+        juce::MidiBuffer midi;
+        q.processBlock (buffer, midi);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (q.getLatencySamples() == 240, fmt ("LOOK-AHEAD 5 ms: the host is told %d samples (240)", q.getLatencySamples()));
+        HeraProcessor r;
+        setValue (r.apvts, id::lookahead, 4.0f);
+        r.setPlayConfigDetails (2, 2, 48000.0, 512);
+        r.prepareToPlay (48000.0, 512);
+        check (r.getLatencySamples() == 480, "a session opened with LOOK-AHEAD 10 ms tells the host 480 samples at once");
+    }
+
+    // Presets: each applies, has a name and a one-line purpose, and the chosen one is kept with the session.
+    {
+        HeraProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 6;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        int duck = 0, glue = 0, catcher = 0;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            if (q.getProgramName (i) == "Sidechain Duck") duck = i;
+            if (q.getProgramName (i) == "Bus Glue") glue = i;
+            if (q.getProgramName (i) == "Peak Catcher") catcher = i;
+        }
+        q.setCurrentProgram (duck);
+        check (readParams (q.apvts).external && readParams (q.apvts).ratio > 5.0f, "Sidechain Duck turns KEY on and sets a high ratio");
+        q.setCurrentProgram (catcher);
+        check (readParams (q.apvts).lookahead == 2 && ! readParams (q.apvts).external, "Peak Catcher sets 2 ms of look-ahead, and KEY goes back to off (a preset does not inherit the last one)");
+        q.setCurrentProgram (glue);
+        check (readParams (q.apvts).autoRelease && readParams (q.apvts).lookahead == 0, "Bus Glue: AUTO release on, and the look-ahead back to Off");
+        q.setCurrentProgram (0);
+        const auto d0 = readParams (q.apvts);
+        check (std::fabs (d0.thresholdDb + 18.0f) < 1e-3f && ! d0.autoRelease && d0.lookahead == 0 && d0.mix > 0.999f, "Init is the defaults");
+        q.setCurrentProgram (duck);
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        HeraProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == duck && readParams (other.apvts).external, "the chosen preset and its settings are saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HeraEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == duck + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.presetBox.getRight() < editor.getWidth() && editor.lookahead.getRight() < editor.getWidth() && editor.lookahead.getNumItems() == kNumLookaheads, "the preset box and LOOK-AHEAD fit the header");
     }
 
     // The state survives a round trip.

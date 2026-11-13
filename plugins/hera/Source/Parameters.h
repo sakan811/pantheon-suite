@@ -12,10 +12,11 @@ namespace hera
 namespace id
 {
 inline const juce::String threshold { "thresh" }, ratio { "ratio" }, attack { "attack" }, release { "release" }, knee { "knee" }, makeup { "makeup" }, mix { "mix" },
-                          link { "link" }, hpf { "hpf" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" };
+                          link { "link" }, hpf { "hpf" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" }, lookahead { "lookahead" };
 }
 
 inline const juce::StringArray detectorNames { "Peak", "RMS" };
+inline const juce::StringArray lookaheadNames { "Off", "1 ms", "2 ms", "5 ms", "10 ms" }; // kLookaheadMs, in order
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 {
@@ -58,6 +59,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::autoRelease, 1 }, "Auto Release", d.autoRelease));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::autoMakeup, 1 }, "Auto Makeup", d.autoMakeup));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::external, 1 }, "Sidechain Key", d.external));
+    // Added after the first release: version 2, so a session saved before it has no value and gets the default (Off, the plug-in as it was).
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames, d.lookahead));
     return { p.begin(), p.end() };
 }
 
@@ -79,6 +82,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.autoRelease = v (id::autoRelease) > 0.5f;
     e.autoMakeup = v (id::autoMakeup) > 0.5f;
     e.external = v (id::external) > 0.5f;
+    e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookaheads - 1);
     return e;
 }
 
