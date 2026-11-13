@@ -342,6 +342,18 @@ int main (int argc, char** argv)
             curveOk = curveOk && std::abs (curve.db[i] - static_cast<double> (target.medianDb[i])) < 0.06;
         CHECK (curveOk && std::abs (curve.frequency (10) - themis::BandGrid::centreHz (10)) < 1.0e-6, "... point for point, on the analysis grid");
         CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back) && back.size() == 1, "... and a reader without curves skips it");
+        // A limiter setting (the ceiling to set, the gain to move) travels as its own line: a limiter reads it, an equaliser's reader skips it.
+        themis::LimiterMove move;
+        move.setsCeiling = true;
+        move.ceilingDb = -1.0f;
+        move.changesGain = true;
+        move.gainChangeDb = -3.2f;
+        pdsp::LinkLimiter got;
+        const auto text = ui::linkText ({}, nullptr, move).toStdString();
+        CHECK (pdsp::link::decodeLimiter (text, got) && got.hasCeiling && std::abs (got.ceilingDb + 1.0) < 0.01 && got.hasGainChange && std::abs (got.gainChangeDb + 3.2) < 0.01,
+               "a copied limiter setting reads back: the ceiling and the gain change");
+        CHECK (pdsp::link::decode (text, back) && back.empty() && ui::linkDestination ({}, move) == "Aegis", "... an equaliser's reader sees no band in it, and the destination is Aegis");
+        CHECK (! pdsp::link::decodeLimiter (ui::linkText ({ cut }).toStdString(), got), "a band list holds no limiter setting");
     }
 
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");

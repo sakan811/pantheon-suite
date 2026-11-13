@@ -39,7 +39,7 @@ inline juce::String hzText (double hz) { return juce::String (themis::hzText (hz
 // Suggested bands as the text the other plugins of the repository paste (pdsp::link): equaliser bands go to the equaliser,
 // a harmonic-fill band to the harmonic generator.
 // The band list for the other plugins, with the target curve the bands were fitted to when there is one (Iris draws it as its reference).
-inline juce::String linkText (const themis::EqMoves& moves, const themis::TargetCurve* target = nullptr)
+inline juce::String linkText (const themis::EqMoves& moves, const themis::TargetCurve* target = nullptr, const themis::LimiterMove& limiter = {})
 {
     using K = themis::EqMove::Kind;
     std::vector<pdsp::LinkBand> bands;
@@ -66,12 +66,19 @@ inline juce::String linkText (const themis::EqMoves& moves, const themis::Target
         curve.name = target->name;
         curve.db.assign (target->medianDb.begin(), target->medianDb.end());
     }
-    return juce::String (pdsp::link::encode (bands, target != nullptr ? &curve : nullptr));
+    pdsp::LinkLimiter set;
+    set.hasCeiling = limiter.setsCeiling;
+    set.ceilingDb = limiter.ceilingDb;
+    set.hasGainChange = limiter.changesGain;
+    set.gainChangeDb = limiter.gainChangeDb;
+    return juce::String (pdsp::link::encode (bands, target != nullptr ? &curve : nullptr, limiter.active() ? &set : nullptr));
 }
 
 // Where a copied fix goes, for the status line.
-inline juce::String linkDestination (const themis::EqMoves& moves)
+inline juce::String linkDestination (const themis::EqMoves& moves, const themis::LimiterMove& limiter = {})
 {
+    if (moves.empty())
+        return limiter.active() ? "Aegis" : "";
     bool fill = false, eq = false;
     for (const auto& m : moves)
         (m.kind == themis::EqMove::Kind::harmonicFill ? fill : eq) = true;

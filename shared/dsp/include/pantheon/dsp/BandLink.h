@@ -20,10 +20,15 @@ namespace pdsp
 //   bell freq=270 gain=-2.0 q=0.70 place=mid
 //   fill lo=40 hi=90
 //   curve f0=20 oct=6 name=Modern_Pop db=-1.2,0.0,0.8,...
+//   limiter ceiling=-1.0 gainchange=-3.0
 //
 // A curve line carries a spectrum shape (not a band): the dB of each point of a log-frequency grid (f0 is the first point's
 // frequency, oct the points per octave, name has its spaces written as underscores), relative to the level around the middle of
 // the spectrum. A reader that does not know curves skips the line like any other kind it does not know.
+//
+// A limiter line is a setting for a limiter, not a band: the ceiling to set (an absolute level in dBTP) and how far to move the
+// limiter's input gain (a change in dB, negative to turn it down), either of them alone. `decode` skips it like any other kind it does
+// not know; `decodeLimiter` reads it.
 //
 // Unknown keys are ignored and a band with an unknown kind is skipped, so a newer writer does not break an older reader.
 struct LinkBand
@@ -60,6 +65,15 @@ struct LinkCurve
         const double t = pos - static_cast<double> (i);
         return db[i] + t * (db[i + 1] - db[i]);
     }
+};
+
+// What a limiter is asked to change: the ceiling (absolute, dBTP) and/or its gain (relative, dB).
+struct LinkLimiter
+{
+    bool hasCeiling = false, hasGainChange = false;
+    double ceilingDb = -1.0, gainChangeDb = 0.0;
+
+    bool valid() const { return hasCeiling || hasGainChange; }
 };
 
 namespace link
@@ -113,7 +127,24 @@ inline std::string encodeCurve (const LinkCurve& c)
     return out;
 }
 
-inline std::string encode (const std::vector<LinkBand>& bands, const LinkCurve* curve = nullptr)
+inline std::string encodeLimiter (const LinkLimiter& l)
+{
+    std::string out;
+    char buf[64];
+    if (l.hasCeiling)
+    {
+        std::snprintf (buf, sizeof (buf), " ceiling=%.1f", l.ceilingDb);
+        out += buf;
+    }
+    if (l.hasGainChange)
+    {
+        std::snprintf (buf, sizeof (buf), " gainchange=%.1f", l.gainChangeDb);
+        out += buf;
+    }
+    return out.empty() ? out : "\nlimiter" + out;
+}
+
+inline std::string encode (const std::vector<LinkBand>& bands, const LinkCurve* curve = nullptr, const LinkLimiter* limiter = nullptr)
 {
     std::string out = kHeader;
     char line[160];
@@ -129,6 +160,8 @@ inline std::string encode (const std::vector<LinkBand>& bands, const LinkCurve* 
     }
     if (curve != nullptr && curve->valid())
         out += encodeCurve (*curve);
+    if (limiter != nullptr)
+        out += encodeLimiter (*limiter);
     return out;
 }
 
@@ -253,6 +286,60 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out, LinkCur
             out.push_back (b);
     }
     return header;
+}
+
+// False when the text is not a Pantheon list or holds no limiter line. A limiter line with a number that is not finite, or a ceiling above 0 dBTP,
+// is read without that number; the last limiter line wins.
+inline bool decodeLimiter (const std::string& text, LinkLimiter& out)
+{
+    out = {};
+    std::istringstream in (text);
+    std::string line;
+    bool header = false;
+    while (std::getline (in, line))
+    {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (!header)
+        {
+            if (line.empty())
+                continue;
+            if (line != kHeader)
+                return false;
+            header = true;
+            continue;
+        }
+        std::istringstream words (line);
+        std::string kind;
+        if (!(words >> kind) || kind != "limiter")
+            continue;
+        LinkLimiter l;
+        std::string pair;
+        while (words >> pair)
+        {
+            const auto eq = pair.find ('=');
+            if (eq == std::string::npos)
+                continue;
+            const auto key = pair.substr (0, eq), value = pair.substr (eq + 1);
+            char* end = nullptr;
+            const double v = std::strtod (value.c_str(), &end);
+            if (end == value.c_str() || !std::isfinite (v))
+                continue;
+            if (key == "ceiling" && v <= 0.0 && v >= -60.0)
+            {
+                l.hasCeiling = true;
+                l.ceilingDb = v;
+            }
+            else if (key == "gainchange" && std::fabs (v) <= 60.0)
+            {
+                l.hasGainChange = true;
+                l.gainChangeDb = v;
+            }
+        }
+        if (l.valid())
+            out = l;
+    }
+    return out.valid();
 }
 } // namespace link
 } // namespace pdsp
