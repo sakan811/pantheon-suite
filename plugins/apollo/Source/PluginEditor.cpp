@@ -15,6 +15,7 @@ constexpr int stripGap = 6;
 constexpr int stripHeight = 332;
 constexpr int cellHeight = 104;
 constexpr int kTimerHz = 20;
+constexpr int kPasteTicks = kTimerHz * 8; // eight seconds
 }
 
 ApolloEditor::Strip::Strip (ApolloProcessor& p, int band)
@@ -38,7 +39,9 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
                                     "Changing it while playing restarts the equaliser."),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after every band."),
       view (p.apvts, [&p] { return p.getSampleRate(); }, p.tapIn, p.tapOut),
-      presetBox (p, presets(), "The bands it does not use go back to 0 dB. PHASE and OUTPUT are kept."),
+      presetBox (p, presets(), "The bands it does not use go back to 0 dB. PHASE, OUTPUT and GAIN MATCH are kept."),
+      matchButton (p.apvts, id::match, "GAIN MATCH", "Takes the level the bands add or take away off again, slowly (about 0.6 s, within 12 dB), so a boost that is merely louder is not mistaken for better. "
+                                                      "OUTPUT is applied after it."),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -49,14 +52,24 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
             addChildComponent (*c);
     }
     view.onSelect = [this] (int) { repaint(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &guideButton })
+    deltaButton.setClickingTogglesState (true);
+    deltaButton.setTooltip ("Listen to only what the bands change (output minus input). Not saved with the project, and it ends when the window closes.");
+    deltaButton.onClick = [this] { proc.engine.delta = deltaButton.getToggleState(); };
+    pasteButton.setTooltip ("Take what Themis copied: the bands of a plan item or of Copy EQ go into free bands (type, frequency, gain, width, channels), and the target curve of Copy EQ "
+                            "is drawn dashed behind the analyser to follow. Right-click the display to clear it.");
+    pasteButton.onClick = [this] { pasteFromClipboard (juce::SystemClipboard::getTextFromClipboard()); };
+    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &matchButton, &deltaButton, &pasteButton, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12);
     showTypes();
 }
 
-ApolloEditor::~ApolloEditor() { setLookAndFeel (nullptr); }
+ApolloEditor::~ApolloEditor()
+{
+    proc.engine.delta = false; // monitoring never outlives the window that asked for it
+    setLookAndFeel (nullptr);
+}
 
 void ApolloEditor::resized()
 {
@@ -75,6 +88,12 @@ void ApolloEditor::resized()
     presetLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
     presetBox.setBounds (row.removeFromLeft (190));
     guideButton.setBounds (row.removeFromRight (64));
+    row.removeFromRight (8);
+    pasteButton.setBounds (row.removeFromRight (64));
+    row.removeFromLeft (14);
+    matchButton.setBounds (row.removeFromLeft (112));
+    row.removeFromLeft (8);
+    deltaButton.setBounds (row.removeFromLeft (70));
 
     bounds.removeFromTop (10);
     view.setBounds (bounds.removeFromTop (viewHeight));
@@ -127,7 +146,34 @@ AdviceInput ApolloEditor::adviceInput() const
     AdviceInput in;
     in.params = readParams (proc.apvts);
     in.latencyMs = 1000.0 * proc.engine.latencySamples.load() / std::max (proc.getSampleRate(), 1.0);
+    in.delta = proc.engine.delta.load();
     return in;
+}
+
+std::vector<ui::Note> ApolloEditor::shownNotes() const
+{
+    auto list = apollo::adviceFor (adviceInput());
+    if (pasteTicks > 0 && ! pasteSaid.empty())
+        list.insert (list.begin(), { ui::Severity::info, pasteSaid });
+    return list;
+}
+
+void ApolloEditor::pasteFromClipboard (const juce::String& text)
+{
+    const auto result = pasteBands (proc.apvts, text);
+    if (result.curve)
+    {
+        std::vector<pdsp::LinkBand> ignored;
+        pdsp::LinkCurve curve;
+        if (pdsp::link::decode (text.toStdString(), ignored, &curve))
+            view.setReference (curve);
+    }
+    if (! result.slots.empty())
+        view.select (result.slots.front());
+    pasteSaid = apollo::pasteSaid (result);
+    pasteTicks = kPasteTicks;
+    showTypes();
+    repaint();
 }
 
 void ApolloEditor::paint (juce::Graphics& g)
@@ -138,9 +184,12 @@ void ApolloEditor::paint (juce::Graphics& g)
     hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Phase", phaseLabel, juce::Justification::left, colours::dim, 9.0f);
     const int latency = proc.engine.latencySamples.load();
+    if (proc.apvts.getRawParameterValue (id::match)->load() > 0.5f) // what GAIN MATCH is doing to the level right now
+        hw::drawLabel (g, "Applying " + juce::String (proc.engine.matchDb.load (std::memory_order_relaxed), 1) + " dB",
+                       { matchButton.getX() + 2, matchButton.getY() - 14, 130, 12 }, juce::Justification::left, colours::amber, 9.0f);
     hw::drawLabel (g, latency == 0 ? juce::String ("No delay") : "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms",
                    latencyLabel, juce::Justification::centredLeft, colours::dim, 9.5f);
-    ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
+    ui::drawNoteStrip (g, noteStrip, shownNotes());
     const auto params = readParams (proc.apvts);
     for (int b = 0; b < kBands; ++b)
     {
@@ -165,6 +214,9 @@ void ApolloEditor::timerCallback()
     if (signature != shownTypes)
         showTypes();
     view.tick();
+    if (pasteTicks > 0)
+        --pasteTicks;
+    deltaButton.setToggleState (proc.engine.delta.load(), juce::dontSendNotification);
     presetBox.sync();
     repaint();
 }

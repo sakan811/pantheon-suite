@@ -7,7 +7,7 @@
 #include <pantheon/ui/Presets.h>
 
 // Starting points for the jobs an equaliser is most often used for. A preset sets the bands it needs; the others go back to their defaults (all at 0 dB, so they do
-// nothing). PHASE and OUTPUT are kept: they are how the equaliser works, not what it does to this sound. Every number here is a place to begin: move the node until
+// nothing). PHASE, OUTPUT and GAIN MATCH are kept: they are how the equaliser works and how you judge it, not what it does to this sound. Every number here is a place to begin: move the node until
 // it sounds right, and cut before you boost.
 namespace apollo
 {
@@ -57,6 +57,6 @@ inline const std::vector<ui::Preset>& presets()
     return list;
 }
 
-// A preset leaves how the equaliser works alone.
-inline bool keepsParameter (const juce::String& pid) { return pid == id::phase || pid == id::out; }
+// A preset leaves how the equaliser works, and how you judge it, alone.
+inline bool keepsParameter (const juce::String& pid) { return pid == id::phase || pid == id::out || pid == id::match; }
 } // namespace apollo

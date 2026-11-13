@@ -38,7 +38,7 @@ inline juce::String hzText (double hz) { return juce::String (themis::hzText (hz
 
 // Suggested bands as the text the other plugins of the repository paste (pdsp::link): equaliser bands go to the equaliser,
 // a harmonic-fill band to the harmonic generator.
-// The band list for the other plugins, with the target curve the bands were fitted to when there is one (Iris draws it as its reference).
+// The band list for the other plugins, with the target curve the bands were fitted to when there is one (Iris and Apollo draw it as their reference).
 inline juce::String linkText (const themis::EqMoves& moves, const themis::TargetCurve* target = nullptr, const themis::LimiterMove& limiter = {})
 {
     using K = themis::EqMove::Kind;
@@ -82,6 +82,6 @@ inline juce::String linkDestination (const themis::EqMoves& moves, const themis:
     bool fill = false, eq = false;
     for (const auto& m : moves)
         (m.kind == themis::EqMove::Kind::harmonicFill ? fill : eq) = true;
-    return fill && eq ? "Iris (EQ bands) and Hephaestus (fill band)" : fill ? "Hephaestus" : "Iris";
+    return fill && eq ? "Iris or Apollo (EQ) and Hephaestus (fill)" : fill ? "Hephaestus" : "Iris or Apollo";
 }
 } // namespace ui

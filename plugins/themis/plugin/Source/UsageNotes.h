@@ -58,7 +58,7 @@ inline const char* guideText()
            "\n"
            "IT IS NOT FOR:\n"
            "  - Changing the sound. Themis has no EQ, compressor or limiter and passes the audio untouched. Make the change in "
-           "Iris (tone), Atlas (dynamics) or Hephaestus (harmonics), or your limiter, then play it again.\n"
+           "Iris or Apollo (tone), Atlas (dynamics) or Hephaestus (harmonics), or your limiter, then play it again.\n"
            "  - Telling you what is right. The plan lists objective faults only; a difference from the target curve is taste, and every "
            "limit is a rule of thumb. It is a checklist for your ears, not a replacement for them.\n"
            "  - Certifying a delivery spec. The loudness meter follows BS.1770 but is not a certified meter, and clip detection is a "

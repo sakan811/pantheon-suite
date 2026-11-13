@@ -34,9 +34,13 @@ public:
     ui::Knob outKnob;
     apollo::gui::CurveView view;
     ui::PresetBox presetBox;
+    ui::Toggle matchButton;
+    juce::TextButton deltaButton { "DELTA" }, pasteButton { "PASTE" };
     ui::GuideButton guideButton { apollo::guideTitle(), apollo::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return apollo::adviceFor (adviceInput()); } // what the strip under the bands says, for the checks
+    std::vector<ui::Note> shownNotes() const;         // the notes, with what the last PASTE did first while it is shown
+    void pasteFromClipboard (const juce::String& text); // what PASTE does with the clipboard's text (bands, and a target curve, from Themis)
     void showTypes(); // which controls each strip shows (the timer calls it; the checks too)
 
 private:
@@ -48,6 +52,8 @@ private:
     juce::TooltipWindow tooltips { this, 600 };
     juce::Rectangle<int> nameplate, presetLabel, phaseLabel, latencyLabel, noteStrip, stripArea;
     int shownTypes = -1;
+    std::string pasteSaid;
+    int pasteTicks = 0; // timer ticks left to show pasteSaid
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ApolloEditor)
 };
