@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Apollo Curve: a JUCE eight-band parametric equaliser (VST3 / AU / Standalone), minimum or linear phase, Stereo / Mid / Side per band. See `README.md` for what it
+Apollo Curve: a JUCE eight-band parametric equaliser (VST3 / AU / Standalone), minimum or linear phase, Stereo / Mid / Side per band, GAIN MATCH, DELTA, and PASTE from Themis. See `README.md` for what it
 does and what has been measured; this file is what you need to change it safely.
 
 ## Build and verify
@@ -10,24 +10,26 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce
 cmake --build build --target ApolloTests -j 10 && ./build/ApolloTests_artefacts/Release/ApolloTests
 cmake --build build --target Apollo_VST3 -j 10
 cmake --build build --target ApolloUiCheck && ./build/ApolloUiCheck_artefacts/Release/ApolloUiCheck
-cmake --build build --target ApolloSnapshot && ./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/screenshot.png
+cmake --build build --target ApolloSnapshot && ./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/screenshot.png match select=4
+./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/themis.png themis select=2      # what PASTE does with Themis' Copy EQ
+./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/delta.png delta linear select=4
 ```
 
 - Building the plugin targets does **not** install them (`APOLLO_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh apollo` is the way to build and check (see the repository's CLAUDE.md).
 - `ApolloTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it (the FFT is its own), so the DSP tests also compile
   with `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`.
 - Definition of done for a DSP change: `ApolloTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
+- Definition of done for a UI or parameter change: `UiCheck` passes and the three images in `docs/` (all embedded in the README, with captions) are regenerated and looked at, and the captions still say what they show.
 
 ## Layout
 
 ```
 Source/DSP/Bands.h         BandParams, Section (the filter of a band), isIdentity(), responseDb()  <- the curve the editor draws and the filter the engine runs
 Source/DSP/LinearPhase.h   Fft, LinearSizes, Convolver (the kernel from the magnitude, FFT overlap-save, the exact delay for the idle case)
-Source/DSP/Engine.h        the signal path, the tick, the smoothing, Mid/Side, the phase mode, latency
+Source/DSP/Engine.h        the signal path, the tick, the smoothing, Mid/Side, the phase mode, latency, GAIN MATCH, DELTA
 Source/Presets.h           the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h            the notes of the strip under the bands and the GUIDE text; plain C++
-Source/Parameters.h        parameter layout, bandIds(), defaultBand(), readParams()                <- the single source of truth for parameters
+Source/Parameters.h        parameter layout, bandIds(), defaultBand(), readParams(), pasteBands() (PASTE)  <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/CurveView.h` is the display and its nodes
 Tests/                     Tests.cpp (DSP), UiCheck.cpp (editor on the real processor), Snapshot.cpp (editor -> PNG), Check.h
 ```
@@ -62,6 +64,10 @@ duplicate a formula for the curve.
 reads them into two `pdsp::SpectrumAnalyzer`s and does nothing when ANALYZER is off (the switch is the `analyzer` property of the session's state, not a parameter, so it is not automatable and no id is added). Its scale is its own (`kAnalyzerTopDb`, `kAnalyzerRangeDb`), not the
 curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCheck`.
 
+**GAIN MATCH and DELTA compare with the input as the output hears it.** In linear phase the dry input is delayed by the latency in a ring (`dryL` / `dryR`, sized in `prepare()`; the Convolver's idle delay is the same integer, so DELTA with no band on is exactly 0); in minimum phase it is the input. The energies in and out are summed per sample and read at the tick (never per block: test [9] pins bit-for-bit block independence with the match on); the match gain is exactly 1.0 with the parameter off, so the idle output stays bit-exact (test [2]). It is applied before OUTPUT. DELTA is `Engine::delta`, an atomic the editor sets, not a parameter: never saved, ended by the editor's destructor, and it shows in the notes.
+
+**PASTE takes free bands, never bands in use.** `pasteBands()` (Parameters.h) reads `pdsp::link::decode`; a band is free when `isIdentity()` (so the default high-pass, low-pass, shelves and bells all are), kinds go to their own end first (`slotOrder`), a link `lowCut` is Apollo's high-pass, left and right bands and fill bands are skipped and counted. The `curve` line becomes the display's reference (`CurveView::setReference`, kept in the state as `referenceCurve`, drawn dashed at the track's level: the analyser's mean over 200 Hz to 5 kHz without the tilt, which is added back). Themis' wording names Apollo (`ThemisUi.h`'s `linkDestination`): run Themis' `ThemisSmoke` when you change what it writes.
+
 **Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()` (the FFT tables, the rings, the kernels). A change of phase mode restarts the equaliser (`configure()`).
 
 **Bad samples.** NaN and infinity are replaced by 0 on the way in.
@@ -70,7 +76,7 @@ curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCh
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
 **Parameters.** Ids (`apollo::id`, `bandIds (i)`: `b1_on` ... `b8_target`) are stored in sessions and automation: never rename or remove one, nor reorder the choice lists (`typeNames`, `targetNames`, `slopeNames`,
-`phaseNames` follow the enums). All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+`phaseNames` follow the enums). All are `ParameterID` version 1 except `match` (version 2, off: a session saved before it sounds as it did; a preset keeps it); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 
 ## DRY: where each thing lives
 

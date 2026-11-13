@@ -16,6 +16,7 @@ struct AdviceInput
 {
     EngineParams params;
     double latencyMs = 0.0;
+    bool delta = false; // DELTA is on (the editor's monitor, not a parameter)
 };
 
 constexpr double kBigBoostDb = 9.0;
@@ -30,6 +31,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     const auto info = [&] (std::string t) { notes.push_back ({ ui::Severity::info, std::move (t) }); };
     const auto& p = in.params;
 
+    if (in.delta)
+        warn ("DELTA is on: you hear only what the bands change, not your track. Switch it off to hear it.");
     const bool anyRunning = std::any_of (p.bands.begin(), p.bands.end(), [] (const BandParams& b) { return ! isIdentity (b); });
     if (! anyRunning && std::fabs (p.outDb) < 0.05)
         info ("No band changes anything yet. Drag a node on the display, or raise a band's GAIN.");
@@ -61,6 +64,11 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     }
     if (worst >= kSumBoostDb)
         warn ("Boosts within an octave of each other add up to " + std::to_string ((int) (worst + 0.5)) + " dB. Lower one, or the output may clip.");
+    const bool bigBoost = std::any_of (p.bands.begin(), p.bands.end(), [] (const BandParams& b) { return ! isIdentity (b) && hasGain (b.type) && b.gainDb >= kBigBoostDb; });
+    if (bigBoost && ! p.match)
+        info ("A boost of 9 dB or more makes the track louder, which sounds better. Turn on GAIN MATCH to judge it fairly.");
+    if (p.match)
+        info ("GAIN MATCH is on: the level the bands add is matched away, so they cannot make the track louder.");
     if (p.phase == Phase::linear && in.latencyMs > 0.0)
         info ("Linear phase delays the sound by " + std::to_string ((int) (in.latencyMs + 0.5)) + " ms (the host compensates it). Not for a live monitor.");
     return ui::ordered (std::move (notes));
@@ -80,6 +88,10 @@ inline const char* guideText()
            "a softer low end (about 12 Hz resolution).\n\n"
            "NOT FOR\n"
            "It is not a dynamic equaliser (Iris is): it does what the curve says, always. The analyser behind the curve shows the sound before (dim) and after "
-           "(bright) the bands; ANALYZER turns it off.";
+           "(bright) the bands; ANALYZER turns it off. It does not judge by loudness: a boost is louder, and louder sounds better. Use GAIN MATCH, and DELTA to hear what the "
+           "bands change.\n\n"
+           "WITH THEMIS\n"
+           "In Themis, COPY on a plan item or Copy EQ, then PASTE here: the bands go into free slots, and the target curve is drawn dashed behind the analyser to follow. "
+           "Right-click the display to clear it.";
 }
 } // namespace apollo

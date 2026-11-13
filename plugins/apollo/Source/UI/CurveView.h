@@ -18,7 +18,10 @@ class CurveView : public juce::Component
 {
 public:
     CurveView (juce::AudioProcessorValueTreeState& state, std::function<double()> sampleRateOf, pdsp::StereoTap& before, pdsp::StereoTap& after)
-        : apvts (state), sampleRate (std::move (sampleRateOf)), tapBefore (before), tapAfter (after) {}
+        : apvts (state), sampleRate (std::move (sampleRateOf)), tapBefore (before), tapAfter (after)
+    {
+        loadReference();
+    }
 
     static constexpr float kAnalyzerTopDb = -10.0f, kAnalyzerRangeDb = 90.0f;
     pdsp::SpectrumAnalyzer inTrace, outTrace;
@@ -41,10 +44,51 @@ public:
         }
         inTrace.update (tapBefore);
         outTrace.update (tapAfter);
+        followAnchor();
+    }
+
+    // ---- the reference: a target curve handed over by Themis' Copy EQ (PASTE), drawn dashed behind the analyser ----------------------------------------------------
+    // Its shape is relative (0 dB is its own mean from kAnchorLoHz to kAnchorHiHz), so it is drawn at the level this track has there: that is what the ear
+    // compares, the shape of the spectrum, not its loudness. It is kept with the session and cleared from the display's right-click menu.
+    static constexpr double kAnchorLoHz = 200.0, kAnchorHiHz = 5000.0;
+
+    bool hasReference() const noexcept { return reference.valid(); }
+    juce::String referenceLabel() const { return referenceName; }
+    bool referenceAnchored() const noexcept { return anchorValid; }
+
+    void setReference (const pdsp::LinkCurve& curve)
+    {
+        if (! curve.valid())
+            return;
+        reference = curve;
+        referenceName = curve.name.empty() ? juce::String ("pasted") : juce::String (curve.name);
+        apvts.state.setProperty (referenceProperty, juce::String (pdsp::link::encode ({}, &curve)), nullptr);
+        repaint();
+    }
+
+    void clearReference()
+    {
+        reference = {};
+        referenceName.clear();
+        apvts.state.removeProperty (referenceProperty, nullptr);
+        repaint();
+    }
+
+    // Where the reference sits at a frequency in the display's own dB (its anchor, and the analyser's tilt), for drawing and for the checks.
+    float referenceDisplayDb (double hz) const
+    {
+        return (float) (reference.at (hz) - referenceMean + anchorDb) + inTrace.getTilt() * (float) std::log2 (hz / pdsp::SpectrumAnalyzer::tiltPivotHz);
     }
 
     std::function<void (int)> onSelect;
     int selected = 0;
+    void select (int band)
+    {
+        selected = band;
+        if (onSelect)
+            onSelect (band);
+        repaint();
+    }
 
     juce::Rectangle<float> plot() const { return getLocalBounds().toFloat().reduced (34.0f, 12.0f).withTrimmedBottom (10.0f); }
     float xOf (double hz) const { const auto r = plot(); return r.getX() + r.getWidth() * ui::FreqAxis::toNormalised ((float) hz); }
@@ -88,6 +132,17 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu())
+        {
+            juce::PopupMenu menu;
+            menu.addItem (1, hasReference() ? "Clear the reference (" + referenceName + ")" : juce::String ("No reference: PASTE Copy EQ from Themis"), hasReference());
+            menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [this] (int chosen)
+                                {
+                                    if (chosen == 1)
+                                        clearReference();
+                                });
+            return;
+        }
         if (analyzerButton().contains (e.position))
         {
             setAnalyzer (! analyzerOn());
@@ -162,6 +217,8 @@ public:
             drawTrace (g, outTrace, colours::text.withAlpha (0.85f), colours::text.withAlpha (0.10f));
         }
 
+        drawReference (g);
+
         const auto curve = [&] (const std::array<BandParams, kBands>& bands, Target path)
         {
             juce::Path p;
@@ -222,6 +279,76 @@ public:
     }
 
 private:
+    void loadReference()
+    {
+        std::vector<pdsp::LinkBand> ignored;
+        pdsp::LinkCurve c;
+        if (pdsp::link::decode (apvts.state.getProperty (referenceProperty).toString().toStdString(), ignored, &c) && c.valid())
+        {
+            reference = c;
+            referenceName = c.name.empty() ? juce::String ("pasted") : juce::String (c.name);
+        }
+    }
+
+    // The mean level of what goes in over the anchor region, without the analyser's tilt, followed slowly (the analyser is already smoothed).
+    void followAnchor()
+    {
+        if (! hasReference())
+            return;
+        double sum = 0.0, curveSum = 0.0;
+        int n = 0;
+        for (double hz = kAnchorLoHz; hz <= kAnchorHiHz; hz *= 1.122462048309373) // 1/6 octave
+        {
+            sum += inTrace.levelAtFrequency (hz) - inTrace.getTilt() * std::log2 (hz / pdsp::SpectrumAnalyzer::tiltPivotHz);
+            curveSum += reference.at (hz);
+            ++n;
+        }
+        referenceMean = curveSum / n;
+        const double mean = sum / n;
+        if (mean > pdsp::SpectrumAnalyzer::floorDb + 25.0f) // there is sound; in silence the last anchor stays
+        {
+            anchorDb = anchorValid ? anchorDb + 0.2 * (mean - anchorDb) : mean;
+            anchorValid = true;
+        }
+    }
+
+    void drawReference (juce::Graphics& g) const
+    {
+        if (! hasReference())
+            return;
+        const auto r = plot();
+        juce::String text = "REFERENCE  " + referenceName.toUpperCase();
+        if (analyzerOn() && anchorValid)
+        {
+            juce::Path line;
+            const int width = (int) r.getWidth();
+            for (int px = 0; px <= width; ++px)
+            {
+                const double hz = ui::FreqAxis::toHz ((float) px / (float) width);
+                const float x = r.getX() + (float) px, y = analyzerY (referenceDisplayDb (hz));
+                px == 0 ? line.startNewSubPath (x, y) : line.lineTo (x, y);
+            }
+            juce::Path dashed;
+            const float dashes[] = { 6.0f, 4.0f };
+            juce::PathStrokeType (1.8f).createDashedStroke (dashed, line, dashes, 2);
+            g.setColour (colours::accent.withAlpha (0.9f));
+            g.fillPath (dashed);
+        }
+        else
+            text += analyzerOn() ? "  (WAITS FOR AUDIO)" : "  (NEEDS THE ANALYZER)";
+        const auto font = ui::labelFont (10.0f);
+        const float width = juce::GlyphArrangement::getStringWidth (font, text) + 30.0f;
+        const juce::Rectangle<float> pill (r.getX() + 6.0f, r.getY() + 4.0f, width, 18.0f);
+        g.setColour (colours::glass.withAlpha (0.9f));
+        g.fillRoundedRectangle (pill, 9.0f);
+        g.setColour (colours::accent.withAlpha (0.7f));
+        g.drawRoundedRectangle (pill, 9.0f, 1.0f);
+        ui::hw::drawLamp (g, { pill.getX() + 11.0f, pill.getCentreY() }, 3.5f, colours::accent, true);
+        g.setFont (font);
+        g.setColour (colours::accent);
+        g.drawText (text, pill.withTrimmedLeft (22.0f).toNearestInt(), juce::Justification::centredLeft, false);
+    }
+
     float analyzerY (float db) const
     {
         const auto r = plot();
@@ -252,13 +379,6 @@ private:
         g.strokePath (path, juce::PathStrokeType (1.2f));
     }
 
-    void select (int band)
-    {
-        selected = band;
-        if (onSelect)
-            onSelect (band);
-        repaint();
-    }
     void set (const juce::String& pid, float value)
     {
         auto* p = apvts.getParameter (pid);
@@ -270,7 +390,11 @@ private:
     pdsp::StereoTap& tapBefore;
     pdsp::StereoTap& tapAfter;
     double analyzerRate = 0.0;
-    inline static const juce::Identifier analyzerProperty { "analyzer" };
+    inline static const juce::Identifier analyzerProperty { "analyzer" }, referenceProperty { "referenceCurve" };
+    pdsp::LinkCurve reference;
+    juce::String referenceName;
+    double anchorDb = 0.0, referenceMean = 0.0;
+    bool anchorValid = false;
     int dragged = -1;
 };
 } // namespace apollo::gui

@@ -331,7 +331,7 @@ int main (int argc, char** argv)
                "an unknown key with a non-numeric value does not drop the band");
         CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=abc gain=1 q=1", back) && back.empty(),
                "a known key with a bad number still drops the band");
-        // Copy EQ hands the target curve over with its bands (Iris draws it as its reference); a reader without curves still gets the bands.
+        // Copy EQ hands the target curve over with its bands (Iris and Apollo draw it as their reference); a reader without curves still gets the bands.
         const auto target = proc.activeTarget();
         pdsp::LinkCurve curve;
         CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back, &curve) && back.size() == 1 && curve.valid()
@@ -354,6 +354,7 @@ int main (int argc, char** argv)
                "a copied limiter setting reads back: the ceiling and the gain change");
         CHECK (pdsp::link::decode (text, back) && back.empty() && ui::linkDestination ({}, move) == "Aegis", "... an equaliser's reader sees no band in it, and the destination is Aegis");
         CHECK (! pdsp::link::decodeLimiter (ui::linkText ({ cut }).toStdString(), got), "a band list holds no limiter setting");
+        CHECK (ui::linkDestination ({ cut }) == "Iris or Apollo", "equaliser bands go to Iris or Apollo (both read them, and Copy EQ's curve)");
     }
 
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");

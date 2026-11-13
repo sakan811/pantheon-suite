@@ -54,7 +54,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     learnButton.onClick = [this] { chooseReferenceTracks(); };
     saveButton.onClick = [this] { saveCurve(); };
     copyEqButton.setTooltip ("Copy the equaliser moves that bring the measured curve towards the target (a low shelf, up to three bells and a high "
-                             "shelf, from the long-term average), and the target curve itself, to paste in Iris (PASTE on its band panel; the curve "
+                             "shelf, from the long-term average), and the target curve itself, to paste in Iris or Apollo (PASTE on its band panel or in its header; the curve "
                              "becomes its reference, drawn behind the spectrum). A difference from the target is a "
                              "matter of taste, so treat it as a starting point and judge it by ear.");
     copyEqButton.onClick = [this] { copyTonalEq(); };
@@ -117,12 +117,12 @@ void ThemisEditor::copyTonalEq()
         return;
     }
     const auto moves = themis::tonalMoves (measured, proc.activeTarget(), proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0);
-    // The target curve goes along with the bands: Iris draws it behind its spectrum as the reference to match.
+    // The target curve goes along with the bands: Iris and Apollo draw it behind their spectrum as the reference to follow.
     const auto target = proc.activeTarget();
     juce::SystemClipboard::copyTextToClipboard (ui::linkText (moves, &target));
     if (moves.empty())
     {
-        setStatus ("The curve is within 0.5 dB of the target: no bands to copy, but the target curve is on the clipboard for Iris' reference.", false);
+        setStatus ("The curve is within 0.5 dB of the target: no bands to copy, but the target curve is on the clipboard for the reference of Iris or Apollo.", false);
         return;
     }
     setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s) and the target curve: paste them in " + ui::linkDestination (moves) + " (PASTE on its band panel).", false);

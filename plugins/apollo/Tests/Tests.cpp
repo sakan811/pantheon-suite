@@ -281,5 +281,88 @@ int main()
         }
     }
 
+    // [9] GAIN MATCH and DELTA.
+    std::printf("\n[9] Gain match, delta\n");
+    {
+        std::mt19937 gen (21);
+        std::uniform_real_distribution<float> white (-0.3f, 0.3f);
+        const int n = 48000 * 6;
+        Stereo noise { std::vector<float> ((size_t) n), std::vector<float> ((size_t) n) };
+        for (auto& v : noise.l) v = white (gen);
+        for (auto& v : noise.r) v = white (gen);
+        const auto lastSecond = [&] (const Stereo& s) { return rms (s.l, (size_t) n - 48000); };
+        for (const Phase phase : { Phase::minimum, Phase::linear })
+        {
+            const char* name = phase == Phase::minimum ? "minimum phase" : "linear phase";
+            auto boost = one (Type::lowShelf, 4000.0, 9.0, 0.707, phase);
+            const auto run1 = [&] (const EngineParams& p) { Engine e; e.prepare (kFs, phase); return run (e, noise, p); };
+            const double louder = db (lastSecond (run1 (boost)) / lastSecond (noise));
+            boost.match = true;
+            Engine e;
+            e.prepare (kFs, phase);
+            const auto matched = run (e, noise, boost);
+            const double after = db (lastSecond (matched) / lastSecond (noise));
+            check (louder > 2.0 && std::fabs (after) < 0.5, fmt ("%s: a +9 dB low shelf on noise is %.2f dB louder; with GAIN MATCH it is %+.2f dB after 5 s (applying %.2f dB)", name, louder, after, e.matchDb.load()));
+            check (std::fabs (e.matchDb.load() + louder) < 0.5, fmt ("%s: the readout says what it applies (%.2f dB against the %.2f dB the bands added)", name, e.matchDb.load(), louder));
+
+            // At most 12 dB either way: a tone cut by 18 dB comes back by 12.
+            auto cut = one (Type::bell, 1000.0, -18.0, 1.0, phase);
+            cut.match = true;
+            Engine c;
+            c.prepare (kFs, phase);
+            const auto toneOut = run (c, tone (1000.0, n), cut);
+            const double net = db (rms (toneOut.l, (size_t) n - 48000) / rms (tone (1000.0, n).l, (size_t) n - 48000));
+            check (std::fabs (net + 6.0) < 0.3, fmt ("%s: a tone cut by 18 dB with GAIN MATCH is %+.2f dB: the match makes up at most 12 dB", name, net));
+
+            // OUTPUT comes after the match.
+            auto trimmed = boost;
+            trimmed.outDb = 6.0;
+            Engine t;
+            t.prepare (kFs, phase);
+            const double withOut = db (lastSecond (run (t, noise, trimmed)) / lastSecond (noise));
+            check (std::fabs (withOut - 6.0) < 0.5, fmt ("%s: OUTPUT +6 dB on top of the match is %+.2f dB", name, withOut));
+
+            // Matching is the same for every block size, bit for bit (it steps on the engine's tick).
+            auto longer = boost;
+            longer.bands[1] = { true, Type::bell, 300.0, -4.0, 1.0, 0, Target::mid };
+            Stereo head { std::vector<float> (noise.l.begin(), noise.l.begin() + 60000), std::vector<float> (noise.r.begin(), noise.r.begin() + 60000) };
+            Engine a;
+            a.prepare (kFs, phase);
+            const auto ref = run (a, head, longer, 512);
+            bool same = true;
+            for (const int block : { 1, 7, 333, 4096 })
+            {
+                Engine b;
+                b.prepare (kFs, phase);
+                const auto out = run (b, head, longer, block);
+                same = same && out.l == ref.l && out.r == ref.r;
+            }
+            check (same, fmt ("%s: with GAIN MATCH on, blocks of 1, 7, 333 and 4096 samples give the output of 512, bit for bit", name));
+
+            // Off, it is not there: the eight bells at 0 dB test [2] is the proof; here the readout stays at 0 dB.
+            Engine off;
+            off.prepare (kFs, phase);
+            run (off, head, one (Type::lowShelf, 4000.0, 9.0, 0.707, phase));
+            check (off.matchDb.load() == 0.0f, fmt ("%s: with GAIN MATCH off it applies 0.00 dB", name));
+
+            // DELTA: output minus input, the input delayed as the output is. A +9 dB bell on its own centre frequency is a pure gain: delta is (10^(9/20) - 1) x the tone.
+            const auto bell = one (Type::bell, 1000.0, 9.0, 1.0, phase);
+            Engine d;
+            d.prepare (kFs, phase);
+            d.delta = true;
+            const auto deltaOut = run (d, tone (1000.0, n), bell);
+            const double expected = db (std::pow (10.0, 9.0 / 20.0) - 1.0), got = db (rms (deltaOut.l, (size_t) n - 48000) / rms (tone (1000.0, n).l, (size_t) n - 48000));
+            check (std::fabs (got - expected) < 0.1, fmt ("%s: DELTA of a +9 dB bell on a tone at its frequency is %+.2f dB (the wanted %+.2f)", name, got, expected));
+            Engine silent;
+            silent.prepare (kFs, phase);
+            silent.delta = true;
+            const auto none = run (silent, noise, EngineParams());
+            double biggest = 0.0;
+            for (size_t i = 0; i < none.l.size(); ++i)
+                biggest = std::fmax (biggest, std::fmax (std::fabs ((double) none.l[i]), std::fabs ((double) none.r[i])));
+            check (biggest == 0.0, fmt ("%s: DELTA with nothing on is silence (largest sample %.1e): the delayed input is the output, exactly", name, biggest));
+        }
+    }
+
     return test::finish ("ApolloTests");
 }

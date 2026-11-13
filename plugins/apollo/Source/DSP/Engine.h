@@ -5,6 +5,7 @@
 
 #include "LinearPhase.h"
 #include <atomic>
+#include <vector>
 
 // The whole equaliser: no GUI, no JUCE. Everything is sized in prepare(); process() allocates and locks nothing.
 namespace apollo
@@ -17,6 +18,7 @@ struct EngineParams
     std::array<BandParams, kBands> bands;
     Phase phase = Phase::minimum;
     double outDb = 0.0;
+    bool match = false; // GAIN MATCH: the bands' effect on the level is taken off again (slowly), so a boost that is merely louder is not mistaken for better
 };
 
 class Engine
@@ -33,6 +35,10 @@ public:
         for (auto& c : convolver)
             c.prepare (sizes);
         smoothing = 1.0 - std::exp (-(double) kTick / (0.02 * fs));
+        matchEnergyK = 1.0 - std::exp (-(double) kTick / (0.6 * fs));
+        matchGainK = 1.0 - std::exp (-(double) kTick / (0.15 * fs));
+        dryL.assign ((size_t) std::max (sizes.latency(), 1), 0.0);
+        dryR.assign (dryL.size(), 0.0);
         configure (phase);
     }
 
@@ -48,6 +54,14 @@ public:
         for (auto& c : convolver)
             c.reset();
         tickCount = 0;
+        std::fill (dryL.begin(), dryL.end(), 0.0);
+        std::fill (dryR.begin(), dryR.end(), 0.0);
+        dryPos = 0;
+        matchNow = 1.0;
+        msDry = msWet = 1.0e-6;
+        eDry = eWet = 0.0;
+        eCount = 0;
+        matchDb.store (0.0f, std::memory_order_relaxed);
         outNow = -1.0; // snaps to the target at the first tick
         linearDirty = true;
         sinceDesign = 1000;
@@ -75,11 +89,26 @@ public:
             for (int i = done; i < done + m; ++i)
             {
                 const double l = std::isfinite (left[i]) ? (double) left[i] : 0.0, r = std::isfinite (right[i]) ? (double) right[i] : 0.0;
-                double yl, yr;
+                double yl, yr, dl = l, dr = r; // dl, dr: the input as the output hears it (in linear phase, the input of `latency` samples ago)
                 if (mode == Phase::minimum)
                     sample (l, r, yl, yr);
                 else
+                {
                     sampleLinear (l, r, yl, yr);
+                    std::swap (dl, dryL[dryPos]);
+                    std::swap (dr, dryR[dryPos]);
+                    dryPos = dryPos + 1 == dryL.size() ? 0 : dryPos + 1;
+                }
+                eDry += dl * dl + dr * dr;
+                eWet += yl * yl + yr * yr;
+                ++eCount;
+                yl *= matchNow; // exactly 1.0 unless GAIN MATCH is on
+                yr *= matchNow;
+                if (deltaOn)
+                {
+                    yl -= dl;
+                    yr -= dr;
+                }
                 left[i] = (float) (yl * outNow);
                 right[i] = (float) (yr * outNow);
             }
@@ -91,6 +120,8 @@ public:
     // What the editor draws: the bands as the engine has them now (smoothed), for the curve while a knob moves.
     std::atomic<int> latencySamples { 0 };
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
+    std::atomic<bool> delta { false };   // DELTA: only what the bands change (output minus input). Monitoring, not a setting: never saved, never a parameter
+    std::atomic<float> matchDb { 0.0f }; // the gain GAIN MATCH is applying now, for the display
 
 private:
     struct BandState
@@ -102,6 +133,18 @@ private:
 
     void tick (const EngineParams& p) noexcept
     {
+        deltaOn = delta.load (std::memory_order_relaxed);
+        // GAIN MATCH: the RMS of what came in against what the bands made of it, over about 0.6 s; the gain that equals them follows at 0.15 s, within 12 dB.
+        if (eCount > 0)
+        {
+            msDry += matchEnergyK * (eDry / eCount - msDry);
+            msWet += matchEnergyK * (eWet / eCount - msWet);
+            eDry = eWet = 0.0;
+            eCount = 0;
+        }
+        const double matchTarget = p.match ? std::clamp (std::sqrt ((msDry + 1.0e-9) / (msWet + 1.0e-9)), 0.25, 4.0) : 1.0;
+        matchNow = std::fabs (matchTarget - matchNow) < 1e-9 ? matchTarget : matchNow + (matchTarget - matchNow) * matchGainK;
+        matchDb.store ((float) (20.0 * std::log10 (matchNow)), std::memory_order_relaxed);
         const double outTarget = std::pow (10.0, std::clamp (p.outDb, -24.0, 24.0) / 20.0);
         outNow = outNow < 0.0 ? outTarget : (std::fabs (outTarget - outNow) < 1e-9 ? outTarget : outNow + (outTarget - outNow) * smoothing);
         for (int i = 0; i < kBands; ++i)
@@ -218,6 +261,11 @@ private:
     }
 
     double fs = 48000.0, smoothing = 0.1, outNow = -1.0;
+    double matchEnergyK = 0.001, matchGainK = 0.01, matchNow = 1.0, msDry = 1.0e-6, msWet = 1.0e-6, eDry = 0.0, eWet = 0.0;
+    int eCount = 0;
+    bool deltaOn = false;
+    std::vector<double> dryL, dryR; // the input, delayed by the linear phase's latency, to compare the output with
+    size_t dryPos = 0;
     LinearSizes sizes;
     Phase mode = Phase::minimum;
     int tickCount = 0, sinceDesign = 1000;
