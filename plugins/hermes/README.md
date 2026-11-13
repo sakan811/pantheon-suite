@@ -16,6 +16,7 @@ It changes nothing but the level and what you listen to.
 | **Listen** | *Stereo* (as it is), *Mono* (`(L + R) / 2` in both: what a mono speaker plays), *Left* and *Right* (one channel in both), *Side* (`(L - R) / 2` in both: what differs between the channels), *Swap*. A check: the meters still read the whole sound. |
 | **Meters** | **Momentary** (400 ms) and **short-term** (3 s) loudness in LUFS; **integrated** loudness (gated, since RESET); **range** in LU; the **true peak** in dBTP and the sample peak in dBFS; and a graph of the last minute. |
 | **Reference** | **LOAD** a track (WAV, AIFF, FLAC, OGG, MP3 where the system can read it; at most 10 minutes, kept in memory), **REF (B)** to hear it instead of your sound (A) with a 20 ms crossfade, **LEVEL MATCH** to bring it to the integrated loudness of your sound, **REF TRIM** (+-12 dB) to add to that, **RESTART**. It loops, and plays on while you listen to A. The file's path is kept in the session. |
+| **Presets** | Eight listening setups (Normal, Mono Check, Side Only, Left Only, Right Only, Swap Check, Reference A/B, Reference As Is). A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY and REF TRIM are kept. LISTEN and REF are saved with the session: choose Normal before a bounce. |
 
 ## How it works
 
@@ -49,7 +50,7 @@ It changes nothing but the level and what you listen to.
 - **LISTEN and REF are parameters and are saved with the session**: set LISTEN back to Stereo and REF off before you bounce (a note reminds you).
 - **A reference is kept whole in memory** (at most 10 minutes; about 230 MB at 48 kHz). It is brought to the sample rate the session had when it was loaded; if the session's rate changes it is made again from the file.
 - **It reads the file again from its path** when a session is opened: if the file has moved, the session opens without a reference.
-- It has not been built on macOS or run through `auval`, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
 

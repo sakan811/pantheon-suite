@@ -143,5 +143,51 @@ int main()
     }
     wav.deleteFile();
 
+    // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
+    {
+        HermesProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        bool all = q.getNumPrograms() == (int) presets().size() && q.getNumPrograms() >= 6;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+        {
+            q.setCurrentProgram (i);
+            const auto len = std::strlen (presets()[(size_t) i].purpose);
+            all = all && q.getProgramName (i).isNotEmpty() && q.getCurrentProgram() == i && len > 20 && len <= 140;
+        }
+        check (all, fmt ("all %d presets apply, have a name and a one-line purpose", q.getNumPrograms()));
+        const auto indexOf = [&] (const char* name)
+        {
+            for (int i = 0; i < q.getNumPrograms(); ++i)
+                if (q.getProgramName (i) == name)
+                    return i;
+            check (false, std::string ("a preset called ") + name);
+            return 0;
+        };
+        const auto raw = [&] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
+        setValue (q.apvts, id::trim, 3.0f);
+        q.setCurrentProgram (indexOf ("Mono Check"));
+        check ((int) raw (id::listen) == 1 && std::fabs (raw (id::trim) - 3.0f) < 0.01f, "Mono Check listens to the mono sum, and TRIM is kept");
+        q.setCurrentProgram (indexOf ("Reference A/B"));
+        check ((int) raw (id::listen) == 0 && raw (id::reference) > 0.5f && raw (id::levelMatch) > 0.5f, "Reference A/B: the reference on and level matched, and LISTEN back on Stereo");
+        q.setCurrentProgram (0);
+        check ((int) raw (id::listen) == 0 && raw (id::reference) < 0.5f && raw (id::levelMatch) > 0.5f && std::fabs (raw (id::trim) - 3.0f) < 0.01f, "Normal: Stereo, the reference off, LEVEL MATCH back on (its default), TRIM kept");
+        q.setCurrentProgram (indexOf ("Reference As Is"));
+        check (raw (id::reference) > 0.5f && raw (id::levelMatch) < 0.5f, "Reference As Is: the reference at its own level (LEVEL MATCH off)");
+        const int chosen = indexOf ("Side Only");
+        q.setCurrentProgram (chosen);
+        check ((int) raw (id::listen) == 4, "Side Only listens to the sides");
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        HermesProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (other.getCurrentProgram() == chosen, "the chosen preset is saved with the session");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HermesEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == chosen + 1, "the editor's preset box lists the presets and shows the current one");
+        check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
+    }
+
     return test::finish ("HermesUiCheck");
 }
