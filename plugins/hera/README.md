@@ -9,6 +9,10 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 *Hera* is the goddess of marriage and of what holds together: the compressor's work is to bring the loud and the quiet closer so that they hold together as one.
 (CMake targets, namespaces and plugin codes use the short name "Hera".)
 
+![Hera Bond](docs/screenshot.png)
+
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, an 8 dB knee, AUTO REL and AUTO MAKEUP on. On the left, the transfer curve (input across, output up) with the dot where the level is now; on the right, the reduction over the last seconds (-8.5 dB now). The strip warns that taking off 11 dB or more will pump. Regenerate with the command under "Development".*
+
 ## What it does
 
 | | |

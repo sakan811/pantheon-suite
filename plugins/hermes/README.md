@@ -8,6 +8,10 @@ It changes nothing but the level and what you listen to.
 
 *Hermes* is the messenger and the god of measures and exchanges: he carries a thing from one place to another and says what it weighs. (CMake targets, namespaces and plugin codes use the short name "Hermes".)
 
+![Hermes Level](docs/screenshot.png)
+
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary, short-term and integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
+
 ## What it does
 
 | | |

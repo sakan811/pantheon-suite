@@ -8,6 +8,10 @@ of the sides as a whole, a **mono bass** that takes the sides away below a frequ
 *Castor* is one of the Dioscuri, the twins: two that are one. The plugin works on what is the same in both channels and what is different. (CMake targets,
 namespaces and plugin codes use the short name "Castor".)
 
+![Castor Pair](docs/screenshot.png)
+
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz. The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. Regenerate with the command under "Development".*
+
 ## What it does
 
 | | |
