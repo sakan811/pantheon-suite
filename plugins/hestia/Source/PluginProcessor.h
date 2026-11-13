@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Parameters.h"
+#include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
 class HestiaProcessor : public juce::AudioProcessor
@@ -24,10 +25,10 @@ public:
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    int getNumPrograms() override { return programs.count(); }
+    int getCurrentProgram() override { return programs.current(); }
+    void setCurrentProgram (int index) override { programs.set (index); }
+    const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
@@ -35,6 +36,7 @@ public:
 
     hestia::Engine engine; // makes its place on the shared bus when the instance is made and gives it back when it goes
     juce::AudioProcessorValueTreeState apvts;
+    ui::Programs programs { apvts, hestia::presets(), hestia::keepsParameter }; // after apvts
     // Whether the host handed the last block a sidechain: the editor says so.
     std::atomic<bool> sidechainConnected { false };
 

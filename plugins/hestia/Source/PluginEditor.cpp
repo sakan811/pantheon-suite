@@ -8,7 +8,7 @@ namespace hw = ui::hw;
 
 namespace
 {
-constexpr int kWidth = 960;
+constexpr int kWidth = 1110;
 constexpr int headerHeight = 84;
 constexpr int viewHeight = 300;
 constexpr int knobPanelHeight = 134;
@@ -36,6 +36,7 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
       release (p.apvts, id::release, "RELEASE", "How fast a cut goes out when the other stem stops.", ui::Knob::Layout::below),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything."),
       scImportance (p.apvts, id::scImportance, "SC IMPORT", "How much the track on the sidechain matters, as IMPORTANCE does for a stem.", ui::Knob::Layout::beside),
+      presetBox (p, presets(), "The mix letter, the sidechain's role and importance, and OUTPUT are kept."),
       view (p),
       proc (p)
 {
@@ -44,7 +45,7 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
     deltaButton.setTooltip ("Listen to only what Hestia changes in this stem: the stem as it comes out minus as it came in (the cut and the depth). Not saved with the session.");
     deltaButton.onClick = [this] { proc.engine.deltaOn = ! proc.engine.deltaOn.load(); };
     for (auto* c : std::initializer_list<juce::Component*> { &view, &roleBox, &mixBox, &scRoleBox, &importance, &distance, &carve, &reach, &attack, &release, &outKnob, &scImportance,
-                                                              &deltaButton, &guideButton })
+                                                              &deltaButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
@@ -71,6 +72,9 @@ void HestiaEditor::resized()
     row.removeFromLeft (14);
     mixLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
     mixBox.setBounds (row.removeFromLeft (90));
+    row.removeFromLeft (14);
+    presetLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
+    presetBox.setBounds (row.removeFromLeft (150));
     row.removeFromLeft (14);
     deltaButton.setBounds (row.removeFromLeft (96));
     guideButton.setBounds (row.removeFromRight (64));
@@ -114,6 +118,7 @@ void HestiaEditor::paint (juce::Graphics& g)
     g.fillAll (colours::background);
     hw::drawHeaderPlate (g, getLocalBounds().removeFromTop (headerHeight).toFloat());
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Stem spacer", inLevel > 0.001f, 25.0f);
+    hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Role", roleLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Mix", mixLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawModule (g, knobPanel.toFloat());
@@ -131,5 +136,6 @@ void HestiaEditor::timerCallback()
     for (const auto& l : proc.engine.ownLevel)
         level = std::fmax (level, l.load (std::memory_order_relaxed));
     inLevel = level > -80.0f ? 1.0f : 0.0f;
+    presetBox.sync();
     repaint();
 }

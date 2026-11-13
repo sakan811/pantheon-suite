@@ -63,6 +63,7 @@ void HestiaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
 void HestiaProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    programs.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -71,7 +72,10 @@ void HestiaProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            programs.loadFrom (apvts.state);
+        }
 }
 
 juce::AudioProcessorEditor* HestiaProcessor::createEditor() { return new ui::ScaledEditor<HestiaEditor> (*this, apvts.state, *this); }
