@@ -120,7 +120,7 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
 
 ## Gotchas already paid for
 
-- `createEditor()` returns a `ui::ScaledEditor<HephaestusEditor>` (shared/ui Scaled.h), not the editor: the window opens at 70% and scales. Tests and snapshots reach the editor with `ui::innerOf<HephaestusEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
+- `createEditor()` returns a `ui::ScaledEditor<HephaestusEditor>` (shared/ui Scaled.h), not the editor: the window opens at 100% and scales. Tests and snapshots reach the editor with `ui::innerOf<HephaestusEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
 - In an editor constructor call `setSize()` **last**; `resized()` runs inside it and only positions controls that exist.
 - A hosted VST3's parameters are wrapper objects: find them by name, not `dynamic_cast<RangedAudioParameter*>`.
   Its editor is a native view, so editor screenshots must instantiate `HephaestusProcessor` directly (`Snapshot.cpp`).

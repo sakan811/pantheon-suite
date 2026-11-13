@@ -9,14 +9,14 @@
 
 namespace ui
 {
-// Opens a plugin's editor smaller than it was drawn, and lets the user drag the corner to scale it. The editor inside is laid out, drawn and tested at its own
+// Opens a plugin's editor at the size it was drawn (100%), and lets the user drag the corner to scale it. The editor inside is laid out, drawn and tested at its own
 // size (the design size it sets in its constructor) and never knows: this window scales it by a transform, as Harmonia's does. The aspect ratio is kept. The scale
 // is kept with the session (a property of the processor's state, `uiScale`), so the next time the editor opens it is as it was left.
 //
 //   juce::AudioProcessorEditor* MyProcessor::createEditor() { return new ui::ScaledEditor<MyEditor> (*this, apvts.state, *this); }
 //
 // The extra arguments are handed to the editor's constructor. Tests reach the editor inside with `ui::innerOf<MyEditor> (*processor.createEditor())`.
-inline constexpr float kDefaultEditorScale = 0.7f, kMinEditorScale = 0.5f, kMaxEditorScale = 1.5f;
+inline constexpr float kDefaultEditorScale = 1.0f, kMinEditorScale = 0.5f, kMaxEditorScale = 1.5f;
 
 template <class Editor>
 class ScaledEditor : public juce::AudioProcessorEditor
