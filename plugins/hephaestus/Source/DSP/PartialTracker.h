@@ -57,7 +57,14 @@ public:
         gateCoeff = 1.0 - std::exp (-1.0 / (0.02 * fs));
         hopLength = std::max (8, (int) (fs / 1500.0));
         glide = 1.0 - std::exp (-(double) hopLength / (0.004 * fs));
-        retune (std::sqrt (lo * hi) * 2.0 * kPi);
+        // setup() runs again every block while a band edge glides (FundamentalEngine::updateCoefficients): the pitch the tracker
+        // has locked to must survive that, so it is only centred the first time (or at a new sample rate) and otherwise kept inside the new range.
+        if (!configured || sampleRate != configuredFs)
+            retune (std::sqrt (lo * hi) * 2.0 * kPi);
+        else
+            retune (std::clamp (omega, lo * 2.0 * kPi, hi * 2.0 * kPi));
+        configured = true;
+        configuredFs = sampleRate;
     }
 
     void reset() noexcept
@@ -155,6 +162,8 @@ private:
     double fs = 48000.0, loHz = 40.0, hiHz = 120.0, logStep = 0.1, dt = 1.0 / 48000.0, omega = 2.0 * kPi * 70.0;
     double powerCoeff = 0.0, gateCoeff = 0.0, glide = 0.0, bandPower = 0.0, partialPower = 0.0, gateNow = 0.0;
     int bankSize = 5, hop = 0, hopLength = 32;
+    bool configured = false;
+    double configuredFs = 0.0;
 
     std::array<pdsp::Biquad, maxBank> bank;
     std::array<double, maxBank> energy {}, energyCoeff {};

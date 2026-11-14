@@ -7,6 +7,7 @@
 #include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <pantheon/dsp/AnalyzerTap.h>
+#include <pantheon/dsp/BypassDelay.h>
 
 class ApolloProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
@@ -16,9 +17,10 @@ public:
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
-    void reset() override { engine.reset(); } // a host locate, loop or stop: nothing of the old position may sound at the new one
+    void reset() override { engine.reset(); bypassDelay.reset(); } // a host locate, loop or stop: nothing of the old position may sound at the new one
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override; // delayed by the reported latency, so a bypassed track stays in time
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -46,6 +48,7 @@ private:
     // The latency can move with a setting; setLatencySamples belongs to the message thread, so the audio thread only asks for it.
     void handleAsyncUpdate() override;
     std::atomic<int> reportedLatency { 0 };
+    pdsp::BypassDelay bypassDelay;
     std::vector<float> monoRight; // a mono host: the engine's second channel
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ApolloProcessor)

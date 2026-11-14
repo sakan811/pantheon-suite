@@ -24,6 +24,9 @@ public:
 
     std::array<std::unique_ptr<ui::Knob>, castor::kBands> widths;
     ui::Knob midKnob, sideKnob, monoKnob, balanceKnob, outKnob;
+    ui::Choice listen;
+    juce::TextButton minButton { "MIN --" }; // the lowest correlation since it was last clicked
+    float correlationMinHold() const noexcept { return minHold; }
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { castor::guideTitle(), castor::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -40,7 +43,7 @@ private:
     juce::Rectangle<int> nameplate, presetLabel, gonio, correlationBar, noteStrip, bandsLabel, otherLabel;
     std::array<float, kPoints> pointL {}, pointR {};
     std::vector<float> scratchL, scratchR;
-    float correlation = 1.0f;
+    float correlation = 1.0f, minHold = 1.0f;
     bool live = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CastorEditor)

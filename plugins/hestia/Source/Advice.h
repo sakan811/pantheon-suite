@@ -20,6 +20,7 @@ struct AdviceInput
     float strongestCutDb = 0.0f;  // the biggest cut in any band now (negative)
     bool delta = false;
     bool sidechain = false;       // a sidechain is connected
+    int sentTo = -1;              // COPY TO MIX has just handed its settings to this many other instances (-1: not lately)
 };
 
 constexpr float kSameImportance = 0.05f;
@@ -36,6 +37,11 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
 
     if (in.delta)
         warn ("DELTA is on: you hear only what Hestia changes, not the stem. Switch it off.");
+    if (in.sentTo >= 0)
+        info (in.sentTo == 0 ? "Copy to mix: no other instance is in this mix yet, so nothing was sent."
+                              : "Copied CARVE, REACH, ATTACK and RELEASE to " + std::to_string (in.sentTo) + (in.sentTo == 1 ? " other instance" : " other instances") + " of this mix.");
+    if (p.hold)
+        info ("HOLD is on: the cut stays as it is, whatever the other stems do. Switch it off to follow them again.");
     if (p.group == 0)
         warn ("MIX is Off: this stem is not linked to any other, so nothing is cut. Pick a mix, A to H.");
     else if (in.others == 0)
@@ -71,10 +77,14 @@ inline const char* guideText()
            "  - IMPORTANCE moves a stem's claim: raise it on the stem that must not lose room, lower it on the one that may.\n"
            "  - CARVE is the most any band is cut, REACH how much quieter than this stem another can be and still be given room, "
            "ATTACK and RELEASE how fast the cut comes in and goes out. DELTA lets you hear exactly what Hestia changes.\n"
+           "  - HOLD freezes the cut where it is now (this stem is still seen by the others): set it while the mix plays as you want it, and the cut stays "
+           "through a section where the others change.\n"
+           "  - COPY TO MIX hands this stem's CARVE, REACH, ATTACK and RELEASE to every other Hestia in the same mix, so they are set once.\n"
            "  - DEPTH puts the stem back from the front: the air takes the highs, the level falls, the sides narrow and the first reflections "
            "of a room (up to 37 ms) come up. The depth map shows where each stem sits, and a stem at the back also gives way to the ones in front.\n"
            "  - SIDECHAIN: route any track into Hestia's sidechain input (a track with no Hestia on it, from any plugin chain) and set SC ROLE "
            "and SC IMPORTANCE to say what it is: it is then one more stem in the mix. It is only listened to, never heard.\n"
+           "  - Where the host tells Hestia the name of its track, the lists and the depth map call each stem by it instead of by its role.\n"
            "\n"
            "IT IS NOT FOR:\n"
            "  - Fixing a single stem: it only cuts, and only because another stem is there. For a fixed cut use an equaliser (Iris).\n"

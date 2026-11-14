@@ -22,8 +22,8 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 4 + 2 * kCrossovers + 10 * kBands,
-           fmt ("%d parameters: phase, oversampling, output, look-ahead, the %d splits (frequency and on) and 10 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
+    check (proc.getParameters().size() == 5 + 2 * kCrossovers + 10 * kBands,
+           fmt ("%d parameters: phase, oversampling, output, look-ahead, mix, the %d splits (frequency and on) and 10 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
     check (channelNames.size() == kNumChannelModes && oversamplingNames.size() == kNumOsModes && lookaheadNames().size() == kNumLookahead && listenNames.size() == 2 && directionNames.size() == 2, "the choice lists match the engine's modes");
     for (int k = 0; k < kCrossovers; ++k)
         check (std::fabs (proc.apvts.getRawParameterValue (id::crossover[(size_t) k])->load() - (float) pdsp::bands::crossoverHz (k)) < 0.5f,
@@ -50,6 +50,22 @@ int main()
                "every split removed: one band over the whole spectrum");
         moveSplit (s, addSplit (s, 300.0) - 1, 5.0);
         check (std::fabs (layoutOf (s).edgeHz[1] - kMinCrossoverHz) < 1.0, "an edge dragged off the bottom stops at 40 Hz");
+    }
+
+    // A split added below bands that sit in scattered strips: every band must get the settings of its own strip, not of one an earlier copy wrote.
+    {
+        AtlasProcessor q;
+        auto& s = q.apvts;
+        for (int k : { 0, 1, 3 }) setValue (s, id::split[(size_t) k], 0.0f); // bands on strips 0, 3 and 5
+        setValue (s, bandIds (0).threshold, -11.0f);
+        setValue (s, bandIds (3).threshold, -22.0f);
+        setValue (s, bandIds (5).threshold, -33.0f);
+        const bool scattered = layoutOf (s).numBands == 3 && layoutOf (s).slot[1] == 3 && layoutOf (s).slot[2] == 5;
+        const int made = addSplit (s, 100.0);
+        const auto e = readParams (s);
+        check (scattered && made == 1 && layoutOf (s).numBands == 4 && std::fabs (e.bands[0].thresholdDb + 11.0) < 0.01 && std::fabs (e.bands[1].thresholdDb + 11.0) < 0.01
+                   && std::fabs (e.bands[2].thresholdDb + 22.0) < 0.01 && std::fabs (e.bands[3].thresholdDb + 33.0) < 0.01,
+               "a split below bands on strips 0, 3 and 5: the new band has the lower band's settings and the others keep their own (copies read a snapshot)");
     }
 
     auto& monitor = proc.engine.monitor;
@@ -120,6 +136,47 @@ int main()
         }
         const float learned = (float) readParams (proc.apvts).bands[1].thresholdDb;
         const float read = proc.engine.levelMeter[1].load(); // the tone is about 3 dB down inside a 70 to 160 Hz band
+        // The LEARN button of a strip: the same listening, with a 6 dB swing, so the threshold is 3 dB under the loudest the band read.
+        setValue (proc.apvts, bandIds (1).threshold, 0.0f);
+        editor.strips[1]->learn.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        check (view.learningSlot() == 1, "LEARN on a strip starts listening to that band");
+        for (int block = 0; block < 260; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                const float v = 0.25f * std::sin (6.2831853f * 100.0f * (float) (block * 512 + i) / 48000.0f);
+                audio.setSample (0, i, v);
+                audio.setSample (1, i, v);
+            }
+            proc.processBlock (audio, noMidi);
+            if (block % 3 == 0)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+        }
+        const float learnedByButton = (float) readParams (proc.apvts).bands[1].thresholdDb;
+        check (view.learningSlot() < 0 && std::fabs (learnedByButton - (proc.engine.levelMeter[1].load() - 3.0f)) < 0.5f,
+               fmt ("... and two seconds later THRESH is %.1f dB, 3 dB under what the band reads (%.1f dB)", learnedByButton, (double) proc.engine.levelMeter[1].load()));
+
+        // TO ALL: THRESH, RATIO, ATTACK and RELEASE go to every band, and nothing else does.
+        setValue (proc.apvts, bandIds (1).ratio, 7.0f);
+        setValue (proc.apvts, bandIds (1).attack, 33.0f);
+        setValue (proc.apvts, bandIds (1).release, 444.0f);
+        setValue (proc.apvts, bandIds (1).makeup, 5.0f);
+        setValue (proc.apvts, bandIds (4).channels, (float) (int) Channels::midSide);
+        editor.strips[1]->toAll.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        bool all = true;
+        const auto after = readParams (proc.apvts);
+        for (int band = 0; band < layoutOf (proc.apvts).numBands; ++band)
+            all = all && std::fabs (after.bands[(size_t) band].thresholdDb - learnedByButton) < 0.01 && std::fabs (after.bands[(size_t) band].ratio - 7.0) < 0.01
+                  && std::fabs (after.bands[(size_t) band].attackMs - 33.0) < 0.01 && std::fabs (after.bands[(size_t) band].releaseMs - 444.0) < 0.01;
+        check (all && std::fabs (after.bands[3].makeupDb) < 0.01 && after.bands[4].channels == Channels::midSide,
+               "TO ALL copies THRESH, RATIO, ATTACK and RELEASE to every band and leaves MAKEUP and the channel mode alone");
+        for (auto* param : proc.getParameters()) // the rest of the check starts from a fresh plugin's bands
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+                if (ranged->paramID.startsWith ("b") && ranged->paramID.contains ("_") && ranged->paramID != bandIds (0).channels) // band 1 keeps the M/S the next check reads
+                    setValue (proc.apvts, ranged->paramID, ranged->convertFrom0to1 (ranged->getDefaultValue()));
+
         check (read < -13.0f && read > -17.0f && std::fabs (learned - (read - 7.0f)) < 0.5f,
                fmt ("... and after two seconds of a 100 Hz tone at -12 dB (%.1f dB in the band) its threshold is half the jump under that: %.1f dB", read, learned));
 
@@ -139,6 +196,31 @@ int main()
     juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
     check (proc.getLatencySamples() == proc.engine.latencySamples.load() && proc.getLatencySamples() > LinearSplit::latencyFor (48000.0),
            fmt ("Linear with 4x oversampling: the host is told %d samples", proc.getLatencySamples()));
+
+    // Bypass: a bypassed plugin that reports latency delays by it (the host compensates for it either way).
+    {
+        AtlasProcessor q;
+        setValue (q.apvts, id::phase, 1.0f);
+        setValue (q.apvts, id::oversampling, 2.0f);
+        setValue (q.apvts, id::lookahead, 4.0f);
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        const int latency = q.getLatencySamples();
+        juce::AudioBuffer<float> in (2, 512);
+        juce::MidiBuffer none;
+        int found = -1;
+        for (int block = 0; block < 40 && found < 0; ++block)
+        {
+            in.clear();
+            if (block == 0)
+                in.setSample (0, 5, 1.0f);
+            q.processBlockBypassed (in, none);
+            for (int i = 0; i < 512 && found < 0; ++i)
+                if (in.getSample (0, i) > 0.5f)
+                    found = block * 512 + i;
+        }
+        check (latency > 2000 && found == 5 + latency, fmt ("bypassed with Linear, 4x oversampling and 10 ms look-ahead: an impulse comes out %d samples late, the reported latency is %d", found - 5, latency));
+    }
 
     // State round trip.
     juce::MemoryBlock state;

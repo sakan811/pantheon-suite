@@ -20,7 +20,7 @@ public:
     {
         setTooltip ("The space of the mix, low to high across.\nTop: this stem (teal) and the other stems of the mix, each in its colour: how loud each is in each third-octave band. "
                     "The sidechain, if one is connected, is the white line.\nThe strip: who owns each band, by the stem with the biggest claim there.\nBottom: the cut this stem makes, "
-                    "in amber: it gives up a band only where a stem with a bigger claim is playing.\nRight: how far back each stem sits (its DEPTH), front at the top.");
+                    "in amber: it gives up a band only where a stem with a bigger claim is playing.\nRight: how far back each stem sits (its DEPTH), front at the top.\nA stem is called by its track's name when the host tells it, otherwise by its role.");
     }
 
     float xForHz (double hz) const noexcept { return plot().getX() + ui::FreqAxis::toNormalised ((float) hz) * plot().getWidth(); }
@@ -43,8 +43,21 @@ public:
         sidechainRole = params.scRole;
         sidechainImportance = params.scImportance;
         numOthers = proc.engine.slotIndex() >= 0 ? proc.engine.busRef().gather (proc.engine.slotIndex(), params.group, (std::uint32_t) juce::Time::getMillisecondCounter(), others.data()) : 0;
+        auto& bus = proc.engine.busRef();
+        char name[kNameChars + 1];
+        bus.nameOf (proc.engine.slotIndex(), name);
+        ownName = juce::String::fromUTF8 (name);
+        for (int j = 0; j < numOthers; ++j)
+        {
+            bus.nameOf (others[(size_t) j].slot, name);
+            otherNames[(size_t) j] = juce::String::fromUTF8 (name);
+        }
         repaint();
     }
+
+    // What a stem is called in the legend and the depth map: the host's name for its track when it said one, otherwise its role.
+    juce::String stemLabel (int j) const { return otherNames[(size_t) j].isNotEmpty() ? otherNames[(size_t) j] : juce::String (roleName (others[(size_t) j].role)); }
+    juce::String thisLabel() const { return ownName.isNotEmpty() ? ownName : juce::String (roleName (role)); }
 
     int otherStems() const noexcept { return numOthers; } // the stems of the bus; the sidechain is not one of them
     const std::array<Stem, kMaxStems>& stems() const noexcept { return others; }
@@ -163,9 +176,9 @@ public:
             g.drawText (text, juce::Rectangle<float> (x + 11.0f, spectra.getY() + 3.0f, w, 14.0f), juce::Justification::centredLeft);
             x += w + 8.0f;
         };
-        legend (juce::String (roleName (role)) + " (this)", colours::accent);
+        legend (thisLabel() + " (this)", colours::accent);
         for (int j = 0; j < numOthers; ++j)
-            legend (roleName (others[(size_t) j].role), stemColour (others[(size_t) j].slot));
+            legend (stemLabel (j), stemColour (others[(size_t) j].slot));
         if (sidechain)
             legend (juce::String ("Sidechain: ") + roleName (sidechainRole), colours::text);
         if (group == 0 || (numOthers == 0 && ! sidechain))
@@ -194,9 +207,9 @@ private:
         g.drawText ("FRONT", juce::Rectangle<float> (map.getX(), map.getY() + 14.0f, map.getWidth(), 12.0f), juce::Justification::centredLeft);
         g.drawText ("BACK", juce::Rectangle<float> (map.getX(), map.getBottom() - 12.0f, map.getWidth(), 12.0f), juce::Justification::centredLeft);
         struct Dot { float distance; juce::Colour colour; juce::String name; bool mine; };
-        std::vector<Dot> dots { { distance, colours::accent, roleName (role), true } };
+        std::vector<Dot> dots { { distance, colours::accent, thisLabel(), true } };
         for (int j = 0; j < numOthers; ++j)
-            dots.push_back ({ others[(size_t) j].distance, stemColour (others[(size_t) j].slot), roleName (others[(size_t) j].role), false });
+            dots.push_back ({ others[(size_t) j].distance, stemColour (others[(size_t) j].slot), stemLabel (j), false });
         std::stable_sort (dots.begin(), dots.end(), [] (const Dot& a, const Dot& b) { return a.distance < b.distance; });
         const float top = map.getY() + 32.0f, height = map.getBottom() - 16.0f - top;
         float lastLabel = top - 12.0f;
@@ -238,6 +251,8 @@ private:
     HestiaProcessor& proc;
     std::array<float, kBands> own {}, cut {}, side {};
     std::array<Stem, kMaxStems> others {};
+    std::array<juce::String, kMaxStems> otherNames;
+    juce::String ownName;
     int numOthers = 0, group = 1;
     bool sidechain = false;
     Role role = Role::fullRange, sidechainRole = Role::fullRange;

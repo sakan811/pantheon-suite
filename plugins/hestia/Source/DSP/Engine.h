@@ -27,6 +27,7 @@ struct EngineParams
     float reachDb = 12.0f;     // how far under this stem another can be and still count as in its way
     float attackMs = 30.0f;    // how fast a cut comes in
     float releaseMs = 250.0f;  // how fast it goes out
+    bool hold = false;         // HOLD: the carve stays as it is (this stem still publishes and is still seen), whatever the other stems do
     float outDb = 0.0f;
     Role scRole = Role::fullRange; // what the sidechain input is (a track with no Hestia on it), as a role...
     float scImportance = 0.5f;     // ... and how much it matters
@@ -55,7 +56,7 @@ class Engine
 public:
     static constexpr int kTick = 64; // everything that changes with time steps this often, counted from the start, so the output is the same for any host block size
 
-    explicit Engine (Bus& busToUse = sharedBus()) : bus (busToUse), slot (busToUse.claim())
+    explicit Engine (Bus& busToUse = sharedBus()) : bus (busToUse), slot (busToUse.claim()), seenBroadcast (busToUse.broadcastSeq())
     {
         for (auto& v : ownLevel) v.store (kFloorDb);
         for (auto& v : cutShown) v.store (0.0f);
@@ -153,6 +154,24 @@ public:
     std::atomic<float> inPeak { 0.0f };
 
     int slotIndex() const noexcept { return slot; }
+
+    // The host's name for this stem's track (message thread): the other instances show it in their lists.
+    void setTrackName (const char* name) noexcept { bus.setName (slot, name); }
+
+    // COPY TO MIX (message thread): hands carve, reach, attack and release to the other instances of `group`. They take them on their own message threads.
+    void copyToMix (int group, const Shared& s) noexcept
+    {
+        if (slot >= 0 && group > 0)
+            bus.broadcast (slot, group, s);
+    }
+    // The audio thread saw a broadcast for this stem's mix; the processor then asks for it on the message thread.
+    bool broadcastPending() const noexcept { return pendingBroadcast.load (std::memory_order_relaxed); }
+    bool takeBroadcast (Shared& out) noexcept
+    {
+        if (! pendingBroadcast.exchange (false, std::memory_order_relaxed))
+            return false;
+        return bus.broadcastFor (slot, lastGroup.load (std::memory_order_relaxed), out);
+    }
     const Carver& carverRef() const noexcept { return carver; }
     Bus& busRef() const noexcept { return bus; }
     // How many other stems the last tick found in this stem's mix, the sidechain included.
@@ -178,6 +197,14 @@ private:
         for (int k = 0; k < kBands; ++k)
             ownLevel[(size_t) k].store (own[(size_t) k], std::memory_order_relaxed);
         const int group = std::clamp (p.group, 0, kMaxGroups);
+        lastGroup.store (group, std::memory_order_relaxed);
+        if (const auto seq = bus.broadcastSeq(); seq != seenBroadcast)
+        {
+            seenBroadcast = seq;
+            Shared incoming;
+            if (slot >= 0 && bus.broadcastFor (slot, group, incoming))
+                pendingBroadcast.store (true, std::memory_order_relaxed);
+        }
         const float distance = std::clamp (p.distance, 0.0f, 1.0f);
         bus.publish (slot, group, p.role, p.importance, distance, own.data(), nowMs);
 
@@ -209,36 +236,39 @@ private:
         sidechainActive.store (sidechain, std::memory_order_relaxed);
         linked.store (count, std::memory_order_relaxed);
 
-        // What each of them takes of each band.
-        const auto mine = claims (p.role, p.importance, distance);
-        std::array<float, kBands> target {};
-        if (count > 0 && p.carveDb > 0.0f)
+        // What each of them takes of each band. Held, the cut stays where it is (and is shown where it is): nothing below is worked out.
+        if (! p.hold)
         {
-            std::array<std::array<float, kBands>, kMaxStems> theirs;
-            for (int j = 0; j < count; ++j)
-                theirs[(size_t) j] = claims (others[(size_t) j].role, others[(size_t) j].importance, others[(size_t) j].distance);
+            const auto mine = claims (p.role, p.importance, distance);
+            std::array<float, kBands> target {};
+            if (count > 0 && p.carveDb > 0.0f)
+            {
+                std::array<std::array<float, kBands>, kMaxStems> theirs;
+                for (int j = 0; j < count; ++j)
+                    theirs[(size_t) j] = claims (others[(size_t) j].role, others[(size_t) j].importance, others[(size_t) j].distance);
+                for (int k = 0; k < kBands; ++k)
+                {
+                    float free = 1.0f; // the share of the band nobody is in the way of
+                    for (int j = 0; j < count; ++j)
+                        free *= 1.0f - pressureOn (mine[(size_t) k], theirs[(size_t) j][(size_t) k], own[(size_t) k], others[(size_t) j].level[(size_t) k], p.reachDb);
+                    target[(size_t) k] = -p.carveDb * (1.0f - free);
+                }
+            }
+
+            // The cut follows its target: in fast (attack), out slowly (release).
+            const float tickSeconds = (float) kTick / (float) fs;
+            const float attack = 1.0f - std::exp (-tickSeconds / (0.001f * std::fmax (p.attackMs, 0.1f)));
+            const float release = 1.0f - std::exp (-tickSeconds / (0.001f * std::fmax (p.releaseMs, 1.0f)));
             for (int k = 0; k < kBands; ++k)
             {
-                float free = 1.0f; // the share of the band nobody is in the way of
-                for (int j = 0; j < count; ++j)
-                    free *= 1.0f - pressureOn (mine[(size_t) k], theirs[(size_t) j][(size_t) k], own[(size_t) k], others[(size_t) j].level[(size_t) k], p.reachDb);
-                target[(size_t) k] = -p.carveDb * (1.0f - free);
+                float& c = cut[(size_t) k];
+                c += (target[(size_t) k] - c) * (target[(size_t) k] < c ? attack : release);
+                if (std::fabs (c) < 0.0005f && std::fabs (target[(size_t) k]) < 1e-9f)
+                    c = 0.0f; // at rest it is exactly none
+                cutShown[(size_t) k].store (c, std::memory_order_relaxed);
             }
+            carver.setTarget (cut.data());
         }
-
-        // The cut follows its target: in fast (attack), out slowly (release).
-        const float tickSeconds = (float) kTick / (float) fs;
-        const float attack = 1.0f - std::exp (-tickSeconds / (0.001f * std::fmax (p.attackMs, 0.1f)));
-        const float release = 1.0f - std::exp (-tickSeconds / (0.001f * std::fmax (p.releaseMs, 1.0f)));
-        for (int k = 0; k < kBands; ++k)
-        {
-            float& c = cut[(size_t) k];
-            c += (target[(size_t) k] - c) * (target[(size_t) k] < c ? attack : release);
-            if (std::fabs (c) < 0.0005f && std::fabs (target[(size_t) k]) < 1e-9f)
-                c = 0.0f; // at rest it is exactly none
-            cutShown[(size_t) k].store (c, std::memory_order_relaxed);
-        }
-        carver.setTarget (cut.data());
 
         // The depth moves to where it was put over a few ticks (no zipper), and is exact once it is there.
         distanceNow += (distance - distanceNow) * 0.2f;
@@ -275,6 +305,9 @@ private:
     std::array<float, kBands> cut {};
     std::array<Stem, kMaxStems> others {};
     std::atomic<int> linked { 0 };
+    std::uint32_t seenBroadcast = 0;
+    std::atomic<bool> pendingBroadcast { false };
+    std::atomic<int> lastGroup { 0 };
     Ramp gain, widthLoss, reflect, deltaMix;
     float distanceNow = 0.0f, shownDistance = -1.0f;
     int scFed = 0;

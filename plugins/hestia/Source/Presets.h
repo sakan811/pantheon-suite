@@ -7,7 +7,7 @@
 #include <pantheon/ui/Presets.h>
 
 // A starting point for each kind of stem: its role and how much it matters, how deep the cut may go and how far back it sits. A preset leaves the mix letter, the
-// sidechain's role and importance, and OUTPUT alone (they belong to the session, not to the stem); what it does not list is back at its default. The roles are
+// sidechain's role and importance, OUTPUT and HOLD alone (they belong to the session, not to the stem); what it does not list is back at its default. The roles are
 // rules of thumb: move IMPORTANCE by ear.
 namespace hestia
 {
@@ -39,5 +39,5 @@ inline const std::vector<ui::Preset>& presets()
     return list;
 }
 
-inline bool keepsParameter (const juce::String& pid) { return pid == id::mix || pid == id::scRole || pid == id::scImportance || pid == id::out; }
+inline bool keepsParameter (const juce::String& pid) { return pid == id::mix || pid == id::scRole || pid == id::scImportance || pid == id::out || pid == id::hold; }
 } // namespace hestia

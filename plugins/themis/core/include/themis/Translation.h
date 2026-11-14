@@ -146,6 +146,8 @@ inline float netChangeDb (const BandArray& spectrumDb, const BandArray& response
     return before > 0.0 && after > 0.0 ? static_cast<float> (powerToDb (after / before, 0.0)) : 0.0f;
 }
 
+inline constexpr double kMinFoldShare = 1.0e-10; // -100 dB: the smallest share of a band's power that a mono sum keeps
+
 // Power lost by a sum to mono, in dB (>= 0), over the bands in [loHz, hiHz): the mid power is the part that
 // survives, and mid + side is what the stereo signal carried. `midDb` weights the bands, `foldDb` is the per-band
 // mono-fold curve (10 log10 (M / (M + S))).
@@ -158,8 +160,10 @@ inline float monoLossDb (const BandArray& midDb, const BandArray& foldDb, double
         const double f = BandGrid::centreHz (i);
         if (f < loHz || f >= hiHz || midDb[s] <= kNoDataDb)
             continue;
+        // What the band carried is its mid + side power: mid / share. The share is floored at -100 dB (not -60) so that a band that
+        // cancels almost completely still weighs what the stereo signal carried there, not a clamped fraction of it.
         const double m = dbToPower (midDb[s]);
-        const double share = std::max (dbToPower (foldDb[s]), 1.0e-6);
+        const double share = std::max (dbToPower (foldDb[s]), kMinFoldShare);
         kept += m;
         total += m / share;
     }
@@ -181,7 +185,10 @@ inline void addMonoFold (TranslationReport& r, const BandArray& measured, const 
     {
         const auto s = static_cast<size_t> (i);
         const double f = BandGrid::centreHz (i);
-        if (f < translation::kWorstBandMinHz || f > translation::kWorstBandMaxHz || measured[s] < translation::kWorstBandFloorDb)
+        // The floor is on what the band carried (mid + side), not on the mid alone: a band that cancels in a mono sum has almost no
+        // mid, and it is exactly the one to report (the phase check does the same with its mid + side level).
+        if (f < translation::kWorstBandMinHz || f > translation::kWorstBandMaxHz || measured[s] <= kNoDataDb
+            || measured[s] - std::max (fold[s], -100.0f) < translation::kWorstBandFloorDb)
             continue;
         if (-fold[s] > worst)
         {

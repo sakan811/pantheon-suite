@@ -60,11 +60,11 @@ minimum-phase biquads in series. In the two linear modes (`linear`, `linearHq`; 
 feeds the input to `LinearFilter`, which hands back the sound `latencySamples` (= half + hop) late, together with the input delayed by the same amount (it replaces
 `dryL`/`dryR`, so Delta and Gain Match stay aligned) and the soloed band's curve. The latency is `Engine::latencySamples` (an atomic the audio thread writes when
 `control()` sees a new mode) and reaches the host through `IrisProcessor::handleAsyncUpdate` from the message thread, as Hephaestus does with its oversampling; `prepareToPlay`
-passes the saved mode to `Engine::prepare` so the host hears the right latency before the first block. Rules:
+passes the saved mode to `Engine::prepare` so the host hears the right latency before the first block. The sizes scale with the sample rate (`sizeScaleFor`: x2 over 50 kHz, x4 over 100 kHz; `linearSpec (mode, rate)`, `latencyFor (mode, rate)`, defaults 48 kHz), so 44.1 / 48 kHz are unchanged. `IrisProcessor::processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay`, sized by `maxLatencyFor (rate)` in `prepareToPlay` (UiCheck pins it). Rules:
 - **No allocation after `prepare()`.** `LinearFilter::prepare` sizes everything for the larger mode; a switch only clears and re-points (`start`).
 - **Hops are counted in samples from the start**, like the tick, and a hop is a multiple of the tick (256, 1024), so the output is the same for any host block (test [15]).
   The kernels are rebuilt at a hop only if something moved (`kernelsDirty`, set wherever a filter is reconfigured, a band fades, starts or stops, or the mode changes);
-  anything new that changes a band's curve has to set it too, or the linear modes will not follow it.
+  anything new that changes a band's curve has to set it too, or the linear modes will not follow it. `runLinearHop` rebuilds the main kernels when a band is working **or a curve solo is on** (`processHop` takes the filtering path for either; with no band working the kernels are the plain delay): test [15] pins the fade of a CURVE solo of a flat band.
 - **The curve comes from `BandFilter::powerAt`** (the same filter the display draws, from cos w and cos 2w, no trigonometry per bin), never from a second design. Clamp it at 0:
   rounding leaves -1e-17 at a high-pass's DC and `sqrt` of that is NaN.
 - **Placements are a 2 x 2 matrix of kernels** (`LinearFilter::finishKernels`), not a kernel and then M/S on its output: a second kernel applied to the delayed signal would need

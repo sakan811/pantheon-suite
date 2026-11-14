@@ -18,6 +18,8 @@ struct AdviceInput
     float reductionDb = 0.0f;     // what it is taking off now
     float heldDb = 0.0f;          // the most in the last few seconds
     bool sidechainConnected = false;
+    bool delta = false;    // DELTA is on (the editor's monitor, not a parameter)
+    bool scListen = false; // SC LISTEN is on (the same kind of monitor)
 };
 
 constexpr float kHeavyDb = 10.0f;
@@ -31,6 +33,10 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     const auto info = [&] (std::string t) { notes.push_back ({ ui::Severity::info, std::move (t) }); };
     const auto& p = in.params;
 
+    if (in.scListen)
+        warn ("SC LISTEN is on: you hear the detector's key, not your track. Switch it off to hear it.");
+    else if (in.delta)
+        warn ("DELTA is on: you hear only what the compressor changes, not your track. Switch it off to hear it.");
     if (p.ratio <= 1.05f)
         warn ("RATIO is 1:1, which does nothing. Raise it.");
     if (p.thresholdDb >= kThresholdAtTopDb)
@@ -47,6 +53,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         info ("MIX under 100% blends the compressed sound with the dry one; the meter shows the compressed path only.");
     if (p.autoRelease)
         info ("AUTO release follows the programme: RELEASE is not used.");
+    if (p.match)
+        info ("LEVEL MATCH is on: the loudness it adds or takes away is matched away, so louder cannot win.");
     if (p.autoMakeup && p.makeupDb > 0.0f)
         info ("AUTO makeup is on: MAKEUP adds to it.");
     return ui::ordered (std::move (notes));
@@ -61,7 +69,9 @@ inline const char* guideText()
            "Slow ATTACK keeps the punch, fast takes it away; RELEASE sets how it lets go (AUTO follows the programme). With MIX under 100% "
            "the compressed sound is blended with the dry one (parallel compression).\n\n"
            "SIDECHAIN\n"
-           "The detector can listen to a high-passed copy (SC HIGH-PASS) so the bass does not trigger it, or to another track routed to the sidechain input (KEY).\n\n"
+           "The detector can listen to a high-passed copy (SC HIGH-PASS) so the bass does not trigger it, or to another track routed to the sidechain input (KEY). SC LISTEN plays what the detector hears (after the high-pass) instead of the track.\n\n"
+           "JUDGING IT\n"
+           "A compressor that is louder sounds better, whatever it did. LEVEL MATCH takes the level difference off, slowly, and DELTA plays only what the compressor changes.\n\n"
            "NOT FOR\n"
            "Not a limiter: it reads no true peak, and its look-ahead is a few milliseconds. Not a multiband compressor (Atlas is) and not a dynamic equaliser (Iris is).";
 }

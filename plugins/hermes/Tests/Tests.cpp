@@ -334,5 +334,52 @@ int main()
         check (fine && std::isfinite (c.integrated.load()), "a NaN and an infinity in the input are silence: the output and the meters are finite");
     }
 
+    // [6] A shorter reference replaces a longer one, seeking, and AUTO TRIM.
+    std::printf("\n[6] Reference swap, seek and AUTO TRIM\n");
+    {
+        Reference longRef, shortRef;
+        longRef.left = longRef.right = sine (1000.0, -14.0, 4.0).l;
+        longRef.integratedLufs = -14.0;
+        shortRef.left = shortRef.right = sine (1000.0, -14.0, 0.2).l;
+        shortRef.integratedLufs = -14.0;
+        Engine e;
+        e.prepare (kFs);
+        e.setReference (&longRef);
+        EngineParams p;
+        p.reference = true;
+        p.levelMatch = false;
+        run (e, silence (3.0), p); // the position is deep into the long one
+        e.setReference (&shortRef); // a new reference sets a restart, but the position must also be safe by itself
+        auto in = silence (0.5);
+        run (e, in, p);
+        bool fine = true;
+        for (const float v : in.l)
+            fine = fine && std::isfinite (v);
+        check (fine && e.referencePosition.load() >= 0.0f && e.referencePosition.load() < 1.0f, "a shorter reference swapped in while the position is past its end plays from inside it (no read out of bounds)");
+
+        e.setReference (&longRef);
+        run (e, silence (0.05), p);
+        e.seekReference (0.5f);
+        run (e, silence (0.01), p);
+        const float at = e.referencePosition.load();
+        check (at > 0.49f && at < 0.52f, fmt ("seeking to 50%% puts the reference at %.3f", at));
+        e.seekReference (1.0f);
+        run (e, silence (0.01), p);
+        check (e.referencePosition.load() < 0.01f || e.referencePosition.load() > 0.99f, "seeking to the very end stays inside the reference (it loops)");
+
+        check (std::fabs (autoTrimDb (0.0f, -20.0) - 6.0f) < 1e-4f, "AUTO TRIM: -20 LUFS to the -14 target is +6 dB");
+        check (std::fabs (autoTrimDb (3.0f, -10.0) + 1.0f) < 1e-4f, "AUTO TRIM reads the loudness after the current trim: +3 dB at -10 LUFS gives -1 dB");
+        check (autoTrimDb (2.0f, -200.0) == 2.0f && autoTrimDb (0.0f, -65.0) == 24.0f && autoTrimDb (0.0f, 30.0) == -24.0f, "AUTO TRIM leaves the trim alone when nothing is measured, and stays within the trim's range");
+        Engine m;
+        m.prepare (kFs);
+        EngineParams q;
+        run (m, sine (500.0, -26.0, 6.0), q);
+        q.trimDb = autoTrimDb (0.0f, m.integrated.load());
+        Engine n;
+        n.prepare (kFs);
+        run (n, sine (500.0, -26.0, 6.0), q);
+        check (std::fabs (n.integrated.load() - kAutoTrimLufs) < 0.3, fmt ("a sound measured, trimmed by AUTO TRIM and played again reads %.2f LUFS (target %.0f)", n.integrated.load(), kAutoTrimLufs));
+    }
+
     return test::finish ("HermesTests");
 }

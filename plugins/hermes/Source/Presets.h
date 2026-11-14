@@ -6,7 +6,7 @@
 #include "Parameters.h"
 #include <pantheon/ui/Presets.h>
 
-// Listening checks and the reference, ready to switch to. A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY and REF TRIM are kept (they are the level of your
+// Listening checks and the reference, ready to switch to. A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY, REF TRIM and AUTO RESET are kept (they are the level of your
 // sound, not what you listen to). The meters always read the whole sound. LISTEN and REF are saved with the session: choose Normal before you bounce.
 namespace hermes
 {
@@ -30,5 +30,5 @@ inline const std::vector<ui::Preset>& presets()
     return list;
 }
 
-inline bool keepsParameter (const juce::String& pid) { return pid == id::trim || pid == id::polarity || pid == id::referenceTrim; }
+inline bool keepsParameter (const juce::String& pid) { return pid == id::trim || pid == id::polarity || pid == id::referenceTrim || pid == id::resetOnPlay; }
 } // namespace hermes

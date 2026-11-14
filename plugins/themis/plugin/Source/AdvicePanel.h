@@ -61,11 +61,16 @@ public:
         g.drawText (verdict, titleRow.withTrimmedRight (16.0f).toNearestInt(), juce::Justification::right);
 
         auto readout = area.removeFromTop (snapshot.have ? 50.0f : 34.0f);
-        snapChip = readout.removeFromRight (kChipWidth).removeFromTop (20.0f).toNearestInt();
+        auto chips = readout.removeFromRight (kChipWidth);
+        snapChip = chips.removeFromTop (16.0f).toNearestInt();
+        textChip = chips.withTrimmedTop (2.0f).removeFromTop (16.0f).toNearestInt();
         ui::hw::drawPushButton (g, snapChip.toFloat(), snapshot.have, colours::amber, false, hoverSnap);
         g.setColour (snapshot.have ? colours::lampInk : colours::text);
         g.setFont (ui::labelFont (9.5f));
         g.drawText (snapshot.have ? "CLEAR" : "SNAP", snapChip, juce::Justification::centred);
+        ui::hw::drawPushButton (g, textChip.toFloat(), false, colours::amber, false, hoverText);
+        g.setColour (colours::text);
+        g.drawText ("TEXT", textChip, juce::Justification::centred);
         readout.removeFromRight (4.0f);
         readoutArea = readout.toNearestInt();
         ui::hw::drawGlass (g, readout, 3.0f, colours::amber);
@@ -122,9 +127,15 @@ public:
             hoverSnap = snap;
             repaint (snapChip);
         }
-        setMouseCursor (hoverSnap || hoverCopy || (hoverRow >= 0 && advice.items[static_cast<size_t> (hoverRow)].hear.active()) ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        const bool text = textChip.contains (e.position.toInt());
+        if (text != hoverText)
+        {
+            hoverText = text;
+            repaint (textChip);
+        }
+        setMouseCursor (hoverSnap || hoverText || hoverCopy || (hoverRow >= 0 && advice.items[static_cast<size_t> (hoverRow)].hear.active()) ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
-    void mouseExit (const juce::MouseEvent&) override { hoverRow = -1; hoverSnap = hoverCopy = false; }
+    void mouseExit (const juce::MouseEvent&) override { hoverRow = -1; hoverSnap = hoverCopy = hoverText = false; }
 
     // Called with the status text after COPY put an item's bands on the clipboard.
     std::function<void (const juce::String&)> onCopied;
@@ -137,11 +148,26 @@ public:
     }
     bool hasSnapshot() const { return snapshot.have; }
 
+    // TEXT puts the whole plan on the clipboard as plain text (the target, the numbers, every item and its why): for a note, a message, a session log.
+    juce::String planText() const { return juce::String (themis::planAsText (inputs, advice)); }
+    void copyPlanText()
+    {
+        refresh();
+        juce::SystemClipboard::copyTextToClipboard (planText());
+        if (onCopied)
+            onCopied ("Copied the master plan as text (" + juce::String (static_cast<int> (advice.items.size())) + " item(s)): paste it in a note, a message or a session log.");
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (snapChip.contains (e.position.toInt()))
         {
             toggleSnapshot();
+            return;
+        }
+        if (textChip.contains (e.position.toInt()))
+        {
+            copyPlanText();
             return;
         }
         const int row = rowAt (e.position.toInt());
@@ -178,6 +204,10 @@ public:
                    "SNAP keeps the plan as it is now. Change the master, play the same part again (press Reset first for a fair comparison), "
                    "and the plan says how many items were fixed, got better, got worse or are new, and how far the loudness and the true peak moved. "
                    "It works once the plan has finished measuring.";
+        if (hoverText)
+            return "TEXT puts the whole master plan on the clipboard as plain text: the delivery target and the true-peak ceiling, the measured loudness and peak, "
+                   "then every item worst first with what to change and why. For a note to yourself, a message to the client or a session log. "
+                   "(COPY on an item is different: it hands bands or a limiter setting to another plugin.)";
         if (hoverRow < 0 && readoutArea.contains (lastMouse))
             return "Loudness since Reset: integrated LUFS (the Deliver for target in brackets), true peak and PLR. Second line: momentary (last 400 ms) "
                    "and short-term (last 3 s) LUFS, and the loudness range LRA (EBU Tech 3342: the spread between the quieter and the louder "
@@ -332,10 +362,10 @@ private:
     themis::MasterAdvice advice;
     themis::Switches audition;
     themis::PlanSnapshot snapshot;
-    juce::Rectangle<int> listArea, snapChip, readoutArea;
+    juce::Rectangle<int> listArea, snapChip, textChip, readoutArea;
     juce::Point<int> lastMouse;
     int firstRow = 0, hoverRow = -1;
-    bool hoverSnap = false, hoverCopy = false;
+    bool hoverSnap = false, hoverCopy = false, hoverText = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AdvicePanel)
 };

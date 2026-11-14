@@ -19,6 +19,7 @@ inline constexpr float kMaxTrimDb = 24.0f;
 inline constexpr double kMatchLimitDb = 24.0;
 inline constexpr double kCrossfadeMs = 20.0;
 inline constexpr int kTick = 64;
+constexpr double kAutoTrimLufs = -14.0; // what AUTO TRIM brings the integrated loudness to: the level streaming services play at
 
 struct EngineParams
 {
@@ -28,6 +29,7 @@ struct EngineParams
     bool reference = false;     // hear the reference instead of the sound (B)
     bool levelMatch = true;     // bring the reference to the loudness of the sound
     float referenceTrimDb = 0.0f;
+    bool resetOnPlay = false;   // read by the processor, not the engine: clear the meters when the host starts playing
 };
 
 // A track to compare with: decoded and brought to the sample rate of the session by whoever loads it (the editor's thread), its loudness measured by the same meter.
@@ -46,6 +48,15 @@ inline double measureIntegrated (const std::vector<float>& l, const std::vector<
     for (size_t i = 0; i < l.size(); ++i)
         meter.push (l[i], r[i]);
     return meter.integrated();
+}
+
+// The trim that brings the integrated loudness (read after the current trim) to the target: `trimDb + target - integrated`, within the trim's range.
+// Nothing measured yet (under the absolute gate): the trim as it is.
+inline float autoTrimDb (float trimDb, double integratedLufs, double targetLufs = kAutoTrimLufs) noexcept
+{
+    if (! (integratedLufs > kAbsoluteGateLufs))
+        return trimDb;
+    return (float) std::clamp ((double) trimDb + targetLufs - integratedLufs, (double) -kMaxTrimDb, (double) kMaxTrimDb);
 }
 
 class Engine
@@ -79,6 +90,8 @@ public:
     // From the message thread: the reference to compare with (null: none). The previous one is not freed here: the caller keeps it until the audio thread has moved on (see the processor).
     void setReference (const Reference* r) noexcept { reference.store (r, std::memory_order_release); restart.store (true, std::memory_order_relaxed); }
     void restartReference() noexcept { restart.store (true, std::memory_order_relaxed); }
+    // From the message thread: play on from this fraction (0 to 1) of the reference. The audio thread takes it, like the restart.
+    void seekReference (float fraction) noexcept { seekTo.store (std::clamp (fraction, 0.0f, 1.0f), std::memory_order_relaxed); }
     void resetMeters() noexcept { clear.store (true, std::memory_order_relaxed); }
 
     // In place. Everything that is not a number is silence.
@@ -95,6 +108,12 @@ public:
             position = 0;
         const Reference* ref = reference.load (std::memory_order_acquire);
         const int refLength = ref != nullptr ? ref->length() : 0;
+        const float seek = seekTo.exchange (-1.0f, std::memory_order_relaxed);
+        if (seek >= 0.0f && refLength > 0)
+            position = std::min ((int) ((double) seek * refLength), refLength - 1);
+        // The reference may have been swapped for a shorter one after `restart` was taken: the position is only ever read inside the reference that was just loaded.
+        if (position >= refLength)
+            position = 0;
         const double trimT = std::pow (10.0, std::clamp (p.trimDb, -kMaxTrimDb, kMaxTrimDb) / 20.0) * (p.polarity ? -1.0 : 1.0);
         if (! started)
         {
@@ -174,6 +193,7 @@ private:
     bool started = false;
     std::atomic<const Reference*> reference { nullptr };
     std::atomic<bool> restart { false }, clear { false };
+    std::atomic<float> seekTo { -1.0f };
     LoudnessMeter meter;
     std::array<pdsp::TruePeakReader, 2> peakReader;
 };

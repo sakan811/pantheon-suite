@@ -193,6 +193,45 @@ public:
         }
     }
 
+    // Selects the notes whose pitch, as it is now (after the edits), is more than `cents` from the nearest note of the scale: the amber and
+    // red ones. Returns how many; if none, the selection is left as it was.
+    int selectOffScale (double cents)
+    {
+        std::set<int> off;
+        for (const auto& n : session.notes)
+            if (std::fabs (session.key.snap (n.target) - n.target) * 100.0 > cents)
+                off.insert (n.start);
+        if (off.empty())
+            return 0;
+        selected = off;
+        selectionChanged();
+        if (const auto first = std::find_if (session.notes.begin(), session.notes.end(), [&] (const Note& n) { return off.count (n.start) != 0; }); first != session.notes.end())
+            showSample ((double) first->start * session.contour.hop);
+        return (int) off.size();
+    }
+
+    // Shows the selected notes: their time span, with a little room, and the pitches they and their edits cover.
+    void zoomToSelection()
+    {
+        juce::int64 from = 0, to = 0;
+        if (! selectionSpan (from, to))
+            return;
+        const double sr = session.sampleRate, span = std::max (0.2, (double) (to - from) / sr), pad = span * 0.12;
+        double lo = 1.0e9, hi = -1.0e9;
+        for (const auto& n : session.notes)
+            if (isSelected (n))
+            {
+                lo = std::min ({ lo, (double) n.centre, (double) n.target });
+                hi = std::max ({ hi, (double) n.centre, (double) n.target });
+            }
+        setViewSeconds ((double) from / sr - pad, (double) to / sr + pad);
+        const double rows = std::max (8.0, hi - lo + 5.0);
+        rowH = std::clamp ((double) std::max (100, graphArea().getHeight()) / rows, 7.0, 40.0);
+        topMidi = (lo + hi) * 0.5 + (graphArea().getHeight() / rowH) * 0.5;
+        clampView();
+        repaint();
+    }
+
     // The samples the selection covers (empty selection: none).
     bool selectionSpan (juce::int64& from, juce::int64& to) const
     {
@@ -217,7 +256,10 @@ public:
             return;
         session.pushUndo();
         for (const auto i : which)
+        {
             session.notes[i].target += (float) semitones;
+            session.notes[i].clampTarget();
+        }
         applyEdit (which);
     }
 
@@ -260,13 +302,10 @@ public:
     bool splitAtSample (juce::int64 sample)
     {
         const int frame = session.contour.frameAtSample ((double) sample);
+        if (edit::splitIndex (session.notes, frame) < 0) // checked first: a cut that cannot happen must not clear the redo steps or leave an undo step
+            return false;
         session.pushUndo();
         const int i = edit::splitAt (session.notes, session.contour, frame);
-        if (i < 0)
-        {
-            session.undo();
-            return false;
-        }
         selected.insert (session.notes[(size_t) i].start);
         selected.insert (session.notes[(size_t) i + 1].start);
         session.changed (session.notes[(size_t) i].start, session.notes[(size_t) i + 1].end);
@@ -572,7 +611,10 @@ public:
             if (snapping)
                 delta = session.key.snap (drag.primaryOrigin + raw) - drag.primaryOrigin;
             for (const auto& [i, target] : drag.origin)
+            {
                 session.notes[i].target = target + (float) delta;
+                session.notes[i].clampTarget();
+            }
             const auto& primary = session.notes[drag.primary];
             dragText = noteText (primary.target, session.key.gridOffset()) + juce::String::formatted ("   moved %+.0f ct", (primary.target - primary.centre) * 100.0)
                        + (snapping ? "" : (fine ? "   fine" : "   free"));

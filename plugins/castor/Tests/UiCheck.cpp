@@ -22,7 +22,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == kBands + 5, fmt ("%d parameters: a width for each of %d bands, mid, side, mono below, balance and output", proc.getParameters().size(), kBands));
+    check (proc.getParameters().size() == kBands + 6, fmt ("%d parameters: a width for each of %d bands, mid, side, mono below, balance, output and listen", proc.getParameters().size(), kBands));
     const auto d = readParams (proc.apvts);
     bool defaultsOk = std::fabs (d.midDb) < 1e-4f && std::fabs (d.sideDb) < 1e-4f && d.monoBelowHz <= kMonoOffHz + 0.01f && std::fabs (d.balance) < 1e-4f && std::fabs (d.outDb) < 1e-4f;
     for (float w : d.width)
@@ -73,6 +73,76 @@ int main()
         setValue (proc.apvts, id::monoBelow, 20.0f);
     }
 
+    // A mono bus: BALANCE is ignored (it would only turn the one channel down), and the check is not applied.
+    {
+        CastorProcessor q;
+        q.setPlayConfigDetails (1, 1, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::balance, 100.0f);
+        setValue (q.apvts, id::listen, 2.0f);
+        juce::AudioBuffer<float> buffer (1, 512);
+        juce::MidiBuffer midi;
+        float peak = 0.0f;
+        for (int block = 0; block < 20; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+                buffer.setSample (0, i, 0.4f * std::sin (2.0f * 3.14159265f * 300.0f * (float) (block * 512 + i) / 48000.0f));
+            q.processBlock (buffer, midi);
+            if (block >= 10)
+                peak = std::max (peak, buffer.getMagnitude (0, 512));
+        }
+        check (std::fabs (peak - 0.4f) < 0.005f, fmt ("a mono bus with BALANCE at +100 and LISTEN on Side comes out unchanged (peak %.3f of 0.400)", peak));
+    }
+
+    // LISTEN through the real processor, and the correlation minimum in the editor.
+    {
+        CastorProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<CastorEditor> (*holder);
+        editor.setVisible (true);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        const auto play = [&] (bool outOfPhase, int blocks)
+        {
+            float diff = 0.0f, sum = 0.0f;
+            for (int block = 0; block < blocks; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float v = 0.3f * std::sin (2.0f * 3.14159265f * 400.0f * (float) (block * 512 + i) / 48000.0f);
+                    buffer.setSample (0, i, v);
+                    buffer.setSample (1, i, outOfPhase ? -v : v);
+                }
+                q.processBlock (buffer, midi);
+                diff = std::max (diff, std::fabs (buffer.getSample (0, 100) - buffer.getSample (1, 100)));
+                sum = std::max (sum, buffer.getMagnitude (0, 512));
+                if (block % 8 == 0)
+                    editor.tickDisplay();
+            }
+            return std::make_pair (diff, sum);
+        };
+        setValue (q.apvts, id::listen, 1.0f);
+        auto r = play (true, 40);
+        check (r.second < 1e-6f && r.first == 0.0f, fmt ("LISTEN Mono: an out-of-phase tone is silent (%.1e) in both channels", r.second));
+        check (ui::hasNote (editor.notes(), "LISTEN is not Stereo", ui::Severity::warning), "LISTEN away from Stereo is flagged");
+        setValue (q.apvts, id::listen, 2.0f);
+        r = play (true, 10);
+        check (r.second > 0.25f && r.first == 0.0f, fmt ("LISTEN Side: the out-of-phase tone is heard (%.2f), the same in both channels", r.second));
+        setValue (q.apvts, id::listen, 0.0f);
+        play (false, 60);
+        editor.tickDisplay();
+        check (editor.correlationMinHold() < -0.5f, fmt ("the correlation minimum shows the out-of-phase passage after it is over: %.2f", editor.correlationMinHold()));
+        check (editor.minButton.getButtonText().startsWith ("MIN -"), "the MIN button reads it");
+        editor.minButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        play (false, 10);
+        editor.tickDisplay();
+        check (editor.correlationMinHold() > 0.5f, fmt ("clicking MIN starts it again (%.2f)", editor.correlationMinHold()));
+        check (editor.listen.getRight() < editor.getWidth() && editor.minButton.getRight() <= editor.getWidth() && editor.minButton.getBottom() < editor.getHeight() && ! editor.listen.getBounds().intersects (editor.minButton.getBounds()), "LISTEN and MIN fit under the correlation bar");
+    }
+
     // The state survives a round trip.
     {
         setValue (proc.apvts, id::width (3), 150.0f);
@@ -93,6 +163,9 @@ int main()
         in.params.width[3] = 1.4f;
         in.correlation = -0.4f;
         check (ui::hasNote (adviceFor (in), "out of phase", ui::Severity::warning) && ui::hasNote (adviceFor (in), "turn the phase around the band edges", ui::Severity::info), "a negative correlation is warned about, and the widths' phase turn is explained");
+        in.params.listen = Listen::mono;
+        check (ui::hasNote (adviceFor (in), "LISTEN is not Stereo", ui::Severity::warning), "a check is flagged");
+        in.params.listen = Listen::stereo;
         in.params.sideDb = 8.0f;
         in.params.balance = 0.2f;
         check (ui::hasNote (adviceFor (in), "SIDE above +6 dB", ui::Severity::warning) && ui::hasNote (adviceFor (in), "BALANCE turns", ui::Severity::info), "a high SIDE and a BALANCE are flagged");

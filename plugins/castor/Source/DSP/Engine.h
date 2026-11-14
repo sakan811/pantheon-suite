@@ -18,6 +18,10 @@ inline constexpr int kCrossovers = pdsp::bands::kNumCrossovers;
 inline constexpr float kMaxWidth = 2.0f;     // 200%
 inline constexpr float kMonoOffHz = 20.0f;   // MONO BELOW at or under this is off
 
+// A check on what is heard, after everything (the goniometer and the correlation still read the sound as it is): the sum of both channels (what a mono speaker plays), or only the sides.
+enum class Listen { stereo, mono, side };
+inline constexpr int kNumListen = 3;
+
 struct EngineParams
 {
     std::array<float, kBands> width { 1, 1, 1, 1, 1, 1 }; // the side of each band, as a share of what it is (1 = as it is)
@@ -25,7 +29,20 @@ struct EngineParams
     float monoBelowHz = kMonoOffHz;                        // below this the sides are taken away: the bass is mono
     float balance = 0.0f;                                  // -1 (left only) .. +1 (right only)
     float outDb = 0.0f;
+    Listen listen = Listen::stereo;                        // read by the processor (applyListen), not by process()
 };
+
+// In place: mono is (L + R) / 2 in both channels, side is (L - R) / 2 in both. Stereo touches nothing.
+inline void applyListen (float* left, float* right, int n, Listen listen) noexcept
+{
+    if (listen == Listen::stereo)
+        return;
+    for (int i = 0; i < n; ++i)
+    {
+        const float v = listen == Listen::mono ? 0.5f * (left[i] + right[i]) : 0.5f * (left[i] - right[i]);
+        left[i] = right[i] = v;
+    }
+}
 
 class Engine
 {
@@ -133,9 +150,13 @@ public:
             elr += corrCoef * (yl * yr - elr);
         }
         const double denom = std::sqrt (ell * err);
-        correlation.store (denom > 1e-12 ? (float) std::clamp (elr / denom, -1.0, 1.0) : 1.0f, std::memory_order_relaxed);
+        const float c = denom > 1e-12 ? (float) std::clamp (elr / denom, -1.0, 1.0) : 1.0f;
+        correlation.store (c, std::memory_order_relaxed);
+        if (c < correlationMin.load (std::memory_order_relaxed))
+            correlationMin.store (c, std::memory_order_relaxed);
     }
 
+    std::atomic<float> correlationMin { 1.0f }; // the lowest block reading since the editor last took it (it sets it back to 1): the editor keeps the minimum
     std::atomic<float> correlation { 1.0f }; // of the output, over 0.3 s: +1 mono, 0 wide, -1 out of phase
 
 private:

@@ -11,7 +11,8 @@ namespace castor
 {
 namespace id
 {
-inline const juce::String mid { "mid" }, side { "side" }, monoBelow { "mono" }, balance { "balance" }, out { "out" };
+inline const juce::String mid { "mid" }, side { "side" }, monoBelow { "mono" }, balance { "balance" }, out { "out" },
+    listen { "listen" }; // version 2: a check on what is heard, Stereo by default
 // width1 ... width6: the sides of each of the six bands of music (pdsp::bands), in percent
 inline const juce::String& width (int band)
 {
@@ -19,6 +20,8 @@ inline const juce::String& width (int band)
     return ids[(size_t) band];
 }
 }
+
+inline const juce::StringArray listenNames { "Stereo", "Mono", "Side" }; // the order of Listen
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 {
@@ -41,6 +44,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::balance, 1 }, "Balance", NormalisableRange<float> (-100.0f, 100.0f, 1.0f), d.balance * 100.0f,
                                                          Attr().withStringFromValueFunction ([] (float v, int) { return v == 0.0f ? String ("C") : (v < 0.0f ? "L " : "R ") + String (roundToInt (std::fabs (v))); })));
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::out, 1 }, "Output", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), d.outDb, Attr().withStringFromValueFunction (db)));
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::listen, 2 }, "Listen", listenNames, (int) d.listen));
     return { p.begin(), p.end() };
 }
 
@@ -56,6 +60,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.monoBelowHz = v (id::monoBelow);
     e.balance = v (id::balance) / 100.0f;
     e.outDb = v (id::out);
+    e.listen = (Listen) std::clamp ((int) v (id::listen), 0, kNumListen - 1);
     return e;
 }
 

@@ -37,6 +37,7 @@ int main (int argc, char** argv)
     }
 
     const hestia::Role roles[] = { hestia::Role::leadVocal, hestia::Role::kick, hestia::Role::bass, hestia::Role::guitar };
+    const char* names[] = { "Lead Vox", "Kick In", "Bass DI", "Gtr Rhythm" };
     const int stems = alone ? 1 : 4;
     std::vector<std::unique_ptr<HestiaProcessor>> procs;
     for (int s = 0; s < stems; ++s)
@@ -47,6 +48,9 @@ int main (int argc, char** argv)
         p.prepareToPlay (kFs, 512);
         hestia::setValue (p.apvts, hestia::id::role, (float) (int) roles[s]);
         hestia::setValue (p.apvts, hestia::id::mix, 8.0f); // H: nobody else is in it
+        juce::AudioProcessor::TrackProperties props; // what a host tells: the name of the track
+        props.name = names[s];
+        p.updateTrackProperties (props);
     }
     hestia::setValue (procs[0]->apvts, hestia::id::carve, 9.0f);
     const float depths[] = { 12.0f, 18.0f, 40.0f, 75.0f }; // the vocal up front, the guitar at the back

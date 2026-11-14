@@ -42,7 +42,7 @@ public:
         resonances.reset();
         loadReference();
 
-        setTooltip ("Double-click to add a band. Drag a node to set its frequency and gain (Shift = fine), turn the wheel over it for Q. "
+        setTooltip ("Double-click to add a band. Drag a node to set its frequency and gain (Shift = fine), turn the wheel over it for Q; double-click it to reset gain and Q. "
                     "Right-click a node for its menu. The strip along the bottom solos a part of the spectrum.");
         startTimerHz (30);
     }
@@ -329,6 +329,7 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         drag = {};
+        ui::beginUndoStep (apvts, "Drag"); // a drag of a node or a crossover is one step
 
         if (pillArea().contains (e.position) && anySolo())
         {
@@ -435,6 +436,7 @@ public:
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
+        ui::beginUndoStep (apvts, "Reset");
         if (stripArea().contains (e.position))
         {
             const int boundary = boundaryAt (e.position.x);
@@ -443,8 +445,15 @@ public:
                     setParameter (*p, p->getDefaultValue());
             return;
         }
-        if (nodeAt (e.position) >= 0)
+        if (const int hit = nodeAt (e.position); hit >= 0)
+        {
+            // The node goes back to flat and to Q 1 and stays where it is in frequency (a knob does the same on its own double-click).
+            const auto& ids = bandIds (hit);
+            if (hasGain (bandParamsOf (apvts, hit).type))
+                setParameterValue (apvts, ids.gain, 0.0f);
+            setParameterValue (apvts, ids.q, 1.0f);
             return;
+        }
         if (const int r = resonanceAt (e.position); r >= 0)
             addResonanceBand (found[(size_t) r]);
         else if (const int c = clashLabelAt (e.position); c >= 0)
@@ -461,6 +470,7 @@ public:
         setSelectedBand (band);
         if (wheel.deltaY == 0.0f) // a sideways scroll is not a step up or down
             return;
+        ui::beginUndoStep (apvts, "Wheel");
 
         const auto b = bandParamsOf (apvts, band);
         const auto& ids = bandIds (band);
@@ -942,9 +952,12 @@ private:
             if (result == 1)
                 engine.monitor.regions = 0u;
             else if (result == 2)
+            {
+                ui::beginUndoStep (apvts, "Reset crossovers");
                 for (int k = 0; k < numCrossovers; ++k)
                     if (auto* p = apvts.getParameter (id::crossover[(size_t) k]))
                         setParameter (*p, p->getDefaultValue());
+            }
             repaint();
         });
     }
@@ -971,6 +984,8 @@ private:
 
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [this, band, ids] (int result)
         {
+            if (result >= 100 && result < 400)
+                ui::beginUndoStep (apvts, "Band");
             if (result >= 100 && result < 200)
                 setParameterValue (apvts, ids.type, (float) (result - 100));
             else if (result >= 200 && result < 300)
@@ -999,6 +1014,13 @@ private:
             actions.push_back ([this, at, t] { addBandAt ((BandType) t, at); });
         }
         menu.addSeparator();
+        juce::PopupMenu places;
+        for (int p = 0; p < placeNames.size(); ++p)
+        {
+            places.addItem (nextId++, placeNames[p]);
+            actions.push_back ([this, p] { setAllPlacements (apvts, p); });
+        }
+        menu.addSubMenu ("All bands to", places);
         menu.addSectionHeader ("Reference");
         menu.addItem (nextId++, learning ? "Keep what was learned" : "Learn a reference from what plays now");
         actions.push_back ([this] { toggleLearning(); });

@@ -666,5 +666,78 @@ int main()
         check (std::fabs (busCut - sidechainCut) < 0.3, fmt ("the same cut by the bus (%.2f dB) as by the sidechain (%.2f dB)", busCut, sidechainCut));
     }
 
+    // ---- [15] track names, HOLD, and COPY TO MIX -------------------------------------------------------------------------------------------------
+    std::printf ("[15] names, hold, copy to mix\n");
+    {
+        Bus bus;
+        const int a = bus.claim(), b = bus.claim();
+        char name[kNameChars + 1];
+        bus.nameOf (a, name);
+        check (name[0] == '\0', "a new slot has no name");
+        bus.setName (a, "Lead Vox 2");
+        bus.setName (b, "A track name that is far too long to keep whole");
+        char other[kNameChars + 1];
+        bus.nameOf (a, name);
+        bus.nameOf (b, other);
+        check (std::strcmp (name, "Lead Vox 2") == 0 && std::strlen (other) == (size_t) kNameChars && std::strncmp (other, "A track name that is far too long", (size_t) kNameChars) == 0,
+               fmt ("a slot keeps the host's name for its track ('%s'), cut at %d characters ('%s')", name, kNameChars, other));
+        bus.release (a);
+        const int again = bus.claim();
+        bus.nameOf (again, name);
+        check (again == a && name[0] == '\0', "a slot that is given back and claimed again has no name");
+
+        // HOLD: the vocal gives up the bass's band while the bass plays; held, it keeps that cut after the bass has stopped.
+        const double lowTone = bandCentreHz (5);
+        for (const bool hold : { false, true })
+        {
+            Bus hb;
+            Stem1 bass (hb, Role::bass), vocal (hb, Role::leadVocal);
+            std::uint32_t clock = 1000;
+            run ({ &bass, &vocal }, 2.0, 256, [&] (int, long long n) { return sine (lowTone, 0.25, n); }, clock);
+            const float before = vocal.engine.cutShown[5].load();
+            vocal.params.hold = hold;
+            const auto after = run ({ &bass, &vocal }, 3.0, 256, [&] (int s, long long n) { return s == 0 ? 0.0f : sine (lowTone, 0.25, n); }, clock); // the bass goes quiet
+            const double level = tailDb (after.out[1], 0.5) - tailDb (after.in[1], 0.5);
+            if (hold)
+                check (before < -5.0f && std::fabs (vocal.engine.cutShown[5].load() - before) < 0.01f && level < -5.0,
+                       fmt ("HOLD: the cut of %.2f dB stays while the bass is silent for 3 s (the tone still comes out %.2f dB down)", before, level));
+            else
+                check (before < -5.0f && std::fabs (vocal.engine.cutShown[5].load()) < 0.05f && level > -0.3, fmt ("without HOLD the same cut lets go once the bass stops (%.2f dB)", level));
+        }
+        // Held from the start there is no cut to keep: the stem is the input, bit for bit, even with the bass playing under it.
+        {
+            Bus hb;
+            Stem1 bass (hb, Role::bass), vocal (hb, Role::leadVocal);
+            vocal.params.hold = true;
+            std::uint32_t clock = 1000;
+            const auto r = run ({ &bass, &vocal }, 1.5, 256, [&] (int, long long n) { return sine (lowTone, 0.25, n); }, clock);
+            check (r.out[1] == r.in[1] && vocal.engine.cutShown[5].load() == 0.0f, "HOLD before any cut was made keeps no cut: the output is the input, bit for bit");
+        }
+
+        // COPY TO MIX: the others of the mix take the values; the sender, another mix and an instance made later do not.
+        Bus cb;
+        Stem1 sender (cb), mate (cb), stranger (cb);
+        sender.params.group = 2;
+        mate.params.group = 2;
+        stranger.params.group = 3;
+        std::uint32_t clock = 1000;
+        run ({ &sender, &mate, &stranger }, 0.5, 256, [&] (int, long long n) { return sine (1000.0, 0.1, n); }, clock);
+        Shared sent;
+        sent.carveDb = 11.0f;
+        sent.reachDb = 20.0f;
+        sent.attackMs = 5.0f;
+        sent.releaseMs = 400.0f;
+        sender.engine.copyToMix (2, sent);
+        Stem1 later (cb);
+        later.params.group = 2;
+        run ({ &sender, &mate, &stranger, &later }, 0.1, 256, [&] (int, long long n) { return sine (1000.0, 0.1, n); }, clock);
+        Shared got;
+        check (mate.engine.broadcastPending() && mate.engine.takeBroadcast (got) && got.carveDb == 11.0f && got.reachDb == 20.0f && got.attackMs == 5.0f && got.releaseMs == 400.0f,
+               "another stem of the mix is told, and gets CARVE 11, REACH 20, ATTACK 5 and RELEASE 400");
+        check (! mate.engine.broadcastPending(), "... once");
+        check (! sender.engine.broadcastPending() && ! stranger.engine.broadcastPending() && ! later.engine.broadcastPending(),
+               "the sender, a stem of another mix and an instance made after the copy are not");
+    }
+
     return test::finish ("HestiaTests");
 }

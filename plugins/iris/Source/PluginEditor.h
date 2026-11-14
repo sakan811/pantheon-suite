@@ -7,7 +7,9 @@
 #include "PluginProcessor.h"
 #include "UI/EqView.h"
 #include "UI/IrisUi.h"
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 class IrisEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -23,6 +25,8 @@ public:
     void selectBand (int band);
     iris::gui::EqView& display() noexcept { return view; } // for the checks and the snapshot tool
     juce::TextButton& guide() noexcept { return guideButton; }   // for the checks
+    ui::UndoButtons& undoControls() noexcept { return undoButtons; } // UNDO / REDO, for the checks
+    ui::AbButtons& abControls() noexcept { return abButtons; }       // A / B, for the checks
     std::vector<ui::Note> notes() const { return iris::adviceFor (adviceInput()); } // what the strip under the panels says, for the checks
 
 private:
@@ -57,6 +61,8 @@ private:
     ui::Choice styleBox, modeBox, phaseBox;
 
     juce::ComboBox presetBox;
+    ui::UndoButtons undoButtons;
+    ui::AbButtons abButtons;
     juce::TextButton deltaButton { "DELTA" }, clearMetersButton { "CLEAR" }, learnRefButton { "LEARN REF" }, matchEqButton { "MATCH EQ" };
     ui::Toggle matchButton;
 

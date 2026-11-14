@@ -37,16 +37,24 @@ public:
         latestFundamental (hz, tilt, noHarmonics);
         themis::ClipTotals clipNow;
         const bool haveClipNow = proc.readClip (clipNow);
+        themis::BandArray heldNow {};
+        const bool haveHeldNow = proc.readHeldCurve (heldNow);
+        const float ceilingNow = proc.paramReader.truePeakCeilingDb();
 
         const bool changed = have != haveData || haveClipNow != haveClip || (haveClipNow && clipNow != clipTotals) || havePhaseNow != havePhase || (havePhaseNow && differs (ph, phaseBands)) || differs (hz, fundamentalHz)
                              || differs (tilt, fundamentalTiltDb) || noHarmonics != noFundamentalHarmonics
                              || haveFoldNow != haveFold || (haveFoldNow && differs (f, fold)) || dev != deviceIndex || (have && differs (m, measured)) || haveCrestNow != haveCrest
                              || (haveCrestNow && differs (crest, lowCrestDb)) || t.name != target.name
                              || differs (t.medianDb, target.medianDb) || differs (t.halfWidthDb, target.halfWidthDb)
-                             || differs (tol, tolerance) || differs (rate, fs);
+                             || differs (tol, tolerance) || differs (rate, fs) || haveHeldNow != haveHeld || (haveHeldNow && differs (heldNow, held))
+                             || differs (ceilingNow, ceilingDb);
         if (!changed)
             return;
         haveData = have;
+        haveHeld = haveHeldNow;
+        if (haveHeldNow)
+            held = heldNow;
+        ceilingDb = ceilingNow;
         haveClip = haveClipNow;
         if (haveClipNow)
             clipTotals = clipNow;
@@ -94,6 +102,8 @@ public:
         drawGrid (g);
         drawDeviceRange (g);
         drawTarget (g);
+        if (haveHeld)
+            drawHeld (g);
         if (haveData)
         {
             drawMeasured (g);
@@ -267,6 +277,23 @@ private:
         g.setColour (colours::accent);
         g.setFont (ui::font (12.0f));
         g.drawText ("Target: " + juce::String (target.name), annotationRow (0, false), juce::Justification::left);
+    }
+
+    // The held curve (HOLD CURVE): a pale, wide ghost behind the live trace (the device preview is the dashed line), with the live
+    // curve's display smoothing and tilt.
+    void drawHeld (juce::Graphics& g) const
+    {
+        auto sm = held;
+        themis::smoothBands (sm, 1);
+        juce::Path ghost;
+        traceCurve (ghost, [&] (size_t s) { return sm[s]; });
+        g.setColour (colours::text.withAlpha (0.16f));
+        g.strokePath (ghost, juce::PathStrokeType (7.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        g.setColour (colours::text.withAlpha (0.55f));
+        g.strokePath (ghost, juce::PathStrokeType (1.4f));
+        g.setColour (colours::text.withAlpha (0.85f));
+        g.setFont (ui::font (12.0f));
+        g.drawText ("Held curve (pale ghost)", annotationRow (device != nullptr ? 2 : 1, false), juce::Justification::left);
     }
 
     void drawMeasured (juce::Graphics& g) const
@@ -482,10 +509,11 @@ private:
         cell.drawTitle (g, "CLIPPING");
         const auto bar = cell.drawTrack (g);
         const auto xAt = [&] (float db) { return bar.getX() + bar.getWidth() * (juce::jlimit (kLowDb, kHighDb, db) - kLowDb) / (kHighDb - kLowDb); };
-        ui::MeterCell::fillSpan (g, bar, bar.getX(), xAt (clip::kTruePeakWarnDb), colours::good.withAlpha (0.25f));
-        ui::MeterCell::fillSpan (g, bar, xAt (clip::kTruePeakWarnDb), xAt (clip::kTruePeakBadDb), colours::warn.withAlpha (0.25f));
+        const float warnDb = std::min (ceilingDb, clip::kTruePeakBadDb);
+        ui::MeterCell::fillSpan (g, bar, bar.getX(), xAt (warnDb), colours::good.withAlpha (0.25f));
+        ui::MeterCell::fillSpan (g, bar, xAt (warnDb), xAt (clip::kTruePeakBadDb), colours::warn.withAlpha (0.25f));
         ui::MeterCell::fillSpan (g, bar, xAt (clip::kTruePeakBadDb), bar.getRight(), colours::bad.withAlpha (0.25f));
-        const auto level = clip::level (clipTotals.truePeakDb, clipTotals.clipEvents, clipTotals.overSamples);
+        const auto level = clip::level (clipTotals.truePeakDb, clipTotals.clipEvents, clipTotals.overSamples, ceilingDb);
         const auto c = colours::forLevel (level);
         ui::MeterCell::drawMarker (g, bar, xAt (clipTotals.truePeakDb), c);
         const juce::String count = clipTotals.clipEvents >= 1000 ? juce::String (static_cast<double> (clipTotals.clipEvents) / 1000.0, 1) + "k" : juce::String (static_cast<juce::int64> (clipTotals.clipEvents));
@@ -503,7 +531,7 @@ private:
                             + " samples) and " + juce::String (static_cast<juce::int64> (clipTotals.overSamples)) + " samples at or over 0 dBFS. ";
         text += "DC offset (the average of the samples, which should be zero): " + juce::String (clipTotals.dcOffsetDb(), 0) + " dBFS"
                 + (themis::history::dc::level (clipTotals.dcOffsetDb()) == themis::Level::good ? " (none worth removing). " : ", worth removing: see the master plan. ");
-        text += "Any clip or over is bad, a true peak above " + juce::String (clip::kTruePeakWarnDb, 0) + " dBTP is a warning (lossy encoding can push it over) and above "
+        text += "Any clip or over is bad, a true peak above your ceiling (" + juce::String (ceilingDb, 1) + " dBTP, set in the header) is a warning (lossy encoding can push it over) and above "
                 + juce::String (clip::kTruePeakBadDb, 0) + " dBTP bad: rules of thumb. A synthesised square wave or a held level also looks like a flat top. "
                   "The PEAKS tab of the LEVEL graph shows when it happened.";
         return text;
@@ -625,6 +653,9 @@ private:
     themis::PhaseReport phase;
     bool havePhase = false;
     bool haveClip = false;
+    bool haveHeld = false;
+    themis::BandArray held {};
+    float ceilingDb = themis::history::clip::kTruePeakWarnDb; // the true-peak ceiling parameter
     themis::ClipTotals clipTotals;
     float fundamentalHz = 0.0f, fundamentalTiltDb = 0.0f; // newest tonal bass; 0 Hz when there is none
     bool noFundamentalHarmonics = false;

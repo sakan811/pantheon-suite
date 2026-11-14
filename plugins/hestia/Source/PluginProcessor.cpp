@@ -28,6 +28,40 @@ void HestiaProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
 }
 
+void HestiaProcessor::updateTrackProperties (const TrackProperties& properties)
+{
+    AudioProcessor::updateTrackProperties (properties);
+    engine.setTrackName (properties.name.has_value() ? properties.name->toRawUTF8() : "");
+}
+
+int HestiaProcessor::copyToMix()
+{
+    const auto params = hestia::readParams (apvts);
+    hestia::Shared s;
+    s.carveDb = params.carveDb;
+    s.reachDb = params.reachDb;
+    s.attackMs = params.attackMs;
+    s.releaseMs = params.releaseMs;
+    engine.copyToMix (params.group, s);
+    hestia::Stem scratch[hestia::kMaxStems];
+    return engine.slotIndex() >= 0 && params.group > 0 ? engine.busRef().gather (engine.slotIndex(), params.group, (std::uint32_t) juce::Time::getMillisecondCounter(), scratch) : 0;
+}
+
+void HestiaProcessor::handleAsyncUpdate()
+{
+    hestia::Shared s;
+    if (! engine.takeBroadcast (s))
+        return;
+    for (const auto& [pid, value] : { std::pair<const juce::String&, float> { hestia::id::carve, s.carveDb }, { hestia::id::reach, s.reachDb },
+                                      { hestia::id::attack, s.attackMs }, { hestia::id::release, s.releaseMs } })
+    {
+        auto* param = apvts.getParameter (pid);
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (value));
+        param->endChangeGesture();
+    }
+}
+
 void HestiaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -59,6 +93,8 @@ void HestiaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             start += m;
         }
     }
+    if (engine.broadcastPending())
+        triggerAsyncUpdate();
 }
 
 void HestiaProcessor::getStateInformation (juce::MemoryBlock& dest)

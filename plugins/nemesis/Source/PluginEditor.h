@@ -24,7 +24,10 @@ public:
     ui::Knob freq, width, threshold, range, release;
     ui::Choice mode, detection, lookahead;
     ui::PresetBox presetBox;
-    ui::Toggle listen;
+    ui::Toggle listen, delta;
+    juce::TextButton findButton { "FIND" }; // listens for a moment and sets FREQ to the strongest place between 4 and 10 kHz (LISTEN on)
+    void tickDisplay() { timerCallback(); } // one reading of the engine (the checks and a snapshot call it as the timer would)
+    bool findPending() const noexcept { return awaiting; }
     ui::GuideButton guideButton { nemesis::guideTitle(), nemesis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return nemesis::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
@@ -40,6 +43,8 @@ private:
     juce::Rectangle<int> nameplate, bandArea, historyArea, modeLabel, detectionLabel, presetLabel, lookaheadLabel, latencyLabel, noteStrip;
     std::array<float, kHistory> history {}; // the reduction in dB (positive), oldest first
     float shownReduction = 0.0f;
+    bool awaiting = false;      // FIND was pressed and its answer has not come
+    unsigned findCountAtClick = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NemesisEditor)
 };

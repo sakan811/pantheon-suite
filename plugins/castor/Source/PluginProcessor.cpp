@@ -29,13 +29,15 @@ void CastorProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 void CastorProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
-    const auto params = castor::readParams (apvts);
+    auto params = castor::readParams (apvts);
     auto main = getBusBuffer (buffer, false, 0);
     const int n = main.getNumSamples();
     if (main.getNumChannels() >= 2)
         engine.process (main.getWritePointer (0), main.getWritePointer (1), n, params);
     else if (main.getNumChannels() == 1)
     {
+        // Mono bus: the engine's left channel is the output, and BALANCE would only turn it down (there is no other channel to hear it against): it is ignored.
+        params.balance = 0.0f;
         // Mono: both channels of the engine get the signal, in pieces the scratch channel holds (a host may send more than it promised).
         auto* x = main.getWritePointer (0);
         for (int start = 0; start < n;)
@@ -48,6 +50,8 @@ void CastorProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     }
     if (main.getNumChannels() > 0)
         tapOut.push (main.getArrayOfReadPointers(), main.getNumChannels(), n);
+    if (main.getNumChannels() >= 2) // after the goniometer's tap: the check changes what is heard, not what is drawn
+        castor::applyListen (main.getWritePointer (0), main.getWritePointer (1), n, params.listen);
 }
 
 void CastorProcessor::getStateInformation (juce::MemoryBlock& dest)

@@ -116,8 +116,9 @@ public:
         count = 0;
     }
 
-    // The kernel for the bands that reach `path` (the filters as they are now, `sections[i]` for the band i, `running[i]` whether it is in).
-    void design (const std::array<Section, kBands>& sections, const std::array<bool, kBands>& running, bool& identity) noexcept
+    // The kernel for the bands that reach `path` (the filters as they are now, `sections[i]` for the band i, `running[i]` whether it is in, `mix[i]` how far: below 1 a band that is fading out
+    // has its magnitude taken to that power, so its dB shrink to nothing).
+    void design (const std::array<Section, kBands>& sections, const std::array<bool, kBands>& running, const std::array<double, kBands>& mix, bool& identity) noexcept
     {
         const int F = sizes.frame, half = sizes.half();
         identity = true;
@@ -128,8 +129,11 @@ public:
             double power = 1.0;
             for (int b = 0; b < kBands; ++b)
                 if (running[(size_t) b])
-                    power *= sections[(size_t) b].powerAt (cosW[(size_t) k], cos2W[(size_t) k]);
-            const double m = std::sqrt (power);
+                {
+                    const double p = sections[(size_t) b].powerAt (cosW[(size_t) k], cos2W[(size_t) k]);
+                    power *= mix[(size_t) b] == 1.0 ? p : std::pow (p, mix[(size_t) b]);
+                }
+            const double m = std::sqrt (std::max (power, 0.0)); // a notch on a bin's exact frequency sums to a hair below 0: its root was NaN, and the NaN went into every sample
             work[(size_t) k] = m;
             if (k > 0 && k < F / 2)
                 work[(size_t) (F - k)] = m;

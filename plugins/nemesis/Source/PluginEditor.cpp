@@ -14,7 +14,7 @@ constexpr int displayHeight = 180;
 constexpr int cellWidth = 112;
 constexpr int cellHeight = 108;
 constexpr int kTimerHz = 30;
-constexpr int kWidth = 760;
+constexpr int kWidth = 860;
 }
 
 NemesisEditor::NemesisEditor (NemesisProcessor& p)
@@ -30,11 +30,20 @@ NemesisEditor::NemesisEditor (NemesisProcessor& p)
                                          "It is a delay: the host compensates it. Changing it while playing restarts the de-esser (a short gap)."),
       presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default."),
       listen (p.apvts, id::listen, "LISTEN", "Hear only the band the detector hears, to find the s. Not saved as a sound: switch it off before you bounce."),
+      delta (p.apvts, id::delta, "DELTA", "Hear only what is turned down (the sound minus the output): if it is the voice and not just the hiss of the s, THRESH is too low or RANGE too high. It takes the place of LISTEN while it is on. Switch it off before you bounce."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &release, &mode, &detection, &lookahead, &presetBox, &listen, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &release, &mode, &detection, &lookahead, &presetBox, &listen, &delta, &findButton, &guideButton })
         addAndMakeVisible (*c);
+    findButton.setTooltip ("With LISTEN on: listens to the next second and a half of your sound and sets FREQ to the strongest place between 4 and 10 kHz (the s). Play a passage with the s in it; if the sound is too quiet nothing changes.");
+    findButton.onClick = [this]
+    {
+        findCountAtClick = proc.engine.findCount.load (std::memory_order_acquire);
+        awaiting = true;
+        proc.engine.startFind();
+        findButton.setButtonText ("FINDING");
+    };
     startTimerHz (kTimerHz);
     setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
 }
@@ -76,7 +85,12 @@ void NemesisEditor::resized()
     column.removeFromTop (12);
     detection.setBounds (column.removeFromTop (26).removeFromLeft (150));
     column.removeFromTop (6);
-    listen.setBounds (column.removeFromTop (26).removeFromLeft (150));
+    auto listenRow = column.removeFromTop (26);
+    listen.setBounds (listenRow.removeFromLeft (80));
+    listenRow.removeFromLeft (6);
+    delta.setBounds (listenRow.removeFromLeft (80));
+    listenRow.removeFromLeft (6);
+    findButton.setBounds (listenRow.removeFromLeft (80));
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
 }
 
@@ -188,6 +202,16 @@ void NemesisEditor::timerCallback()
     std::copy (history.begin() + 1, history.end(), history.begin());
     history.back() = now;
     shownReduction = now >= shownReduction ? now : std::max (now, shownReduction - gui::kReductionRangeDb / (float) kTimerHz);
+    if (awaiting && proc.engine.findCount.load (std::memory_order_acquire) != findCountAtClick)
+    {
+        awaiting = false;
+        const float found = proc.engine.foundHz.load (std::memory_order_relaxed);
+        if (found > 0.0f)
+            setValue (proc.apvts, id::freq, found);
+    }
+    if (! awaiting)
+        findButton.setButtonText ("FIND");
+    findButton.setEnabled (readParams (proc.apvts).listen && ! awaiting);
     presetBox.sync();
     repaint();
 }

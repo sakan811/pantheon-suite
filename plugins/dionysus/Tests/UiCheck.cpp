@@ -22,11 +22,11 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 8, fmt ("%d parameters: drive, curve, bias, tone, mix, output, auto gain and oversampling", proc.getParameters().size()));
+    check (proc.getParameters().size() == 9, fmt ("%d parameters: drive, curve, bias, tone, mix, output, auto gain, oversampling and low cut", proc.getParameters().size()));
     check (shapeNames.size() == kNumShapes && oversamplingNames.size() == kNumOversampling, "the choice lists match the engine's");
     const auto d = readParams (proc.apvts);
-    check (std::fabs (d.driveDb - 12.0f) < 0.01f && d.shape == Shape::tape && std::fabs (d.bias) < 1e-4f && std::fabs (d.tone) < 1e-4f && d.mix > 0.999f && d.autoGain && d.oversampling == 1,
-           "a new instance: 12 dB of drive, tape, no bias or tone, MIX 100%, AUTO GAIN on, 2x");
+    check (std::fabs (d.driveDb - 12.0f) < 0.01f && d.shape == Shape::tape && std::fabs (d.bias) < 1e-4f && std::fabs (d.tone) < 1e-4f && d.mix > 0.999f && d.autoGain && d.oversampling == 1 && d.lowCutHz <= 20.5f,
+           "a new instance: 12 dB of drive, tape, no bias or tone, MIX 100%, AUTO GAIN on, 2x, no low cut");
     check (proc.getLatencySamples() == oversamplingLatency (1), fmt ("the host is told %d samples of latency", proc.getLatencySamples()));
     {
         setValue (proc.apvts, id::oversampling, 3.0f);
@@ -117,6 +117,8 @@ int main()
         in.params.mix = 0.0f;
         in.params.oversampling = 0;
         in.params.autoGain = false;
+        in.params.lowCutHz = 120.0f;
+        in.delta = true;
         for (const auto& n : adviceFor (in))
             if ((int) n.text.size() > ui::kMaxNoteChars)
             {
@@ -124,6 +126,71 @@ int main()
                 std::printf ("  too long (%d): %s\n", (int) n.text.size(), n.text.c_str());
             }
         check (! tooLong, "every note fits a line of the strip");
+    }
+
+    // Bypassed by the host: the sound is still delayed by the oversampler's latency, or the track would jump early.
+    {
+        DionysusProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::oversampling, 3.0f); // 8x
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        buffer.clear();
+        q.processBlock (buffer, midi);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        const int latency = q.getLatencySamples();
+        int at = -1, seen = 0;
+        for (int block = 0; block < 2; ++block)
+        {
+            buffer.clear();
+            if (block == 0)
+                buffer.setSample (0, 0, 1.0f), buffer.setSample (1, 0, 0.5f);
+            q.processBlockBypassed (buffer, midi);
+            for (int i = 0; i < 512; ++i)
+                if (buffer.getSample (0, i) != 0.0f)
+                    at = block * 512 + i, ++seen;
+        }
+        check (latency == oversamplingLatency (3) && at == latency && seen == 1, fmt ("bypassed at 8x, an impulse comes out %d samples late (the reported latency, %d)", at, latency));
+    }
+
+    // DELTA, the drive meter and the clip lamp.
+    {
+        DionysusProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        {
+            std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+            auto& editor = ui::innerOf<DionysusEditor> (*holder);
+            editor.setVisible (true);
+            check (editor.getWidth() == 1000 && editor.lowCut.getRight() <= editor.mix.getX() && editor.deltaButton.getBottom() <= editor.getHeight() && ! editor.deltaButton.getBounds().intersects (editor.autoGain.getBounds())
+                       && editor.autoGain.getRight() <= editor.getWidth(),
+                   "LOW CUT sits beside TONE and DELTA under AUTO GAIN, overlapping nothing");
+            editor.deltaButton.triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            check (q.engine.delta.load() && ui::hasNote (editor.notes(), "DELTA is on", ui::Severity::warning), "DELTA turns the engine's monitor on, and a warning says you do not hear your track");
+            check (q.getParameters().size() == 9 && ! (bool) q.apvts.state.getProperty ("delta", false), "DELTA is not a parameter and not in the state: it is never saved or automated");
+            q.engine.delta = false;
+        }
+        check (! q.engine.delta.load(), "closing the editor ends DELTA: monitoring never outlives its window");
+        // A loud tone through the processor (the editor is closed, so nothing else reads the meters): the level that reached the curve and the output's peak.
+        setValue (q.apvts, id::drive, 24.0f);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        for (int block = 0; block < 20; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+                for (int c = 0; c < 2; ++c)
+                    buffer.setSample (c, i, 0.5f * std::sin (6.2831853f * 220.0f * (float) (block * 512 + i) / 48000.0f));
+            q.processBlock (buffer, midi);
+        }
+        check (std::fabs (q.engine.drivePeak.load() - 0.5f * 15.85f) < 0.5f && q.engine.outPeak.load() > 0.05f,
+               fmt ("a 0.5 tone at +24 dB of drive reaches the curve at %.2f (7.9) and the output peaks at %.2f", q.engine.drivePeak.load(), q.engine.outPeak.load()));
+        AdviceInput in;
+        in.params.lowCutHz = 120.0f;
+        check (ui::hasNote (adviceFor (in), "LOW CUT filters the saturated path only", ui::Severity::info), "a low cut at MIX 100% says it is the whole sound");
+        in.params.mix = 0.5f;
+        check (! ui::hasNote (adviceFor (in), "LOW CUT filters", ui::Severity::info), "... and not under 100%");
     }
 
     // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
@@ -154,7 +221,10 @@ int main()
         check ((int) raw (id::shape) == 0 && (int) raw (id::oversampling) == 1 && std::fabs (raw (id::mix) - 100.0f) < 0.5f && std::fabs (raw (id::drive) - 12.0f) < 0.1f, "Init is the defaults");
         const int chosen = indexOf ("Parallel Grit");
         q.setCurrentProgram (chosen);
-        check ((int) raw (id::shape) == 3 && std::fabs (raw (id::mix) - 30.0f) < 0.5f, "Parallel Grit: the diode curve under the dry sound");
+        check ((int) raw (id::shape) == 3 && std::fabs (raw (id::mix) - 30.0f) < 0.5f && std::fabs (raw (id::lowCut) - 120.0f) < 1.0f, "Parallel Grit: the diode curve under the dry sound, with the bass kept out of it (LOW CUT 120 Hz)");
+        q.setCurrentProgram (0);
+        check (raw (id::lowCut) <= 20.5f, "a preset that does not list LOW CUT leaves it Off");
+        q.setCurrentProgram (chosen);
         juce::MemoryBlock saved;
         q.getStateInformation (saved);
         DionysusProcessor other;

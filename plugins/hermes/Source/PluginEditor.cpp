@@ -31,6 +31,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
       polarity (p.apvts, id::polarity, "POLARITY", "Inverts both channels. It sounds the same alone and different against other tracks."),
       reference (p.apvts, id::reference, "REF (B)", "Hear the reference instead of your sound (A). The switch is a short crossfade, and the reference plays on while you listen to A."),
       levelMatch (p.apvts, id::levelMatch, "LEVEL MATCH", "Brings the reference to the integrated loudness of your sound, so you compare the tone and not the level. Let the meter run first: until it has read a few seconds there is nothing to match."),
+      autoReset (p.apvts, id::resetOnPlay, "AUTO RESET", "Clears the integrated loudness, the range and the peaks each time the host starts playing, so every pass is measured from its start. Off by default; it is kept with the session."),
       presetBox (p, presets(), "LISTEN and the reference are set; TRIM, POLARITY and REF TRIM are kept."),
       proc (p)
 {
@@ -38,7 +39,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
     momentaryHistory.fill (gui::kNothing - 1.0f);
     shortTermHistory.fill (gui::kNothing - 1.0f);
     loadButton.setTooltip ("Choose a track to compare with (WAV, AIFF, FLAC, OGG or MP3 where the system can read it; at most 10 minutes). It is kept in the session.");
-    restartButton.setTooltip ("Takes the reference back to its start. It loops, and plays on whether it is heard or not.");
+    restartButton.setTooltip ("Takes the reference back to its start. It loops, and plays on whether it is heard or not. Click or drag on the bar below to play from there.");
     resetButton.setTooltip ("Clears the integrated loudness, the loudness range and the peaks, and starts again.");
     loadButton.onClick = [this]
     {
@@ -49,9 +50,15 @@ HermesEditor::HermesEditor (HermesProcessor& p)
                 loadFile (c.getResult());
         });
     };
+    autoTrimButton.setTooltip ("Sets TRIM so the integrated loudness reads -14 LUFS: play the whole passage first (RESET starts it again). It changes TRIM once, it does not follow the sound.");
+    autoTrimButton.onClick = [this]
+    {
+        const auto measured = proc.engine.integrated.load();
+        setValue (proc.apvts, id::trim, autoTrimDb (readParams (proc.apvts).trimDb, measured));
+    };
     restartButton.onClick = [this] { proc.engine.restartReference(); };
     resetButton.onClick = [this] { proc.engine.resetMeters(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &presetBox, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &autoTrimButton, &autoReset, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
@@ -95,6 +102,11 @@ void HermesEditor::resized()
     polarity.setBounds (two.removeFromLeft (80));
     two.removeFromLeft (6);
     resetButton.setBounds (two.removeFromLeft (80));
+    column.removeFromTop (6);
+    auto three = column.removeFromTop (26);
+    autoTrimButton.setBounds (three.removeFromLeft (80));
+    three.removeFromLeft (6);
+    autoReset.setBounds (three.removeFromLeft (80));
     row.removeFromLeft (14);
     referenceArea = row.withTrimmedTop (4);
     auto ref = referenceArea;
@@ -108,6 +120,32 @@ void HermesEditor::resized()
     bottom.removeFromLeft (6);
     levelMatch.setBounds (bottom.removeFromLeft (130));
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
+}
+
+juce::Rectangle<float> HermesEditor::referenceBar() const
+{
+    return { (float) referenceArea.getX(), (float) referenceArea.getBottom() - 12.0f, (float) referenceArea.getWidth() - 20.0f, 5.0f };
+}
+
+void HermesEditor::seekTo (juce::Point<int> where)
+{
+    const auto bar = referenceBar();
+    proc.engine.seekReference ((where.x - bar.getX()) / bar.getWidth());
+    position = juce::jlimit (0.0f, 1.0f, (where.x - bar.getX()) / bar.getWidth()); // shown at once; the audio thread confirms it
+    repaint (referenceArea);
+}
+
+void HermesEditor::mouseDown (const juce::MouseEvent& e)
+{
+    seeking = proc.referenceName().isNotEmpty() && referenceBar().expanded (0.0f, 6.0f).contains (e.position);
+    if (seeking)
+        seekTo (e.getPosition());
+}
+
+void HermesEditor::mouseDrag (const juce::MouseEvent& e)
+{
+    if (seeking)
+        seekTo (e.getPosition());
 }
 
 AdviceInput HermesEditor::adviceInput() const
@@ -139,7 +177,7 @@ void HermesEditor::paint (juce::Graphics& g)
                        area, juce::Justification::left, status.isNotEmpty() && name.isEmpty() ? colours::warn : colours::dim, 9.5f);
         if (name.isNotEmpty())
         {
-            const auto bar = juce::Rectangle<float> ((float) referenceArea.getX(), (float) referenceArea.getBottom() - 12.0f, (float) referenceArea.getWidth() - 20.0f, 5.0f);
+            const auto bar = referenceBar();
             g.setColour (colours::glassGrid);
             g.fillRect (bar);
             g.setColour (colours::accent);

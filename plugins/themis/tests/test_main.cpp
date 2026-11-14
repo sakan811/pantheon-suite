@@ -1180,6 +1180,24 @@ TEST (translation_report_flags_bass_heavy_and_wide_low_end)
     CHECK (cancel.worstBand == static_cast<int> (std::lround (BandGrid::indexForHz (60.0))));
     CHECK_NEAR (cancel.worstBandLossDb, 20.0, 1.0e-4);
 
+    // a band that cancels completely has almost no mid left, and is still the worst one: the floor is on mid + side
+    {
+        BandArray mid = target.medianDb, cancelFold {};
+        cancelFold.fill (-3.0f);
+        const auto b = static_cast<size_t> (std::lround (BandGrid::indexForHz (1000.0)));
+        mid[b] = -45.0f;         // the mid of that band, 45 dB under its neighbours' ...
+        cancelFold[b] = -45.0f;  // ... because nearly all of its power is side
+        const auto gone = analyseTranslation (mid, &cancelFold, target, nullptr);
+        CHECK (gone.worstBand == static_cast<int> (b));
+        CHECK_NEAR (gone.worstBandLossDb, 45.0, 1.0e-4);
+        // a band that is simply quiet (mid + side under the floor) is still ignored
+        BandArray quiet = target.medianDb, quietFold {};
+        quietFold.fill (-3.0f);
+        quiet[b] = -45.0f;
+        quietFold[b] = -10.0f; // -45 + 10 = -35 dB: under the floor, though its loss (10 dB) is the largest
+        CHECK (analyseTranslation (quiet, &quietFold, target, nullptr).worstBand != static_cast<int> (b));
+    }
+
     // single-band verdicts: bass is held to a tighter limit than the highs
     CHECK (translation::bandMonoLevel (0, 2.0f) == Level::warn);
     CHECK (translation::bandMonoLevel (40, 2.0f) == Level::good);
@@ -2508,6 +2526,57 @@ TEST (advisor_hands_the_ceiling_and_the_gain_to_a_limiter)
     in.lowCrestDb = 2.0f;
     for (const auto& item : advise (in).items)
         CHECK (item.topic == Topic::clipping || item.topic == Topic::loudness || !item.limiter.active());
+}
+
+TEST (the_true_peak_ceiling_is_the_users)
+{
+    // The default is the old -1 dBTP: a peak at -2 is fine, one at -0.4 is a warning.
+    auto in = cleanMaster();
+    in.clip.truePeakDb = -2.0f;
+    CHECK (pick (in, Topic::clipping) == nullptr);
+
+    // A ceiling of -3: the same -2 dBTP is over it, the headline names the new ceiling and the limiter is handed it.
+    in.truePeakCeilingDb = -3.0f;
+    const auto* c = pick (in, Topic::clipping);
+    CHECK (c != nullptr && c->level == Level::warn && c->headline.find ("-3.0 dBTP") != std::string::npos);
+    CHECK (c != nullptr && c->limiter.setsCeiling && std::abs (c->limiter.ceilingDb + 3.0f) < 1e-6f);
+    CHECK (history::clip::level (-2.0f, 0, 0, -3.0f) == Level::warn && history::clip::level (-2.0f, 0, 0) == Level::good);
+    CHECK (history::clip::level (0.5f, 0, 0, -3.0f) == Level::bad); // over 0 dBTP is bad whatever the ceiling
+    CHECK (history::clip::level (-0.5f, 0, 0, 0.0f) == Level::good && history::clip::level (0.2f, 0, 0, 0.0f) == Level::bad);
+
+    // The peaks graph's verdict uses it too.
+    std::vector<FrameStats> frames (static_cast<size_t> (history::kMinFrames + 2));
+    for (auto& f : frames)
+        f.truePeakDb = f.samplePeakDb = -2.0f;
+    CHECK (history::analysePeaks (frames.data(), static_cast<int> (frames.size())).level == Level::good);
+    CHECK (history::analysePeaks (frames.data(), static_cast<int> (frames.size()), -3.0f).level == Level::warn);
+
+    // "Raise the level" counts its room against the user's ceiling.
+    in = cleanMaster();
+    in.integratedLufs = -19.0f;
+    in.clip.truePeakDb = -7.0f;
+    in.truePeakCeilingDb = -6.0f;
+    const auto* q = pick (in, Topic::loudness);
+    CHECK (q != nullptr && q->why.find ("Only 1.0 dB fits under -6.0 dBTP") != std::string::npos);
+}
+
+TEST (the_plan_is_copied_as_text)
+{
+    auto in = cleanMaster();
+    in.clip.clipEvents = 30;
+    in.clip.truePeakDb = -0.4f;
+    in.integratedLufs = -8.0f;
+    const auto advice = advise (in);
+    const auto text = planAsText (in, advice);
+    CHECK (text.rfind ("Themis master plan\n", 0) == 0);
+    CHECK (text.find ("true-peak ceiling -1.0 dBTP") != std::string::npos && text.find ("-8.0 LUFS integrated") != std::string::npos);
+    CHECK (text.find ("1. [FIX] " + advice.items.front().headline) != std::string::npos);
+    CHECK (text.find ("2. [") != std::string::npos);
+    CHECK (text.find (advice.items.front().why) != std::string::npos);
+    auto quiet = cleanMaster();
+    CHECK (planAsText (quiet, advise (quiet)).find ("Status: ready") != std::string::npos);
+    quiet.analysedSeconds = 1.0;
+    CHECK (planAsText (quiet, advise (quiet)).find ("still measuring") != std::string::npos);
 }
 
 TEST (advisor_speaks_for_each_stereo_problem)

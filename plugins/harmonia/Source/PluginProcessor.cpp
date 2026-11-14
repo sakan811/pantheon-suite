@@ -77,7 +77,7 @@ HarmoniaProcessor::HarmoniaProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "STATE", createLayout()),
+      apvts (*this, &undo, "STATE", createLayout()),
       engine (std::make_unique<AutoTuneEngine>())
 {
     pKey = apvts.getRawParameterValue (ids::key);
@@ -118,6 +118,13 @@ bool HarmoniaProcessor::followedKey (int& root, bool& minor) const
 
 uint16_t HarmoniaProcessor::currentNoteMask() const
 {
+    if (const uint16_t held = heldMask.load(); held != 0)
+        return held;
+    return keyboardNoteMask();
+}
+
+uint16_t HarmoniaProcessor::keyboardNoteMask() const
+{
     int root = 0;
     bool minor = false;
     if (followedKey (root, minor))
@@ -155,12 +162,48 @@ void HarmoniaProcessor::prepareToPlay (double sampleRate, int)
 {
     const int channels = juce::jlimit (1, 2, getTotalNumInputChannels());
     prepared.store (false);
+    heldNotes.fill (0);
+    heldMask.store (0);
     engine->prepare (sampleRate, channels);
     setLatencySamples (engine->latencySamples());
     prepared.store (true);
 }
 
-void HarmoniaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void HarmoniaProcessor::followMidi (const juce::MidiBuffer& midi)
+{
+    // No allocation: the buffer is only read. A note-on with velocity 0 is a note-off (the message class says so).
+    bool changed = false;
+    for (const auto metadata : midi)
+    {
+        const auto m = metadata.getMessage();
+        if (m.isNoteOn())
+        {
+            auto& n = heldNotes[(size_t) m.getNoteNumber() & 127];
+            n = (uint8_t) std::min (255, n + 1);
+            changed = true;
+        }
+        else if (m.isNoteOff())
+        {
+            auto& n = heldNotes[(size_t) m.getNoteNumber() & 127];
+            n = n > 0 ? (uint8_t) (n - 1) : (uint8_t) 0;
+            changed = true;
+        }
+        else if (m.isAllNotesOff() || m.isAllSoundOff())
+        {
+            heldNotes.fill (0);
+            changed = true;
+        }
+    }
+    if (! changed)
+        return;
+    uint16_t mask = 0;
+    for (size_t n = 0; n < heldNotes.size(); ++n)
+        if (heldNotes[n] > 0)
+            mask = (uint16_t) (mask | (1u << (n % 12)));
+    heldMask.store (mask);
+}
+
+void HarmoniaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -170,19 +213,28 @@ void HarmoniaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     if (! prepared.load())
         return;
 
+    blockCount.fetch_add (1);
+
     if (resetRequested.exchange (false))
+    {
         engine->reset();
+        heldNotes.fill (0); // a host that stopped or jumped may never send the note-offs
+        heldMask.store (0);
+    }
+    followMidi (midi);
 
     engine->setParams (readParams());
 
     // Key detection requests from the UI.
-    switch (learnCommand.exchange (0))
+    if (const auto seq = learnSequence.load(); seq != learnSeen)
     {
-        case 1:
+        learnSeen = seq;
+        if (learnWanted.load())
+        {
             engine->startLearning();
             learning.store (true);
-            break;
-        case 2:
+        }
+        else if (learning.load()) // a stop with nothing started (a cancelled request) has nothing to give
         {
             const auto guess = engine->stopLearning();
             learning.store (false);
@@ -193,9 +245,7 @@ void HarmoniaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 resultScore.store (guess.score);
                 resultReady.store (true);
             }
-            break;
         }
-        default: break;
     }
     if (learning.load())
         learnAmount.store (engine->learnedAmount());
@@ -221,7 +271,9 @@ juce::AudioProcessorEditor* HarmoniaProcessor::createEditor()
 
 void HarmoniaProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = apvts.copyState().createXml())
+    auto state = apvts.copyState();
+    ab.saveTo (state);
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
@@ -229,7 +281,11 @@ void HarmoniaProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (apvts.state.getType()))
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        {
+            const auto tree = juce::ValueTree::fromXml (*xml);
+            ab.loadFrom (tree);
+            apvts.replaceState (tree);
+        }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

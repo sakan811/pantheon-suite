@@ -5,6 +5,7 @@
 
 #include "NoteModel.h"
 
+#include <functional>
 #include <numeric>
 
 // Cuts the contour into notes. A voiced stretch is one candidate; inside it the notes are where the held pitch changes, or
@@ -36,7 +37,11 @@ struct NoteSpan
 class Segmenter
 {
 public:
-    static std::vector<NoteSpan> segment (const Contour& c, const SegmenterSettings& s = {})
+    // `cancelled` is polled inside the fit (which is quadratic in the length of a voiced stretch); when it returns true the notes found so far
+    // are returned and the caller is expected to drop them.
+    using Cancel = std::function<bool()>;
+
+    static std::vector<NoteSpan> segment (const Contour& c, const SegmenterSettings& s = {}, const Cancel& cancelled = {})
     {
         std::vector<NoteSpan> notes;
         const int nf = c.numFrames();
@@ -47,15 +52,17 @@ public:
             int e = f;
             while (e < nf && c.voiced[(size_t) e])
                 ++e;
+            if (cancelled && cancelled())
+                break;
             if (e - f >= s.minNoteFrames)
-                segmentRun (c, f, e, s, notes);
+                segmentRun (c, f, e, s, notes, cancelled);
             f = e;
         }
         return notes;
     }
 
 private:
-    static void segmentRun (const Contour& c, int a, int b, const SegmenterSettings& s, std::vector<NoteSpan>& out)
+    static void segmentRun (const Contour& c, int a, int b, const SegmenterSettings& s, std::vector<NoteSpan>& out, const Cancel& cancelled)
     {
         const int n = b - a;
         std::vector<double> raw ((size_t) n);
@@ -89,6 +96,9 @@ private:
             std::vector<int> from ((size_t) n + 1, 0);
             best[0] = -s.levelPenalty; // the first level is free
             for (int j = s.minSegmentFrames; j <= n; ++j)
+            {
+                if (cancelled && (j & 31) == 0 && cancelled())
+                    return;
                 for (int i = 0; i <= j - s.minSegmentFrames; ++i)
                 {
                     if (best[(size_t) i] >= inf)
@@ -100,6 +110,7 @@ private:
                         from[(size_t) j] = i;
                     }
                 }
+            }
             cuts.clear();
             for (int j = n; j > 0; j = from[(size_t) j])
                 cuts.push_back (from[(size_t) j]);

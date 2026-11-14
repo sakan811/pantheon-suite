@@ -18,7 +18,13 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
       deviceBox (p.apvts, params::device),
       loudnessBox (p.apvts, params::loudnessTarget),
       avgKnob (p.apvts, params::avgTime, "Averaging", "Averaging window for the long-term curve. Infinite measures the whole track since Reset."),
-      toleranceKnob (p.apvts, params::tolerance, "Tolerance", "How wide the target band is, as a multiple of the curve's own spread. Narrower is stricter; double-click for 1.00x.")
+      toleranceKnob (p.apvts, params::tolerance, "Tolerance", "How wide the target band is, as a multiple of the curve's own spread. Narrower is stricter; double-click for 1.00x."),
+      ceilingKnob (p.apvts, params::truePeakCeiling, "True-peak ceiling",
+                   "The true peak the master is held to: above it is a warning in the CLIPPING readout, the PEAKS graph and the master plan (the plan's ceiling item and the COPY for Aegis name it). "
+                   "-1 dBTP is the usual streaming-delivery ceiling; double-click for it. Over 0 dBTP is always bad."),
+      resetOnPlayButton (p.apvts, params::resetOnPlay, "Auto reset",
+                         "When on, the measurement restarts by itself each time the host starts playing from the beginning of its timeline (as Reset does), so a fresh pass of the track "
+                         "is measured on its own. Off by default: the measurement runs on across stops and starts until you press Reset. Playing on from a stop part-way never resets.")
 {
     setLookAndFeel (&laf);
 
@@ -29,7 +35,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     addAndMakeVisible (advicePanel);
     addAndMakeVisible (auditionPanel);
     for (auto* c : std::initializer_list<juce::Component*> { &targetBox, &avgKnob, &deviceBox, &deviceLabel, &loudnessBox, &loudnessLabel, &learnButton, &saveButton, &loadButton,
-                                                              &copyEqButton, &resetButton, &statusLabel, &toleranceKnob, &guideButton })
+                                                              &copyEqButton, &holdButton, &resetButton, &statusLabel, &toleranceKnob, &ceilingKnob, &resetOnPlayButton, &guideButton })
         addAndMakeVisible (c);
 
     deviceBox.setTooltip ("Preview how the balance would translate to a typical playback device (approximate response; "
@@ -58,6 +64,12 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
                              "becomes its reference, drawn behind the spectrum). A difference from the target is a "
                              "matter of taste, so treat it as a starting point and judge it by ear.");
     copyEqButton.onClick = [this] { copyTonalEq(); };
+    holdButton.setClickingTogglesState (true);
+    holdButton.setToggleState (proc.hasHeldCurve(), juce::dontSendNotification);
+    holdButton.setTooltip ("Keep the measured tonal curve as it is now and draw it behind the live one as a pale ghost, to judge a change against what it was: "
+                           "change the master, press Reset, play the same part again and compare the two. Click again to let it go. Not saved with the session.");
+    holdButton.onClick = [this] { toggleHeldCurve(); };
+    shownCeilingDb = proc.paramReader.truePeakCeilingDb();
     advicePanel.onCopied = [this] (const juce::String& text) { setStatus (text, false); };
     loadButton.onClick = [this] { loadCurve(); };
     resetButton.onClick = [this] {
@@ -68,8 +80,8 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     showIdleStatus();
 
     setResizable (true, true);
-    setResizeLimits (1120, 780, 2200, 1300);
-    setSize (1120, 780); // opens at the smallest size it supports; the corner scales it up (setResizeLimits above)
+    setResizeLimits (kMinWidth, 780, 2200, 1300);
+    setSize (kMinWidth, 780); // opens at the smallest size it supports; the corner scales it up (setResizeLimits above)
     advicePanel.refresh();
     startTimerHz (30);
 }
@@ -78,13 +90,21 @@ ThemisEditor::~ThemisEditor()
 {
     stopTimer();
     // The preview and reference gains are kept up to date by this editor's timer; without it they would go stale, so they end with it.
+    // The audition ends too: its panel is the only place that shows it, and an engaged solo with no window would be heard with no way to see why.
     proc.setStreamingPreview (false);
     proc.setReferenceOn (false);
+    proc.setAudition (themis::Switches {});
     setLookAndFeel (nullptr);
 }
 
 void ThemisEditor::timerCallback()
 {
+    if (const float ceiling = proc.paramReader.truePeakCeilingDb(); ceiling != shownCeilingDb) // the verdicts of the graphs and the plan depend on it
+    {
+        shownCeilingDb = ceiling;
+        levelView.refresh();
+        advicePanel.refresh();
+    }
     view.update();
     scopeView.update();
     levelView.update();
@@ -126,6 +146,25 @@ void ThemisEditor::copyTonalEq()
         return;
     }
     setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s) and the target curve: paste them in " + ui::linkDestination (moves) + " (PASTE on its band panel).", false);
+}
+
+void ThemisEditor::toggleHeldCurve()
+{
+    if (!holdButton.getToggleState())
+    {
+        proc.releaseHeldCurve();
+        view.update();
+        setStatus ("Released the held curve.", false);
+        return;
+    }
+    if (!proc.holdCurve())
+    {
+        holdButton.setToggleState (false, juce::dontSendNotification);
+        setStatus ("Nothing measured yet: play the track first, then hold the curve.", true);
+        return;
+    }
+    view.update();
+    setStatus ("Holding the curve as it is now (the pale ghost). Change the master, press Reset, play the same part again and compare.", false);
 }
 
 usage::Input ThemisEditor::usageInput() const
@@ -258,16 +297,22 @@ void ThemisEditor::resized()
     loadButton.setBounds (row1.removeFromLeft (84).reduced (0, 3));
     row1.removeFromLeft (4);
     copyEqButton.setBounds (row1.removeFromLeft (76).reduced (0, 3));
+    row1.removeFromLeft (4);
+    holdButton.setBounds (row1.removeFromLeft (92).reduced (0, 3));
     row1.removeFromLeft (14);
     deviceLabel.setBounds (row1.removeFromLeft (84));
     row1.removeFromLeft (6);
     deviceBox.setBounds (row1.removeFromLeft (160).reduced (0, 2));
+    row1.removeFromLeft (14);
+    resetOnPlayButton.setBounds (row1.removeFromLeft (96).reduced (0, 3));
 
     head.removeFromTop (4);
     auto row2 = head;
     avgKnob.setBounds (row2.removeFromLeft (158));
     row2.removeFromLeft (8);
     toleranceKnob.setBounds (row2.removeFromLeft (158));
+    row2.removeFromLeft (8);
+    ceilingKnob.setBounds (row2.removeFromLeft (158));
     row2.removeFromLeft (16);
     resetButton.setBounds (row2.removeFromLeft (70).withSizeKeepingCentre (70, 26));
     row2.removeFromLeft (18);

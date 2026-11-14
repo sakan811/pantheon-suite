@@ -38,6 +38,10 @@ A notch or a shelf in the path at 0 dB would not be exact (that is the lesson of
 **Look-ahead delays the sound and its band, not the detector.** The detector's band-pass reads what is arriving; the sound and that band are written into a ring (`Channel::ringSound`, `ringBand`) and what is heard is `delaySamples` back, so `y = heard - (1 - gain) x heardBand` is still the subtraction above (the delayed band is the band of the delayed sound).
 With `delaySamples == 0` the ring returns the input, so the engine is bit-identical to the one without. A change of the setting clears the rings (a short gap) and moves `latencySamples`, which the processor hands to the host on the message thread (`handleAsyncUpdate`). The list is `kLookaheadMs`, in the order of `lookaheadNames`.
 
+**DELTA is the third output branch** (`y = (1 - gain) x heardBand` in split-band, `heard x (1 - gain)` in wideband, ahead of LISTEN): it is exactly what the other branches take off, so output + DELTA is the delayed input. **FIND** (`startFind`, `findCount`, `foundHz`) is a bank of `kFindBins` band-passes that only runs for `kFindMs` after a request, on the mono sum, fixed arrays, no allocation; the editor's FIND button (enabled only with LISTEN on) sets FREQ from `foundHz` when `findCount` moves.
+
+**Bypass.** The plugin reports latency (the look-ahead), so `processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay` (prepared for the longest look-ahead); UiCheck pins it.
+
 **Presets** are `ui::Preset`s in `Presets.h`; the processor's `ui::Programs` applies them (every parameter back to its default first) and saves the chosen index with the session.
 
 **One gain for both channels.** The louder band envelope decides; the gain is applied to both. Do not detect per channel: a sibilant panned to one side would move.
@@ -53,7 +57,7 @@ block-size dependence only exists while a knob moves).
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
-**Parameters.** Ids (`nemesis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`nemesis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off), and `delta`, version 3 (off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `modeNames` and `detectionNames` is the order of `Mode` and `Detection`.
 
 ## DRY: where each thing lives

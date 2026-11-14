@@ -28,6 +28,10 @@ inline constexpr double kAutoDepth = 0.4;
 inline constexpr double kAutoFastShare = 0.2;
 inline constexpr double kAutoFastFloorMs = 2.0;
 
+// MATCH LEVEL: the output is turned down (never up, so the ceiling still holds) to the loudness of the input, read as the RMS of both channels over about a second.
+inline constexpr double kMatchMeanMs = 1000.0;
+inline constexpr double kMatchStepMs = 20.0;
+
 struct EngineParams
 {
     float gainDb = 0.0f;       // before the limiter
@@ -36,6 +40,8 @@ struct EngineParams
     int lookahead = kDefaultLookahead;
     bool truePeak = true;      // read the peaks between the samples too
     bool autoRelease = false;  // a short peak is let go faster than RELEASE, a sustained reduction at RELEASE
+    bool delta = false;        // listen to what the limiter takes away (the sound after GAIN minus the output, aligned by the latency)
+    bool matchLevel = false;   // turn the output down to the loudness of the input, so a raised GAIN is not an unfair comparison
 };
 
 inline int lookaheadSamples (double fs, int choice) noexcept
@@ -118,6 +124,8 @@ public:
         sustained = 1.0;
         gainNow = 1.0;
         gainStarted = false;
+        inPower = outPower = 0.0;
+        matchNow = 1.0;
     }
 
     // A change of look-ahead restarts the limiter (the latency moves with it).
@@ -142,6 +150,7 @@ public:
         const double fastMs = std::min ((double) p.releaseMs, std::max (kAutoFastFloorMs, kAutoFastShare * (double) p.releaseMs));
         const double fastStep = 1.0 - std::exp (-1.0 / std::max (0.001 * fastMs * fs, 1.0));
         const double meanStep = 1.0 - std::exp (-1.0 / (0.001 * kAutoMeanMs * fs));
+        const double powerStep = 1.0 - std::exp (-1.0 / (0.001 * kMatchMeanMs * fs)), matchStep = 1.0 - std::exp (-1.0 / (0.001 * kMatchStepMs * fs));
         if (! gainStarted)
         {
             gainNow = gainTarget;
@@ -154,7 +163,8 @@ public:
         for (int i = 0; i < n; ++i)
         {
             gainNow += (gainTarget - gainNow) * gainSmooth;
-            const double xl = finite (left[i]) * gainNow, xr = finite (right[i]) * gainNow;
+            const double dryL = finite (left[i]), dryR = finite (right[i]);
+            const double xl = dryL * gainNow, xr = dryR * gainNow;
             peakIn = std::max (peakIn, (float) std::fmax (std::fabs (finite (left[i])), std::fabs (finite (right[i]))));
 
             // What the limiter must do for the sound the detector is looking at now, kept for the whole look-ahead, then let go at the release.
@@ -185,10 +195,31 @@ public:
             // The gain already keeps the output under the ceiling; this is the end of the line for a sample that got past (and a counter, so a test can tell).
             if (std::fabs (yl) > ceiling * (1.0 + 1e-9) || std::fabs (yr) > ceiling * (1.0 + 1e-9))
                 ++clamped;
-            left[i] = (float) std::clamp (yl, -ceiling, ceiling);
-            right[i] = (float) std::clamp (yr, -ceiling, ceiling);
-            // What leaves, read the way the detector reads: the number OUT shows (and what a true-peak meter after the limiter should find).
-            peakOut = std::max (peakOut, (float) std::fmax (outReaderL.push (left[i], p.truePeak), outReaderR.push (right[i], p.truePeak)));
+            const double limitedL = std::clamp (yl, -ceiling, ceiling), limitedR = std::clamp (yr, -ceiling, ceiling);
+            // What leaves, read the way the detector reads: the number OUT shows (and what a true-peak meter after the limiter should find). It reads the limiter's own output,
+            // before DELTA and MATCH LEVEL, which are for listening and only ever make the sound smaller.
+            peakOut = std::max (peakOut, (float) std::fmax (outReaderL.push ((double) (float) limitedL, p.truePeak), outReaderR.push ((double) (float) limitedR, p.truePeak)));
+            // The loudness of the input and of the limited output (the output is `wait` samples behind, which a second's mean does not feel).
+            inPower += (0.5 * (dryL * dryL + dryR * dryR) - inPower) * powerStep;
+            outPower += (0.5 * (limitedL * limitedL + limitedR * limitedR) - outPower) * powerStep;
+            double outL = limitedL, outR = limitedR;
+            if (p.delta)
+            {
+                // What the limiter took away: the delayed sound it was given (after GAIN) minus what it let through. Aligned by the same read position as the output.
+                outL = delayL[read] - limitedL;
+                outR = delayR[read] - limitedR;
+            }
+            else if (p.matchLevel || matchNow != 1.0)
+            {
+                const double target = p.matchLevel && outPower > 1e-12 ? std::fmin (1.0, std::sqrt (inPower / outPower)) : 1.0;
+                matchNow += (target - matchNow) * matchStep;
+                if (! p.matchLevel && std::fabs (1.0 - matchNow) < 1e-9)
+                    matchNow = 1.0;
+                outL *= matchNow;
+                outR *= matchNow;
+            }
+            left[i] = (float) outL;
+            right[i] = (float) outR;
             ++position;
         }
 
@@ -217,7 +248,7 @@ private:
     pdsp::TruePeakReader readerL, readerR, outReaderL, outReaderR;
     std::vector<double> delayL, delayR, avg1, avg2;
     uint64_t position = 0;
-    double sum1 = 1.0, sum2 = 1.0, release = 1.0, sustained = 1.0, gainNow = 1.0;
+    double sum1 = 1.0, sum2 = 1.0, release = 1.0, sustained = 1.0, gainNow = 1.0, inPower = 0.0, outPower = 0.0, matchNow = 1.0;
     int widthOne = 1, widthTwo = 1; // the two means: widthOne + widthTwo = look + 2, so together they reach back look samples
     bool gainStarted = false;
 };

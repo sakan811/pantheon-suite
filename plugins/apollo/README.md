@@ -14,7 +14,7 @@ by loudness, and **PASTE** takes the bands and the target curve that [Themis](..
 *Headless render of the editor (the hardware-style interface shared with the other plugins) over a programme of a low note with its harmonics on noise that
 falls with frequency. Band 1 is a 36 dB/oct high-pass, band 2 a low shelf of -4 dB, band 4 (selected, ringed) a bell of +3.5 dB at 1.8 kHz, band 5 a narrow dip at 3.4 kHz
 and band 6 a bell on the **Side** only, whose response is the teal curve; the amber curve is the response of the settings, and the cream and dim traces are the analyser after
-and before the bands. **GAIN MATCH** is on and says what it is applying in the header (a fraction of a dB here: the cuts and the boosts nearly cancel). Regenerate with the commands
+and before the bands. **GAIN MATCH** is on and says what it is applying in the header (a fraction of a dB here: the cuts and the boosts nearly cancel). **LISTEN** (off) and ANALYZER are the two buttons in the display's corner. Regenerate with the commands
 under "Development".*
 
 ![Paste from Themis](docs/themis.png)
@@ -42,11 +42,12 @@ Themis writes (see [BandLink.h](../../shared/dsp/include/pantheon/dsp/BandLink.h
 | **Output** | -24 to +24 dB after every band (and after GAIN MATCH). |
 | **Gain Match** | Takes the level the bands add or take away off again, slowly (about 0.6 s), by at most 12 dB either way, so a boost that is merely louder is not mistaken for better. Off by default; while it is on, the gain it applies is read out above its button. Kept by presets. |
 | **Delta** | Plays only what the bands change (output minus input). Not saved, not automatable, off when the window closes. In linear phase the input is delayed like the output, so it is exact. |
+| **Listen** | **LISTEN** (a button in the corner of the display, beside ANALYZER) plays the selected band's region alone: the sound after the bands through a band-pass at that band's frequency and width, and it follows the selected band. Not saved, not automatable, off when the window closes. |
 | **Paste** | **PASTE** (header) takes what Themis copied: **COPY** on a master-plan item or **Copy EQ**. Each band goes into a free band (one that does nothing) with its type, frequency, gain, Q, slope and channels (Mid or Side stays Mid or Side; a low cut is a high-pass); a harmonic-fill band (Hephaestus') and a band on the left or right alone (Iris') are left out, and the strip says so. The target curve of Copy EQ becomes a dashed **reference** behind the analyser, at the level of this track; right-click the display to clear it. Kept with the session. |
 | **Presets** | Nine starting points (Init, Low Cut, Vocal Presence, Mud Cut, Air Lift, Bass Weight, Master Smile, Sides Open Top, Telephone). A preset sets the bands it needs; the others go back to 0 dB. PHASE, OUTPUT and GAIN MATCH are kept. |
 
-On the display, drag a node sideways for the frequency and up and down for the gain; the wheel over a node changes the Q; a double click switches the band
-on or off. The amber curve is the response of the settings; a teal one appears when a band works on the sides only (it is the sides' response). The curve is the
+On the display, drag a node sideways for the frequency and up and down for the gain; the wheel over a node changes the Q; a double click on a node switches the band
+on or off, and a double click on empty glass adds a bell there in the first free band. The amber curve is the response of the settings; a teal one appears when a band works on the sides only (it is the sides' response). The curve is the
 filter that runs, not a drawing of it.
 
 ## How it works
@@ -55,7 +56,7 @@ filter that runs, not a drawing of it.
    mid and side, filters one of them, and adds the *difference* back, so what it does not touch is not touched at all.
 2. **Smoothing.** Everything that changes with time steps every 64 samples, counted from the start: the frequency (in the log domain), the gain and the Q of each band
    are moved toward the knob by a one-pole of 20 ms, and the coefficients are redesigned (the states stay). A band switched off or taken to 0 dB fades first, then
-   is no longer run.
+   is no longer run: a bell or shelf fades its gain, a high-pass, low-pass or notch (which has none) fades its mix with the plain input (in linear phase, the kernel's magnitude to that power).
 3. **A band that does nothing is not run.** Off, or a bell or shelf under 0.005 dB: it is not in the chain, so the sound is the input bit for bit even in a build that fuses
    multiplies and adds (a bell "at 0 dB" is the identity only on paper).
 4. **Linear phase.** The magnitude of all the bands that reach the mid (and, separately, the side) is sampled on a grid of 4096 points (at 48 kHz; the frame scales with the
@@ -78,6 +79,8 @@ filter that runs, not a drawing of it.
 - Mid and Side: a Mid bell of +9 dB lifts a centred sound by 9.00 dB and leaves a side-only sound within 0.1 dB; a Side bell the reverse; a Stereo bell lifts a left-only sound by 9 dB too, in both phase modes.
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit, in both phase modes.
 - A +12 dB bell switched off while a 1 kHz tone plays: the largest sample-to-sample step is 0.1297 against 0.1299 for the steady tone, so there is no click; afterwards the tone is back at its level (+0.001 dB).
+- A notch, a 48 dB high-pass and a 48 dB low-pass switched off while a tone plays fade as well: the largest step is that of the steady tone in minimum phase (0.0327) and 0.05 at most in linear phase (the kernel is remade once a hop), where a cut would be 0.25. A notch exactly on a bin of the linear-phase grid (3000 Hz at 48 kHz) is a notch, not NaN.
+- LISTEN to a +6 dB bell at 1 kHz: a tone at 1 kHz comes through at +6.00 dB, 100 Hz and 10 kHz about 26 dB down; with it off the sound is as it was; the same output for blocks of 7 and 512 samples. Bypassed by the host in linear phase, an impulse comes out exactly the reported 2304 samples late (`ApolloUiCheck`).
 - NaN and infinity in the input are silence. OUTPUT +6 dB with every band off is +6.00 dB.
 - Gain Match: a +9 dB low shelf at 4 kHz on noise is 3.01 dB louder; with GAIN MATCH on it is +0.03 dB (minimum phase) and +0.02 dB (linear) after 5 s, the readout saying -3.00 dB. A tone cut by 18 dB comes out
   -5.96 dB (minimum) and -5.95 dB (linear): the match made up 12 dB and no more. OUTPUT +6 dB on top of the match is +6.03 dB. With it on, blocks of 1, 7, 333 and 4096 samples give the output of 512, bit for bit, in both phase modes.

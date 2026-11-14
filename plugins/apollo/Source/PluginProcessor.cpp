@@ -22,6 +22,7 @@ bool ApolloProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void ApolloProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate, apollo::readParams (apvts).phase);
+    bypassDelay.prepare (2, apollo::linearSizesFor (sampleRate).latency()); // the longest latency it can report
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
     reportedLatency = engine.latencySamples.load();
     setLatencySamples (reportedLatency.load());
@@ -59,6 +60,15 @@ void ApolloProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         tapOut.push (main.getArrayOfReadPointers(), main.getNumChannels(), n);
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
+}
+
+void ApolloProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+    auto main = getBusBuffer (buffer, false, 0);
+    bypassDelay.process (main.getArrayOfWritePointers(), main.getNumChannels(), main.getNumSamples(), getLatencySamples());
+    for (int c = main.getNumChannels(); c < buffer.getNumChannels(); ++c)
+        buffer.clear (c, 0, buffer.getNumSamples());
 }
 
 void ApolloProcessor::getStateInformation (juce::MemoryBlock& dest)

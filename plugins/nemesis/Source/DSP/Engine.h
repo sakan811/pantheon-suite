@@ -30,6 +30,12 @@ inline constexpr double kFloorDb = -120.0;
 inline constexpr std::array<float, 5> kLookaheadMs { 0.0f, 0.5f, 1.0f, 2.0f, 5.0f };
 inline constexpr int kNumLookaheads = (int) kLookaheadMs.size();
 
+// FIND (auto-find of FREQ): for kFindMs of the sound that arrives, a bank of narrow band-passes from kFindLoHz to kFindHiHz (in equal ratios) keeps the energy of the mono sum of each;
+// the energy per hertz (a band-pass of constant Q is wider higher up) is smoothed over its neighbours and the strongest place, refined between the bins, is the answer.
+inline constexpr int kFindBins = 17;
+inline constexpr double kFindLoHz = 4000.0, kFindHiHz = 10000.0, kFindQ = 10.0, kFindMs = 1500.0;
+inline constexpr double kFindMinEnergy = 1e-10; // mean square of the sound under which there is nothing to find (-100 dBFS)
+
 struct EngineParams
 {
     float freqHz = 6500.0f;     // the centre of the sibilance
@@ -40,6 +46,7 @@ struct EngineParams
     Mode mode = Mode::splitBand;
     Detection detection = Detection::absolute;
     bool listen = false;        // hear the band the detector hears
+    bool delta = false;         // hear what is turned down (the sound minus the output); it takes the place of LISTEN while it is on
     int lookahead = 0;          // an index into kLookaheadMs: the sound is delayed by it, the detector is not
 };
 
@@ -74,6 +81,8 @@ public:
         attackCoef = coefOf (kAttackMs);
         envFall = std::exp (-1.0 / (0.001 * kEnvelopeFallMs * fs));
         bodyCoef = coefOf (kBodyMs);
+        for (int k = 0; k < kFindBins; ++k)
+            findBank[(size_t) k].setBandpass (fs, std::fmin (findHz (k), 0.45 * fs), kFindQ);
         reset();
     }
 
@@ -92,6 +101,8 @@ public:
         gr = 0.0;
         designedFor = { -1.0, -1.0 };
         started = false;
+        findActive = false;
+        finding.store (false, std::memory_order_relaxed);
     }
 
     // In place. Everything that is not a number is silence.
@@ -116,11 +127,26 @@ public:
             }
         }
         const double releaseCoef = coefOf (p.releaseMs);
+        if (findRequest.exchange (false, std::memory_order_relaxed))
+        {
+            for (int k = 0; k < kFindBins; ++k)
+            {
+                findBank[(size_t) k].reset();
+                findEnergy[(size_t) k] = 0.0;
+            }
+            findSamples = 0;
+            findTotal = 0.0;
+            findLength = std::max (1, (int) (0.001 * kFindMs * fs));
+            findActive = true;
+            finding.store (true, std::memory_order_relaxed);
+        }
         float deepest = 0.0f;
 
         for (int i = 0; i < n; ++i)
         {
             const double x[2] = { finite (left[i]), finite (right[i]) };
+            if (findActive)
+                feedFind (0.5 * (x[0] + x[1]));
             double band[2], level = 0.0, body = 0.0;
             for (int c = 0; c < 2; ++c)
             {
@@ -151,7 +177,9 @@ public:
                 s.ringBand[(size_t) writePos] = band[c];
                 const double heard = s.ringSound[(size_t) readPos], heardBand = s.ringBand[(size_t) readPos];
                 double y;
-                if (p.listen)
+                if (p.delta)
+                    y = p.mode == Mode::wideband ? heard * (1.0 - gain) : (1.0 - gain) * heardBand; // what the other two branches take off: nothing at all when the gain is 1
+                else if (p.listen)
                     y = heardBand;
                 else if (p.mode == Mode::wideband)
                     y = heard * gain;
@@ -168,6 +196,13 @@ public:
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB
     std::atomic<int> latencySamples { 0 };      // the look-ahead in samples: the processor tells the host
 
+    // From the message thread: listen for kFindMs of the sound and find the strongest place between kFindLoHz and kFindHiHz. `findCount` goes up when an answer is ready; `foundHz` is it (0: the sound was too quiet).
+    void startFind() noexcept { findRequest.store (true, std::memory_order_relaxed); }
+    static double findHz (int bin) noexcept { return kFindLoHz * std::pow (kFindHiHz / kFindLoHz, (double) bin / (double) (kFindBins - 1)); }
+    std::atomic<bool> finding { false };
+    std::atomic<unsigned> findCount { 0 };
+    std::atomic<float> foundHz { 0.0f };
+
 private:
     struct Channel
     {
@@ -175,6 +210,39 @@ private:
         double env = 0.0, body = 0.0;
         std::vector<double> ringSound, ringBand; // the last look-ahead of the sound and of its band, for the delay
     };
+
+    void feedFind (double mono) noexcept
+    {
+        findTotal += mono * mono;
+        for (int k = 0; k < kFindBins; ++k)
+        {
+            const double v = findBank[(size_t) k].process (mono);
+            findEnergy[(size_t) k] += v * v;
+        }
+        if (++findSamples < findLength)
+            return;
+        findActive = false;
+        double density[kFindBins], smooth[kFindBins];
+        for (int k = 0; k < kFindBins; ++k)
+            density[k] = findEnergy[(size_t) k] / findHz (k);
+        for (int k = 0; k < kFindBins; ++k)
+            smooth[k] = 0.25 * (density[std::max (k - 1, 0)] + 2.0 * density[k] + density[std::min (k + 1, kFindBins - 1)]);
+        int best = 0;
+        for (int k = 1; k < kFindBins; ++k)
+            if (smooth[k] > smooth[best])
+                best = k;
+        double at = (double) best;
+        if (best > 0 && best < kFindBins - 1)
+        {
+            const double a = smooth[best - 1], b = smooth[best], c = smooth[best + 1], denom = a - 2.0 * b + c;
+            if (denom < 0.0)
+                at += std::clamp (0.5 * (a - c) / denom, -0.5, 0.5);
+        }
+        const bool loud = findTotal / (double) findLength > kFindMinEnergy;
+        foundHz.store (loud ? (float) (kFindLoHz * std::pow (kFindHiHz / kFindLoHz, at / (double) (kFindBins - 1))) : 0.0f, std::memory_order_relaxed);
+        finding.store (false, std::memory_order_relaxed);
+        findCount.fetch_add (1, std::memory_order_release);
+    }
 
     static inline double finite (float v) noexcept { return std::isfinite (v) ? (double) v : 0.0; }
     double coefOf (double ms) const noexcept { return 1.0 - std::exp (-1.0 / std::fmax (0.001 * ms * fs, 1.0)); }
@@ -189,5 +257,11 @@ private:
     std::array<double, 2> designedFor { -1.0, -1.0 };
     bool started = false;
     std::array<Channel, 2> ch;
+    std::array<pdsp::Biquad, kFindBins> findBank;
+    std::array<double, kFindBins> findEnergy {};
+    double findTotal = 0.0;
+    int findSamples = 0, findLength = 1;
+    bool findActive = false;
+    std::atomic<bool> findRequest { false };
 };
 } // namespace nemesis

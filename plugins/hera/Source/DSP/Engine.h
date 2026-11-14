@@ -44,6 +44,7 @@ struct EngineParams
     bool autoMakeup = false;   // makes up what the compression takes from a full-scale signal
     bool external = false;     // listen to the sidechain input
     int lookahead = 0;         // an index into kLookaheadMs: the sound is delayed by it, the detector is not
+    bool match = false;        // LEVEL MATCH: the level the compressor and MAKEUP add or take away is taken off again (slowly), so an A/B is not judged by loudness
 };
 
 // The gain computer: how many dB the level is turned down, in a soft knee of `kneeDb` around the threshold. Positive.
@@ -74,6 +75,8 @@ public:
         delaySamples = delayOf (lookaheadIndex);
         latencySamples = delaySamples;
         rmsCoef = 1.0 - std::exp (-1.0 / (0.001 * kRmsMs * fs));
+        matchEnergyK = 1.0 - std::exp (-1.0 / (0.6 * fs));
+        matchGainK = 1.0 - std::exp (-1.0 / (0.15 * fs));
         peakFall = std::exp (-1.0 / (0.001 * kPeakFallMs * fs));
         reset();
     }
@@ -90,7 +93,13 @@ public:
         writePos = 0;
         started = false;
         hpfFor = -1.0;
+        matchNow = 1.0;
+        msDry = msWet = 1.0e-6;
+        matchDb.store (0.0f, std::memory_order_relaxed);
     }
+
+    // The longest delay LOOK-AHEAD can ask for, in samples (what a bypassed plug-in has to delay by, for the largest setting).
+    int maxLatencySamples() const noexcept { return ringSize - 2; }
 
     // In place. `keyL` / `keyR`: the sidechain (null: none); a mono key is given as `keyR == nullptr`.
     void process (float* left, float* right, int n, const EngineParams& p, const float* keyL = nullptr, const float* keyR = nullptr) noexcept
@@ -124,6 +133,7 @@ public:
             started = true;
         }
         const double sqrt2 = std::sqrt (2.0);
+        const bool deltaOn = delta.load (std::memory_order_relaxed), keyOn = scListen.load (std::memory_order_relaxed);
         float peakIn = 0.0f, peakOut = 0.0f;
         double deepest = 0.0;
 
@@ -144,10 +154,11 @@ public:
             const double key[2] = { useKey ? finite (keyL[i]) : now[0], useKey ? finite (keyR != nullptr ? keyR[i] : keyL[i]) : now[1] };
 
             // The detector: the key, high-passed, as a peak or as RMS (read as the peak of a sine).
-            double level[2];
+            double level[2], heard[2];
             for (int c = 0; c < 2; ++c)
             {
                 const double k = hpfOn ? ch[(size_t) c].hpf.process (key[c]) : key[c];
+                heard[c] = k;
                 if (p.detector == Detector::peak)
                 {
                     auto& env = ch[(size_t) c].env;
@@ -188,12 +199,32 @@ public:
                 wet[c] = dry[c] * gain * makeup;
             }
             const bool pure = mix >= 1.0 - 1e-12;
-            const double out0 = pure ? wet[0] : dry[0] + mix * (wet[0] - dry[0]), out1 = pure ? wet[1] : dry[1] + mix * (wet[1] - dry[1]);
+            double out0 = pure ? wet[0] : dry[0] + mix * (wet[0] - dry[0]), out1 = pure ? wet[1] : dry[1] + mix * (wet[1] - dry[1]);
+            // LEVEL MATCH: the RMS of the sound as it comes out against the sound as it came in (delayed like the output), over about 0.6 s; the gain that equals them follows at 0.15 s, within 12 dB.
+            // Per sample, so the output does not depend on the block size; exactly 1.0 when off.
+            msDry += matchEnergyK * (0.5 * (dry[0] * dry[0] + dry[1] * dry[1]) - msDry);
+            msWet += matchEnergyK * (0.5 * (out0 * out0 + out1 * out1) - msWet);
+            const double matchTarget = p.match ? std::clamp (std::sqrt ((msDry + 1.0e-9) / (msWet + 1.0e-9)), 0.25, 4.0) : 1.0;
+            matchNow = std::fabs (matchTarget - matchNow) < 1e-9 ? matchTarget : matchNow + (matchTarget - matchNow) * matchGainK;
+            out0 *= matchNow;
+            out1 *= matchNow;
+            // Monitoring, never saved: the detector's key after its high-pass (SC LISTEN), or only what the compressor changes (DELTA: output minus the sound that came in).
+            if (keyOn)
+            {
+                out0 = heard[0];
+                out1 = heard[1];
+            }
+            else if (deltaOn)
+            {
+                out0 -= dry[0];
+                out1 -= dry[1];
+            }
             left[i] = (float) out0;
             right[i] = (float) out1;
             peakIn = std::max (peakIn, (float) std::fmax (std::fabs (now[0]), std::fabs (now[1])));
             peakOut = std::max (peakOut, (float) std::fmax (std::fabs (out0), std::fabs (out1)));
         }
+        matchDb.store ((float) (20.0 * std::log10 (matchNow)), std::memory_order_relaxed);
         if ((float) deepest > reductionMeter.load (std::memory_order_relaxed))
             reductionMeter.store ((float) deepest, std::memory_order_relaxed);
         if (peakIn > inPeak.load (std::memory_order_relaxed))
@@ -203,6 +234,9 @@ public:
     }
 
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB
+    std::atomic<bool> delta { false };          // DELTA: only what the compressor changes (output minus input). Monitoring, not a setting: never saved, never a parameter
+    std::atomic<bool> scListen { false };       // SC LISTEN: the output is the detector's key after the sidechain high-pass, to hear what it hears. Monitoring, like delta
+    std::atomic<float> matchDb { 0.0f };        // the gain LEVEL MATCH is applying now, for the display
     std::atomic<int> latencySamples { 0 };      // the look-ahead in samples: the processor tells the host
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
 
@@ -223,6 +257,7 @@ private:
     }
 
     int ringSize = 2, writePos = 0, delaySamples = 0;
+    double matchEnergyK = 0.001, matchGainK = 0.01, matchNow = 1.0, msDry = 1.0e-6, msWet = 1.0e-6;
     double fs = 48000.0, rmsCoef = 0.002, peakFall = 0.99, makeup = 1.0, mix = 1.0, hpfFor = -1.0;
     bool started = false;
     std::array<Channel, 2> ch;

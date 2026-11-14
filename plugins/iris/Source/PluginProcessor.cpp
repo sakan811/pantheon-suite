@@ -10,7 +10,7 @@ IrisProcessor::IrisProcessor()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                           .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
-      apvts (*this, nullptr, "STATE", iris::createLayout())
+      apvts (*this, &undo, "STATE", iris::createLayout())
 {
 }
 
@@ -27,6 +27,7 @@ void IrisProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
     engine.prepare (sampleRate, samplesPerBlock, iris::readParams (apvts).phase);
+    bypassDelay.prepare (2, iris::maxLatencyFor (sampleRate));
     reportedLatency = engine.latencySamples.load();
     setLatencySamples (reportedLatency.load());
 }
@@ -66,6 +67,14 @@ void IrisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         triggerAsyncUpdate();
 }
 
+void IrisProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    auto main = getBusBuffer (buffer, false, 0);
+    bypassDelay.process (main.getArrayOfWritePointers(), main.getNumChannels(), main.getNumSamples(), getLatencySamples());
+    for (int c = getMainBusNumOutputChannels(); c < buffer.getNumChannels(); ++c)
+        buffer.clear (c, 0, buffer.getNumSamples());
+}
+
 void IrisProcessor::setCurrentProgram (int index)
 {
     currentProgram = index;
@@ -82,6 +91,7 @@ void IrisProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     auto state = apvts.copyState();
     state.setProperty ("program", currentProgram, nullptr);
+    ab.saveTo (state);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -93,6 +103,7 @@ void IrisProcessor::setStateInformation (const void* data, int size)
         {
             auto tree = juce::ValueTree::fromXml (*xml);
             currentProgram = (int) tree.getProperty ("program", 0);
+            ab.loadFrom (tree);
             apvts.replaceState (tree);
         }
 }

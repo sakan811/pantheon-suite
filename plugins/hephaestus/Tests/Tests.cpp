@@ -464,6 +464,29 @@ void testCleanFill()
                fmt ("a 3 Hz tremolo (30 - 100 %%): the 2nd harmonic re the fundamental moves %.1f dB over the cycle (Warm %.1f dB)", cleanSpread, warmSpread));
     }
 
+    // A band edge that keeps moving (the user drags it): the filters are redesigned every block, but the tracker must not be re-centred
+    // each time, or the note it locked to is lost again and again (the harmonics come out at the wrong pitch or not at all).
+    {
+        const auto in = sines ({ { 60.0, 0.5 } }, 144000);
+        std::vector<float> out (in.size());
+        FundamentalEngine fe;
+        fe.prepare (fs);
+        auto p = clean;
+        int block = 0;
+        for (size_t pos = 0; pos < in.size(); pos += 480, ++block)
+        {
+            p.hi = clean.hi + 8.0 * (0.5 + 0.5 * std::sin (2.0 * M_PI * (double) block / 40.0));
+            const int n = (int) std::min<size_t> (480, in.size() - pos);
+            const float* inp[1] = { in.data() + pos };
+            float* outp[1] = { out.data() + pos };
+            fe.process (inp, outp, 1, n, p);
+        }
+        const double ref = amplitudeAt (in, 72000, 32000, 60.0) * rangeGain (60.0, clean);
+        const double h2 = db (amplitudeAt (out, 72000, 32000, 120.0) / ref);
+        check (std::fabs (h2 - expected[0]) < 1.5,
+               fmt ("hi edge moving every block: 2nd harmonic %+.2f dB (expected %+.1f) - the tracker keeps its lock", h2, expected[0]));
+    }
+
     // A note that arrives at full level: no overshoot while the harmonics settle.
     {
         std::vector<float> in (144000, 0.0f);

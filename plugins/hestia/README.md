@@ -14,7 +14,7 @@ room for all of them. (CMake targets, namespaces and plugin codes use the short 
 
 ![Hestia Space](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A lead vocal (this instance, teal) in a mix with a kick, a bass and a guitar, each fed a programme, on mix H. The curves are the stems' spectra; the strip of colours under them says which stem owns each band, and the amber bars are how far this instance cuts there (CARVE 9 dB, REACH 12 dB): it gives way to the kick and the bass below about 350 Hz and is untouched where it owns the band. DEPTH is 12%; the map on the right is the stems' distances. The strip warns that cutting 9 dB in a band can leave a stem hollow. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A lead vocal (this instance, teal) in a mix with a kick, a bass and a guitar, each fed a programme, on mix H. The curves are the stems' spectra; the strip of colours under them says which stem owns each band, and the amber bars are how far this instance cuts there (CARVE 9 dB, REACH 12 dB): it gives way to the kick and the bass below about 350 Hz and is untouched where it owns the band. DEPTH is 12%; the map on the right is the stems' distances. The strip warns that cutting 9 dB in a band can leave a stem hollow. The track names the host gave (Lead Vox, Kick In, Bass DI, Gtr Rhythm) are what the legend and the depth map call the stems; HOLD and COPY TO MIX are in the header (HOLD off). Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -29,6 +29,9 @@ room for all of them. (CMake targets, namespaces and plugin codes use the short 
 | **Reach** | 0 to 36 dB, 12 by default: how much quieter than this stem another can be and still be given room. 0 dB: only when it is as loud or louder. |
 | **Attack / Release** | How fast a cut comes in (30 ms) and goes out (250 ms). |
 | **Output** | Gain after the cut. |
+| **Hold** | Freezes the cut where it is now: every band keeps the cut it has, whatever the other stems do, until HOLD is switched off. The stem is still measured and published, so the others still see it. A parameter (automatable, saved, kept by presets); off by default. |
+| **Copy to mix** | **COPY TO MIX** (header) hands this instance's CARVE, REACH, ATTACK and RELEASE to every other Hestia of the same mix that is playing: each takes them as if its knobs had been turned (the host sees the changes). Roles, importances and depths are not copied: they say what a stem is. The strip says how many instances got them. |
+| **Track names** | When the host tells the plugin the name of its track (hosts that do, in VST3 and AU), the legend and the depth map call each stem by it ("Bass DI") instead of by its role. A name is kept to 24 characters. |
 | **Delta** | Listen to what Hestia changes in the stem (its output minus its input: the cut and the depth). Monitoring, not saved with the session. |
 | **Presets** | Ten starting points, one for each kind of stem (Init, Kick, Bass, Drum Bus, Lead Vocal, Backing Vocals, Guitars, Lead Synth, Pads and Strings, FX and Ambience): a role, an importance, a cut and a depth. The mix letter, the sidechain's role and importance, and OUTPUT are kept. |
 
@@ -57,6 +60,7 @@ not a separate analysis.
 - The level bank: a sine on the centre of any band reads its level within 0.8 dB; three bands away it is 20 dB under, six or more 40 dB.
 - A bass and a lead vocal on the same tone at 79 Hz: the vocal is cut by 5.9 dB (DEPTH 6), the bass by 0.0 dB; on 2 kHz it is the other way round;
   on different tones neither is cut.
+- Track names: a slot keeps the host's name for its track, cut at 24 characters, and a slot given back has none. HOLD: a vocal cut by 6.00 dB under a bass keeps that cut for 3 s after the bass has stopped (the tone is still 5.9 dB down), and without HOLD it is back at 0.00 dB; held before any cut, the stem is the input bit for bit. COPY TO MIX: another stem of the mix is told and gets CARVE 11, REACH 20, ATTACK 5 and RELEASE 400; the sender, a stem of another mix and an instance made after the copy are not told (`HestiaUiCheck` checks it through two processors).
 - Stems of the same role and importance are not cut; raise one's IMPORTANCE and the other gives way. With REACH 6 dB a stem 12 dB louder than the
   other is not cut for it; with 24 dB it is half way in (-3 dB of 6).
 - A stem that stops being processed is forgotten half a second later, and the cut goes away.
@@ -73,6 +77,8 @@ not a separate analysis.
 
 ## Limits
 
+- **COPY TO MIX copies settings, once.** It is not a link: later changes on either side are not followed. It reaches only instances that are playing in this process and in the same mix; a stopped one takes it when it next plays.
+- **HOLD keeps a cut, not a decision.** If the other stems change while it is on (a section that needs different room), the held cut is wrong for it; switch it off to follow them again.
 - **One process.** The instances with Hestia on them see each other only inside one host process. A host that runs each plugin in its own process (some hosts'
   sandboxing or bridging), or a bounce on another machine, does not link them: each then works as if alone, and says so in the notes.
 - **It only cuts.** It never lifts a band, and it never touches the stem that owns one. For a fixed correction use an equaliser (Iris).

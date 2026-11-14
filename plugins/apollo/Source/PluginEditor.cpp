@@ -52,6 +52,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
             addChildComponent (*c);
     }
     view.onSelect = [this] (int) { repaint(); };
+    view.onListen = [this] (int band) { proc.engine.listen = band; };
     deltaButton.setClickingTogglesState (true);
     deltaButton.setTooltip ("Listen to only what the bands change (output minus input). Not saved with the project, and it ends when the window closes.");
     deltaButton.onClick = [this] { proc.engine.delta = deltaButton.getToggleState(); };
@@ -68,6 +69,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
 ApolloEditor::~ApolloEditor()
 {
     proc.engine.delta = false; // monitoring never outlives the window that asked for it
+    proc.engine.listen = -1;
     setLookAndFeel (nullptr);
 }
 
@@ -147,6 +149,7 @@ AdviceInput ApolloEditor::adviceInput() const
     in.params = readParams (proc.apvts);
     in.latencyMs = 1000.0 * proc.engine.latencySamples.load() / std::max (proc.getSampleRate(), 1.0);
     in.delta = proc.engine.delta.load();
+    in.listen = proc.engine.listen.load();
     return in;
 }
 

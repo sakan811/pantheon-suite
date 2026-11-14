@@ -7,10 +7,11 @@
 #include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
-class HestiaProcessor : public juce::AudioProcessor
+class HestiaProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
 public:
     HestiaProcessor();
+    ~HestiaProcessor() override { cancelPendingUpdate(); }
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -38,10 +39,16 @@ public:
     hestia::Engine engine; // makes its place on the shared bus when the instance is made and gives it back when it goes
     juce::AudioProcessorValueTreeState apvts;
     ui::Programs programs { apvts, hestia::presets(), hestia::keepsParameter }; // after apvts
+    // The host's name for this track, when it tells (the VST3 and AU hosts that do): it is what the other instances' lists and depth maps show for this stem.
+    void updateTrackProperties (const TrackProperties& properties) override;
+    // COPY TO MIX: CARVE, REACH, ATTACK and RELEASE go to the other instances of this mix, which take them on their next block. Returns how many instances are in the mix.
+    int copyToMix();
     // Whether the host handed the last block a sidechain: the editor says so.
     std::atomic<bool> sidechainConnected { false };
 
 private:
+    // The audio thread saw a broadcast for this mix; the parameters are set on the message thread.
+    void handleAsyncUpdate() override;
     std::vector<float> monoRight; // a mono host: the engine's second channel
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HestiaProcessor)

@@ -35,6 +35,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     const auto info = [&] (std::string t) { notes.push_back ({ ui::Severity::info, std::move (t) }); };
     const auto& p = in.params;
 
+    if (p.listen != Listen::stereo)
+        warn ("LISTEN is not Stereo: you hear a check, not your sound. Set it back to Stereo before you bounce.");
     if (isNeutral (p))
         info ("Nothing is changed yet: turn a width, MID, SIDE or MONO BELOW.");
     if (in.correlation < kNegativeCorrelation)
@@ -67,7 +69,8 @@ inline const char* guideText()
            "BALANCE turns one channel down.\n\n"
            "READING IT\n"
            "The goniometer draws the left and right as a cloud: a vertical line is mono, a horizontal one is out of phase. The correlation bar reads +1 for mono, "
-           "0 for wide, and below 0 for a sound that will cancel in mono.\n\n"
+           "0 for wide, and below 0 for a sound that will cancel in mono; MIN is the lowest it has read since you last clicked it. "
+           "LISTEN checks the result: Mono plays the sum of both channels (what a mono speaker plays), Side only what differs. Set it back to Stereo before you bounce.\n\n"
            "NOT FOR\n"
            "It adds nothing: it does not make a mono recording stereo (there are no sides to widen), and no widener fixes a bad mix. Always listen in mono.";
 }

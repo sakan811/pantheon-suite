@@ -8,7 +8,7 @@ namespace hw = ui::hw;
 
 namespace
 {
-constexpr int kWidth = 1110;
+constexpr int kWidth = 1290;
 constexpr int headerHeight = 84;
 constexpr int viewHeight = 300;
 constexpr int knobPanelHeight = 134;
@@ -36,7 +36,8 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
       release (p.apvts, id::release, "RELEASE", "How fast a cut goes out when the other stem stops.", ui::Knob::Layout::below),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything."),
       scImportance (p.apvts, id::scImportance, "SC IMPORT", "How much the track on the sidechain matters, as IMPORTANCE does for a stem.", ui::Knob::Layout::beside),
-      presetBox (p, presets(), "The mix letter, the sidechain's role and importance, and OUTPUT are kept."),
+      holdButton (p.apvts, id::hold, "HOLD", "Freezes the cut where it is now: the bands keep the cut they have, whatever the other stems do, until you switch it off. This stem is still seen by the others."),
+      presetBox (p, presets(), "The mix letter, the sidechain's role and importance, OUTPUT and HOLD are kept."),
       view (p),
       proc (p)
 {
@@ -44,8 +45,11 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
     deltaButton.setClickingTogglesState (false);
     deltaButton.setTooltip ("Listen to only what Hestia changes in this stem: the stem as it comes out minus as it came in (the cut and the depth). Not saved with the session.");
     deltaButton.onClick = [this] { proc.engine.deltaOn = ! proc.engine.deltaOn.load(); };
+    copyButton.setTooltip ("Hand this stem's CARVE, REACH, ATTACK and RELEASE to every other Hestia in the same mix (they must be playing, and in this host process). "
+                           "Each of them takes the values as if you had turned its knobs.");
+    copyButton.onClick = [this] { copyToMix(); };
     for (auto* c : std::initializer_list<juce::Component*> { &view, &roleBox, &mixBox, &scRoleBox, &importance, &distance, &carve, &reach, &attack, &release, &outKnob, &scImportance,
-                                                              &deltaButton, &presetBox, &guideButton })
+                                                              &holdButton, &deltaButton, &copyButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
@@ -58,6 +62,12 @@ HestiaEditor::~HestiaEditor()
     setLookAndFeel (nullptr);
 }
 
+void HestiaEditor::copyToMix()
+{
+    sentTo = proc.copyToMix();
+    sentTicks = 4 * kTimerHz;
+}
+
 void HestiaEditor::resized()
 {
     auto bounds = getLocalBounds().reduced (12, 0);
@@ -68,15 +78,19 @@ void HestiaEditor::resized()
     header.removeFromRight (16);
     auto row = header.withTrimmedTop (28).withHeight (28);
     roleLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    roleBox.setBounds (row.removeFromLeft (180));
+    roleBox.setBounds (row.removeFromLeft (170));
     row.removeFromLeft (14);
     mixLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
     mixBox.setBounds (row.removeFromLeft (90));
     row.removeFromLeft (14);
     presetLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    presetBox.setBounds (row.removeFromLeft (150));
+    presetBox.setBounds (row.removeFromLeft (140));
     row.removeFromLeft (14);
-    deltaButton.setBounds (row.removeFromLeft (96));
+    holdButton.setBounds (row.removeFromLeft (72));
+    row.removeFromLeft (14);
+    deltaButton.setBounds (row.removeFromLeft (80));
+    row.removeFromLeft (14);
+    copyButton.setBounds (row.removeFromLeft (112));
     guideButton.setBounds (row.removeFromRight (64));
 
     bounds.removeFromTop (10);
@@ -110,6 +124,7 @@ AdviceInput HestiaEditor::adviceInput() const
     in.strongestCutDb = view.strongestCutDb();
     in.delta = proc.engine.deltaOn.load();
     in.sidechain = proc.sidechainConnected.load (std::memory_order_relaxed);
+    in.sentTo = sentTicks > 0 ? sentTo : -1;
     return in;
 }
 
@@ -130,6 +145,8 @@ void HestiaEditor::paint (juce::Graphics& g)
 
 void HestiaEditor::timerCallback()
 {
+    if (sentTicks > 0)
+        --sentTicks;
     deltaButton.setToggleState (proc.engine.deltaOn.load(), juce::dontSendNotification);
     view.tick();
     float level = kFloorDb;

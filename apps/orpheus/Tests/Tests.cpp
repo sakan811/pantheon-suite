@@ -502,5 +502,58 @@ int main()
         std::printf ("  20 s of audio: tracking %.0f ms, marks %.0f ms, full resynthesis %.0f ms (%zu samples)\n", ms (t0, t1), ms (t1, t2), ms (t2, t3), r.data[0].size());
     }
 
+    // ---- [9] limits ----------------------------------------------------------------------------------------------------
+    std::printf ("\n[9] what the engine refuses\n");
+    {
+        Note n = phraseSetup.notes[1];
+        n.target = n.centre + 130.0f;
+        n.clampTarget();
+        test::check (std::fabs (n.target - (n.centre + kMaxShiftSemitones)) < 1.0e-4f, test::fmt ("a target 130 semitones up is held to +%.0f from the sung pitch", kMaxShiftSemitones));
+        n.target = std::nanf ("");
+        n.clampTarget();
+        test::check (n.target == n.centre, "a NaN target goes back to the sung pitch");
+        n.centre = 5.0f;
+        n.target = -20.0f;
+        n.clampTarget();
+        test::check (n.target == kLowestTargetMidi, "and a target is never below MIDI 0");
+
+        // the engine's own limit, for a plan that did not come from the editor: +130 semitones is refused, not rendered
+        auto notes = phraseSetup.notes;
+        notes[1].target = notes[1].centre + 130.0f;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto out = renderAll (phraseSetup, notes);
+        const double ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
+        bool finite = true;
+        for (const float v : out)
+            finite = finite && std::isfinite (v);
+        test::check (finite && ms < 3000.0, test::fmt ("a note planned 130 semitones up renders in %.0f ms, finite (it used to run to the loop guard)", ms));
+        test::check (out == phraseSetup.voice.audio, "... and is left as it was sung");
+        notes[1].target = notes[1].centre + 12.0f;
+        test::check (renderAll (phraseSetup, notes) != phraseSetup.voice.audio, "while an octave up is rendered");
+
+        // the cut into notes stops when asked to
+        Contour c;
+        c.sampleRate = kRate;
+        c.hop = 240;
+        const int frames = 6000;
+        c.midi.assign ((size_t) frames, 60.0f);
+        c.confidence.assign ((size_t) frames, 1.0f);
+        c.levelDb.assign ((size_t) frames, -20.0f);
+        c.voiced.assign ((size_t) frames, 1);
+        for (int i = 0; i < frames; ++i)
+            c.midi[(size_t) i] += (float) (i / 500 % 3) + 0.3f * std::sin ((float) i * 0.2f);
+        int polls = 0;
+        const auto stopped = Segmenter::segment (c, {}, [&polls] { return ++polls >= 3; });
+        test::check (polls <= 4 && stopped.empty(), test::fmt ("cancelling the fit of a 30 s voiced stretch stops it after %d polls", polls));
+        test::check (Segmenter::segment (c).size() >= 3, "and without a cancel the same stretch is cut into its steps");
+
+        // a note can only be cut where both halves are long enough
+        const auto& base = phraseSetup.notes;
+        const int mid = (base[0].start + base[0].end) / 2;
+        auto copy = base;
+        test::check (edit::splitIndex (base, mid) == 0 && edit::splitIndex (base, base[0].start + 1) < 0, "splitIndex says where a note can be cut, without cutting it");
+        test::check (edit::splitAt (copy, phraseSetup.contour, mid) == 0 && copy.size() == base.size() + 1, "and splitAt cuts there");
+    }
+
     return test::finish ("OrpheusTests");
 }

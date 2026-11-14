@@ -45,10 +45,34 @@ void doubleClick (juce::Component& view, juce::Point<float> at)
     view.mouseUp (mouse (view, at, at, false, {}, 2));
 }
 
-std::unique_ptr<MainComponent> makeWindow (bool chromatic = false, double detune = 0.0)
+// What the window told the user instead of opening a dialog, and what it asked (the answer is gAnswer).
+std::vector<juce::String> gErrors, gAsked;
+bool gAnswer = false;
+
+std::unique_ptr<MainComponent> makeBare()
 {
     auto w = std::make_unique<MainComponent> (false);
     w->setSize (MainComponent::kDesignWidth, MainComponent::kDesignHeight);
+    w->reportError = [] (const juce::String& m) { gErrors.push_back (m); };
+    w->ask = [] (const juce::String& message, const juce::String&, std::function<void()> onOk)
+    {
+        gAsked.push_back (message);
+        if (gAnswer)
+            onOk();
+    };
+    return w;
+}
+
+// Lets the message loop run until the analysis the window started has been adopted.
+void waitIdle (MainComponent& w)
+{
+    for (int waited = 0; w.isBusy() && waited < 120000; waited += 20)
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+}
+
+std::unique_ptr<MainComponent> makeWindow (bool chromatic = false, double detune = 0.0)
+{
+    auto w = makeBare();
     auto notes = test::outOfTunePhrase();
     if (detune != 0.0) // every note on the same off-grid: the singer is flat or sharp all the way through
         for (auto& n : notes)
@@ -402,6 +426,361 @@ int main()
         test::check (std::abs (w->playback.position() - 96000) < 400, "a click on the ruler moves the playhead there");
     }
 
+
+    // ---- [4] files, limits, and the tools of the editing session -----------------------------------------------------
+    std::printf ("\n[4] files and tools\n");
+    {
+        const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("orpheus-check-" + juce::String (juce::Time::currentTimeMillis()));
+        dir.createDirectory();
+        const auto take = dir.getChildFile ("take");
+        take.createDirectory();
+        const auto wav = take.getChildFile ("phrase.wav");
+        juce::String error;
+        {
+            auto src = makeWindow();
+            test::check (src->session.exportWav (wav, error) && wav.existsAsFile(), "a recording is written to a WAV for the file checks");
+            // exportWav goes through a temporary file: nothing is left beside the result, and an existing file is replaced
+            test::check (src->session.exportWav (wav, error) && take.getNumberOfChildFiles (juce::File::findFiles, "*") == 1, "exporting over an existing file replaces it and leaves no temporary file behind");
+            test::check (! src->session.exportWav (dir.getChildFile ("no/such/folder/x.wav"), error) && error.isNotEmpty(), "an export that cannot be written says so");
+        }
+
+        // a bad file dropped during an analysis neither cancels it nor stops the playback
+        {
+            auto w = makeBare();
+            w->loadFile (wav);
+            test::check (w->isBusy(), "opening a recording starts its analysis");
+            const auto junk = dir.getChildFile ("junk.wav");
+            junk.replaceWithText ("this is not audio");
+            gErrors.clear();
+            w->loadFile (junk);
+            test::check (w->isBusy() && gErrors.size() == 1 && gErrors[0].contains ("Cannot read"), "a file that is not audio is refused, and the analysis that is running goes on");
+            waitIdle (*w);
+            test::check (w->session.isAnalysed() && w->session.notes.size() == 9, "which then finishes (the nine notes)");
+            gErrors.clear();
+            w->loadFile (junk);
+            test::check (w->session.isAnalysed() && ! w->isBusy() && w->session.notes.size() == 9 && gErrors.size() == 1, "and a bad file after it leaves the open recording and its notes alone");
+            test::check (w->windowTitle() == "Orpheus - phrase.wav", "the window is titled by its file");
+
+            // dirty marker, and asking before edits are lost
+            auto& s = w->session;
+            test::check (! s.dirty(), "an opened recording is not 'edited'");
+            s.correct (1.0f);
+            test::check (s.dirty() && w->windowTitle().endsWithChar ('*'), "an edit marks the session unsaved, with a star in the title");
+            s.undo();
+            test::check (! s.dirty(), "undoing back to where it was is clean again");
+            s.correct (1.0f);
+            gAsked.clear();
+            gAnswer = false;
+            w->loadFile (wav);
+            test::check (gAsked.size() == 1 && gAsked[0].contains ("not saved") && ! w->isBusy(), "opening a file over unsaved edits asks first; 'cancel' opens nothing");
+            gAnswer = true;
+            w->loadFile (wav);
+            test::check (w->isBusy(), "and agreeing opens it");
+            waitIdle (*w);
+            gAnswer = false;
+            test::check (! s.dirty(), "the new recording starts clean");
+
+            // Save, silently, to the project it has; relative path and fingerprint in the file
+            s.correct (1.0f);
+            s.notes[3].gainDb = -4.0f;
+            s.changedAll();
+            const auto project = take.getChildFile ("phrase.orpheus");
+            int titles = 0;
+            w->onTitleChanged = [&titles] { ++titles; };
+            test::check (w->saveTo (project) && ! s.dirty() && titles >= 1, "Save As writes the project, marks it saved and changes the title");
+            const auto xml = juce::XmlDocument::parse (project);
+            test::check (xml != nullptr && xml->getStringAttribute ("sourceRelative") == "phrase.wav" && xml->getStringAttribute ("fingerprint").isNotEmpty(), "the project holds the path relative to itself and a fingerprint of the audio");
+            test::check (take.getNumberOfChildFiles (juce::File::findFiles, "*.orpheus") == 1 && take.getNumberOfChildFiles (juce::File::findFiles, "*") == 2, "a save leaves no temporary file");
+            s.notes[2].gainDb = 3.0f;
+            s.changedAll();
+            test::check (s.dirty(), "an edit after the save is unsaved again");
+            test::check (w->keyPressed (character ('s', juce::ModifierKeys (juce::ModifierKeys::commandModifier))) && ! s.dirty(), "Cmd+S saves to the project without asking where");
+            const auto saved = juce::XmlDocument::parse (project);
+            test::check (saved != nullptr && saved->getNumChildElements() == 9, "and the file has the nine notes");
+            double gain2 = 0.0;
+            int idx = 0;
+            for (const auto* e : saved->getChildWithTagNameIterator ("Note"))
+                if (idx++ == 2)
+                    gain2 = e->getDoubleAttribute ("gain");
+            test::check (std::fabs (gain2 - 3.0) < 1e-6, "Cmd+S wrote the edit made after the first save");
+
+            // the project, with its folder moved: found by the relative path
+            const auto moved = dir.getChildFile ("moved");
+            test::check (take.moveFileTo (moved), "(the folder with the audio and the project is moved)");
+            auto w2 = makeBare();
+            gErrors.clear();
+            w2->loadFile (moved.getChildFile ("phrase.orpheus"));
+            waitIdle (*w2);
+            test::check (gErrors.empty() && w2->session.isAnalysed() && w2->session.notes.size() == 9 && std::fabs (w2->session.notes[3].gainDb + 4.0f) < 1e-5f,
+                         "a project whose folder has moved is found by its relative path and brings its edits");
+            test::check (! w2->session.dirty() && w2->windowTitle() == "Orpheus - phrase.orpheus", "a loaded project is clean, and titled by the project");
+
+            // same name, other audio: refused by the fingerprint, with the open recording left as it was
+            {
+                auto other = makeWindow (false, 0.3);
+                test::check (other->session.exportWav (moved.getChildFile ("phrase.wav"), error), "(the audio file is replaced by another take)");
+            }
+            gErrors.clear();
+            const auto before = w2->session.notes.size();
+            w2->loadFile (moved.getChildFile ("phrase.orpheus"));
+            test::check (! w2->isBusy() && gErrors.size() == 1 && gErrors[0].contains ("different recording") && w2->session.notes.size() == before, "a project whose audio is another take is refused, and the open recording stays");
+            // ... while one from before fingerprints (nothing but the frame count) still loads
+            auto old = juce::XmlDocument::parse (moved.getChildFile ("phrase.orpheus"));
+            old->removeAttribute ("fingerprint");
+            old->removeAttribute ("sourceRelative");
+            old->setAttribute ("source", moved.getChildFile ("phrase.wav").getFullPathName());
+            const auto oldFile = moved.getChildFile ("old.orpheus");
+            old->writeTo (oldFile);
+            gErrors.clear();
+            w2->loadFile (oldFile);
+            waitIdle (*w2);
+            test::check (w2->session.isAnalysed() && w2->session.notes.size() > 0, "a project without a fingerprint (an older one) is still opened");
+        }
+
+        // applyXml: what a hand-edited or damaged project can do
+        {
+            auto w = makeWindow();
+            auto& s = w->session;
+            auto xml = s.toXml();
+            test::check (s.applyXml (*xml), "(the project of this recording applies)");
+            xml->setAttribute ("fingerprint", "123abc");
+            test::check (! s.applyXml (*xml), "a project with another fingerprint is refused by applyXml too");
+            xml->removeAttribute ("fingerprint");
+            xml->setAttribute ("a4", 1000.0);
+            xml->setAttribute ("glide", 5000.0);
+            // notes out of order, one overlapping its neighbour, one with NaN and absurd values
+            const auto a = *xml->getChildByName ("Note");
+            xml->deleteAllChildElementsWithTagName ("Note");
+            const auto note = [&] (int start, int end, double target)
+            {
+                auto* e = xml->createNewChildElement ("Note");
+                e->setAttribute ("start", start);
+                e->setAttribute ("end", end);
+                e->setAttribute ("target", target);
+            };
+            const int first = a.getIntAttribute ("start");
+            note (first + 400, first + 500, 70.0);
+            note (first, first + 100, 60.0);
+            note (first + 50, first + 150, 61.0);   // overlaps the one before it: dropped
+            note (first + 200, first + 300, 9999.0); // absurd: held to the model's range
+            auto* nan = xml->createNewChildElement ("Note");
+            nan->setAttribute ("start", first + 600);
+            nan->setAttribute ("end", first + 700);
+            nan->setAttribute ("target", "nan");
+            nan->setAttribute ("gain", 400.0);
+            test::check (s.applyXml (*xml) && s.notes.size() == 4, test::fmt ("a project's notes are put in order and the overlapping one dropped (%zu notes)", s.notes.size()));
+            bool ordered = true;
+            for (size_t i = 1; i < s.notes.size(); ++i)
+                ordered = ordered && s.notes[i - 1].end <= s.notes[i].start;
+            test::check (ordered && s.notes[0].start == first, "... in order and without overlap");
+            test::check (std::fabs (s.notes[2].target - s.notes[2].centre) <= kMaxShiftSemitones + 1e-4f && s.notes[3].target == s.notes[3].centre && s.notes[3].gainDb == 12.0f,
+                         "an absurd or NaN target is held to the range, an absurd gain to the knob's");
+            test::check (s.key.a4Hz == kMaxA4Hz && s.glideMs == 200.0, "the reference pitch and the glide are held to the knobs' ranges (one constant for the A4 range)");
+        }
+
+        // the split that cannot happen
+        {
+            auto w = makeWindow();
+            auto& s = w->session;
+            s.correct (1.0f);
+            s.undo();
+            test::check (s.canRedo(), "(undone: there is a redo step)");
+            const auto edge = (juce::int64) s.notes[2].start * s.contour.hop + s.contour.hop;
+            w->roll.select ({ 2 });
+            test::check (! w->roll.splitAtSample (edge) && s.canRedo() && ! s.canUndo(), "a split too close to the edge of a note is refused and leaves undo and redo as they were");
+        }
+
+        // limits on the target
+        {
+            auto w = makeWindow (true);
+            auto& s = w->session;
+            w->roll.fitToSession();
+            w->refreshInspector();
+            const auto from = centreOf (*w, 1);
+            dragFrom (w->roll, from, from - juce::Point<float> (0.0f, (float) w->roll.rowH * 90.0f));
+            test::check (s.notes[1].target <= s.notes[1].centre + kMaxShiftSemitones + 1e-4f && s.notes[1].target > s.notes[1].centre + 10.0f,
+                         test::fmt ("dragging a note 90 rows up stops %.1f semitones above its sung pitch", s.notes[1].target - s.notes[1].centre));
+            w->roll.select ({ 4 });
+            for (int i = 0; i < 40; ++i)
+                w->keyPressed (key (juce::KeyPress::upKey));
+            test::check (std::fabs (s.notes[4].target - (s.notes[4].centre + kMaxShiftSemitones)) < 1e-3f, "so does the Up key, held down");
+            bool finite = true;
+            for (int ch = 0; ch < s.output.getNumChannels(); ++ch)
+                for (int i = 0; i < s.output.getNumSamples(); ++i)
+                    finite = finite && std::isfinite (s.output.getSample (ch, i));
+            test::check (finite, "and the audio stays finite");
+        }
+
+        // peak, clip warning, export
+        {
+            auto w = makeBare();
+            auto notes = test::outOfTunePhrase();
+            const auto voice = test::sing (notes, 7.0);
+            juce::AudioBuffer<float> audio (1, (int) voice.audio.size());
+            float peak = 0.0f;
+            for (const float v : voice.audio)
+                peak = std::max (peak, std::fabs (v));
+            for (size_t i = 0; i < voice.audio.size(); ++i)
+                audio.setSample (0, (int) i, voice.audio[i] * 0.8f / peak);
+            w->session.adoptAudio (std::move (audio), voice.rate, juce::File ("loud.wav"));
+            w->analyseNow();
+            test::check (std::fabs (w->session.outputPeak() - 0.8f) < 1e-4f, test::fmt ("the output peak is read off the audio (%.3f)", w->session.outputPeak()));
+            test::check (w->notes().empty(), "a take at -2 dB: nothing to warn about");
+            for (auto& n : w->session.notes)
+                n.gainDb = 12.0f;
+            w->session.changedAll();
+            test::check (w->session.outputPeak() > 1.5f && ui::hasNote (w->notes(), "will clip", ui::Severity::warning), test::fmt ("GAIN +12 dB on every note takes it to %.1f: the strip warns that it will clip", w->session.outputPeak()));
+            const auto target = dir.getChildFile ("loud_tuned.wav");
+            gAsked.clear();
+            gAnswer = false;
+            w->exportTo (target);
+            test::check (gAsked.size() == 1 && gAsked[0].contains ("peaks at +") && ! target.existsAsFile(), "EXPORT of a result that clips asks first; 'cancel' writes nothing");
+            gAnswer = true;
+            w->exportTo (target);
+            test::check (target.existsAsFile(), "and 'export anyway' writes it");
+            gAnswer = false;
+            w->session.resetNotes();
+            gAsked.clear();
+            w->exportTo (dir.getChildFile ("quiet.wav"));
+            test::check (gAsked.empty() && dir.getChildFile ("quiet.wav").existsAsFile(), "a result that does not clip is exported without a question");
+        }
+
+        // the voice range
+        {
+            test::check (analysisSettingsFor (0).minHz == 65.0 && analysisSettingsFor (0).maxHz == 1100.0 && analysisSettingsFor (1).maxHz == 400.0 && analysisSettingsFor (3).minHz == 200.0,
+                         "the voice ranges map to the tracker's limits (wide is the tracker's own)");
+            auto w = makeWindow();
+            auto& s = w->session;
+            const auto highest = [&]
+            {
+                double top = 0.0;
+                for (int f = 0; f < s.contour.numFrames(); ++f)
+                    if (s.contour.isVoiced (f))
+                        top = std::max<double> (top, s.contour.midi[(size_t) f]);
+                return top;
+            };
+            const double wide = highest();
+            s.correct (1.0f);
+            gAsked.clear();
+            gAnswer = false;
+            w->rangeBox.setSelectedId (2, juce::sendNotificationSync);
+            test::check (s.voiceRange == 1 && s.analysedRange == 0, "choosing LOW in the box sets the range for the next analysis only");
+            w->reanalyseButton.onClick();
+            test::check (gAsked.size() == 1 && gAsked[0].contains ("not saved") && ! w->isBusy(), "RE-ANALYSE over edits asks first");
+            gAnswer = true;
+            w->reanalyseButton.onClick();
+            waitIdle (*w);
+            gAnswer = false;
+            test::check (s.analysedRange == 1 && highest() < hzToMidi (400.0 * 1.06) && wide > 68.5, test::fmt ("re-analysed LOW (65 to 400 Hz) the contour tops out at MIDI %.1f, wide found %.1f", highest(), wide));
+            bool clean = ! s.dirty();
+            for (const auto& n : s.notes)
+                clean = clean && ! n.edited();
+            test::check (clean, "and the edits are gone");
+            const auto saved = s.toXml();
+            test::check (saved->getIntAttribute ("range") == 1, "the range the notes were found with is saved in the project");
+            // a project of another range is analysed with it
+            const auto lowWav = dir.getChildFile ("low.wav"), lowProject = dir.getChildFile ("low.orpheus");
+            s.exportWav (lowWav, error);
+            auto w3 = makeBare();
+            w3->loadFile (lowWav);
+            waitIdle (*w3);
+            w3->session.voiceRange = 1;
+            w3->reanalyseButton.onClick();
+            waitIdle (*w3);
+            w3->saveTo (lowProject);
+            auto w4 = makeBare();
+            w4->loadFile (lowProject);
+            waitIdle (*w4);
+            test::check (w4->session.voiceRange == 1 && w4->session.analysedRange == 1 && w4->rangeBox.getSelectedId() == 2, "opening that project analyses with its range, and the box shows it");
+        }
+
+        // selecting by how far off, zooming to the selection, copy and paste
+        {
+            auto w = makeWindow();
+            auto& s = w->session;
+            auto& roll = w->roll;
+            int expected = 0;
+            for (const auto& n : s.notes)
+                expected += std::fabs (s.key.snap (n.target) - n.target) * 100.0 > 15.0 ? 1 : 0;
+            const int found = roll.selectOffScale (15.0);
+            test::check (found == expected && found > 0 && (int) roll.selectedIndices().size() == found, test::fmt ("SELECT finds the %d notes more than 15 ct off the scale", found));
+            for (const auto i : roll.selectedIndices())
+                test::check (std::fabs (s.key.snap (s.notes[i].target) - s.notes[i].target) * 100.0 > 15.0, test::fmt ("... note %zu is one of them", i));
+            s.correct (1.0f);
+            roll.select ({ 1 });
+            test::check (roll.selectOffScale (5.0) == 0 && roll.selectedIndices() == std::vector<size_t> { 1 }, "after Correct all none is off, and the selection is left alone");
+            w->offBox.setSelectedId (5, juce::dontSendNotification);
+            s.resetNotes();
+            w->selectOffButton.onClick();
+            test::check (! roll.selectedIndices().empty(), "the SELECT button uses the limit in the box");
+
+            roll.fitToSession();
+            roll.select ({ 7 });
+            const double visible = roll.visibleSeconds();
+            w->keyPressed (character ('z'));
+            const double t0 = s.notes[7].start * s.contour.hop / s.sampleRate, t1 = s.notes[7].end * s.contour.hop / s.sampleRate;
+            test::check (roll.visibleSeconds() < visible * 0.5 && roll.scrollSec <= t0 && roll.scrollSec + roll.visibleSeconds() >= t1, test::fmt ("Z zooms to the selected note (%.1f s shown instead of %.1f)", roll.visibleSeconds(), visible));
+            const auto r = roll.noteRect (s.notes[7]);
+            test::check (roll.graphArea().toFloat().contains (r), "and the note is on screen, in time and in pitch");
+            w->keyPressed (character ('f'));
+
+            // copy and paste of one note's settings
+            s.notes[2].target = s.notes[2].centre + 0.6f;
+            s.notes[2].drift = 0.5f;
+            s.notes[2].vibrato = 0.3f;
+            s.notes[2].formant = -2.0f;
+            s.notes[2].gainDb = 2.5f;
+            s.changedAll();
+            roll.select ({ 2, 3 });
+            w->keyPressed (character ('c', juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+            test::check (! w->hasCopiedSettings(), "COPY with two notes selected copies nothing");
+            roll.select ({ 2 });
+            w->copyButton.onClick();
+            test::check (w->hasCopiedSettings(), "COPY takes the settings of the one selected note");
+            roll.select ({ 4, 5 });
+            const bool wasClean = ! s.notes[4].edited();
+            w->keyPressed (character ('v', juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+            bool ok = wasClean;
+            for (const size_t i : { (size_t) 4, (size_t) 5 })
+                ok = ok && std::fabs (s.notes[i].shift() - 0.6f) < 1e-5f && s.notes[i].drift == 0.5f && s.notes[i].vibrato == 0.3f && s.notes[i].formant == -2.0f && s.notes[i].gainDb == 2.5f;
+            test::check (ok, "PASTE puts shift (the same distance from each note's own pitch), drift, vibrato, formant and gain on every selected note");
+            w->undo();
+            test::check (! s.notes[4].edited() && ! s.notes[5].edited() && s.notes[2].edited(), "and one undo takes the paste back from both");
+        }
+
+        // recent files, and the last one again
+        {
+            const auto store = dir.getChildFile ("recent.txt");
+            RecentFiles list (store);
+            list.add (dir.getChildFile ("moved/phrase.wav"));
+            list.add (dir.getChildFile ("low.wav"));
+            list.add (dir.getChildFile ("moved/phrase.wav"));
+            list.add (dir.getChildFile ("gone.wav"));
+            RecentFiles again (store);
+            const auto files = again.files();
+            test::check (files.size() == 2 && files[0] == dir.getChildFile ("moved/phrase.wav") && files[1] == dir.getChildFile ("low.wav"),
+                         "the recent list is newest first, without repeats, without files that are gone, and is kept in its file");
+            {
+                RecentFiles many (dir.getChildFile ("many.txt"));
+                for (int i = 0; i < 12; ++i)
+                {
+                    const auto f = dir.getChildFile ("f" + juce::String (i) + ".wav");
+                    f.replaceWithText ("x");
+                    many.add (f);
+                }
+                test::check (many.files().size() == RecentFiles::kMax && many.last() == dir.getChildFile ("f11.wav"), "the list holds the last eight");
+            }
+            auto w = makeBare();
+            w->recent = RecentFiles (store);
+            w->reopenLast();
+            test::check (w->isBusy() && w->session.file == again.last(), "REOPEN LAST opens the file used last");
+            waitIdle (*w);
+            test::check (w->session.isAnalysed(), "(and it analyses)");
+            test::check (w->recent.last() == again.last(), "opening a file puts it first");
+        }
+        dir.deleteRecursively();
+    }
+
     {
         // Advice: the notes that keep the editor from being used for the wrong job
         using ui::Severity;
@@ -415,20 +794,24 @@ int main()
         test::check (has (adviceFor (in), "Analysing", Severity::info), "while analysing: say so");
         in = fine; in.playingOriginal = true;
         test::check (has (adviceFor (in), "ORIGINAL is lit", Severity::warning), "ORIGINAL lit: a warning");
-        in = fine; in.hasEdits = true;
-        test::check (has (adviceFor (in), "not saved", Severity::warning), "edits never saved: a warning");
-        in.projectSaved = true;
-        test::check (! has (adviceFor (in), "not saved", Severity::warning), "... which a saved project does not give");
+        in = fine; in.unsaved = true;
+        test::check (has (adviceFor (in), "not saved", Severity::warning), "edits not saved: a warning");
+        in.unsaved = false;
+        test::check (! has (adviceFor (in), "not saved", Severity::warning), "... which saving takes away");
+        in = fine; in.outputPeakDb = 2.5;
+        test::check (has (adviceFor (in), "peaks at +2.5 dB", Severity::warning), "a result past full scale: it will clip");
+        in.outputPeakDb = -0.5;
+        test::check (adviceFor (in).empty(), "... and just under it, nothing to say");
         in = fine; in.largestShiftSemitones = 8.0;
         test::check (has (adviceFor (in), "8 semitones", Severity::warning), "a shift of 8 semitones: the voice changes character");
         in = fine; in.shortestNoteMs = 60.0;
         test::check (has (adviceFor (in), "under 100 ms", Severity::info), "a 60 ms note may be a mis-cut");
 
         size_t longest = 0;
-        for (int mask = 0; mask < 64; ++mask)
+        for (int mask = 0; mask < 128; ++mask)
         {
             AdviceInput all;
-            all.hasAudio = true; all.notes = 9; all.playingOriginal = mask & 1; all.hasEdits = mask & 2; all.largestShiftSemitones = (mask & 4) ? 12.0 : 0.0;
+            all.hasAudio = true; all.notes = 9; all.playingOriginal = mask & 1; all.unsaved = mask & 2; all.outputPeakDb = (mask & 64) ? 12.3 : -6.0; all.largestShiftSemitones = (mask & 4) ? 12.0 : 0.0;
             all.shortestNoteMs = (mask & 8) ? 50.0 : 300.0; all.busy = mask & 16; all.hasAudio = ! (mask & 32);
             for (auto& n : adviceFor (all))
                 longest = std::max (longest, n.text.size());

@@ -107,6 +107,7 @@ inline const char* guideText()
            "  - Lifting what goes quiet: set a band to UPWARD and it brings a part that dips (low-mids that go empty between sections, a top that "
            "falls away) up towards THRESH, by at most 12 dB, and leaves noise and silence alone.\n"
            "  - Making room: a band can listen to the SIDECHAIN input instead of itself (route the kick there and the bass bands duck when it hits).\n"
+           "  - Parallel compression: MIX blends the compressed bands with the untouched ones (already lined up, so it does not comb). LEARN on a strip sets THRESH from two seconds of what the band hears; TO ALL copies THRESH, RATIO, ATTACK and RELEASE to every band.\n"
            "  - Gluing a sound that moves around: Stereo keeps the image still, M/S compresses the centre and the sides apart.\n"
            "\n"
            "IT IS NOT FOR:\n"

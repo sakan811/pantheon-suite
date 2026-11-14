@@ -78,7 +78,9 @@ struct LoudnessTarget
 };
 inline constexpr LoudnessTarget loudnessTargets[] = { { "Streaming", "streaming", themis::master::kStreamingLufs },
                                                       { "Loud release", "loud release", -9.0f },
-                                                      { "Dynamic", "dynamic", -18.0f } };
+                                                      { "Dynamic", "dynamic", -18.0f },
+                                                      { "Quiet streaming", "quiet streaming", -16.0f },
+                                                      { "Broadcast", "broadcast", -23.0f } };
 inline constexpr int kNumLoudnessTargets = static_cast<int> (sizeof (loudnessTargets) / sizeof (loudnessTargets[0]));
 inline constexpr int kDefaultLoudnessTarget = 0;
 
@@ -95,6 +97,15 @@ inline constexpr const char* tolerance = "tolerance";
 inline constexpr const char* avgTime = "avgTime";
 inline constexpr const char* device = "device";
 inline constexpr const char* loudnessTarget = "loudnessTarget";
+// Added after the first release (parameter version 2, see createLayout): a session saved before them opens with their defaults.
+inline constexpr const char* truePeakCeiling = "truePeakCeiling"; // the true-peak ceiling the master is held to, dBTP
+inline constexpr const char* resetOnPlay = "resetOnPlay";         // restart the measurement when the host starts playing from the beginning
+
+// The true-peak ceiling: the usual streaming-delivery -1 dBTP unless the user sets another (the limits are in HistoryChecks.h).
+inline constexpr float kMinTruePeakCeilingDb = themis::history::clip::kMinCeilingDb, kMaxTruePeakCeilingDb = 0.0f;
+inline constexpr float kDefaultTruePeakCeilingDb = themis::history::clip::kTruePeakWarnDb;
+// Playing "from the beginning" for resetOnPlay: the host's position is within this many seconds of the start.
+inline constexpr double kStartWindowSeconds = 0.05;
 
 juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
@@ -106,9 +117,13 @@ public:
 
     float value (const juce::String& id) const;
     float averagingSeconds() const;
+    float truePeakCeilingDb() const { return truePeakRaw->load(); }
+    bool resetsOnPlay() const { return resetOnPlayRaw->load() >= 0.5f; }
 
 private:
     juce::AudioProcessorValueTreeState& state;
     std::atomic<float>* avgTimeRaw = nullptr;
+    std::atomic<float>* truePeakRaw = nullptr;
+    std::atomic<float>* resetOnPlayRaw = nullptr;
 };
 } // namespace params

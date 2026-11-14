@@ -5,6 +5,7 @@
 
 #include "DSP/Engine.h"
 #include <pantheon/dsp/BandLink.h>
+#include <pantheon/ui/Undo.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
 namespace hep
@@ -376,6 +377,7 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandMode mode, double
 
     if (slot >= 0)
     {
+        ui::beginUndoStep (s, "Add band");
         const int i = slot;
         const auto& ids = bandIds (i);
         for (auto* pid : { &ids.drive, &ids.amount, &ids.tone, &ids.adapt, &ids.rebuild, &ids.character })
@@ -400,6 +402,7 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
 {
     std::vector<int> slots;
     skipped = 0;
+    ui::beginUndoStep (s, "Paste bands");
     std::vector<pdsp::LinkBand> bands;
     if (! pdsp::link::decode (text.toStdString(), bands))
         return slots;
@@ -422,6 +425,7 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
 // Switching to fill can shrink the range (see effectiveRange): write what the band really covers back.
 inline void setBandMode (juce::AudioProcessorValueTreeState& s, int band, BandMode mode)
 {
+    ui::beginUndoStep (s, "Band mode");
     const auto& ids = bandIds (band);
     setParameterValue (s, ids.mode, (float) (int) mode);
     const auto r = bandRange (s, band);
@@ -429,7 +433,47 @@ inline void setBandMode (juce::AudioProcessorValueTreeState& s, int band, BandMo
     setParameterValue (s, ids.hi, (float) r.hi);
 }
 
-inline void removeBand (juce::AudioProcessorValueTreeState& s, int band) { setParameterValue (s, bandIds (band).on, 0.0f); }
+// Copies band `band` (mode, range and every knob) into the first free slot and switches it on last, so the audio thread never sees it half made.
+// Returns the new slot, or -1 when all are in use. The copy sits exactly on the original: the user then moves it.
+inline int duplicateBand (juce::AudioProcessorValueTreeState& s, int band)
+{
+    if (! isBandOn (s, band))
+        return -1;
+    int slot = -1;
+    for (int i = 0; slot < 0 && i < maxBands; ++i)
+        if (i != band && ! isBandOn (s, i))
+            slot = i;
+    if (slot < 0)
+        return -1;
+
+    ui::beginUndoStep (s, "Duplicate band");
+    const auto& from = bandIds (band);
+    const auto& to = bandIds (slot);
+    const std::pair<const juce::String*, const juce::String*> pairs[] = {
+        { &from.mode, &to.mode }, { &from.lo, &to.lo }, { &from.hi, &to.hi }, { &from.drive, &to.drive }, { &from.amount, &to.amount },
+        { &from.tone, &to.tone }, { &from.adapt, &to.adapt }, { &from.rebuild, &to.rebuild }, { &from.character, &to.character },
+    };
+    for (auto& [src, dst] : pairs)
+        if (auto* a = s.getParameter (*src))
+            if (auto* b = s.getParameter (*dst))
+                setParameter (*b, a->getValue());
+    setParameterValue (s, to.on, 1.0f);
+    return slot;
+}
+
+inline void removeBand (juce::AudioProcessorValueTreeState& s, int band)
+{
+    ui::beginUndoStep (s, "Remove band");
+    setParameterValue (s, bandIds (band).on, 0.0f);
+}
+
+// Writes each (parameter, 0..1 value) once, leaving alone the ones that already have it.
+inline void writeTargets (const std::vector<std::pair<juce::RangedAudioParameter*, float>>& targets)
+{
+    for (auto& [param, normalised] : targets)
+        if (std::fabs (param->getValue() - normalised) > 1.0e-6f)
+            setParameter (*param, normalised);
+}
 
 inline void applyPreset (juce::AudioProcessorValueTreeState& s, int index)
 {
@@ -437,13 +481,24 @@ inline void applyPreset (juce::AudioProcessorValueTreeState& s, int index)
     if (! juce::isPositiveAndBelow (index, (int) list.size()))
         return;
 
-    // Start from defaults so presets don't inherit leftovers from the previous one.
+    ui::beginUndoStep (s, "Preset");
+    // Start from defaults so presets don't inherit leftovers from the previous one, but write each parameter once, with its final
+    // value: the audio thread must never read a half-applied state (every parameter at default with the preset's values arriving one by one).
+    std::vector<std::pair<juce::RangedAudioParameter*, float>> targets;
     for (auto* param : s.processor.getParameters())
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
             if (! isGlobalParameter (ranged->paramID))
-                setParameter (*ranged, ranged->getDefaultValue());
+                targets.emplace_back (ranged, ranged->getDefaultValue());
 
     for (auto& [pid, value] : list[(size_t) index].values)
-        setParameterValue (s, pid, value);
+    {
+        auto it = std::find_if (targets.begin(), targets.end(), [&] (const auto& t) { return t.first->paramID == pid; });
+        if (it != targets.end())
+            it->second = it->first->convertTo0to1 (value);
+        else if (auto* param = s.getParameter (pid)) // a session-wide parameter a preset sets on purpose
+            targets.emplace_back (param, param->convertTo0to1 (value));
+    }
+
+    writeTargets (targets);
 }
 }

@@ -11,7 +11,7 @@ namespace hermes
 {
 namespace id
 {
-inline const juce::String trim { "trim" }, polarity { "polarity" }, listen { "listen" }, reference { "ref" }, levelMatch { "match" }, referenceTrim { "ref_trim" };
+inline const juce::String trim { "trim" }, polarity { "polarity" }, listen { "listen" }, reference { "ref" }, levelMatch { "match" }, referenceTrim { "ref_trim" }, resetOnPlay { "reset_play" };
 }
 
 inline const juce::StringArray listenNames { "Stereo", "Mono", "Left", "Right", "Side", "Swap" };
@@ -30,6 +30,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::reference, 1 }, "Reference", d.reference));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::levelMatch, 1 }, "Level Match", d.levelMatch));
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::referenceTrim, 1 }, "Reference Trim", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), d.referenceTrimDb, Attr().withStringFromValueFunction (db)));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::resetOnPlay, 2 }, "Auto Reset", d.resetOnPlay));
     return { p.begin(), p.end() };
 }
 
@@ -44,6 +45,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.reference = v (id::reference) > 0.5f;
     e.levelMatch = v (id::levelMatch) > 0.5f;
     e.referenceTrimDb = v (id::referenceTrim);
+    e.resetOnPlay = v (id::resetOnPlay) > 0.5f;
     return e;
 }
 

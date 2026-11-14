@@ -80,6 +80,6 @@ inline const char* guideText()
            "  - Judging by loudness: a boost is louder, and louder sounds better. Use GAIN MATCH, and DELTA to hear what you changed.\n"
            "\n"
            "BEFORE YOU START: double-click the display where you want a band. Press BAND to hear the region a band covers, and CURVE to hear "
-           "only what it adds or takes away. The strip under the panels warns when a setting does not suit its job.";
+           "only what it adds or takes away. UNDO / REDO (Cmd+Z) take back a change and A / B compares two settings. The strip under the panels warns when a setting does not suit its job.";
 }
 }

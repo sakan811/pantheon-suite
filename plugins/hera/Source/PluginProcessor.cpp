@@ -25,6 +25,7 @@ bool HeraProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void HeraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate, hera::readParams (apvts).lookahead);
+    bypassDelay.prepare (2, engine.maxLatencySamples()); // the longest look-ahead
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
     reportedLatency = engine.latencySamples.load();
     setLatencySamples (reportedLatency.load());
@@ -66,6 +67,14 @@ void HeraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
+}
+
+void HeraProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+    auto main = getBusBuffer (buffer, false, 0);
+    bypassDelay.process (main.getArrayOfWritePointers(), main.getNumChannels(), main.getNumSamples(), getLatencySamples());
+    // The only output is the main bus (the sidechain is an input, never heard), so there is nothing else to clear.
 }
 
 void HeraProcessor::getStateInformation (juce::MemoryBlock& dest)

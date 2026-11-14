@@ -316,5 +316,80 @@ int main()
         check (d.latencySamples.load() == (int) std::lround (0.005 * kFs), "changing the look-ahead while running changes the latency the engine reports (5 ms: 240 samples)");
     }
 
+    // [9] DELTA and FIND.
+    std::printf ("\n[9] Delta and find\n");
+    {
+        for (const Mode mode : { Mode::splitBand, Mode::wideband })
+        {
+            EngineParams p;
+            p.mode = mode;
+            p.rangeDb = 12.0f;
+            const auto in = tones ({ { 6500.0, -12.0 }, { 300.0, -20.0 } }, 48000);
+            Engine a, b;
+            a.prepare (kFs);
+            b.prepare (kFs);
+            const auto heard = run (a, in, p);
+            p.delta = true;
+            const auto delta = run (b, in, p);
+            double worst = 0.0, deltaPeak = 0.0;
+            for (size_t i = 0; i < in.l.size(); ++i)
+            {
+                worst = std::fmax (worst, std::fabs ((double) in.l[i] - ((double) heard.l[i] + (double) delta.l[i])));
+                deltaPeak = std::fmax (deltaPeak, std::fabs ((double) delta.l[i]));
+            }
+            check (worst < 1e-6 && deltaPeak > 0.05, fmt ("%s: the output plus DELTA is the input (largest difference %.1e; the delta reaches %.3f)", mode == Mode::splitBand ? "split-band" : "wideband", worst, deltaPeak));
+        }
+        {
+            EngineParams p;
+            p.delta = true;
+            p.thresholdDb = 0.0f;
+            const auto in = tones ({ { 6500.0, -30.0 } }, 24000);
+            Engine e;
+            e.prepare (kFs);
+            const auto out = run (e, in, p);
+            double peak = 0.0;
+            for (const float v : out.l)
+                peak = std::fmax (peak, std::fabs ((double) v));
+            check (peak == 0.0, "DELTA with nothing turned down is exactly silent");
+        }
+
+        // FIND: the strongest place between 4 and 10 kHz, of a tone, of a tone over a louder one outside the range, of nothing.
+        const auto found = [] (const Stereo& in, int blocks = 1)
+        {
+            Engine e;
+            e.prepare (kFs);
+            e.startFind();
+            EngineParams p;
+            auto s = in;
+            for (int i = 0; i < blocks; ++i)
+                s = run (e, s, p);
+            return std::make_pair (e.foundHz.load(), e.findCount.load());
+        };
+        for (const double hz : { 4500.0, 6200.0, 7800.0, 9500.0 })
+        {
+            const auto r = found (tones ({ { hz, -20.0 } }, 96000));
+            check (r.second == 1 && std::fabs (r.first - hz) < 0.04 * hz, fmt ("FIND: a %.0f Hz tone is found at %.0f Hz", hz, (double) r.first));
+        }
+        const auto over = found (tones ({ { 300.0, 0.0 }, { 7000.0, -26.0 } }, 96000));
+        check (std::fabs (over.first - 7000.0) < 280.0, fmt ("FIND: a 7 kHz tone at -26 dBFS is found at %.0f Hz under a 300 Hz voice at 0 dBFS (26 dB louder, outside the range)", (double) over.first));
+        std::mt19937 gen (11);
+        std::uniform_real_distribution<float> white (-1.0f, 1.0f);
+        Stereo noise { std::vector<float> (96000), std::vector<float> (96000) };
+        pdsp::Biquad shape;
+        shape.setBandpass (kFs, 5600.0, 4.0);
+        for (size_t i = 0; i < noise.l.size(); ++i)
+            noise.l[i] = noise.r[i] = 0.02f * white (gen) + 0.5f * (float) shape.process (white (gen));
+        const auto n = found (noise);
+        check (n.first > 5000.0f && n.first < 6200.0f, fmt ("FIND: noise with a hump at 5.6 kHz is found at %.0f Hz", (double) n.first));
+        const auto none = found (tones ({ { 6500.0, -130.0 } }, 96000));
+        check (none.second == 1 && none.first == 0.0f, "FIND: a sound at -130 dBFS gives no answer (0), not a frequency");
+        Engine pending;
+        pending.prepare (kFs);
+        pending.startFind();
+        auto shortSound = tones ({ { 6500.0, -20.0 } }, 4800);
+        run (pending, shortSound, EngineParams {});
+        check (pending.finding.load() && pending.findCount.load() == 0, "FIND takes the next 1.5 s of sound: 0.1 s in, it is still listening");
+    }
+
     return test::finish ("NemesisTests");
 }

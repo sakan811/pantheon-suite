@@ -26,17 +26,19 @@ AegisEditor::AegisEditor (AegisProcessor& p)
                                            "this plus a fraction of a millisecond (the host compensates). Changing it while playing restarts the limiter."),
       truePeakButton (p.apvts, id::truePeak, "TRUE PEAK", "Read the peaks between the samples too (8x), as a converter or a codec will: the ceiling is then in dBTP. Off, only the samples are held."),
       autoReleaseButton (p.apvts, id::autoRelease, "AUTO RELEASE", "A short peak is let go faster than RELEASE; a reduction that lasts is let go at RELEASE. Smoother on music with transients, and RELEASE is then the slow end. Off, the gain always comes back at RELEASE."),
+      deltaButton (p.apvts, id::delta, "DELTA", "Listen to what the limiter takes away: the sound after GAIN minus the output, aligned by the delay. If it is the sound itself (not just the peaks), the limiter is working too hard. Not for the bounce: switch it off. Presets switch it off."),
+      matchButton (p.apvts, id::matchLevel, "MATCH", "Turns the output down to the loudness of the input (read over about a second), so raising GAIN does not win the comparison just by being louder. It only ever turns down, so the ceiling holds. For comparing: switch it off before the bounce. Presets switch it off."),
       presetBox (p, presets(), "Everything is set by a preset, GAIN too (set it by ear afterwards); what it does not list goes back to its default."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &gainKnob, &ceilingKnob, &releaseKnob, &lookaheadBox, &truePeakButton, &autoReleaseButton, &presetBox, &guideButton, &pasteButton, &clearOutButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &gainKnob, &ceilingKnob, &releaseKnob, &lookaheadBox, &truePeakButton, &autoReleaseButton, &deltaButton, &matchButton, &presetBox, &guideButton, &pasteButton, &clearOutButton })
         addAndMakeVisible (*c);
     pasteButton.setTooltip ("Take the limiter setting that Themis copied from its master plan (COPY on the ceiling or the loudness item): the CEILING it names and how far to move GAIN. "
                             "A ceiling in dBTP needs TRUE PEAK, so a paste that sets one switches it on.");
     pasteButton.onClick = [this] { pasteFromClipboard (juce::SystemClipboard::getTextFromClipboard()); };
-    clearOutButton.setTooltip ("Clear the OUT PEAK hold. It also clears when CEILING or TRUE PEAK changes, because the old peak was read against another limit.");
-    clearOutButton.onClick = [this] { outHold = gui::kLevelFloorDb; };
+    clearOutButton.setTooltip ("Clear the OUT PEAK hold and the MAX REDUCTION hold (clicking the MAX REDUCTION number clears that one alone). They also clear when CEILING or TRUE PEAK changes, because the old peaks were read against another limit.");
+    clearOutButton.onClick = [this] { outHold = gui::kLevelFloorDb; reductionHold = 0.0f; };
     startTimerHz (kTimerHz);
     setSize (kWidth, headerHeight + 10 + displayHeight + 10 + controlsHeight + 8 + ui::kNoteStripHeight + 12);
 }
@@ -60,7 +62,11 @@ void AegisEditor::resized()
 
     bounds.removeFromTop (10);
     display = bounds.removeFromTop (displayHeight);
-    clearOutButton.setBounds ((int) (display.toFloat().reduced (46.0f, 14.0f).withTrimmedRight (kReadoutWidth).getRight()) + 10, display.getY() + 14 + 80, 56, 20);
+    {
+        const auto plot = display.toFloat().reduced (46.0f, 14.0f).withTrimmedRight (kReadoutWidth);
+        holdArea = { (int) plot.getRight() + 10, (int) plot.getY() + 34, 104, 30 }; // the MAX REDUCTION number (paint() draws it at the same place)
+    }
+    clearOutButton.setBounds ((int) (display.toFloat().reduced (46.0f, 14.0f).withTrimmedRight (kReadoutWidth).getRight()) + 10, display.getY() + 14 + 116, 56, 20);
     bounds.removeFromTop (10);
     auto controls = bounds.removeFromTop (controlsHeight);
     const int cell = 120;
@@ -70,13 +76,27 @@ void AegisEditor::resized()
     controls.removeFromLeft (24);
     auto right = controls.withTrimmedTop (22);
     lookaheadLabel = { right.getX() + 2, right.getY() - 15, 120, 12 };
-    lookaheadBox.setBounds (right.removeFromTop (28).removeFromLeft (150));
+    auto lookRow = right.removeFromTop (28);
+    lookaheadBox.setBounds (lookRow.removeFromLeft (150));
+    lookRow.removeFromLeft (12);
+    deltaButton.setBounds (lookRow.removeFromLeft (84));
+    lookRow.removeFromLeft (6);
+    matchButton.setBounds (lookRow.removeFromLeft (84));
     right.removeFromTop (14);
     auto toggles = right.removeFromTop (28);
     truePeakButton.setBounds (toggles.removeFromLeft (150));
     toggles.removeFromLeft (12);
     autoReleaseButton.setBounds (toggles.removeFromLeft (150));
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
+}
+
+void AegisEditor::mouseDown (const juce::MouseEvent& e)
+{
+    if (holdArea.contains (e.getPosition()))
+    {
+        reductionHold = 0.0f;
+        repaint (holdArea);
+    }
 }
 
 float AegisEditor::heldReductionDb() const noexcept { return *std::max_element (history.begin(), history.end()); }
@@ -154,10 +174,13 @@ void AegisEditor::paint (juce::Graphics& g)
     g.setColour (colours::amber);
     g.drawText (shownReduction < 0.05f ? juce::String ("0.0 dB") : "-" + juce::String (shownReduction, 1) + " dB", juce::Rectangle<float> (x0, plot.getY(), 96.0f, 16.0f), juce::Justification::centredLeft);
     hw::drawLabel (g, "REDUCTION", { (int) x0 + 2, (int) plot.getY() + 16, 90, 12 }, juce::Justification::left, colours::dim, 8.5f);
+    g.setColour (colours::amber);
+    g.drawText (reductionHold < 0.05f ? juce::String ("0.0 dB") : "-" + juce::String (reductionHold, 1) + " dB", juce::Rectangle<float> (x0, plot.getY() + 34.0f, 96.0f, 16.0f), juce::Justification::centredLeft);
+    hw::drawLabel (g, "MAX (CLICK TO CLEAR)", { (int) x0 + 2, (int) plot.getY() + 50, 104, 12 }, juce::Justification::left, colours::dim, 8.5f);
     const bool over = outHold > shownCeilingDb + 0.1f;
     g.setColour (over ? colours::bad : colours::amber);
-    g.drawText (outHold <= gui::kLevelFloorDb ? juce::String ("--") : juce::String (outHold, 1) + (shownTruePeak ? " dBTP" : " dBFS"), juce::Rectangle<float> (x0, plot.getY() + 44.0f, 104.0f, 16.0f), juce::Justification::centredLeft);
-    hw::drawLabel (g, "OUT PEAK", { (int) x0 + 2, (int) plot.getY() + 60, 90, 12 }, juce::Justification::left, colours::dim, 8.5f);
+    g.drawText (outHold <= gui::kLevelFloorDb ? juce::String ("--") : juce::String (outHold, 1) + (shownTruePeak ? " dBTP" : " dBFS"), juce::Rectangle<float> (x0, plot.getY() + 76.0f, 104.0f, 16.0f), juce::Justification::centredLeft);
+    hw::drawLabel (g, "OUT PEAK", { (int) x0 + 2, (int) plot.getY() + 92, 90, 12 }, juce::Justification::left, colours::dim, 8.5f);
 
     const auto bar = [&] (float x) { return juce::Rectangle<float> (x, plot.getY(), 12.0f, plot.getHeight()); };
     const auto level = [] (float db) { return juce::jlimit (0.0f, 1.0f, (db - gui::kLevelFloorDb) / -gui::kLevelFloorDb); };
@@ -193,10 +216,14 @@ void AegisEditor::timerCallback()
     outLevelDb = out > 1e-5f ? 20.0f * std::log10 (out) : gui::kLevelFloorDb;
     const auto params = readParams (proc.apvts);
     if (params.ceilingDb != shownCeilingDb || params.truePeak != shownTruePeak)
-        outHold = gui::kLevelFloorDb; // the old peak was read against another limit
+    {
+        outHold = gui::kLevelFloorDb; // the old peaks were read against another limit
+        reductionHold = 0.0f;
+    }
     shownCeilingDb = params.ceilingDb;
     shownTruePeak = params.truePeak;
     outHold = std::max (outHold, outLevelDb);
+    reductionHold = std::max (reductionHold, now);
     if (pasteTicks > 0)
         --pasteTicks;
     presetBox.sync();

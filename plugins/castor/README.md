@@ -10,7 +10,7 @@ namespaces and plugin codes use the short name "Castor".)
 
 ![Castor Pair](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz. The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz. The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. Under the correlation bar, LISTEN is on Stereo and MIN shows the lowest correlation the bar has read (0.88). Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -19,12 +19,13 @@ namespaces and plugin codes use the short name "Castor".)
 | **Width, six bands** | Sub (20-60 Hz), Bass (60-250), Low-Mid (250-500), Midrange (500-2 k), Upper-Mid (2-6 k) and High (6-20 k): the bands of music of `shared/dsp`. Each band's *sides* (what differs between left and right) are scaled by 0 to 200%: 0% is mono, 100% as it is, 200% twice the sides. |
 | **Mid / Side** | -12 to +12 dB each, 0 by default: the level of the middle (what is the same in both channels) and of the sides, after the widths. |
 | **Mono below** | 20 Hz (off) to 500 Hz: the sides go through a 24 dB/oct high-pass at this frequency, so below it the sound is in the middle: safe for mono playback, club systems and vinyl. |
-| **Balance** | L 100 to R 100: turns one channel down (not a pan). |
+| **Balance** | L 100 to R 100: turns one channel down (not a pan). On a mono bus it is ignored (there is no other channel to hear it against). |
 | **Output** | -12 to +12 dB. |
+| **Listen** | A check on what you hear, after everything: *Stereo* (as it is; the default), *Mono* (`(L + R) / 2` in both channels: what a mono speaker plays; what is out of phase vanishes) or *Side* (`(L - R) / 2` in both: only what differs between the channels). The goniometer and the correlation still read the sound as it is. Presets set it back to Stereo, and a note reminds you before a bounce. |
 | **Presets** | Seven starting points (Init, Mono Bass, Club Safe, Widen Highs, Wide Master, Narrow Mix, Vocal Forward). A preset sets the widths, MID, SIDE and MONO BELOW; BALANCE and OUTPUT are kept. |
 
 The goniometer draws the last 1536 samples of the output as a cloud, left and right turned a quarter (a vertical line is mono, a horizontal one out of phase); the bar under it is the
-correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase.
+correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase. **MIN** (beside LISTEN) is the lowest it has read since you last clicked it, also drawn as a thin mark on the bar: a dip under 0 is a moment that cancels in mono, even if it is over when you look.
 
 ## How it works
 
@@ -44,6 +45,7 @@ correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase.
 - MONO BELOW 120 Hz: the sides are -38.2 dB at 40 Hz, -3.01 dB at 120 Hz, -0.00 dB at 480 Hz and +0.000 dB at 2 kHz; a centred bass is untouched, bit for bit.
 - BALANCE +50%: the left is -6.02 dB, the right untouched. OUTPUT +6 dB is +6.02 dB.
 - The correlation meter: +1.000 for a centred sound, -1.000 for an out-of-phase one, -0.002 for independent noise; +1.000 with every width at 0%.
+- LISTEN: Mono is `(L + R) / 2` in both channels and Side `(L - R) / 2`, exactly; a side-only tone is silent in the Mono check and fully heard in Side. The correlation minimum keeps a dip of -0.68 (0.5 s of an out-of-phase tone after a mono passage) after the live reading is back at +0.94. On a mono bus BALANCE +100 leaves the sound unchanged.
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
 
 ## Limits
@@ -53,6 +55,7 @@ correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase.
 - **With a width off 100% the phase turns around the band edges** (the magnitude is flat, the all-pass of the crossovers is in the sound). It is the same for left and right, so the image does not move, but a transient in a
   band edge is slightly smeared. At 100% everywhere the sound is not touched at all.
 - **The six bands are fixed** (the bands of music of `shared/dsp`), not movable.
+- **LISTEN is a parameter and is saved with the session**: set it back to Stereo before you bounce (a note reminds you).
 - It has no delay and does not clip or limit: a wider image can raise the peaks.
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 

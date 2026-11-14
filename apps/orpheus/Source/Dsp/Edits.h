@@ -25,14 +25,21 @@ inline float correctionOf (const Note& n, const Key& key) noexcept
 
 constexpr int kMinSplitFrames = 4;
 
+// The index of the note that can be cut at `frame` (both halves at least kMinSplitFrames long), or -1. Nothing is changed.
+inline int splitIndex (const std::vector<Note>& notes, int frame) noexcept
+{
+    for (size_t i = 0; i < notes.size(); ++i)
+        if (frame - notes[i].start >= kMinSplitFrames && notes[i].end - frame >= kMinSplitFrames)
+            return (int) i;
+    return -1;
+}
+
 // Cuts the note that contains `frame` in two there. Returns the index of the first half, or -1 if no note can be cut there.
 inline int splitAt (std::vector<Note>& notes, const Contour& c, int frame)
 {
-    for (size_t i = 0; i < notes.size(); ++i)
+    if (const int i = splitIndex (notes, frame); i >= 0)
     {
-        const Note whole = notes[i];
-        if (frame - whole.start < kMinSplitFrames || whole.end - frame < kMinSplitFrames)
-            continue;
+        const Note whole = notes[(size_t) i];
         Note a = whole, b = whole;
         a.end = frame;
         b.start = frame;
@@ -40,9 +47,11 @@ inline int splitAt (std::vector<Note>& notes, const Contour& c, int frame)
         b.centre = steadyCentre (c, b.start, b.end);
         a.target = a.centre + whole.shift();
         b.target = b.centre + whole.shift();
-        notes[i] = a;
+        a.clampTarget();
+        b.clampTarget();
+        notes[(size_t) i] = a;
         notes.insert (notes.begin() + (long) i + 1, b);
-        return (int) i;
+        return i;
     }
     return -1;
 }
@@ -58,6 +67,7 @@ inline bool mergeWithNext (std::vector<Note>& notes, const Contour& c, int i)
     m.end = notes[(size_t) i + 1].end;
     m.centre = steadyCentre (c, m.start, m.end);
     m.target = m.centre + shift;
+    m.clampTarget();
     notes[(size_t) i] = m;
     notes.erase (notes.begin() + i + 1);
     return true;

@@ -11,7 +11,7 @@ namespace atlas
 {
 namespace id
 {
-inline const juce::String phase { "phase" }, oversampling { "os" }, out { "out" }, lookahead { "look" };
+inline const juce::String phase { "phase" }, oversampling { "os" }, out { "out" }, lookahead { "look" }, mix { "mix" };
 inline const std::array<juce::String, kCrossovers> crossover { "xo0", "xo1", "xo2", "xo3", "xo4" };
 inline const std::array<juce::String, kCrossovers> split { "xo0_on", "xo1_on", "xo2_on", "xo3_on", "xo4_on" }; // off: the two bands are one
 }
@@ -112,6 +112,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { bandIds (i).listen, 2 }, "Band " + String (i + 1) + " Listens To", listenNames, 0));
     for (int i = 0; i < kBands; ++i)
         p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { bandIds (i).direction, 3 }, "Band " + String (i + 1) + " Direction", directionNames, 0));
+    // Dry / wet for parallel compression, after everything else (version 4). 100 % is the plugin as it was, so an old session sounds the same.
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::mix, 4 }, "Mix", NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f,
+                                                        Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 0) + " %"; })
+                                                              .withValueFromStringFunction ([] (const String& t) { return t.getFloatValue(); })));
     return { p.begin(), p.end() };
 }
 
@@ -124,6 +128,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.oversampling = std::clamp ((int) v (id::oversampling), 0, kNumOsModes - 1);
     e.outGainDb = v (id::out);
     e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookahead - 1);
+    e.mix = std::clamp ((double) v (id::mix) * 0.01, 0.0, 1.0);
     for (int k = 0; k < kCrossovers; ++k)
     {
         e.crossover[(size_t) k] = v (id::crossover[(size_t) k]);
@@ -190,14 +195,63 @@ inline void setValue (juce::AudioProcessorValueTreeState& s, const juce::String&
     }
 }
 
+// The ids of a band's settings in one list (the order is `BandValues`'s).
+inline std::array<const juce::String*, 10> bandIdList (const BandIds& a)
+{
+    return { &a.on, &a.channels, &a.threshold, &a.ratio, &a.attack, &a.release, &a.makeup, &a.match, &a.listen, &a.direction };
+}
+
+using BandValues = std::array<float, 10>;
+
+inline BandValues readBand (juce::AudioProcessorValueTreeState& s, int slot)
+{
+    BandValues v {};
+    const auto ids = bandIdList (bandIds (slot));
+    for (size_t i = 0; i < ids.size(); ++i)
+    {
+        auto* param = s.getParameter (*ids[i]);
+        v[i] = param->convertFrom0to1 (param->getValue());
+    }
+    return v;
+}
+
+inline void writeBand (juce::AudioProcessorValueTreeState& s, int slot, const BandValues& v)
+{
+    const auto ids = bandIdList (bandIds (slot));
+    for (size_t i = 0; i < ids.size(); ++i)
+        setValue (s, *ids[i], v[i]);
+}
+
 inline void copyBand (juce::AudioProcessorValueTreeState& s, int from, int to)
 {
-    const auto& a = bandIds (from);
-    const auto& b = bandIds (to);
-    const juce::String* const pairs[][2] = { { &a.on, &b.on }, { &a.channels, &b.channels }, { &a.threshold, &b.threshold }, { &a.ratio, &b.ratio },
-                                             { &a.attack, &b.attack }, { &a.release, &b.release }, { &a.makeup, &b.makeup }, { &a.match, &b.match }, { &a.listen, &b.listen }, { &a.direction, &b.direction } };
-    for (const auto& pair : pairs)
-        setValue (s, *pair[1], s.getParameter (*pair[0])->convertFrom0to1 (s.getParameter (*pair[0])->getValue()));
+    writeBand (s, to, readBand (s, from));
+}
+
+// Several copies at once, `from -> to` in the order given, all read before any is written: a copy never sees what an earlier one wrote.
+inline void copyBands (juce::AudioProcessorValueTreeState& s, const std::vector<std::pair<int, int>>& moves)
+{
+    std::array<BandValues, kBands> before;
+    for (int i = 0; i < kBands; ++i)
+        before[(size_t) i] = readBand (s, i);
+    for (const auto& m : moves)
+        writeBand (s, m.second, before[(size_t) m.first]);
+}
+
+// THRESH, RATIO, ATTACK and RELEASE of one band to every other band there is (not its channels, direction, makeup or on/off: those are per band by nature).
+inline void copyDynamicsToAll (juce::AudioProcessorValueTreeState& s, int fromSlot)
+{
+    const auto l = layoutOf (s);
+    const auto& a = bandIds (fromSlot);
+    for (int band = 0; band < l.numBands; ++band)
+    {
+        const int to = l.slot[(size_t) band];
+        if (to == fromSlot)
+            continue;
+        const auto& b = bandIds (to);
+        for (const auto& pair : { std::pair<const juce::String*, const juce::String*> { &a.threshold, &b.threshold }, { &a.ratio, &b.ratio }, { &a.attack, &b.attack }, { &a.release, &b.release } })
+            if (auto* param = s.getParameter (*pair.first))
+                setValue (s, *pair.second, param->convertFrom0to1 (param->getValue()));
+    }
 }
 
 // Writes the splits that are on into the first slots, in order, and parks the rest at the top, off.
@@ -231,12 +285,14 @@ inline int addSplit (juce::AudioProcessorValueTreeState& s, double hz)
         if (std::max (f, hz) / std::min (f, hz) < kMinCrossoverRatio)
             return -1;
     const int at = (int) (std::upper_bound (splits.begin(), splits.end(), hz) - splits.begin()); // the band that is split
-    // Settings first, from the top down, read from the strips the bands are on now.
+    // Settings first, read from the strips the bands are on now (a snapshot: a copy must not read a strip an earlier one wrote).
+    std::vector<std::pair<int, int>> moves;
     for (int band = l.numBands - 1; band >= at; --band)
-        copyBand (s, l.slot[(size_t) band], band + 1);
+        moves.push_back ({ l.slot[(size_t) band], band + 1 });
     for (int band = 0; band < at; ++band)
         if (l.slot[(size_t) band] != band)
-            copyBand (s, l.slot[(size_t) band], band);
+            moves.push_back ({ l.slot[(size_t) band], band });
+    copyBands (s, moves);
     splits.insert (splits.begin() + at, hz);
     writeSplits (s, splits);
     return at + 1;
@@ -248,12 +304,14 @@ inline bool removeSplit (juce::AudioProcessorValueTreeState& s, int band)
     const auto l = layoutOf (s);
     if (band < 0 || band >= l.numBands - 1)
         return false;
+    std::vector<std::pair<int, int>> moves;
     for (int b = 0; b < l.numBands; ++b)
     {
         const int to = b <= band ? b : b - 1;
         if (b != band + 1 && l.slot[(size_t) b] != to)
-            copyBand (s, l.slot[(size_t) b], to);
+            moves.push_back ({ l.slot[(size_t) b], to });
     }
+    copyBands (s, moves);
     auto splits = splitsOf (l);
     splits.erase (splits.begin() + band);
     writeSplits (s, splits);
@@ -274,7 +332,7 @@ inline void moveSplit (juce::AudioProcessorValueTreeState& s, int band, double h
 
 // ---- presets -------------------------------------------------------------------------------------
 // A preset is the bands' settings; everything not listed goes back to its default, the session-wide controls (phase, oversampling,
-// look-ahead, output) are kept. The thresholds are starting points for a master around -14 LUFS: the band's level decides, so set THRESH
+// look-ahead, output, mix) are kept. The thresholds are starting points for a master around -14 LUFS: the band's level decides, so set THRESH
 // where the meter first moves.
 using PresetValues = std::vector<std::pair<juce::String, float>>;
 
@@ -287,7 +345,7 @@ struct Preset
 
 inline bool isGlobalParameter (const juce::String& pid)
 {
-    return pid == id::phase || pid == id::oversampling || pid == id::out || pid == id::lookahead;
+    return pid == id::phase || pid == id::oversampling || pid == id::out || pid == id::lookahead || pid == id::mix;
 }
 
 inline PresetValues bandValues (int band, double thresholdDb, double ratio, double attackMs, double releaseMs,

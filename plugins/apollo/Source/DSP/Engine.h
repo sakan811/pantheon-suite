@@ -63,6 +63,9 @@ public:
         eCount = 0;
         matchDb.store (0.0f, std::memory_order_relaxed);
         outNow = -1.0; // snaps to the target at the first tick
+        listenL.reset();
+        listenR.reset();
+        listenBand = -1;
         linearDirty = true;
         sinceDesign = 1000;
     }
@@ -109,6 +112,11 @@ public:
                     yl -= dl;
                     yr -= dr;
                 }
+                if (listenBand >= 0)
+                {
+                    yl = listenL.process (yl);
+                    yr = listenR.process (yr);
+                }
                 left[i] = (float) (yl * outNow);
                 right[i] = (float) (yr * outNow);
             }
@@ -121,6 +129,7 @@ public:
     std::atomic<int> latencySamples { 0 };
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     std::atomic<bool> delta { false };   // DELTA: only what the bands change (output minus input). Monitoring, not a setting: never saved, never a parameter
+    std::atomic<int> listen { -1 };      // LISTEN: the band (0 to 7) whose region is heard alone, after the bands, through a band-pass at its frequency and width; -1 is off. Monitoring, like delta
     std::atomic<float> matchDb { 0.0f }; // the gain GAIN MATCH is applying now, for the display
 
 private:
@@ -128,12 +137,29 @@ private:
     {
         bool running = false;
         BandParams now;             // what the band is now: the target's settings, moved toward it
+        double mix = 1.0;           // a band without a gain (high-pass, low-pass, notch) fades in and out through this: 1 is the filter, 0 is the plain input
         Section mid, side;          // the filters: `mid` is the left or the mid signal, `side` the right or the side signal
     };
 
     void tick (const EngineParams& p) noexcept
     {
         deltaOn = delta.load (std::memory_order_relaxed);
+        {
+            const int want = std::clamp (listen.load (std::memory_order_relaxed), -1, kBands - 1);
+            if (want != listenBand)
+            {
+                listenL.reset();
+                listenR.reset();
+                listenBand = want;
+            }
+            if (listenBand >= 0)
+            {
+                const auto& b = p.bands[(size_t) listenBand];
+                const double f = std::clamp (b.freqHz, kMinHz, std::min (kMaxHz, 0.45 * fs)), q = std::clamp (b.q, 0.3, 10.0);
+                listenL.setBandpass (fs, f, q); // the coefficients move, the states stay
+                listenR.setBandpass (fs, f, q);
+            }
+        }
         // GAIN MATCH: the RMS of what came in against what the bands made of it, over about 0.6 s; the gain that equals them follows at 0.15 s, within 12 dB.
         if (eCount > 0)
         {
@@ -152,8 +178,9 @@ private:
             auto& b = band[(size_t) i];
             const auto& t = p.bands[(size_t) i];
             const bool sameKind = t.type == b.now.type && t.target == b.now.target && t.slope == b.now.slope;
-            // A bell or shelf whose gain is being taken to 0 (or whose band was switched off) is run until it has got there: it fades, it does not cut.
-            const bool fading = b.running && sameKind && hasGain (b.now.type) && std::fabs (b.now.gainDb) >= kIdentityDb;
+            // A band that is being taken out is run until it has got there: it fades, it does not cut. A bell or shelf fades its gain; a high-pass, low-pass or notch (no gain to take to 0)
+            // fades its `mix`, from the filter to the plain input.
+            const bool fading = b.running && sameKind && (hasGain (b.now.type) ? std::fabs (b.now.gainDb) >= kIdentityDb : b.mix > 0.0);
             if (isIdentity (t) && ! fading)
             {
                 if (b.running)
@@ -170,6 +197,7 @@ private:
             {
                 // Starts from 0 dB (a gain moves to its value like any other change) with clean filters.
                 b.now = t;
+                b.mix = 1.0;
                 if (hasGain (t.type))
                     b.now.gainDb = 0.0;
                 b.mid.reset();
@@ -188,8 +216,16 @@ private:
             if (std::fabs (std::log (t.freqHz / f)) < 1e-4) f = t.freqHz;
             if (std::fabs (targetGain - g) < 1e-3) g = targetGain;
             if (std::fabs (t.q - q) < 1e-3) q = t.q;
-            if (f != b.now.freqHz || g != b.now.gainDb || q != b.now.q)
+            double mix = b.mix;
+            if (! hasGain (t.type))
             {
+                const double mixTarget = t.on ? 1.0 : 0.0;
+                mix += (mixTarget - mix) * smoothing;
+                if (std::fabs (mixTarget - mix) < 1e-3) mix = mixTarget;
+            }
+            if (f != b.now.freqHz || g != b.now.gainDb || q != b.now.q || mix != b.mix)
+            {
+                b.mix = mix;
                 b.now.freqHz = f;
                 b.now.gainDb = g;
                 b.now.q = q;
@@ -214,17 +250,23 @@ private:
                 continue;
             switch (b.now.target)
             {
-                case Target::stereo: l = b.mid.process (l); r = b.side.process (r); break;
+                case Target::stereo:
+                {
+                    const double fl = b.mid.process (l), fr = b.side.process (r);
+                    l = b.mix == 1.0 ? fl : l + b.mix * (fl - l);
+                    r = b.mix == 1.0 ? fr : r + b.mix * (fr - r);
+                    break;
+                }
                 case Target::mid:
                 {
-                    const double m = 0.5 * (l + r), d = b.mid.process (m) - m;
+                    const double m = 0.5 * (l + r), d = b.mix * (b.mid.process (m) - m);
                     l += d;
                     r += d;
                     break;
                 }
                 case Target::side:
                 {
-                    const double s = 0.5 * (l - r), d = b.mid.process (s) - s;
+                    const double s = 0.5 * (l - r), d = b.mix * (b.mid.process (s) - s);
                     l += d;
                     r -= d;
                     break;
@@ -248,14 +290,16 @@ private:
         {
             std::array<Section, kBands> sections;
             std::array<bool, kBands> running {};
+            std::array<double, kBands> mix {};
             for (int i = 0; i < kBands; ++i)
             {
                 const auto& b = band[(size_t) i];
                 running[(size_t) i] = b.running && reaches (b.now.target, path == 0 ? Target::mid : Target::side);
                 sections[(size_t) i] = b.mid;
+                mix[(size_t) i] = b.mix;
             }
             bool identity = false;
-            convolver[(size_t) path].design (sections, running, identity);
+            convolver[(size_t) path].design (sections, running, mix, identity);
         }
         linearDirty = false;
     }
@@ -264,6 +308,8 @@ private:
     double matchEnergyK = 0.001, matchGainK = 0.01, matchNow = 1.0, msDry = 1.0e-6, msWet = 1.0e-6, eDry = 0.0, eWet = 0.0;
     int eCount = 0;
     bool deltaOn = false;
+    int listenBand = -1;
+    pdsp::Biquad listenL, listenR;
     std::vector<double> dryL, dryR; // the input, delayed by the linear phase's latency, to compare the output with
     size_t dryPos = 0;
     LinearSizes sizes;

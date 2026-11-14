@@ -8,7 +8,7 @@
 #include "UI/DionysusUi.h"
 #include <pantheon/ui/Advice.h>
 
-// The curve and the harmonics it makes on glass, five knobs, the curve and oversampling selectors and AUTO GAIN. Everything drawn is the shared kit's (shared/ui).
+// The curve and the harmonics it makes on glass, six knobs, the curve and oversampling selectors and AUTO GAIN. Everything drawn is the shared kit's (shared/ui).
 class DionysusEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -18,9 +18,10 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    ui::Knob drive, bias, tone, mix, out;
+    ui::Knob drive, bias, tone, lowCut, mix, out;
     ui::Choice shape, oversampling;
     ui::Toggle autoGain;
+    juce::TextButton deltaButton { "DELTA" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { dionysus::guideTitle(), dionysus::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -33,8 +34,10 @@ private:
     DionysusProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, presetLabel, curveArea, harmonicArea, shapeLabel, oversamplingLabel, latencyLabel, noteStrip;
-    float level = 0.0f;
+    juce::Rectangle<int> nameplate, presetLabel, curveArea, harmonicArea, meterArea, shapeLabel, oversamplingLabel, latencyLabel, noteStrip;
+    float level = 0.0f;           // the output's peak since the last tick
+    float drivenDb = -60.0f;      // the level that reached the curve, dB re the curve's turning point, falling slowly
+    int clipTicks = 0;            // timer ticks left to hold the CLIP lamp
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DionysusEditor)
 };

@@ -41,6 +41,7 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
                      SpectrumAnalyzer.h (EQ-style FFT analyzer, GUI-free so its calibration is testable; test [10]) and MusicBands.h (the six main bands and their splitter, the band solo strip; test [12b]), namespace `pdsp`, shared with Iris (and Themis)
 Source/Advice.h      the notes under the band's knobs (warnings that a setting does not suit its job) and the GUIDE text; plain C++, no JUCE
 Source/Parameters.h  parameter layout, presets, readParams(), band helpers, legacy migration  <- the single source of truth for parameters
+Source/UserPresets.h the user's own presets: one XML file each (0..1 values by id, all but the session-wide ones) in `UserPresets::defaultFolder()`; the processor owns one, tests point it at a temp folder
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/HephaestusUi.h` holds what is Hephaestus' own)
 Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse drags, slots, legacy sessions), HostCheck.cpp (loads the VST3),
                      Snapshot.cpp (editor -> PNG), Check.h, TestSignals.h
@@ -52,7 +53,7 @@ Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse drags, slots, legacy se
 `prepare()`. `setLatencySamples` is only called from the message thread (`AsyncUpdater` in the processor).
 
 **Latency.** Every path that is summed with another must pass through an `IntDelay` set to the oversampling
-latency (`dryDelay`, `fundDelay`, `bypassDelay`). If you add a path, align it and extend test [2]/[8].
+latency (`dryDelay`, `fundDelay`, `bypassDelay`). If you add a path, align it and extend test [2]/[8]. The latency is `std::atomic` in `Engine` (the audio thread sets it, the message thread reads it), the processor asks for `setLatencySamples` once per change (`requestedLatency`), reports it as the tail (`getTailLengthSeconds`) and delays a host-bypassed block by it (`processBlockBypassed`, `pdsp::BypassDelay` sized with `Engine::getMaxLatency()`: UiCheck pins it).
 
 **Saturate bands add their distortion; they never replace the signal.** `Saturator::process` writes only what the
 shapers add (`shapeBlock<Curve, false>`), and `Engine` sums that onto the clean, `bypassDelay`-aligned input. That
@@ -89,6 +90,10 @@ energy, so `extGain` = amount and `target` = amount squared). Adapt measures the
 (`harmonicReach`) on the *input* and scales the harmonics by `(1 - adapt) + adapt * sqrt (shortfall)`. Keep the
 measurement on the input: measuring the output would make it a feedback loop. Test [5c] pins the law; if you change
 the reach, the time constants or the weights, re-run it and update the README numbers.
+
+**Clean fill and a moving edge.** `FundamentalEngine::updateCoefficients` calls `PartialTracker::setup` every block while a band edge glides; `setup` keeps the pitch the tracker has locked to (it only clamps it into the new range) and centres it only the first time or at a new sample rate. Re-centring it each block lost the note while an edge was dragged (test [5g], the moving-edge case).
+
+**Undo, A/B and presets.** The processor owns a `juce::UndoManager` (`undo`) handed to the APVTS, and a `ui::AbCompare` (`ab`); a gesture of the plugin's own that moves several parameters (a preset, adding, duplicating or removing a band, a drag on the display) calls `ui::beginUndoStep` first so it is one step; `applyPreset` and `UserPresets::apply` write each parameter once with its final value, never "all defaults, then the preset". User presets are files in the user's folder; the processor keeps only the name of the one chosen (`userPreset` in the state).
 
 **Parameters.** Global IDs in `hep::id` are stored in sessions and automation: never rename or remove one. Band ids come
 from `bandIds (i)` (`b1_lo` ... `b6_rebuild`) and are equally permanent. A new parameter needs a `ParameterID` version

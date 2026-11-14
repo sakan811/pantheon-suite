@@ -10,7 +10,7 @@ line and the key it is meant to be in. (CMake targets, namespaces and plugin cod
 
 ![Harmonia Pitch](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins) after a phrase of five notes with vibrato in C major. The pitch graph shows the sung pitch (amber) and the corrected pitch (teal) against the allowed notes; the **KEY & SCALE** panel shows the allowed notes as lit piano keys (click one to allow or block it), and the **STYLE** buttons and the six knobs along the bottom (Speed 40 ms, Strength 100 %, Natural 70 %, Note Hold 70 ms, Formant 0, Tuning 440 Hz) set how the correction behaves. **LATENCY** (top) is the fixed 46 ms. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins) after a phrase of five notes with vibrato in C major. The pitch graph shows the sung pitch (amber) and the corrected pitch (teal) against the allowed notes; the **KEY & SCALE** panel shows the allowed notes as lit piano keys (click one to allow or block it; ALL, NONE, INVERT and SCALE under the keys set them at once), and the **STYLE** buttons and the six knobs along the bottom (Speed 40 ms, Strength 100 %, Natural 70 %, Note Hold 70 ms, Formant 0, Tuning 440 Hz) set how the correction behaves. **LATENCY** (top) is the fixed 46 ms, and above it sit UNDO / REDO and the A / B compare pair (A lit, as on opening). Regenerate with the command under "Development".*
 
 ## Core philosophy
 
@@ -32,7 +32,11 @@ line and the key it is meant to be in. (CMake targets, namespaces and plugin cod
 | Area | What it does |
 |---|---|
 | **Key / Scale** | Notes the voice may land on. Click piano keys to allow or block individual notes (switches to *Custom*). Block notes your melody never uses: fewer wrong-note snaps. |
-| **Detect key** | Listens to your vocal and sets key + major/minor for you, once. |
+| **Note buttons** | Under the piano keys: **ALL** allows every note, **NONE** blocks every note, **INVERT** flips every key, **SCALE** goes back to the scale of the key shown after you edited the keys by hand (the last scale you chose; Major at first). Each switches to *Custom* where it sets notes, and is one undo step. Off while Auto key follows the vocal. |
+| **MIDI notes** | While MIDI notes are held (any channel, any octave) their note names are the allowed notes, so you can play the melody or chord to follow and the voice is pulled to it; release them and the piano keys are back. The piano shows the held notes. It needs the host to send MIDI to the plug-in: the VST3 and the standalone take it, most AU hosts do not send MIDI to an effect (the AU keeps its effect type, so a host that does not will simply not use this). A host stop or jump drops the held notes. |
+| **Undo and A/B** | **UNDO / REDO** (Cmd+Z, Shift+Cmd+Z; Ctrl on other systems) take back and redo changes to the controls, the keys and the style buttons, each as one step. **A / B** holds two complete settings (not the host's Bypass): the first time B is a copy of A, after that each switch keeps what you set in the one you leave and loads the other. Neither is saved with the session except which slot is active. |
+| **Window size** | Drag the corner (75 % to 200 %); the size is kept with the session. |
+| **Detect key** | Listens to your vocal and sets key + major/minor for you, once. If the host is not running audio (stopped) nothing can listen: after a second the plug-in says so and withdraws the request. |
 | **Auto key** | Keeps following the key of the vocal and changes it when the song modulates or a new section starts. Major/minor only; it needs about 6 s of singing before it commits, and takes about 4 s to follow a key change. Key and Scale are ignored while it is on (they still apply until the key is known). Automatable. |
 | **Style** | *Natural* for transparent correction, *Pop* for a polished studio sound, *Hard-tune* for the robotic effect. |
 | **Speed** | How fast the voice is pulled onto the note. *Instant* = robotic. 20–60 ms is transparent. |
@@ -173,6 +177,7 @@ state of that is tracked in the repository's [CLAUDE.md](../../CLAUDE.md)). Run 
 | Vibrato depth kept ≥ 100 % at *Natural 100*, ≤ 15 % at *Natural 0* | Voices other than a clean solo vocal (see Limitations) |
 | Formants unchanged when shifting 3 semitones (spectral centroid ratio 1.04; naive resampling gives 1.19) | |
 | ~0.8 % of one core (stereo, 48 kHz; ~1.4 % at 96 kHz). Passes `auval` and `pluginval` at strictness 10 | |
+| Key detection loses nothing when the editor's start and stop reach the audio thread between the same two blocks (the last wish wins), a stop with nothing started gives no result, and Detect with no audio running says the host is not running audio and withdraws (`HarmoniaDevTool selftest`); held MIDI notes become the allowed notes and a host reset drops them; the ALL / NONE / INVERT / SCALE buttons, UNDO / REDO, A / B and the saved window size (`selftest`) | |
 | A NaN or an inf in the input is taken as silence: the output stays finite and a second later the voice is what it would have been without it (`dsp_test`, section 9) | |
 
 ## Limitations

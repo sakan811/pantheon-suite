@@ -6,6 +6,8 @@
 #include <atomic>
 
 #include "DSP/Peers.h"
+#include <pantheon/dsp/BypassDelay.h>
+#include <pantheon/ui/AbCompare.h>
 #include "Parameters.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -20,6 +22,7 @@ public:
     void reset() override { engine.reset(); } // a host locate, loop or stop: nothing of the old position may sound at the new one
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override; // delayed by the reported latency, so a bypassed track stays in time
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -39,7 +42,9 @@ public:
     void setStateInformation (const void*, int) override;
 
     iris::Engine engine;
+    juce::UndoManager undo; // UNDO / REDO of the parameters (shared/ui Undo.h); declared before the state that records into it
     juce::AudioProcessorValueTreeState apvts;
+    ui::AbCompare ab { apvts }; // A/B compare (shared/ui AbCompare.h): two settings, one live
     // What arrives at the sidechain input (another track), for the masking view only: it never reaches the audio.
     pdsp::StereoTap sidechainTap;
     // Whether the host handed the last block a sidechain: the editor says so next to a band set to listen to it.
@@ -60,6 +65,7 @@ private:
     // message thread, so the audio thread only asks for it.
     void handleAsyncUpdate() override;
     std::atomic<int> reportedLatency { 0 };
+    pdsp::BypassDelay bypassDelay;
 
     int currentProgram = 0;
 

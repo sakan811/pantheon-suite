@@ -76,6 +76,12 @@ The crossovers stop at 40 Hz because the kernels (+-2048 samples at 48 kHz) cann
 
 **The sidechain** is split by its own `scSplitter` / `scLinear` (never the main one: its filters must not hear it), only while a band listens to it (`scActive`, latched at a tick; it starts from clean filters), and each band reads *its own piece* of it: through the same owner summing as the main bands, the same Mid/Side transform as the band's channels, and held (each sample repeated) up to the oversampled rate, which leaves the level (a smoothed mean square) exactly as it was. A band with `sidechain` and no sidechain connected (`scPresent` false) listens to itself, so a session saved with it still works without one. The key's non-finite samples are zeroed in `splitInto`. The input is `Engine::process`'s last two arguments (null: none); the bus is the processor's second input, off by default, and `sidechainConnected` is what the editor's note reads.
 
+**MIX** (`EngineParams::mix`, ramped per tick like the output gain, 1.0 exact) scales the difference a band adds in `runBand`, so 0 is the dry bands bit for bit; the dry bands are already aligned by `dry`. It is a session-wide control: presets keep it (`isGlobalParameter`).
+
+**Bypass.** `AtlasProcessor::processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay` (sized in `prepareToPlay` by `Engine::maxLatency()`, the largest any mode can report), or the track jumps early when the host bypasses the plugin. UiCheck pins it.
+
+**Learn and TO ALL.** `BandView::learnThreshold` (the JUMPS marker's listening and a strip's LEARN) and `copyDynamicsToAll` (Parameters.h). `addSplit` / `removeSplit` copy through `copyBands`, which reads every strip before writing any (a copy must not read a strip an earlier one wrote).
+
 **Latency** is `Engine::latencySamples` (linear split + oversampler + look-ahead), written on the audio thread in `configure()` when a tick sees a
 new mode, and reaches the host through `AtlasProcessor::handleAsyncUpdate` on the message thread; `prepareToPlay` passes the saved
 modes to `Engine::prepare` so the host hears the right latency before the first block. A mode switch clears the histories.
@@ -103,7 +109,7 @@ editor ends them in its destructor. Do not make them parameters. They fade over 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`).
 
 **Parameters.** Ids (`atlas::id`: `xo0` ... `xo4` and `xo0_on` ... `xo4_on` among them; `bandIds (i)`: `b1_on` ... `b6_match`) are stored in sessions and automation: never rename or
-remove one. All are `ParameterID` version 1 except `look` and each band's `listen` (version 2, declared after everything else, so a host's list keeps its order); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+remove one. All are `ParameterID` version 1 except `look` and each band's `listen` (version 2), each band's `dir` (version 3) and `mix` (version 4), all declared after everything else, so a host's list keeps its order; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `channelNames` is the order of `Channels`.
 
 ## DRY: where each thing lives

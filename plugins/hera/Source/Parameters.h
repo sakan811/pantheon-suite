@@ -12,7 +12,7 @@ namespace hera
 namespace id
 {
 inline const juce::String threshold { "thresh" }, ratio { "ratio" }, attack { "attack" }, release { "release" }, knee { "knee" }, makeup { "makeup" }, mix { "mix" },
-                          link { "link" }, hpf { "hpf" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" }, lookahead { "lookahead" };
+                          link { "link" }, hpf { "hpf" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" }, lookahead { "lookahead" }, match { "match" };
 }
 
 inline const juce::StringArray detectorNames { "Peak", "RMS" };
@@ -61,6 +61,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::external, 1 }, "Sidechain Key", d.external));
     // Added after the first release: version 2, so a session saved before it has no value and gets the default (Off, the plug-in as it was).
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames, d.lookahead));
+    // Version 3: a session saved before it opens with LEVEL MATCH off, which is how it always sounded.
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::match, 3 }, "Level Match", d.match));
     return { p.begin(), p.end() };
 }
 
@@ -83,6 +85,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.autoMakeup = v (id::autoMakeup) > 0.5f;
     e.external = v (id::external) > 0.5f;
     e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookaheads - 1);
+    e.match = v (id::match) > 0.5f;
     return e;
 }
 

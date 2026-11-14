@@ -44,13 +44,15 @@ With `engaged == 0` nothing touches the sample: `l = l0`.
 **The rest is differences and gains that are exactly neutral.** `dM = (midGain - 1) x m`, `dS = (sideGain - 1) x s`, and MONO BELOW `dS = HP (s + dS) - s` (only while it is on; the filter is reset while it is off): zero when
 neutral, so `l = l0 + 0 + 0`. BALANCE and OUTPUT multiply by `leftGain x outGain`, exactly 1.0 at rest. Never rebuild left and right from the mid and the side (`m + s` is not `l` to the last bit).
 
+**LISTEN is applied by the processor, after the goniometer's tap** (`applyListen`: Mono and Side put one signal in both channels), so the cloud and the correlation read the sound and not the check; on a mono bus it is not applied and BALANCE is set to 0 before the engine (it would only turn the one channel down). `correlationMin` is the lowest per-block reading since the editor last took it; the editor keeps the minimum (`minHold`) and clears it on the MIN button.
+
 **Real time.** `Engine::process` allocates and locks nothing. The goniometer is fed by the processor through the shared lock-free `pdsp::StereoTap`; nothing of it runs on the audio thread except the push.
 **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
-**Parameters.** Ids (`castor::id`: `width1` ... `width6`, `mid`, `side`, `mono`, `balance`, `out`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one
+**Parameters.** Ids (`castor::id`: `width1` ... `width6`, `mid`, `side`, `mono`, `balance`, `out`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `listen` (version 2, Stereo: a session saved before it opens as it did; presets reset it, it is not kept); a new one
 needs a higher version, an entry in `readParams()` and a place in the editor. The width ids follow the order of `pdsp::bands::kBands`.
 
 ## DRY: where each thing lives

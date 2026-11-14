@@ -35,6 +35,7 @@ private:
     void showIdleStatus();
     usage::Input usageInput() const;
     void copyTonalEq();
+    void toggleHeldCurve();
 
     void launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int chooserFlags,
                         std::function<void (ThemisEditor&, const juce::FileChooser&)> onChosen);
@@ -43,6 +44,7 @@ private:
     void loadCurve();
 
     static constexpr const char* kCurveExtension = ".themiscurve";
+    static constexpr int kMinWidth = 1400;     // the smallest (and opening) width: the header's two rows of controls need it
     static constexpr int kHistoryHeight = 240; // the two time graphs along the bottom
     static constexpr int kHeaderHeight = 84;   // the control panel along the top
     static constexpr int kTitleWidth = 196;    // the nameplate; the header rows start after it
@@ -63,15 +65,17 @@ private:
     ui::Choice targetBox, deviceBox, loudnessBox;
     juce::Label deviceLabel, loudnessLabel;
     juce::TextButton learnButton { "Learn from tracks..." }, saveButton { "Save curve" }, loadButton { "Load curve" },
-        resetButton { "Reset" }, copyEqButton { "Copy EQ" };
+        resetButton { "Reset" }, copyEqButton { "Copy EQ" }, holdButton { "Hold curve" };
     juce::Label statusLabel;
     ui::GuideButton guideButton { usage::guideTitle(), usage::guideText() };
-    ui::Knob avgKnob, toleranceKnob;
+    ui::Knob avgKnob, toleranceKnob, ceilingKnob;
+    ui::Toggle resetOnPlayButton;
     juce::TooltipWindow tooltipWindow { this, 600 };
 
     std::unique_ptr<juce::FileChooser> chooser;
     juce::Rectangle<int> nameplate, statusWindow;
     int statusTicks = 0, planTicks = 0;
+    float shownCeilingDb = 0.0f; // the true-peak ceiling the graphs were last judged against
     bool signalPresent = false; // the SIGNAL lamp: audio is reaching the plugin
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ThemisEditor)

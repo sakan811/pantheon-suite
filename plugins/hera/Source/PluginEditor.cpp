@@ -31,20 +31,33 @@ HeraEditor::HeraEditor (HeraProcessor& p)
       detector (p.apvts, id::detector, "Peak: reads each peak, so it is quick and follows transients.\nRMS: reads the average over 10 ms, closer to what the ear hears and gentler on peaks."),
       lookahead (p.apvts, id::lookahead, "The sound is heard this long after the detector has seen it, so the gain is already down when a peak arrives (a fast attack no longer lets the first of it through).\n"
                                          "It is a delay: the host compensates it. Changing it while playing restarts the compressor (a short gap)."),
-      presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default."),
+      presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default. LEVEL MATCH is kept."),
       autoRelease (p.apvts, id::autoRelease, "AUTO REL", "Program-dependent release: a short peak lets go quickly (50 ms), a long loud passage slowly (600 ms). RELEASE is not used."),
       autoMakeup (p.apvts, id::autoMakeup, "AUTO MAKEUP", "Adds what the compression takes from a signal at 0 dBFS, so a full-scale input is full scale out. MAKEUP adds to it."),
       key (p.apvts, id::external, "KEY", "The detector listens to the sidechain input (another track routed in the host) instead of this one. With nothing connected it listens to itself."),
+      levelMatch (p.apvts, id::match, "LEVEL MATCH", "Takes the level the compressor and MAKEUP add or take away off again, slowly (about 0.6 s, within 12 dB), so an A/B is not decided by loudness: "
+                                                     "a louder sound is heard as better. Kept by presets; while it is on the gain it applies is read out in the display."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &guideButton })
+    deltaButton.setClickingTogglesState (true);
+    deltaButton.setTooltip ("Listen to only what the compressor changes (output minus input). Not saved with the project, and it ends when the window closes.");
+    deltaButton.onClick = [this] { proc.engine.delta = deltaButton.getToggleState(); };
+    listenButton.setClickingTogglesState (true);
+    listenButton.setTooltip ("Listen to what the detector hears: the key (this track, or the sidechain with KEY on) after SC HPF. Not saved with the project, and it ends when the window closes.");
+    listenButton.onClick = [this] { proc.engine.scListen = listenButton.getToggleState(); };
+    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &levelMatch, &deltaButton, &listenButton, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     setSize (24 + kKnobs * cellWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + rowHeight + 10 + ui::kNoteStripHeight + 12);
 }
 
-HeraEditor::~HeraEditor() { setLookAndFeel (nullptr); }
+HeraEditor::~HeraEditor()
+{
+    proc.engine.delta = false; // monitoring never outlives the window that asked for it
+    proc.engine.scListen = false;
+    setLookAndFeel (nullptr);
+}
 
 void HeraEditor::resized()
 {
@@ -81,6 +94,12 @@ void HeraEditor::resized()
     autoMakeup.setBounds (row.removeFromLeft (130));
     row.removeFromLeft (10);
     key.setBounds (row.removeFromLeft (90));
+    row.removeFromLeft (10);
+    levelMatch.setBounds (row.removeFromLeft (130));
+    row.removeFromLeft (10);
+    deltaButton.setBounds (row.removeFromLeft (70));
+    row.removeFromLeft (8);
+    listenButton.setBounds (row.removeFromLeft (96));
     noteStrip = bounds.withTrimmedTop (10).withHeight (ui::kNoteStripHeight);
 }
 
@@ -91,6 +110,8 @@ AdviceInput HeraEditor::adviceInput() const
     in.reductionDb = shownReduction;
     in.heldDb = heldReductionDb();
     in.sidechainConnected = proc.sidechainConnected.load (std::memory_order_relaxed);
+    in.delta = proc.engine.delta.load();
+    in.scListen = proc.engine.scListen.load();
     return in;
 }
 
@@ -173,6 +194,13 @@ void HeraEditor::paint (juce::Graphics& g)
         g.drawText (shownReduction < 0.05f ? juce::String ("0.0 dB") : "-" + juce::String (shownReduction, 1) + " dB", juce::Rectangle<float> (r.getRight() + 6.0f, r.getY(), 80.0f, 16.0f),
                     juce::Justification::centredLeft);
         hw::drawLabel (g, "REDUCTION", { (int) r.getRight() + 8, (int) r.getY() + 16, 74, 12 }, juce::Justification::left, colours::dim, 8.5f);
+        if (params.match) // what LEVEL MATCH is applying now
+        {
+            g.setColour (colours::amber);
+            g.setFont (ui::lcdFont (11.0f));
+            g.drawText (juce::String (proc.engine.matchDb.load (std::memory_order_relaxed), 1) + " dB", juce::Rectangle<float> (r.getRight() + 6.0f, r.getY() + 40.0f, 80.0f, 14.0f), juce::Justification::centredLeft);
+            hw::drawLabel (g, "LEVEL MATCH", { (int) r.getRight() + 8, (int) r.getY() + 54, 74, 12 }, juce::Justification::left, colours::dim, 8.5f);
+        }
         hw::drawGlassOverlay (g, glass, 4.0f, false);
     }
 }
@@ -188,5 +216,7 @@ void HeraEditor::timerCallback()
     proc.engine.outPeak.store (0.0f);
     inDb = in > 1e-5f ? 20.0f * std::log10 (in) : -90.0f;
     presetBox.sync();
+    deltaButton.setToggleState (proc.engine.delta.load(), juce::dontSendNotification);
+    listenButton.setToggleState (proc.engine.scListen.load(), juce::dontSendNotification);
     repaint();
 }

@@ -53,6 +53,9 @@ inline std::string noteName (int midiNote)
     return std::string (kNoteNames[pitchClassOf (midiNote)]) + std::to_string (octave);
 }
 
+// The reference tuning a song can have: a semitone either side of 440 Hz. The TUNING knob, a loaded project and DETECT A4 all stay inside it.
+inline constexpr double kMinA4Hz = 415.0, kMaxA4Hz = 466.0;
+
 struct Key
 {
     int root = 0;                 // pitch class, 0 = C

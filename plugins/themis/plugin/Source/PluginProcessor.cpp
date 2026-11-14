@@ -5,6 +5,8 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/dsp/Biquad.h>
+
 ThemisProcessor::ThemisProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
@@ -38,7 +40,20 @@ void ThemisProcessor::prepareToPlay (double sr, int)
     loudness.prepare (sr);
     audition.prepare (sr);
     listen.prepare (sr);
+    wasPlaying = false;
+    expectedPosition = -1;
     prepared = true;
+    // A reference decoded for another rate would play at the wrong pitch: stop it now, whether or not the editor is open,
+    // and decode it again for this rate (on the message thread).
+    if (const double decoded = referenceRate.load(); decoded > 0.0 && std::abs (decoded - sr) > 0.5)
+    {
+        referenceStale.store (true);
+        listen.setReferenceOn (false);
+        juce::MessageManager::callAsync ([this, aliveFlag = alive] {
+            if (aliveFlag->load())
+                syncReferenceRate();
+        });
+    }
     analysisThread = std::make_unique<AnalysisThread> (analyzer);
     analysisThread->startThread();
 }
@@ -61,6 +76,24 @@ void ThemisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     if (!prepared || buffer.getNumChannels() < 2 || buffer.getNumSamples() == 0)
         return;
 
+    // Where the host is: playing or not, and its timeline position in samples (-1 when it gives none).
+    bool hostPlaying = false;
+    int64_t position = -1;
+    if (auto* head = getPlayHead())
+        if (const auto pos = head->getPosition(); pos.hasValue())
+        {
+            hostPlaying = pos->getIsPlaying();
+            if (const auto t = pos->getTimeInSamples(); t.hasValue())
+                position = *t;
+        }
+    // Reset on play: a start from the beginning of the timeline restarts the measurement (before this block is measured). Playing
+    // on from where the last block ended is not a start, so a run of blocks never resets itself.
+    if (hostPlaying && position >= 0 && paramReader.resetsOnPlay()
+        && position <= static_cast<int64_t> (params::kStartWindowSeconds * getSampleRate()) && (!wasPlaying || position != expectedPosition))
+        resetAnalyzer();
+    wasPlaying = hostPlaying;
+    expectedPosition = hostPlaying && position >= 0 ? position + buffer.getNumSamples() : -1;
+
     // Measure first: everything below sees the input, whatever is being auditioned. The FFT work happens on the analysis thread.
     const float avgSeconds = paramReader.averagingSeconds();
     const float* l = buffer.getReadPointer (0);
@@ -78,12 +111,7 @@ void ThemisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     if (!isNonRealtime())
     {
         audition.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n);
-        int64_t position = -1;
-        if (auto* head = getPlayHead())
-            if (const auto pos = head->getPosition(); pos.hasValue() && pos->getIsPlaying())
-                if (const auto t = pos->getTimeInSamples(); t.hasValue())
-                    position = *t;
-        listen.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n, position);
+        listen.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n, hostPlaying ? position : -1);
     }
 }
 
@@ -93,15 +121,26 @@ void ThemisProcessor::updateListen()
     if (!retiredClips.empty() && listen.retiredClipSafe())
         retiredClips.clear();
 
-    // A reference decoded for another sample rate would play at the wrong pitch: decode it again for this one.
-    if (referenceClip != nullptr && prepared && std::abs (referenceRate - getSampleRate()) > 0.5 && !loadingReference.load())
-        loadReference (referenceFile, [] (const juce::String&) {});
+    syncReferenceRate();
 
     const float master = loudness.hasData() ? loudness.integrated() : themis::LoudnessMeter::kSilence;
     previewDb = previewOn.load() ? themis::listen::previewGainDb (master, deliveryTarget().lufs) : 0.0f;
     listen.setMasterGainDb (previewDb);
     refGain = referenceClip != nullptr ? themis::listen::referenceGainDb (*referenceClip, master + previewDb) : themis::listen::ReferenceGain {};
     listen.setReferenceGainDb (refGain.db);
+}
+
+// Message thread. A reference decoded for another sample rate would play at the wrong pitch: it is switched off (prepareToPlay
+// does that too, at once) and decoded again for the current rate.
+void ThemisProcessor::syncReferenceRate()
+{
+    const double sr = getSampleRate();
+    if (referenceClip == nullptr || sr <= 0.0 || std::abs (referenceRate.load() - sr) <= 0.5)
+        return;
+    referenceStale.store (true);
+    listen.setReferenceOn (false);
+    if (!loadingReference.load())
+        loadReference (referenceFile, [] (const juce::String&) {});
 }
 
 void ThemisProcessor::loadReference (const juce::File& file, std::function<void (const juce::String&)> onDone)
@@ -133,6 +172,21 @@ void ThemisProcessor::loadReference (const juce::File& file, std::function<void 
 
             // Resampled once, here, so the audio thread only copies samples.
             const double ratio = reader->sampleRate / rate;
+            if (ratio > 1.0)
+            {
+                // The interpolator below has no low-pass of its own: going down (a 96 kHz file at 48 kHz) everything above the new
+                // Nyquist would fold back into the band. Two eighth-order Butterworths at 0.42 of the new rate take it out first
+                // (about 55 dB down at 1.5x the new Nyquist).
+                for (int c = 0; c < 2; ++c)
+                {
+                    pdsp::Butterworth lowpass[2];
+                    for (auto& f : lowpass)
+                        f.setup (pdsp::Butterworth::Type::lowpass, 8, reader->sampleRate, 0.42 * rate);
+                    float* x = source.getWritePointer (c);
+                    for (int i = 0; i < static_cast<int> (length); ++i)
+                        x[i] = static_cast<float> (lowpass[1].process (lowpass[0].process (static_cast<double> (x[i]))));
+                }
+            }
             const auto outLength = static_cast<size_t> (static_cast<double> (length) / ratio);
             clip->left.resize (outLength);
             clip->right.resize (outLength);
@@ -151,6 +205,12 @@ void ThemisProcessor::loadReference (const juce::File& file, std::function<void 
             if (!aliveFlag->load())
                 return;
             loadingReference.store (false);
+            if (error.isEmpty() && getSampleRate() > 0.0 && std::abs (rate - getSampleRate()) > 0.5)
+            {
+                loaded.reset(); // the host changed the rate while this was decoding: decode again for the new one
+                loadReference (file, onDone);
+                return;
+            }
             if (error.isEmpty())
             {
                 // The old clip stays alive until the audio thread has finished a block without it (updateListen frees it).
@@ -159,7 +219,8 @@ void ThemisProcessor::loadReference (const juce::File& file, std::function<void 
                     retiredClips.push_back (std::move (referenceClip));
                 referenceClip = std::move (loaded);
                 referenceFile = file;
-                referenceRate = rate;
+                referenceRate.store (rate);
+                referenceStale.store (false);
                 updateListen();
             }
             onDone (error);
@@ -253,6 +314,7 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.integratedLufs = loudness.integrated();
     const auto& delivery = deliveryTarget();
     in.targetLufs = delivery.lufs;
+    in.truePeakCeilingDb = paramReader.truePeakCeilingDb();
     in.deliveryName = delivery.shortName;
     readClip (in.clip);
 
@@ -340,7 +402,9 @@ void ThemisProcessor::learnFromFiles (const juce::Array<juce::File>& files, std:
                 failed.add (file.getFileName());
                 continue;
             }
-            themis::TonalAnalyzer trackAnalyzer;
+            // On the heap: a TonalAnalyzer holds its history rings (about 390 KB), too big for a pool thread's stack.
+            auto analyzerOwner = std::make_unique<themis::TonalAnalyzer>();
+            auto& trackAnalyzer = *analyzerOwner;
             trackAnalyzer.prepareOffline (reader->sampleRate); // whole-track average
 
             constexpr int chunkSize = 1 << 15;

@@ -42,10 +42,10 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 6, fmt ("%d parameters: trim, polarity, listen, reference, level match and reference trim", proc.getParameters().size()));
+    check (proc.getParameters().size() == 7, fmt ("%d parameters: trim, polarity, listen, reference, level match, reference trim and auto reset", proc.getParameters().size()));
     check (listenNames.size() == kNumListen, "the choice list matches the engine's modes");
     const auto d = readParams (proc.apvts);
-    check (std::fabs (d.trimDb) < 1e-4f && ! d.polarity && d.listen == Listen::stereo && ! d.reference && d.levelMatch && proc.getLatencySamples() == 0, "a new instance changes nothing: trim 0, stereo, no reference playing, no latency");
+    check (std::fabs (d.trimDb) < 1e-4f && ! d.polarity && d.listen == Listen::stereo && ! d.reference && d.levelMatch && ! d.resetOnPlay && proc.getLatencySamples() == 0, "a new instance changes nothing: trim 0, stereo, no reference playing, no latency");
 
     // Loading a reference.
     const auto wav = makeReference ("hermes_check_reference.wav", 44100.0, 1, -14.0f);
@@ -60,6 +60,14 @@ int main()
         check (editor.status.isEmpty() && proc.referenceName() == wav.getFileName(), "a WAV is loaded");
         check (std::fabs (proc.referenceLufs() + 14.04) < 0.15, fmt ("a mono 44.1 kHz file is brought to the session's 48 kHz, made stereo and measured: %.2f LUFS (a -14 dBFS sine: -14.04)", proc.referenceLufs()));
         check (ui::hasNote (editor.notes(), "LEVEL MATCH brings", ui::Severity::info), "with a reference loaded and LEVEL MATCH on, a note says to let the meter run first");
+        editor.seekTo (editor.barPoint (0.5f));
+        {
+            juce::AudioBuffer<float> b (2, 64);
+            juce::MidiBuffer m;
+            b.clear();
+            proc.processBlock (b, m);
+            check (std::fabs (proc.engine.referencePosition.load() - 0.5f) < 0.02f, fmt ("a click in the middle of the reference's bar seeks to it: %.3f", proc.engine.referencePosition.load()));
+        }
         editor.reference.triggerClick();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         check (readParams (proc.apvts).reference && ui::hasNote (editor.notes(), "REF is on: you hear the reference", ui::Severity::warning), "REF sets the parameter, and a note says you hear the reference");
@@ -80,6 +88,80 @@ int main()
         other.setStateInformation (saved.getData(), (int) saved.getSize());
         juce::MessageManager::getInstance()->runDispatchLoopUntil (800);
         check (std::fabs (readParams (other.apvts).trimDb + 4.5f) < 0.01f && other.referenceName() == wav.getFileName(), "the state of a session comes back as it was saved, and its reference is loaded again from its path");
+    }
+
+    // A state with no reference (or whose file is gone) clears the one that is loaded.
+    {
+        HermesProcessor other;
+        other.setPlayConfigDetails (2, 2, 48000.0, 512);
+        other.prepareToPlay (48000.0, 512);
+        other.loadReference (wav);
+        check (other.referenceName().isNotEmpty(), "(a reference is loaded)");
+        HermesProcessor bare;
+        juce::MemoryBlock none;
+        bare.getStateInformation (none);
+        other.setStateInformation (none.getData(), (int) none.getSize());
+        check (other.referenceName().isEmpty(), "a session saved without a reference opens without one, not with the last session's");
+        other.loadReference (wav);
+        const auto gone = makeReference ("hermes_check_gone.wav", 48000.0, 2, -20.0, 0.5);
+        other.loadReference (gone);
+        juce::MemoryBlock withGone;
+        other.getStateInformation (withGone);
+        gone.deleteFile();
+        other.loadReference (wav);
+        other.setStateInformation (withGone.getData(), (int) withGone.getSize());
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+        check (other.referenceName().isEmpty(), "a session whose reference file has gone opens without a reference");
+    }
+
+    // AUTO TRIM sets TRIM from the integrated loudness; AUTO RESET clears the meters when the transport starts.
+    {
+        HermesProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HermesEditor> (*holder);
+        editor.setVisible (true);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        struct Head : juce::AudioPlayHead
+        {
+            bool playing = false;
+            juce::Optional<PositionInfo> getPosition() const override { PositionInfo i; i.setIsPlaying (playing); return i; }
+        } head;
+        q.setPlayHead (&head);
+        const auto play = [&] (int blocks)
+        {
+            for (int b = 0; b < blocks; ++b)
+            {
+                for (int i = 0; i < 512; ++i)
+                    for (int c = 0; c < 2; ++c)
+                        buffer.setSample (c, i, 0.05f * std::sin (2.0f * 3.14159265f * 500.0f * (float) (b * 512 + i) / 48000.0f));
+                q.processBlock (buffer, midi);
+            }
+        };
+        play (200);
+        const float measured = q.engine.integrated.load();
+        editor.autoTrimButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (std::fabs (readParams (q.apvts).trimDb - (-14.0f - measured)) < 0.06f, fmt ("AUTO TRIM sets TRIM to %.1f dB (-14 target, %.1f LUFS read)", readParams (q.apvts).trimDb, measured));
+        check (editor.autoTrimButton.getRight() <= editor.getWidth() && editor.autoReset.getBottom() <= editor.getHeight() && ! editor.autoTrimButton.getBounds().intersects (editor.autoReset.getBounds()) && ! editor.autoTrimButton.getBounds().intersects (editor.resetButton.getBounds()), "AUTO TRIM and AUTO RESET fit and overlap nothing");
+
+        play (5);
+        head.playing = false;
+        play (1);
+        head.playing = true;
+        play (1);
+        check (q.engine.integrated.load() > -150.0f, "with AUTO RESET off, the transport starting leaves the meters alone");
+        setValue (q.apvts, id::resetOnPlay, 1.0f);
+        head.playing = false;
+        play (1);
+        head.playing = true;
+        play (1);
+        const float after = q.engine.integrated.load();
+        play (200);
+        check (after < -150.0f, fmt ("with AUTO RESET on, the transport starting clears the integrated loudness (%.1f LUFS right after)", after));
+        q.setPlayHead (nullptr);
     }
 
     // The audio path through the real processor: the trim, and the reference at the loudness of the sound.
