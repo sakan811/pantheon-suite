@@ -88,6 +88,15 @@ public:
         std::fill (std::begin (ownLevel), std::end (ownLevel), kFloorDb);
     }
 
+    // A host locate, loop or stop: the memory of the old position (the level bank, the carve filters, the early-reflection line) is cleared; the settings and their smoothing stay.
+    void reset() noexcept
+    {
+        bank.reset();
+        scBank.reset();
+        carver.reset();
+        reflections.reset();
+    }
+
     // l and r are replaced by the stem with its space made. `nowMs` is the clock the bus is read by. scL / scR are the sidechain input (a track that has
     // no Hestia on it), null when there is none; it is only listened to and never heard.
     void process (float* l, float* r, int n, const EngineParams& p, std::uint32_t nowMs, const float* scL = nullptr, const float* scR = nullptr) noexcept

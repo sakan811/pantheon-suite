@@ -51,9 +51,10 @@ public:
         for (int i = 0; i < n; ++i)
         {
             const size_t pos = static_cast<size_t> ((w + static_cast<uint64_t> (i)) & (kRingSize - 1));
-            ringL[pos] = l[i];
-            ringR[pos] = r[i];
-            const double a = l[i], b = r[i];
+            const float xl = std::isfinite (l[i]) ? l[i] : 0.0f, xr = std::isfinite (r[i]) ? r[i] : 0.0f; // a glitched sample is read as silence, or the correlation would freeze at NaN
+            ringL[pos] = xl;
+            ringR[pos] = xr;
+            const double a = xl, b = xr;
             sumLL += smoothing * (a * a - sumLL);
             sumRR += smoothing * (b * b - sumRR);
             sumLR += smoothing * (a * b - sumLR);

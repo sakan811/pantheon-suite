@@ -10,6 +10,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -172,7 +173,7 @@ public:
         for (int i = 0; i < n; ++i)
         {
             stepRamps();
-            float inL = l[i], inR = r[i];
+            float inL = std::isfinite (l[i]) ? l[i] : 0.0f, inR = std::isfinite (r[i]) ? r[i] : 0.0f; // a glitched sample must not poison the crossover filters' state
             if (bandMix <= 0.0f && !filtersCold)
             {
                 resetFilters(); // not running: the next engagement starts from silence in the filters, not from old audio

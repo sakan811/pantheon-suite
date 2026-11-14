@@ -187,8 +187,10 @@ public:
         for (int i = 0; i < n; ++i)
         {
             const size_t pos = static_cast<size_t> ((w + static_cast<uint64_t> (i)) & mask);
-            ring[pos] = midOf (l[i], r[i]);
-            sideRing[pos] = sideOf (l[i], r[i]);
+            // A glitched sample (NaN or inf) is read as silence: one of them would otherwise poison every average from here on, until Reset.
+            const float xl = std::isfinite (l[i]) ? l[i] : 0.0f, xr = std::isfinite (r[i]) ? r[i] : 0.0f;
+            ring[pos] = midOf (xl, xr);
+            sideRing[pos] = sideOf (xl, xr);
         }
         writeCount.store (w + static_cast<uint64_t> (n), std::memory_order_release);
     }
