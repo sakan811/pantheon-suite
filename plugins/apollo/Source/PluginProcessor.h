@@ -16,6 +16,7 @@ public:
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
+    void reset() override { engine.reset(); } // a host locate, loop or stop: nothing of the old position may sound at the new one
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 

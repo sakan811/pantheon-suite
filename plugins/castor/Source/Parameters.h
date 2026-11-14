@@ -13,7 +13,11 @@ namespace id
 {
 inline const juce::String mid { "mid" }, side { "side" }, monoBelow { "mono" }, balance { "balance" }, out { "out" };
 // width1 ... width6: the sides of each of the six bands of music (pdsp::bands), in percent
-inline const juce::String width (int band) { return "width" + juce::String (band + 1); }
+inline const juce::String& width (int band)
+{
+    static const juce::String ids[] { "width1", "width2", "width3", "width4", "width5", "width6" }; // made once: the audio thread reads these every block and must not allocate
+    return ids[(size_t) band];
+}
 }
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()

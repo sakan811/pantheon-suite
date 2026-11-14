@@ -211,8 +211,8 @@ public:
         float ct = (target * 100.0f - center) - (1.0f - p.natural) * dev;
         ct *= p.strength;
         ct = std::clamp (ct, -400.0f, 400.0f);
-        if (undecided)
-            ct = 0.0f;
+        if (undecided || ! anyAllowed (p.noteMask))
+            ct = 0.0f; // undecided, or no note to aim at: the voice is left as sung
 
         const float alpha = p.retuneMs <= 0.5f ? 1.0f : 1.0f - std::exp (-dt * 1000.0f / p.retuneMs);
         cs += alpha * (ct - cs);

@@ -133,8 +133,8 @@ public:
             }
             // One gain for both channels, so the image does not move.
             double levelDb = level > 1e-6 ? 20.0 * std::log10 (level) : kFloorDb;
-            if (p.detection == Detection::relative)
-                levelDb -= body > 1e-12 ? 10.0 * std::log10 (body * 2.0) : kFloorDb; // the whole sound, read as the peak of a sine
+            if (p.detection == Detection::relative && level > 1e-6) // in silence there is nothing to be relative to: stay at the floor, so a stretch of silence does not leave the reduction at full range
+                levelDb -= 10.0 * std::log10 (std::fmax (body, 1e-12) * 2.0); // the whole sound, read as the peak of a sine
             const double wanted = reductionDb (levelDb, p.thresholdDb, p.rangeDb);
             gr += (wanted - gr) * (wanted > gr ? attackCoef : releaseCoef);
             if (gr < kRestDb && wanted == 0.0)

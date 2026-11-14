@@ -162,14 +162,16 @@ private:
         typing = false;
         const auto typed = entry.getText().trim();
         entry.setVisible (false);
-        if (apply && typed.isNotEmpty())
+        // Text with no digit in it ("abc", "-") reads as 0 in the parsers: it is not a value, and must not set the knob to 0 (the plugin Knob refuses it the same way).
+        if (apply && typed.containsAnyOf ("0123456789"))
         {
             const double v = parse ? parse (typed) : typed.getDoubleValue();
-            if (std::isfinite (v))
+            const double clamped = juce::jlimit (slider.getMinimum(), slider.getMaximum(), v);
+            if (std::isfinite (v) && std::abs (clamped - slider.getValue()) > 1.0e-9) // an unchanged value is no edit: no undo step, no lost redo
             {
                 if (onGestureStart)
                     onGestureStart();
-                slider.setValue (juce::jlimit (slider.getMinimum(), slider.getMaximum(), v), juce::sendNotificationSync);
+                slider.setValue (clamped, juce::sendNotificationSync);
                 if (onGestureEnd)
                     onGestureEnd();
             }
