@@ -15,14 +15,15 @@ When it is right, export a WAV.
 *Headless render of the window (the hardware-style interface shared with the plugins) over a synthetic singer whose nine notes in C major are each
 a little sharp or flat. The blobs are the notes, coloured by how far they are from the scale: **green** within 8 cents, **amber** up to 25,
 **red** beyond. The amber line is the pitch as sung, every 5 ms. The selected note (white outline) has a vibrato, which the line shows and the blob
-does not. Under the display, the waveform; below it, the scale panel on the left and the controls for the selected note on the right.
-Regenerate with the command under "Development".*
+does not. Under the display, the waveform and the navigator; below them, the scale panel on the left (key, scale, tuning, glide, amount, and the voice range with
+RE-ANALYSE) and the controls for the selected note on the right (the knobs, COPY / PASTE, SELECT of the notes still off the scale, and OUT PEAK, the loudest sample of the
+result). Regenerate with the command under "Development".*
 
 ![After Correct all](docs/corrected.png)
 
 *The same phrase after **Correct all**. The notes are on the scale (teal); the teal line is the pitch after the edit, and the dashed
 blobs show where each note was sung. One note (selected) was left half-way: its read-out says CORRECT 50 %, SHIFT -23 ct. The vibrato
-of the third and seventh notes is kept, moved with the note.*
+of the third and seventh notes is kept, moved with the note. The strip at the foot says the edits are not saved.*
 
 ## Core philosophy
 
@@ -62,9 +63,12 @@ of the third and seventh notes is kept, moved with the note.*
 | **Play / Loop / ORIGINAL** | Plays the corrected audio; Loop repeats the selected notes (or everything); ORIGINAL (Tab) swaps in the untouched recording with no gap. Edits are heard while it plays and while you drag. |
 | **Navigator** | The bar under the display shows the whole recording, with a tick for every note and a bright window for the part on screen. Drag the window to scroll along the audio, drag its edges to zoom, click elsewhere on the bar to go there. **-**, **+** and **FIT** zoom the display; the scrollbar at the right edge of the display scrolls the pitch. |
 | **Piano keys** | Click one to hear that pitch as a tone, to check a note by ear. |
-| **Save / Open** | A project (`.orpheus`) keeps the notes, the key and the settings and points at the audio, which it does not copy. Open takes any audio file the system can decode, or a project. |
-| **Guide and notes** | **GUIDE** (header) says what Orpheus is for and what it is *not* for: the pitch of one voice, not chords or a mix, not timing, not big leaps (past about 5 semitones the voice changes), and not a plugin. The strip at the foot of the window warns, in amber, when ORIGINAL is lit (you hear the take, not your edits), when edits are not saved, and when a note is moved more than 5 semitones; it says what to open when nothing is, and that a note under 100 ms may be a mis-cut. The rules are in [Advice.h](Source/UI/Advice.h), checked by `OrpheusUiCheck`. |
-| **Export** | A 24-bit WAV at the sample rate of the recording, mono or stereo. |
+| **Save / Save as / Open** | A project (`.orpheus`) keeps the notes, the key, the settings and the voice range, and points at the audio, which it does not copy: by its path, by its path relative to the project (so the two can be moved together), and by a fingerprint (its length and 4096 samples spread over it). A project whose audio is not the same take is refused with a message and nothing is opened; one from before the fingerprint still opens. **Save** (Cmd+S) writes to the project silently once it has one (the first time it asks where); **Save as** (Shift+Cmd+S) always asks. A star in the window title marks edits that are not saved (undoing back to the saved state clears it), and Open, a dropped file, Re-analyse and Quit ask before they would lose them. Open takes any audio file the system can decode, or a project; its menu lists the last eight files, and at launch without a file Orpheus reopens the last one (the list is `recent.txt` in the application data folder). A file that cannot be read leaves the open recording, and an analysis that is running, alone. |
+| **Voice** / **Re-analyse** | The range the pitch tracker looks for: wide (65-1100 Hz, the default), low (65-400, bass and baritone), mid (100-700) or high (200-1100). A narrower range cannot jump an octave to a pitch outside it. It is used the next time the notes are found: **Re-analyse** finds them again (every edit is taken back, after asking), and it is saved in the project. |
+| **Select** / **Sel** (Z) | **Select** picks the notes that are, as they are now, more than 5, 10, 15, 25 or 50 cents from the nearest note of the scale (the amber and red ones); **Sel** (Z) zooms the display to the selected notes, in time and in pitch. |
+| **Copy / Paste** | Takes shift, drift, vibrato, formant and gain from the one selected note (Cmd+C) and puts them on the selected notes (Cmd+V). The shift is the same distance from each note's own pitch, not the same pitch. One undo takes a paste back. |
+| **Guide and notes** | **GUIDE** (header) says what Orpheus is for and what it is *not* for: the pitch of one voice, not chords or a mix, not timing, not big leaps (past about 5 semitones the voice changes), and not a plugin. The strip at the foot of the window warns, in amber, when ORIGINAL is lit (you hear the take, not your edits), when edits are not saved, when the result peaks above 0 dB (it will clip in the WAV), and when a note is moved more than 5 semitones; it says what to open when nothing is, and that a note under 100 ms may be a mis-cut. The rules are in [Advice.h](Source/UI/Advice.h), checked by `OrpheusUiCheck`. |
+| **Export** / **OUT PEAK** | A 24-bit WAV at the sample rate of the recording, mono or stereo, written to a temporary file and moved over the target when complete (a failed export leaves an existing file as it was). Gain up to +12 dB and the re-spaced grains can take the result past 0 dB, which a WAV cannot hold: OUT PEAK (red past 0 dB), the strip and a question at Export say so. |
 
 ### Keys and mouse
 
@@ -80,8 +84,9 @@ of the third and seventh notes is kept, moved with the note.*
 | Backspace | take back everything done to the selection |
 | S / M | split the note at the playhead / merge the selection |
 | Cmd+A, Cmd+Z, Shift+Cmd+Z | select all, undo, redo |
-| Cmd+O, Cmd+S, Cmd+E | open, save the project, export |
-| F | fit the display to the recording |
+| Cmd+O, Cmd+S, Shift+Cmd+S, Cmd+E | open, save the project, save as, export |
+| Cmd+C, Cmd+V | copy the settings of the selected note, paste them onto the selected notes |
+| F / Z | fit the display to the recording / zoom to the selected notes |
 | Click a note / Shift-click | select / add or remove |
 | Drag on empty space | select the notes in the box |
 | Click the ruler or the waveform | move the playhead |
@@ -147,6 +152,8 @@ Treat the numbers above as what the algorithm does on clean, steady, harmonic vo
   everything stays where it was sung.
 - **A standalone app.** It does not run inside a DAW (no plugin, no host integration): export a WAV and bring it back.
 - **A sibilant or a breath is left as it was**, by design: it has no pitch. A pitch edit of a word ends where the voicing ends.
+- **A note stays within two octaves of where it was sung** (24 semitones; the Shift knob itself goes to 12). A drag, the arrow keys, the knobs and a loaded project are held to it, and
+  the resynthesis refuses a plan more than four octaves away; past two octaves the grains are a few samples apart and the result is noise.
 - **A large shift is audible.** A shift of a few semitones is transparent on a clean take; beyond about 5 to 7 semitones the character of the
   voice begins to change, as with any method that re-spaces grains. Formant can compensate by ear.
 - **Segmentation is a guess.** A very short note (under about 100 ms) between two others in pitch, or a fall-off at the end of a phrase, can be read as part of the neighbour; Split (S) cuts it.
@@ -174,7 +181,7 @@ open build/Orpheus_artefacts/Release/Orpheus.app        # or run it with a file:
 3. Press **Correct all**. Press Play, then Tab to hear the original at the same place.
 4. Fix what is wrong: select a note and type a **Shift** value, drag it, lower **Correct** (a note you want to keep a little bent), **Drift** for a note that sags,
    **Split** a note the cut got wrong.
-5. **Export**, or **Save** the project to come back to it.
+5. **Export** (watch OUT PEAK: red means the WAV would clip), or **Save** the project (Cmd+S) to come back to it. If the notes are wrong from the start (an octave jump), pick the **Voice** range and **Re-analyse**.
 
 ### Development
 
@@ -188,7 +195,8 @@ cmake --build build --target OrpheusSnapshot -j 10
 ```
 
 `OrpheusTests` needs no GUI and no audio device (the signal processing, on a synthetic singer); `OrpheusUiCheck` runs the session
-(undo, project files, export), the player and the window driven with synthetic mouse events and keys.
+(undo, project files and their relative path and fingerprint, export, the recent list), the player and the window driven with synthetic mouse events and keys. A dialog is never opened:
+the window's questions and errors go through two replaceable functions.
 
 See [CLAUDE.md](CLAUDE.md) for the layout, the rules that keep it correct and the mistakes already paid for.
 

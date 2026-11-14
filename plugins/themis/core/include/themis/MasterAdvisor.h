@@ -65,6 +65,7 @@ struct MasterInputs
     std::string deliveryName = "Streaming";
 
     ClipTotals clip; // peaks and clips since the reset
+    float truePeakCeilingDb = history::clip::kTruePeakWarnDb; // the true-peak ceiling the master is held to (the user's setting)
 
     TranslationReport translation; // mono fold (the device part is not used: it is judged against the reference curve)
 
@@ -158,13 +159,13 @@ inline MasterAdvice advise (const MasterInputs& in)
     // ---- clipping and peak ceiling: exact, so it is judged as soon as there is any audio ---------
     if (in.clip.have)
     {
-        const Level level = history::clip::level (in.clip.truePeakDb, in.clip.clipEvents, in.clip.overSamples);
+        const Level level = history::clip::level (in.clip.truePeakDb, in.clip.clipEvents, in.clip.overSamples, in.truePeakCeilingDb);
         check (level);
-        const float overDb = in.clip.truePeakDb - history::clip::kTruePeakWarnDb; // how far above the ceiling
+        const float overDb = in.clip.truePeakDb - in.truePeakCeilingDb; // how far above the ceiling
         if (in.clip.clipEvents > 0 || in.clip.overSamples > 0)
             out.items.push_back (make (level, Topic::clipping,
                                        overDb >= 0.05f ? format ("Stop the clipping: ease the clipper or limiter drive and lower the ceiling %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
-                                                               static_cast<double> (history::clip::kTruePeakWarnDb))
+                                                               static_cast<double> (in.truePeakCeilingDb))
                                                      : std::string ("Stop the clipping: ease the clipper or limiter drive until the flat tops are gone"),
                                        format ("%llu flat-topped clips and %llu samples at 0 dBFS, true peak %+.1f dBTP. Clipping adds distortion that a lossy encode makes worse.",
                                                static_cast<unsigned long long> (in.clip.clipEvents), static_cast<unsigned long long> (in.clip.overSamples),
@@ -172,12 +173,12 @@ inline MasterAdvice advise (const MasterInputs& in)
         else if (level != Level::good)
             out.items.push_back (make (level, Topic::clipping,
                                        format ("Lower the limiter ceiling by %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
-                                               static_cast<double> (history::clip::kTruePeakWarnDb)),
-                                       format ("True peak is %+.1f dBTP. AAC, MP3 and Ogg encodes overshoot the peaks they are fed, so a master above %.0f dBTP can clip after conversion.",
-                                               static_cast<double> (in.clip.truePeakDb), static_cast<double> (history::clip::kTruePeakWarnDb))));
+                                               static_cast<double> (in.truePeakCeilingDb)),
+                                       format ("True peak is %+.1f dBTP. AAC, MP3 and Ogg encodes overshoot the peaks they are fed, so a master above %.1f dBTP can clip after conversion.",
+                                               static_cast<double> (in.clip.truePeakDb), static_cast<double> (in.truePeakCeilingDb))));
         // Aegis (or any limiter that takes the text) can set the ceiling it names; an item about flat tops alone has no ceiling to name.
         if (overDb >= 0.05f && (in.clip.clipEvents > 0 || in.clip.overSamples > 0 || level != Level::good))
-            out.items.back().limiter = { true, false, history::clip::kTruePeakWarnDb, 0.0f };
+            out.items.back().limiter = { true, false, in.truePeakCeilingDb, 0.0f };
     }
 
     // ---- DC offset: the mean of the samples, once it has been averaged for long enough to be one ----
@@ -212,7 +213,7 @@ inline MasterAdvice advise (const MasterInputs& in)
             const std::string plrText = in.clip.have ? format (" Peak-to-loudness ratio %.1f dB.", static_cast<double> (plr)) : std::string();
             if (deltaLu > 0.0f)
             {
-                const bool streaming = in.targetLufs <= master::kStreamingLufs + 0.5f;
+                const bool streaming = std::abs (in.targetLufs - master::kStreamingLufs) <= 0.5f; // the text below is about the -14 LUFS services
                 out.items.push_back (make (level, Topic::loudness,
                                            format ("Take about %s dB off the limiter's gain: %.1f LUFS against a %.0f LUFS %s target", master::rounded (deltaLu).c_str(),
                                                    static_cast<double> (in.integratedLufs), static_cast<double> (in.targetLufs), in.deliveryName.c_str()),
@@ -224,13 +225,13 @@ inline MasterAdvice advise (const MasterInputs& in)
             }
             else
             {
-                const float headroomDb = in.clip.have ? history::clip::kTruePeakWarnDb - in.clip.truePeakDb : 0.0f; // gain before the true peak reaches the ceiling
+                const float headroomDb = in.clip.have ? in.truePeakCeilingDb - in.clip.truePeakDb : 0.0f; // gain before the true peak reaches the ceiling
                 const float raise = -deltaLu;
                 std::string why = format ("%.1f LU under the target.", static_cast<double> (raise));
                 if (in.clip.have)
                     why += headroomDb >= raise ? format (" The peak (%+.1f dBTP) leaves room to raise it by plain gain.", static_cast<double> (in.clip.truePeakDb))
-                                               : format (" Only %.1f dB fits under %.0f dBTP as plain gain; the rest has to come from limiting.", static_cast<double> (std::max (headroomDb, 0.0f)),
-                                                         static_cast<double> (history::clip::kTruePeakWarnDb));
+                                               : format (" Only %.1f dB fits under %.1f dBTP as plain gain; the rest has to come from limiting.", static_cast<double> (std::max (headroomDb, 0.0f)),
+                                                         static_cast<double> (in.truePeakCeilingDb));
                 out.items.push_back (make (level, Topic::loudness,
                                            format ("Raise the level about %s dB: %.1f LUFS against a %.0f LUFS %s target", master::rounded (raise).c_str(),
                                                    static_cast<double> (in.integratedLufs), static_cast<double> (in.targetLufs), in.deliveryName.c_str()),
@@ -491,6 +492,45 @@ inline std::string describe (const PlanChange& c)
         out += format (", %+.1f LU", static_cast<double> (c.loudnessDelta));
     if (c.havePeak)
         out += format (", TP %+.1f dB", static_cast<double> (c.truePeakDelta));
+    return out;
+}
+
+// The plan as plain text, for the clipboard (a note to yourself, a message to the client, a session log): the target and the
+// measured numbers, then every item worst first with its headline and its why. Plain text, one fact per line, no markup.
+inline std::string planAsText (const MasterInputs& in, const MasterAdvice& advice)
+{
+    std::string out = "Themis master plan\n";
+    out += format ("Deliver for: %s, %.0f LUFS; true-peak ceiling %.1f dBTP\n", in.deliveryName.c_str(), static_cast<double> (in.targetLufs),
+                   static_cast<double> (in.truePeakCeilingDb));
+    std::string measured;
+    const auto part = [&] (const std::string& text) { measured += (measured.empty() ? "" : ", ") + text; };
+    if (in.haveLoudness)
+        part (format ("%.1f LUFS integrated", static_cast<double> (in.integratedLufs)));
+    if (in.clip.have)
+        part (format ("true peak %+.1f dBTP", static_cast<double> (in.clip.truePeakDb)));
+    if (in.haveLoudness && in.clip.have)
+        part (format ("PLR %.1f dB", static_cast<double> (in.clip.truePeakDb - in.integratedLufs)));
+    const int seconds = static_cast<int> (in.analysedSeconds);
+    part (format ("%d:%02d analysed", seconds / 60, seconds % 60));
+    out += "Measured: " + measured + "\n";
+
+    int bad = 0, warn = 0;
+    for (const auto& item : advice.items)
+        (item.level == Level::bad ? bad : warn)++;
+    if (advice.measuring)
+        out += format ("Status: still measuring (the long-term checks need %.0f s of audio; only clipping is judged so far)\n", master::kMinSeconds);
+    else if (advice.items.empty())
+        out += format ("Status: ready, all %d checks inside their limits\n", advice.checks);
+    else
+        out += format ("Status: %d to fix, %d to check\n", bad, warn);
+
+    int number = 0;
+    for (const auto& item : advice.items)
+    {
+        out += format ("\n%d. [%s] %s\n", ++number, item.level == Level::bad ? "FIX" : "CHECK", item.headline.c_str());
+        if (!item.why.empty())
+            out += "   " + item.why + "\n";
+    }
     return out;
 }
 } // namespace themis

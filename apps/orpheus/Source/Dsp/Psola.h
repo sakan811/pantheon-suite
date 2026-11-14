@@ -181,6 +181,8 @@ private:
         return p1 + 0.5f * t * (p2 - p0 + t * (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3 + t * (3.0f * (p1 - p2) + p3 - p0)));
     }
 
+    static constexpr double kMaxPeriodRatio = 16.0; // four octaves, either way
+
     static void stretch (const std::vector<const float*>& src, int n, const Contour& c, const std::vector<double>& marks, const Plan& plan,
                          int f0, int f1, Rendered& r)
     {
@@ -238,6 +240,10 @@ private:
                 if (count > 0)
                     Tin = sum / count;
             }
+            // A pitch planned absurdly far from the sung one (the editor and the project loader keep notes within kMaxShiftSemitones, this is the
+            // engine's own limit) makes Ts a few samples long and the loop millions of grains: leave the stretch as it was.
+            if (! (Ts >= 2.0) || ! (Tin / Ts <= kMaxPeriodRatio && Tin / Ts >= 1.0 / kMaxPeriodRatio))
+                return;
             if (std::fabs (marks[j] - ts) > 2.0 * Tin)
                 break; // no input marks here (the voiced stretch ended): nothing to take a grain from
             const double alpha = std::exp2 (planAt (plan.formantSt, ts) / 12.0);

@@ -348,5 +348,66 @@ int main()
         }
     }
 
+    // [13] DELTA and MATCH LEVEL, the listening aids.
+    std::printf ("\n[13] Delta and match level\n");
+    {
+        const int latency = lookaheadSamples (kFs, 2) + kDetectorDelay;
+        const auto in = programme (48000 * 8, -6.0);
+        EngineParams p;
+        p.gainDb = 12.0f;
+        p.ceilingDb = -1.0f;
+        Engine a, b;
+        a.prepare (kFs, 2);
+        b.prepare (kFs, 2);
+        const auto limited = run (a, in, p);
+        p.delta = true;
+        const auto delta = run (b, in, p);
+        // The sound after GAIN, delayed, equals the limited output plus the delta (the gain is smoothed, so compare after it has settled).
+        double worst = 0.0, deltaPeak = 0.0;
+        for (size_t i = 48000; i < in.l.size() - (size_t) latency; ++i)
+        {
+            const double dry = (double) in.l[i] * std::pow (10.0, 12.0 / 20.0);
+            worst = std::fmax (worst, std::fabs (dry - ((double) limited.l[i + (size_t) latency] + (double) delta.l[i + (size_t) latency])));
+            deltaPeak = std::fmax (deltaPeak, std::fabs ((double) delta.l[i + (size_t) latency]));
+        }
+        check (worst < 1e-5 && deltaPeak > 0.1, fmt ("DELTA plus the output is the sound after GAIN, aligned by the %d samples of latency (largest difference %.2g; the delta reaches %.2f)", latency, worst, deltaPeak));
+        Engine c;
+        c.prepare (kFs, 2);
+        p.gainDb = 0.0f;
+        p.ceilingDb = 0.0f;
+        const auto quiet = run (c, programme (48000, -12.0), p);
+        check (samplePeak (quiet.l) < 1e-9 && samplePeak (quiet.r) < 1e-9, "DELTA of a sound that is not limited is silence");
+
+        // MATCH LEVEL: with GAIN +9 into a ceiling of -3, the output is brought to the input's loudness (RMS), and never above the unmatched output.
+        const auto rms = [] (const Stereo& s, size_t from) { double sum = 0.0; for (size_t i = from; i < s.l.size(); ++i) sum += 0.5 * ((double) s.l[i] * s.l[i] + (double) s.r[i] * s.r[i]); return std::sqrt (sum / (double) (s.l.size() - from)); };
+        EngineParams m;
+        m.gainDb = 9.0f;
+        m.ceilingDb = -3.0f;
+        const auto src = programme (48000 * 10, -9.0);
+        Engine off, on;
+        off.prepare (kFs, 2);
+        on.prepare (kFs, 2);
+        const auto plain = run (off, src, m);
+        m.matchLevel = true;
+        const auto matched = run (on, src, m);
+        const size_t from = 48000 * 6;
+        const double inDb = db (rms (src, from)), plainDb = db (rms (plain, from)), matchedDb = db (rms (matched, from));
+        check (plainDb > inDb + 2.0 && std::fabs (matchedDb - inDb) < 0.5, fmt ("MATCH LEVEL: the input reads %.2f dB RMS, the limited output %.2f dB, matched %.2f dB", inDb, plainDb, matchedDb));
+        check (samplePeak (matched.l) <= samplePeak (plain.l) + 1e-9 && on.clamped == 0, "MATCH LEVEL only turns down: the matched output is never above the ceiling");
+        EngineParams q;
+        Engine x, y;
+        x.prepare (kFs, 2);
+        y.prepare (kFs, 2);
+        const auto r1 = run (x, src, q);
+        q.matchLevel = false;
+        const auto r2 = run (y, src, q);
+        check (r1.l == r2.l && r1.r == r2.r, "with both switches off the output is what it was before they existed, bit for bit");
+        Engine z;
+        z.prepare (kFs, 2);
+        const auto quietIn = programme (48000 * 10, -40.0);
+        const auto quietMatched = run (z, quietIn, m); // GAIN +9 with nothing to limit: a plain 9 dB louder, which MATCH takes back
+        check (std::fabs (db (rms (quietMatched, from)) - db (rms (quietIn, from))) < 0.3, fmt ("MATCH LEVEL takes back a plain GAIN of +9 dB: %.2f dB against the input's %.2f dB", db (rms (quietMatched, from)), db (rms (quietIn, from))));
+    }
+
     return test::finish ("AegisTests");
 }

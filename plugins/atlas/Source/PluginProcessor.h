@@ -5,6 +5,7 @@
 
 #include "Parameters.h"
 #include <pantheon/dsp/AnalyzerTap.h>
+#include <pantheon/dsp/BypassDelay.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
 class AtlasProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
@@ -18,6 +19,7 @@ public:
     void reset() override { engine.reset(); } // a host locate, loop or stop: nothing of the old position may sound at the new one
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override; // delayed by the reported latency, so a bypassed track stays in time
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -48,6 +50,7 @@ private:
     void handleAsyncUpdate() override;
     std::atomic<int> reportedLatency { 0 };
     int currentProgram = 0;
+    pdsp::BypassDelay bypassDelay;
     std::vector<float> monoRight; // a mono host: the engine's second channel
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AtlasProcessor)

@@ -26,6 +26,7 @@ struct EngineParams
     float outDb = 0.0f;
     bool autoGain = true;
     int oversampling = 1;        // index into kOversamplingFactor
+    float lowCutHz = 20.0f;      // a high-pass on the saturated path only (before the curve); at 20 or below it is not run. The dry sound is not filtered
 };
 
 class Engine
@@ -43,6 +44,7 @@ public:
         for (auto& c : ch)
         {
             c.os.reset();
+            c.lowCut.reset();
             c.dc.reset();
             c.lowShelf.reset();
             c.highShelf.reset();
@@ -52,6 +54,7 @@ public:
         compFor = {};
         started = false;
         toneFor = -2.0;
+        lowCutFor = -1.0;
     }
 
     // A change of oversampling restarts the saturator (the latency moves with it).
@@ -90,6 +93,15 @@ public:
                 c.highShelf.setHighShelf (fs, kToneHz, 0.7071, tone * kToneMaxDb);
             }
         }
+        const double lowCutHz = std::clamp ((double) p.lowCutHz, 20.0, 0.45 * fs);
+        if (lowCutHz != lowCutFor)
+        {
+            lowCutFor = lowCutHz;
+            for (auto& c : ch)
+                c.lowCut.setHighpass (fs, lowCutHz, 0.7071);
+        }
+        const bool lowCutOn = p.lowCutHz > 20.5f;
+        const bool deltaOn = delta.load (std::memory_order_relaxed);
         const bool toneOn = tone != 0.0, dcOn = bias != 0.0 || shapeNow == Shape::diode;
         if (! started)
         {
@@ -99,7 +111,7 @@ public:
             started = true;
         }
         float* io[2] = { left, right };
-        float peak = 0.0f;
+        float peak = 0.0f, drivenPeak = 0.0f;
         const size_t ring = (size_t) latency + 1;
         size_t w = head; // (always < ring: a change of ring restarts it) where the next sample goes; the oldest one, `latency` samples back, is right after it
 
@@ -115,7 +127,14 @@ public:
                 const size_t r = w + 1 == ring ? 0 : w + 1;
                 s.dry[w] = x;
                 const double dry = s.dry[r]; // the sound as it was `latency` samples ago: what the oversampler delays by
-                double y = s.os.process (x * drive, [&] (double v) { return saturate (shapeNow, v, bias); });
+                double xs = x;
+                if (lowCutOn)
+                    xs = s.lowCut.process (x);
+                else
+                    s.lowCut.reset();
+                const double driven = xs * drive; // what reaches the curve
+                drivenPeak = std::max (drivenPeak, (float) std::fabs (driven));
+                double y = s.os.process (driven, [&] (double v) { return saturate (shapeNow, v, bias); });
                 if (dcOn)
                     y = s.dc.process (y);
                 else
@@ -128,7 +147,9 @@ public:
                     s.highShelf.reset();
                 }
                 const double wet = y * out;
-                const double result = mix >= 1.0 - 1e-12 ? wet : (mix <= 1e-12 ? dry : dry + mix * (wet - dry));
+                double result = mix >= 1.0 - 1e-12 ? wet : (mix <= 1e-12 ? dry : dry + mix * (wet - dry));
+                if (deltaOn)
+                    result -= dry; // only what the saturator adds (the sound minus the sound that came in, delayed like it)
                 io[c][i] = (float) result;
                 peak = std::max (peak, (float) std::fabs (result));
             }
@@ -137,16 +158,20 @@ public:
         head = w;
         if (peak > outPeak.load (std::memory_order_relaxed))
             outPeak.store (peak, std::memory_order_relaxed);
+        if (drivenPeak > drivePeak.load (std::memory_order_relaxed))
+            drivePeak.store (drivenPeak, std::memory_order_relaxed);
     }
 
     std::atomic<int> latencySamples { 0 };
     std::atomic<float> outPeak { 0.0f };
+    std::atomic<float> drivePeak { 0.0f };  // the largest level that reached the curve (input x DRIVE, after the low cut), since the editor last asked: 1.0 is where the curves turn over
+    std::atomic<bool> delta { false };      // DELTA: only what the saturator adds (output minus input). Monitoring, not a setting: never saved, never a parameter
 
 private:
     struct Channel
     {
         Oversampler os;
-        pdsp::Biquad dc, lowShelf, highShelf;
+        pdsp::Biquad lowCut, dc, lowShelf, highShelf;
         std::array<double, kMaxLatency + 1> dry {}; // the first latency + 1 are used
     };
 
@@ -171,7 +196,7 @@ private:
         double driveDb = 0.0, bias = 0.0, value = 1.0;
     } compFor;
 
-    double fs = 48000.0, smooth = 0.004, drive = 1.0, out = 1.0, mix = 1.0, toneFor = -2.0;
+    double fs = 48000.0, smooth = 0.004, drive = 1.0, out = 1.0, mix = 1.0, toneFor = -2.0, lowCutFor = -1.0;
     int index = 0, latency = 0;
     size_t head = 0;
     bool started = false;

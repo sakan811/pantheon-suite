@@ -22,7 +22,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 6, fmt ("%d parameters: gain, ceiling, release, look-ahead, true peak and auto release", proc.getParameters().size()));
+    check (proc.getParameters().size() == 8, fmt ("%d parameters: gain, ceiling, release, look-ahead, true peak, auto release, delta and match level", proc.getParameters().size()));
     check (lookaheadNames().size() == kNumLookahead, "the look-ahead choices match the engine's");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.gainDb) < 1e-4f && std::fabs (d.ceilingDb + 1.0f) < 1e-4f && std::fabs (d.releaseMs - 100.0f) < 0.01f && d.lookahead == kDefaultLookahead && d.truePeak && ! d.autoRelease,
@@ -54,6 +54,32 @@ int main()
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         check (proc.getLatencySamples() == lookaheadSamples (48000.0, 3) + kDetectorDelay, fmt ("after LOOK-AHEAD is set to 5 ms the host is told %d samples", proc.getLatencySamples()));
         setValue (proc.apvts, id::lookahead, (float) kDefaultLookahead);
+    }
+
+    // Bypassed by the host: the sound comes out as late as the limiter reports, not early.
+    {
+        AegisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        const int latency = q.getLatencySamples();
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        std::vector<float> heard;
+        for (int block = 0; block < 4; ++block)
+        {
+            buffer.clear();
+            if (block == 0)
+                for (int c = 0; c < 2; ++c)
+                    buffer.setSample (c, 10, 0.5f);
+            q.processBlockBypassed (buffer, midi);
+            for (int i = 0; i < 512; ++i)
+                heard.push_back (buffer.getSample (1, i));
+        }
+        int at = -1;
+        for (size_t i = 0; i < heard.size(); ++i)
+            if (heard[i] != 0.0f)
+                at = (int) i;
+        check (latency > 0 && at == 10 + latency && heard[(size_t) at] == 0.5f, fmt ("a bypassed block comes out delayed by the reported latency: an impulse at 10 is heard at %d (latency %d)", at, latency));
     }
 
     // The ceiling holds through the real processor, in stereo and in mono.
@@ -145,9 +171,15 @@ int main()
         }
         juce::MessageManager::getInstance()->runDispatchLoopUntil (150);
         check (editor.outHoldDb() > -1.5f && editor.outHoldDb() <= -1.0f + 0.1f, fmt ("OUT PEAK reads %.2f dBTP with the ceiling at -1", editor.outHoldDb()));
+        check (editor.reductionHoldDb() > 3.0f, fmt ("MAX REDUCTION holds the most the limiter took off: %.1f dB", editor.reductionHoldDb()));
+        const auto where = editor.reductionHoldArea().getCentre().toFloat();
+        const juce::MouseEvent click (juce::Desktop::getInstance().getMainMouseSource(), where, juce::ModifierKeys(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &editor, &editor, juce::Time::getCurrentTime(), where, juce::Time::getCurrentTime(), 1, false);
+        editor.mouseDown (click);
+        check (editor.reductionHoldDb() == 0.0f && editor.outHoldDb() > -1.5f, "a click on the MAX REDUCTION number clears that hold alone");
         setValue (q.apvts, id::ceiling, -6.0f);
         juce::MessageManager::getInstance()->runDispatchLoopUntil (150);
         check (editor.outHoldDb() < -30.0f, "changing CEILING clears the hold (the old peak was read against another limit)");
+        check (editor.deltaButton.getBounds().getRight() <= editor.getWidth() && ! editor.deltaButton.getBounds().intersects (editor.matchButton.getBounds()) && ! editor.matchButton.getBounds().intersects (editor.truePeakButton.getBounds()) && ! editor.lookaheadBox.getBounds().intersects (editor.deltaButton.getBounds()), "DELTA and MATCH fit beside LOOK-AHEAD");
     }
 
     // The state survives a round trip.
@@ -177,12 +209,23 @@ int main()
         in.params.releaseMs = 100.0f;
         check (ui::hasNote (adviceFor (in), "Nothing is being limited", ui::Severity::info), "nothing limited: it says to raise GAIN");
         in.latencyMs = 2.7;
+        in.params.delta = true;
+        check (ui::hasNote (adviceFor (in), "DELTA is on", ui::Severity::warning), "DELTA on warns that this is not the sound");
+        in.params.delta = false;
+        in.params.matchLevel = true;
+        check (ui::hasNote (adviceFor (in), "MATCH is on", ui::Severity::warning), "MATCH on warns that it is for comparing");
+        in.params.delta = false;
+        in.params.matchLevel = false;
         bool tooLong = false;
         const auto longest = [&] { for (const auto& n : adviceFor (in)) if ((int) n.text.size() > ui::kMaxNoteChars) { tooLong = true; std::printf ("  too long (%d): %s\n", (int) n.text.size(), n.text.c_str()); } };
         longest();
         in.params.truePeak = false;
         in.heldDb = 12.0f;
         in.params.ceilingDb = 0.0f;
+        longest();
+        in.params.matchLevel = true;
+        longest();
+        in.params.delta = true;
         longest();
         check (! tooLong, "every note fits a line of the strip");
     }

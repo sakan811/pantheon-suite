@@ -24,6 +24,7 @@ CastorEditor::CastorEditor (CastorProcessor& p)
       monoKnob (p.apvts, id::monoBelow, "MONO BELOW", "Takes the sides away below this frequency (a 24 dB/oct high-pass on them), so the bass is in the middle: safe for mono, club systems and vinyl. Off at 20 Hz.", ui::Knob::Layout::below),
       balanceKnob (p.apvts, id::balance, "BALANCE", "Turns one channel down (not a pan: the loudness changes).", ui::Knob::Layout::below),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything.", ui::Knob::Layout::below),
+      listen (p.apvts, id::listen, "A check on what you hear (the goniometer and the correlation still show the sound):\nStereo: as it is.\nMono: the sum of both channels, what a mono speaker plays. What fades or changes here is a phase problem.\nSide: only what differs between the channels. Set it back to Stereo before you bounce."),
       presetBox (p, presets(), "BALANCE and OUTPUT are kept; the widths, MID, SIDE and MONO BELOW are set."),
       proc (p)
 {
@@ -36,8 +37,10 @@ CastorEditor::CastorEditor (CastorProcessor& p)
                                                          ui::Knob::Layout::below);
         addAndMakeVisible (*widths[(size_t) b]);
     }
-    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &presetBox, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &listen, &minButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
+    minButton.setTooltip ("The lowest the correlation has read since the last click (the bar's thin mark shows it too): a dip under 0 is a moment that cancels in mono. Click to start again.");
+    minButton.onClick = [this] { minHold = 1.0f; proc.engine.correlationMin.store (1.0f); repaint(); };
     scratchL.resize (4096);
     scratchR.resize (4096);
     startTimerHz (kTimerHz);
@@ -64,6 +67,11 @@ void CastorEditor::resized()
     gonio = right.removeFromTop (goniometerSize - 24);
     right.removeFromTop (8);
     correlationBar = right.removeFromTop (16);
+    right.removeFromTop (6);
+    auto checkRow = right.removeFromTop (26);
+    listen.setBounds (checkRow.removeFromLeft (110));
+    checkRow.removeFromLeft (6);
+    minButton.setBounds (checkRow.removeFromLeft (110));
 
     bandsLabel = body.removeFromTop (16).withTrimmedLeft (4);
     auto row = body.removeFromTop (cellHeight);
@@ -129,6 +137,14 @@ void CastorEditor::paint (juce::Graphics& g)
     g.fillRect (x - 2.0f, bar.getY() + 3.0f, 4.0f, bar.getHeight() - 6.0f);
     g.setColour (colours::dim);
     g.setFont (ui::lcdFont (9.0f));
+    if (minHold < 1.0f)
+    {
+        const float mx = bar.getX() + 6.0f + (bar.getWidth() - 12.0f) * (minHold + 1.0f) * 0.5f;
+        g.setColour (minHold < kNegativeCorrelation ? colours::bad : colours::dim);
+        g.fillRect (mx - 0.75f, bar.getY() + 3.0f, 1.5f, bar.getHeight() - 6.0f);
+    }
+    g.setColour (colours::dim);
+    g.setFont (ui::lcdFont (9.0f));
     g.drawText ("-1", bar.withTrimmedLeft (6.0f), juce::Justification::centredLeft);
     g.drawText ("+1", bar.withTrimmedRight (6.0f), juce::Justification::centredRight);
     g.drawText ("0", bar, juce::Justification::centred);
@@ -150,6 +166,8 @@ void CastorEditor::timerCallback()
     }
     live = n > 0;
     correlation += 0.3f * (proc.engine.correlation.load (std::memory_order_relaxed) - correlation);
+    minHold = std::min (minHold, proc.engine.correlationMin.exchange (1.0f, std::memory_order_relaxed));
+    minButton.setButtonText (minHold >= 1.0f ? juce::String ("MIN --") : "MIN " + juce::String (minHold, 2));
     presetBox.sync();
     repaint();
 }

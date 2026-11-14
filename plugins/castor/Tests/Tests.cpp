@@ -203,5 +203,41 @@ int main()
         check (fine, "a NaN and an infinity in the input are silence: the output is finite");
     }
 
+    // [8] The listening checks and the correlation minimum.
+    std::printf ("\n[8] Listen and correlation minimum\n");
+    {
+        Stereo s;
+        s.l = { 0.5f, -0.25f, 0.1f };
+        s.r = { 0.25f, 0.25f, -0.3f };
+        auto m = s, d = s, st = s;
+        applyListen (m.l.data(), m.r.data(), 3, Listen::mono);
+        applyListen (d.l.data(), d.r.data(), 3, Listen::side);
+        applyListen (st.l.data(), st.r.data(), 3, Listen::stereo);
+        bool ok = st.l == s.l && st.r == s.r;
+        for (size_t i = 0; i < 3; ++i)
+            ok = ok && m.l[i] == 0.5f * (s.l[i] + s.r[i]) && m.r[i] == m.l[i] && d.l[i] == 0.5f * (s.l[i] - s.r[i]) && d.r[i] == d.l[i];
+        check (ok, "LISTEN: Mono is (L + R) / 2 in both channels, Side is (L - R) / 2 in both, Stereo touches nothing");
+        const auto side = tone (700.0, 48000, true);
+        auto sm = side;
+        applyListen (sm.l.data(), sm.r.data(), (int) sm.l.size(), Listen::mono);
+        double peak = 0.0;
+        for (const float v : sm.l)
+            peak = std::fmax (peak, std::fabs (v));
+        check (peak < 1e-6, "a side-only tone is silent in the Mono check (what is out of phase vanishes)");
+
+        // The minimum: a mono passage, then an out-of-phase one, then mono again; the minimum keeps the dip the live reading has left.
+        Engine e;
+        e.prepare (kFs);
+        EngineParams p;
+        run (e, tone (500.0, 24000, false), p);
+        run (e, tone (500.0, 24000, true), p);
+        const float dip = e.correlationMin.load();
+        run (e, tone (500.0, 48000, false), p);
+        check (dip < -0.5f && e.correlation.load() > 0.9f && e.correlationMin.load() <= dip + 1e-6f, fmt ("the correlation minimum keeps the dip (%.2f) after the live reading is back at %.2f", dip, e.correlation.load()));
+        e.correlationMin.store (1.0f);
+        run (e, tone (500.0, 4800, false), p);
+        check (e.correlationMin.load() > 0.9f, "setting it back to 1 starts the minimum again");
+    }
+
     return test::finish ("CastorTests");
 }

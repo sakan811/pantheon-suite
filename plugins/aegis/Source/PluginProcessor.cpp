@@ -25,6 +25,7 @@ void AegisProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
     reportedLatency = engine.latencySamples.load();
     setLatencySamples (reportedLatency.load());
+    bypassDelay.prepare (2, aegis::lookaheadSamples (sampleRate, aegis::kNumLookahead - 1) + aegis::kDetectorDelay);
 }
 
 void AegisProcessor::handleAsyncUpdate()
@@ -55,6 +56,15 @@ void AegisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     }
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
+}
+
+void AegisProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    // The same delay as when it works, or the track jumps early against the rest of the mix.
+    auto main = getBusBuffer (buffer, false, 0);
+    bypassDelay.process (main.getArrayOfWritePointers(), main.getNumChannels(), main.getNumSamples(), getLatencySamples());
+    for (int c = getMainBusNumOutputChannels(); c < buffer.getNumChannels(); ++c)
+        buffer.clear (c, 0, buffer.getNumSamples());
 }
 
 void AegisProcessor::getStateInformation (juce::MemoryBlock& dest)

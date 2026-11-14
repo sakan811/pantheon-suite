@@ -13,6 +13,7 @@ namespace id
 {
 inline const juce::String role { "role" }, mix { "mix" }, importance { "importance" }, carve { "carve" }, reach { "reach" },
                           attack { "attack" }, release { "release" }, out { "out" };
+inline const juce::String hold { "hold" };                 // HOLD: the carve stays where it is
 inline const juce::String distance { "distance" };         // the Depth knob: how far back the stem sits
 inline const juce::String scRole { "sc_role" }, scImportance { "sc_importance" }; // what the sidechain input is
 }
@@ -67,6 +68,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     F (id::distance, "Depth", { 0.0f, 100.0f, 1.0f }, d.distance * 100.0f, Attr().withStringFromValueFunction (percent));
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::scRole, 1 }, "Sidechain Role", roleNames(), (int) d.scRole));
     F (id::scImportance, "Sidechain Importance", { 0.0f, 100.0f, 1.0f }, d.scImportance * 100.0f, Attr().withStringFromValueFunction (percent));
+    // Version 2: a session saved before it opens with HOLD off, which is how it always sounded.
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::hold, 2 }, "Hold", d.hold));
     return { p.begin(), p.end() };
 }
 
@@ -86,6 +89,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.attackMs = v (id::attack);
     e.releaseMs = v (id::release);
     e.outDb = v (id::out);
+    e.hold = v (id::hold) > 0.5f;
     return e;
 }
 

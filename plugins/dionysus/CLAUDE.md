@@ -48,13 +48,19 @@ whenever either is in use (`dcOn`) and is reset while it is not. `compensation()
 
 **MIX.** 100% takes the saturated sound itself (not `dry + mix x (wet - dry)`), 0% the delayed dry sound itself: exact at both ends. The wet path runs all the time so its states are warm.
 
+**LOW CUT is on the saturated path only.** A 2nd-order high-pass (`Channel::lowCut`) before DRIVE and the curve, not run (and reset) at 20 Hz or below; the dry sound in the ring is the unfiltered input, so MIX under 100% brings the lows back and at 0% it is exact. It is what `drivePeak` (the level that reaches the curve, an atomic the editor's meter reads and resets) measures.
+
+**DELTA is `Engine::delta`, an atomic the editor sets, not a parameter**: never saved, ended by the editor's destructor, shown in the notes. The output is `result - dry` (the dry sound being the ring's, delayed like the output).
+
+**Bypass keeps the latency.** `processBlockBypassed` delays the audio by `getLatencySamples()` through `pdsp::BypassDelay` (prepared for `kMaxLatency`); `DionysusUiCheck` pins it.
+
 **Real time.** `Engine::process` allocates and locks nothing; everything is a fixed array or sized in `prepare()` (`configure()` allocates nothing, so a change of oversampling on the audio thread is safe; a change of oversampling restarts the saturator and is reported through `DionysusProcessor::handleAsyncUpdate`).
 **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
-**Parameters.** Ids (`dionysus::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`dionysus::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lowcut`, version 2 (Off: a session saved before it sounds as it did; a preset that does not list it leaves it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `shapeNames` is the order of `Shape`; of `oversamplingNames`, the index of `kOversamplingFactor`.
 
 ## DRY: where each thing lives

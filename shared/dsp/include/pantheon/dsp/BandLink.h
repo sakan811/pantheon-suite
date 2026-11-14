@@ -31,6 +31,21 @@ namespace pdsp
 // not know; `decodeLimiter` reads it.
 //
 // Unknown keys are ignored and a band with an unknown kind is skipped, so a newer writer does not break an older reader.
+// A reader is forgiving about the text around the data: leading and trailing white space on a line (spaces, tabs, a stray
+// carriage return) and a UTF-8 byte order mark at the start are ignored; and strict about the numbers: a value that is not a
+// finite number drops its band, and one outside the ranges in `pdsp::limits` is clamped into them (a pasted gain=1e9 is not
+// a gain of 1e9 dB).
+namespace limits
+{
+inline constexpr double kMinFreqHz = 10.0, kMaxFreqHz = 40000.0; // a band's frequency, a fill band's edges, a cut's corner
+inline constexpr double kMaxGainDb = 36.0;                      // a bell's or a shelf's gain, either way
+inline constexpr double kMinQ = 0.1, kMaxQ = 40.0;
+inline constexpr double kMinSlopeDbPerOct = 6.0, kMaxSlopeDbPerOct = 96.0;
+inline constexpr double kMinCurveF0Hz = 1.0, kMaxCurveF0Hz = 100000.0; // a curve's first point
+inline constexpr double kMinCurvePerOctave = 0.5, kMaxCurvePerOctave = 96.0;
+inline constexpr double kMaxCurveDb = 120.0;                    // a curve's level, either way
+} // namespace limits
+
 struct LinkBand
 {
     enum class Kind { bell, lowShelf, highShelf, lowCut, highCut, fill };
@@ -52,7 +67,11 @@ struct LinkCurve
     std::vector<double> db;
     std::string name;
 
-    bool valid() const { return f0Hz > 0.0 && perOctave > 0.0 && db.size() >= 2 && db.size() <= kMaxPoints; }
+    bool valid() const
+    {
+        return f0Hz >= limits::kMinCurveF0Hz && f0Hz <= limits::kMaxCurveF0Hz && perOctave >= limits::kMinCurvePerOctave
+               && perOctave <= limits::kMaxCurvePerOctave && db.size() >= 2 && db.size() <= kMaxPoints;
+    }
     double frequency (size_t i) const { return f0Hz * std::pow (2.0, static_cast<double> (i) / perOctave); }
 
     // The level at any frequency, linearly interpolated on the log-frequency axis and held beyond the ends.
@@ -199,11 +218,26 @@ inline LinkCurve parseCurve (std::istringstream& words)
                 const double v = std::strtod (item.c_str(), &end);
                 if (end == item.c_str() || !std::isfinite (v) || c.db.size() >= LinkCurve::kMaxPoints)
                     return {};
-                c.db.push_back (v);
+                c.db.push_back (std::clamp (v, -limits::kMaxCurveDb, limits::kMaxCurveDb));
             }
         }
     }
     return c.valid() ? c : LinkCurve {};
+}
+
+// One line of pasted text without the white space around it (and a UTF-8 byte order mark when it is the first line).
+inline void trimLine (std::string& line, bool first)
+{
+    constexpr const char* kWhite = " \t\r\n\f\v";
+    if (first && line.size() >= 3 && line.compare (0, 3, "\xEF\xBB\xBF") == 0)
+        line.erase (0, 3);
+    const auto begin = line.find_first_not_of (kWhite);
+    if (begin == std::string::npos)
+    {
+        line.clear();
+        return;
+    }
+    line = line.substr (begin, line.find_last_not_of (kWhite) - begin + 1);
 }
 
 // False when the text is not a band list (no header); otherwise the bands it could read, in order.
@@ -214,11 +248,11 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out, LinkCur
         *curve = {};
     std::istringstream in (text);
     std::string line;
-    bool header = false;
+    bool header = false, firstLine = true;
     while (std::getline (in, line))
     {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-            line.pop_back();
+        trimLine (line, firstLine);
+        firstLine = false;
         if (!header)
         {
             if (line.empty())
@@ -282,7 +316,15 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out, LinkCur
             }
             *field = v;
         }
-        if (valid && b.freq > 0.0 && b.q > 0.0 && b.loHz > 0.0 && b.hiHz > b.loHz)
+        if (!valid || !(b.freq > 0.0) || !(b.q > 0.0) || !(b.loHz > 0.0) || !(b.hiHz > b.loHz))
+            continue;
+        b.freq = std::clamp (b.freq, limits::kMinFreqHz, limits::kMaxFreqHz);
+        b.gainDb = std::clamp (b.gainDb, -limits::kMaxGainDb, limits::kMaxGainDb);
+        b.q = std::clamp (b.q, limits::kMinQ, limits::kMaxQ);
+        b.slopeDbPerOct = std::clamp (b.slopeDbPerOct, limits::kMinSlopeDbPerOct, limits::kMaxSlopeDbPerOct);
+        b.loHz = std::clamp (b.loHz, limits::kMinFreqHz, limits::kMaxFreqHz);
+        b.hiHz = std::clamp (b.hiHz, limits::kMinFreqHz, limits::kMaxFreqHz);
+        if (b.hiHz > b.loHz)
             out.push_back (b);
     }
     return header;
@@ -295,11 +337,11 @@ inline bool decodeLimiter (const std::string& text, LinkLimiter& out)
     out = {};
     std::istringstream in (text);
     std::string line;
-    bool header = false;
+    bool header = false, firstLine = true;
     while (std::getline (in, line))
     {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-            line.pop_back();
+        trimLine (line, firstLine);
+        firstLine = false;
         if (!header)
         {
             if (line.empty())

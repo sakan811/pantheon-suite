@@ -1385,6 +1385,57 @@ void testLinearPhase()
         check (dWorst < 1.0e-5 && cWorst < 1.0e-4, fmt ("LINEAR: DELTA is the output minus the delayed input (%.1e); the CURVE solo of a lone band is the same signal (%.1e)", dWorst, cWorst));
     }
 
+    // A CURVE solo that starts and ends with every band a static 0 dB bell (nothing "working"): the 10 ms fade passes through the main kernels, which
+    // must be the plain delay then, not zeros (a dip) or what was built before.
+    for (auto m : { PhaseMode::linear, PhaseMode::linearHq })
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 1000.0, 0.0, 1.0);
+        p.phase = m;
+        const int lat = latencyFor (m), total = 36000, startAt = 16384, endAt = 32768;
+        const auto in = noise (35, 0.3, total);
+        Engine e;
+        e.prepare (fs, 512, m);
+        std::vector<float> out (in.size());
+        juce::AudioBuffer<float> buffer (2, 512);
+        for (int at = 0; at < total; at += 512)
+        {
+            const int n = std::min (512, total - at);
+            e.monitor.soloKind = (int) SoloKind::curve;
+            e.monitor.soloBand = at >= startAt && at < endAt ? 0 : -1;
+            buffer.setSize (2, n, false, false, true);
+            for (int i = 0; i < n; ++i)
+                buffer.setSample (0, i, in[(size_t) (at + i)]), buffer.setSample (1, i, in[(size_t) (at + i)]);
+            e.process (buffer, p);
+            for (int i = 0; i < n; ++i)
+                out[(size_t) (at + i)] = buffer.getSample (0, i);
+        }
+        // The sound of `lat` ago is what comes out; the solo adds nothing (a flat band), so it is the delayed input times (1 - a), a rising 0 to 1 over 480 samples.
+        const auto ratio = [&] (int from) { double a = 0.0, b = 0.0; for (int i = from; i < from + 120; ++i) { a += (double) out[(size_t) i] * out[(size_t) i]; b += (double) in[(size_t) (i - lat)] * in[(size_t) (i - lat)]; } return std::sqrt (a / b); };
+        const double rising = ratio (startAt + 280), falling = ratio (endAt + 280);
+        check (rising > 0.15 && rising < 0.45 && falling > 0.55 && falling < 0.85,
+               fmt ("%s: a CURVE solo of a flat band fades through the delayed input, not through zeros: 280 to 400 samples into its start the output is %.2f of it (about 0.29), into its end %.2f (about 0.71)", m == PhaseMode::linear ? "LINEAR" : "LINEAR HQ", rising, falling));
+    }
+
+    // At a higher sample rate the kernel and the hop grow with it, so the resolution in Hz and the delay in ms stay what they are at 48 kHz.
+    check (latencyFor (PhaseMode::linear, 44100.0) == latencyFor (PhaseMode::linear, 48000.0) && latencyFor (PhaseMode::linear, 96000.0) == 2 * latencyFor (PhaseMode::linear, 48000.0)
+               && latencyFor (PhaseMode::linearHq, 192000.0) == 4 * latencyFor (PhaseMode::linearHq, 48000.0)
+               && linearSpec (PhaseMode::linear, 96000.0).half * 2 + linearSpec (PhaseMode::linear, 96000.0).hop <= linearSpec (PhaseMode::linear, 96000.0).size(),
+           "the linear modes' sizes: 44.1 and 48 kHz as before, 2x at 96 kHz and 4x at 192 kHz (the same milliseconds)");
+    {
+        EngineParams p;
+        setBand (p, 0, BandType::bell, 2000.0, 6.0, 1.0);
+        p.phase = PhaseMode::linear;
+        const double rate = 96000.0;
+        Engine e;
+        e.prepare (rate, 512, PhaseMode::linear);
+        const auto in = sine (2000.0, 0.1, 40000, 0.0, rate);
+        const auto out = run (e, p, in, in);
+        const int lat = e.latencySamples.load();
+        check (lat == latencyFor (PhaseMode::linear, rate) && std::fabs (toDb (amplitudeAt (out.l, 2000.0, 30000, 9600, rate) / amplitudeAt (in, 2000.0, 30000, 9600, rate)) - 6.0) < 0.1,
+               fmt ("at 96 kHz the linear mode reports %d samples (%.1f ms) and a +6 dB bell at its centre gives +6.0 dB", lat, 1000.0 * lat / rate));
+    }
+
     // The output does not depend on how the host cuts the audio.
     {
         EngineParams p;

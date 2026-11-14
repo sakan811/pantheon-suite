@@ -53,7 +53,7 @@ public:
     {
         float from, to;
         juce::Colour colour;
-        const char* label;
+        juce::String label;
     };
     struct Verdict
     {
@@ -69,6 +69,7 @@ public:
         juce::String tooltip;
         Axis axis;
         std::vector<Zone> zones;
+        std::function<std::vector<Zone>()> liveZones; // zones that follow a setting (the true-peak ceiling): read when drawn, instead of `zones`
         std::vector<Series> series;
         bool chooseRange = false;   // shows the range chips; `column` is passed to the series and the verdict
         bool marksClips = false;    // flags the frames in which the audio clipped
@@ -119,6 +120,9 @@ public:
         verdict = t.verdict && numFrames > 0 ? t.verdict (frames.data(), numFrames, column) : Verdict {};
         repaint();
     }
+
+    // A setting the verdict or the zones depend on has changed: read the frames and judge them again at the next update().
+    void refresh() { dirty = true; }
 
     void selectTab (int index)
     {
@@ -310,7 +314,8 @@ private:
     void drawZones (juce::Graphics& g, const Tab& t) const
     {
         g.setFont (font (10.5f));
-        for (const auto& z : t.zones)
+        const auto zones = t.liveZones ? t.liveZones() : t.zones;
+        for (const auto& z : zones)
         {
             const float y0 = yFor (t.axis, z.to), y1 = yFor (t.axis, z.from);
             g.setColour (z.colour.withAlpha (0.10f));
@@ -584,7 +589,7 @@ inline juce::String percentText (float share) { return juce::String (juce::round
 class LevelView : public HistoryPanel
 {
 public:
-    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks(), spectrogram() }) {}
+    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks (p), spectrogram() }) {}
 
 private:
     using Verdict = HistoryPanel::Verdict;
@@ -692,7 +697,7 @@ private:
         return t;
     }
 
-    static Tab peaks()
+    static Tab peaks (ThemisProcessor& proc)
     {
         namespace clip = themis::history::clip;
         Tab t { "PEAKS",
@@ -701,16 +706,19 @@ private:
                 "CLIPPED means a flat top: at least 4 equal samples in a row above -6 dBFS that the waveform ran into, which a hard clipper "
                 "or an overdriven limiter leaves at any ceiling. OVER means a sample at or above 0 dBFS. A synthesised square wave or a held "
                 "level looks like a flat top too, and a clip that was smoothed afterwards leaves none to find.\n\n"
-                "The verdict is bad for any clip or over, a warning above -1 dBTP (lossy encoding can push those peaks over) and bad above 0 dBTP. "
-                "Rules of thumb.",
+                "The verdict is bad for any clip or over, a warning above the true-peak ceiling (the knob in the header, -1 dBTP unless you set another; "
+                "lossy encoding can push those peaks over) and bad above 0 dBTP. Rules of thumb.",
                 { 6.0f, -18.0f, 6.0f, [] (float v) { return juce::String (juce::roundToInt (v)); } } };
-        t.zones = { { 0.0f, 6.0f, colours::bad, "over 0 dB" }, { clip::kTruePeakWarnDb, 0.0f, colours::warn, "-1 to 0 dBTP" } };
+        t.liveZones = [&proc] {
+            const float ceiling = std::min (proc.paramReader.truePeakCeilingDb(), clip::kTruePeakBadDb);
+            return std::vector<Zone> { { 0.0f, 6.0f, colours::bad, "over 0 dB" }, { ceiling, 0.0f, colours::warn, juce::String (ceiling, 1) + " to 0 dBTP" } };
+        };
         t.marksClips = true;
         // The true peak is never below the sample peak, so it goes first and the sample peak is drawn over it.
         t.series = { { "TRUE PEAK", palette::orange, [] (const themis::FrameStats& f, int) { return f.truePeakDb; } },
                      { "SAMPLE PEAK", palette::blue, [] (const themis::FrameStats& f, int) { return f.samplePeakDb; } } };
-        t.verdict = [] (const themis::FrameStats* f, int n, int) -> Verdict {
-            const auto r = themis::history::analysePeaks (f, n);
+        t.verdict = [&proc] (const themis::FrameStats* f, int n, int) -> Verdict {
+            const auto r = themis::history::analysePeaks (f, n, proc.paramReader.truePeakCeilingDb());
             if (!r.have)
                 return Verdict {};
             const auto peak = "True peak " + juce::String (r.truePeakDb, 1) + " dBTP";
@@ -720,7 +728,7 @@ private:
                                      + " samples at 0 dBFS or over. " + peak + ".",
                                  r.level };
             return Verdict { peak + (r.level == themis::Level::good ? ": no clipping and room for lossy encoding."
-                                     : r.level == themis::Level::warn ? ": no clipping, but lossy encoding can push this over 0 dB."
+                                     : r.level == themis::Level::warn ? ": no clipping, but over the ceiling, and lossy encoding can push this over 0 dB."
                                                                        : ": inter-sample peaks go over 0 dB.") ,
                              r.level };
         };

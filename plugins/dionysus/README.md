@@ -10,7 +10,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 
 ![Dionysus Warmth](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). The tape curve at +16 dB of drive with BIAS +25%, TONE +20%, MIX 85%, 4x oversampling and AUTO GAIN on. On the left, the curve the signal goes through (input across, output up); on the right, the harmonics it makes from a sine at -12 dBFS, odd ones amber and even ones teal (the bias is what brings the even ones). The strip explains the bias' DC blocker and the delayed dry sound under 100% MIX. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). The tape curve at +16 dB of drive with BIAS +25%, TONE +20%, LOW CUT off, MIX 85%, 4x oversampling and AUTO GAIN on. On the left, the curve the signal goes through (input across, output up); on the right, the harmonics it makes from a sine at -12 dBFS, odd ones amber and even ones teal (the bias is what brings the even ones). The strip explains the bias' DC blocker and the delayed dry sound under 100% MIX. On the far right, the **drive level** meter: the level that reaches the curve (a 0.25 sine times +16 dB, +4.0 dB here: red above 0 dB, where the curves turn over) and the CLIP lamp (the output reached 0 dBFS; off here). Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -20,11 +20,14 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 | **Curve** | *Tape* (tanh: symmetric, gentle), *Tube* (`x / (1 + |x|)`: softer onset, more high harmonics as it is driven), *Transformer* (a cubic: thick, strong 3rd), *Diode* (uneven: a tanh with a knee of 0.7 on the negative side: even harmonics of its own), *Fold* (`sin x`: peaks turn back on themselves), *Clip* (hard). Every curve has a slope of 1 at 0, so a quiet sound passes unchanged. |
 | **Bias** | -100 to +100%: moves the working point of the curve before it (up to 0.5 in the curve's units), which adds even harmonics. What the curve gives for that offset alone is taken off, so silence stays silence, and a 10 Hz high-pass takes the rest of the DC away. |
 | **Tone** | -100 to +100%: after the curve, a low shelf and a high shelf at 1 kHz turning opposite ways, 6 dB each: a tilt of 12 dB at the ends. + is brighter. |
+| **Low cut** | 20 to 500 Hz, off at 20: a high-pass (2nd order) on the saturated path only, before the curve, so the bass is not saturated and stays clean. The dry sound is not filtered: under 100% MIX the lows come back through it, and at 100% the whole sound loses them. |
 | **Mix** | 0 to 100%: the saturated sound blended with the dry one. The dry sound is delayed to match the oversampler, so nothing combs. 100% is the saturated sound itself. |
+| **Delta** | Plays only what the saturator adds (the output minus the input, delayed like the output). Not saved, not automatable, off when the window closes. |
+| **Drive level** | A meter at the right of the display: the largest level that reaches the curve (the sound after LOW CUT times DRIVE), 0 dB where the curves turn over, red above it, and a CLIP lamp for an output at 0 dBFS (held one second). |
 | **Output** | -24 to +12 dB, after everything. |
 | **Auto gain** | On by default: the gain that brings the RMS of a sine at -12 dBFS back to what it was before the curve (the AC part: the DC is taken off). |
 | **Oversampling** | Off, 2x, 4x or 8x: half-band, linear phase (a 65-tap stage and then 33-tap stages), delay 0, 32, 40 or 44 samples. |
-| **Presets** | Eight starting points (Init, Tape Warmth, Tube Glow, Transformer Thick, Parallel Grit, Bass Harmonics, Fold Fuzz, Hard Clip Edge). A preset sets every control, oversampling included; what it does not list goes back to its default. |
+| **Presets** | Eight starting points (Init, Tape Warmth, Tube Glow, Transformer Thick, Parallel Grit, Bass Harmonics, Fold Fuzz, Hard Clip Edge). A preset sets every control, oversampling included; what it does not list goes back to its default (Parallel Grit sets LOW CUT to 120 Hz). |
 
 ## How it works
 
@@ -53,6 +56,9 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 - MIX 0% is the input delayed by 0, 32, 40 and 44 samples for 1x, 2x, 4x and 8x, bit for bit; an impulse through the saturated path peaks exactly the reported latency later (44 at 8x).
 - AUTO GAIN: a sine at -12 dBFS comes out as loud as it went in, for every curve at 6, 18 and 30 dB of drive, within 0.008 dB (RMS).
 - TONE +100%: 100 Hz -6.0 dB, 8 kHz +6.0 dB (a tilt of 12.0 dB); at 0 it is flat.
+- LOW CUT 500 Hz: a 50 Hz tone through the saturated path is -40.0 dB; at MIX 0% it is untouched (+0.00 dB), at 50% -6.1 dB (half of it is the dry sound); at 20 Hz (Off) the sound is as it was, bit for bit.
+- DELTA plus the input delayed by 32 samples is the output (largest difference 7.5e-09); the 3rd harmonic of a hard-clipped tone is as loud in DELTA as in the output (0.000 dB); at MIX 0% it is silence, exactly.
+- The drive meter reads 1.000 for a -12 dBFS sine at +12 dB of drive. Bypassed by the host at 8x, an impulse comes out exactly the reported 44 samples late (`DionysusUiCheck`).
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
 
 ## Limits
@@ -61,6 +67,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 - **Without oversampling, hard curves alias.** Clip, Fold and Transformer at 12 dB of drive or more make tones that were never there; the half-band filters have a transition band, so a harmonic just over half the sample rate is only partly removed
   even at 8x.
 - **Oversampling delays the sound** (up to 44 samples) and costs CPU; switching it while playing restarts the saturator (it clicks).
+- **LOW CUT filters the saturated path only.** At 100% MIX that is the whole sound, so it takes the lows out of it; lower MIX to keep them (the dry sound is not filtered). It is a 2nd-order filter, so its phase differs from the dry sound's around the cutoff.
 - Each channel is saturated on its own, so a hard-panned sound stays where it is; the two channels' harmonics are not linked.
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 

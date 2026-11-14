@@ -11,7 +11,8 @@ namespace nemesis
 {
 namespace id
 {
-inline const juce::String freq { "freq" }, q { "q" }, threshold { "thresh" }, range { "range" }, release { "release" }, mode { "mode" }, detection { "detect" }, listen { "listen" }, lookahead { "lookahead" };
+inline const juce::String freq { "freq" }, q { "q" }, threshold { "thresh" }, range { "range" }, release { "release" }, mode { "mode" }, detection { "detect" }, listen { "listen" }, lookahead { "lookahead" },
+    delta { "delta" }; // version 3 (lookahead is 2): hear what is turned down, off
 }
 
 inline const juce::StringArray modeNames { "Split-band", "Wideband" };
@@ -49,6 +50,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::listen, 1 }, "Listen", d.listen));
     // Added after the first release: version 2, so a session saved before it has no value and gets the default (Off, the plug-in as it was).
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames, d.lookahead));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::delta, 3 }, "Delta", d.delta));
     return { p.begin(), p.end() };
 }
 
@@ -65,6 +67,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.mode = (Mode) std::clamp ((int) v (id::mode), 0, kNumModes - 1);
     e.detection = (Detection) std::clamp ((int) v (id::detection), 0, kNumDetections - 1);
     e.listen = v (id::listen) > 0.5f;
+    e.delta = v (id::delta) > 0.5f;
     e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookaheads - 1);
     return e;
 }

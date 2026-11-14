@@ -11,6 +11,11 @@
 // can change is one of the fields below, so an edit is one value and an undo is a copy of the vector.
 namespace orpheus
 {
+// How far from the sung pitch a note may be put, and the MIDI range it must stay in. Past two octaves the PSOLA spacing of the grains runs to a few
+// samples and the result is noise; the SHIFT knob (12 semitones) and every drag, key and loaded project are held to this.
+constexpr float kMaxShiftSemitones = 24.0f;
+constexpr float kLowestTargetMidi = 0.0f, kHighestTargetMidi = 127.0f;
+
 struct Note
 {
     int start = 0, end = 0;   // frames [start, end)
@@ -30,6 +35,14 @@ struct Note
                && same (formant, o.formant) && same (gainDb, o.gainDb);
     }
     float shift() const noexcept { return target - centre; } // semitones
+    // Puts the target back into the range the model accepts (and a NaN back on the centre).
+    void clampTarget() noexcept
+    {
+        if (! std::isfinite (target))
+            target = centre;
+        target = std::clamp (target, centre - kMaxShiftSemitones, centre + kMaxShiftSemitones);
+        target = std::clamp (target, kLowestTargetMidi, kHighestTargetMidi);
+    }
     bool edited() const noexcept
     {
         return std::fabs (target - centre) > 1.0e-4f || drift > 1.0e-4f || std::fabs (vibrato - 1.0f) > 1.0e-4f

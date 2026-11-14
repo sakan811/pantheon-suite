@@ -7,7 +7,9 @@
 #include "PluginProcessor.h"
 #include "UI/HephaestusUi.h"
 #include "UI/SpectrumView.h"
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 class HephaestusEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -22,8 +24,11 @@ public:
 
     void selectBand (int band);
     juce::TextButton& regionButton (int band) { return regionButtons[(size_t) band]; } // the band solo strip, for UiCheck
+    ui::UndoButtons& undoControls() { return undoButtons; }                           // UNDO / REDO, for UiCheck
+    ui::AbButtons& abControls() { return abButtons; }                                 // A / B, for UiCheck
     juce::TextButton& guide() { return guideButton; }                                  // the GUIDE button, for UiCheck
     std::vector<ui::Note> notes() const { return hep::adviceFor (adviceInput()); }                // what the band panel tells the user, for UiCheck
+    juce::ComboBox& presetSelector() { return presetBox; }                                    // the preset box (factory, user, SAVE), for UiCheck
     juce::ComboBox& characterSelector() { return characterBox; }                     // Warm / Clean / Octave of the shown fill band, for UiCheck
 
 private:
@@ -37,6 +42,9 @@ private:
     juce::String bandHint() const;
     hep::AdviceInput adviceInput() const;
     void setPresetTooltip();
+    void fillPresetBox();
+    void presetBoxChanged();
+    void askUserPresetName();
     juce::String notesSignature() const;
     void timerCallback() override;
 
@@ -53,6 +61,8 @@ private:
     ui::Choice stereoBox, osBox, curveBox;
     ui::Toggle deltaButton, matchButton;
     juce::TextButton clearMetersButton { "CLEAR" };
+    ui::UndoButtons undoButtons;
+    ui::AbButtons abButtons;
     ui::GuideButton guideButton { hep::guideTitle(), hep::guideText() };
 
     // How the selected fill band makes its harmonics: bound to that band's parameter while one is shown, and to nothing otherwise.
@@ -71,7 +81,7 @@ private:
     float inLevel = 0.0f, outLevel = 0.0f;
     std::array<juce::Rectangle<int>, (size_t) Panel::count> panelBounds;
     juce::Rectangle<int> nameplate, meterArea;
-    int lastProgram = -1;
+    juce::String lastPresetKey;
     juce::String shownNotes;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HephaestusEditor)

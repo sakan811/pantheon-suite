@@ -11,7 +11,7 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 
 ![Hera Bond](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, an 8 dB knee, AUTO REL and AUTO MAKEUP on. On the left, the transfer curve (input across, output up) with the dot where the level is now; on the right, the reduction over the last seconds (-8.5 dB now). The strip warns that taking off 11 dB or more will pump. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, an 8 dB knee, AUTO REL, AUTO MAKEUP and LEVEL MATCH on. On the left, the transfer curve (input across, output up) with the dot where the level is now; on the right, the reduction over the last seconds (-9.3 dB now), with **LEVEL MATCH** on and its gain read out under the reduction (-9.4 dB: the compression takes about that much level, and the match gives it back). The strip warns that taking off 11 dB or more will pump. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -29,7 +29,10 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 | **Auto release** | Program-dependent: two followers, one of 50 ms and one of 600 ms that is 20 times slower to go down; the gain is the larger. A short peak lets go quickly, a long loud passage slowly. RELEASE is not used. |
 | **Key** | Listen to the **sidechain** input (a second input, off until the host routes a track to it) instead of the sound. With nothing connected it listens to itself. |
 | **Look-ahead** | Off (default), 1, 2, 5 or 10 ms: the detector sees the sound as it arrives and the sound is heard that long after, so the gain is already down when a peak gets to the output. It is a delay (the host compensates); MIX delays the dry sound the same, so nothing combs. |
-| **Presets** | Eight starting points (Init, Vocal Level, Drum Punch, Bus Glue, Bass Control, Parallel Smash, Peak Catcher, Sidechain Duck). A preset sets every control; what it does not list goes back to its default. The thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves. |
+| **Level match** | Takes the level the compressor and MAKEUP add or take away off again, slowly (about 0.6 s, within 12 dB), so an A/B is not decided by loudness. Off by default; while it is on, the gain it applies is read out beside the reduction. Kept by presets. |
+| **Delta** | Plays only what the compressor changes (output minus the input, delayed like the output). Not saved, not automatable, off when the window closes. |
+| **SC listen** | Plays what the detector hears: the key (this track, or the sidechain with KEY on) after SC HPF, instead of the track. Not saved, not automatable, off when the window closes. |
+| **Presets** | Eight starting points (Init, Vocal Level, Drum Punch, Bus Glue, Bass Control, Parallel Smash, Peak Catcher, Sidechain Duck). A preset sets every control; what it does not list goes back to its default (LEVEL MATCH is kept). The thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves. |
 
 The display is the transfer curve (input level across, output up; the diagonal is "no compression", the dot is the level now) and the reduction of the last ten seconds.
 
@@ -54,6 +57,7 @@ The display is the transfer curve (input level across, output up; the diagonal i
 - MAKEUP +6 dB: -7.49 dB net (13.5 down, 6 up). AUTO makeup: a full-scale tone comes out at +0.01 dBFS. MIX 50%: -4.35 dB (-4.36 expected).
 - A train of clicks: the peak detector turns it down by 15.7 dB, the RMS one by 0.0 dB.
 - LOOK-AHEAD 5 ms: with nothing to compress the output is the input 240 samples later, bit for bit; at a step from -40 to 0 dBFS (20:1, ATTACK 5 ms) the first millisecond of the output is at -0.6 dBFS without it and -11.0 dBFS with it; a change of the setting while running moves the latency (96 samples for 2 ms).
+- LEVEL MATCH: noise at 4:1 over -30 dB comes out 10.83 dB quieter; with it on it is -0.01 dB after 5 s (applying +10.83 dB); off, 0.00 dB; blocks of 1, 7, 333 and 4096 samples give the same output, bit for bit. DELTA of +6 dB makeup is -0.04 dB of the input (the wanted -0.04), and silence exactly with nothing to compress (with look-ahead too). SC LISTEN with the high-pass at 1 kHz: 5 kHz passes (-0.01 dB), 100 Hz is -40.0 dB; with KEY on it is the key. Bypassed by the host with 10 ms of look-ahead, an impulse comes out exactly the reported 480 samples late (`HeraUiCheck`).
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit (with look-ahead too). NaN and infinity in the input are silence.
 
 ## Limits
@@ -62,6 +66,7 @@ The display is the transfer curve (input level across, output up; the diagonal i
 - **LOOK-AHEAD delays the sound** by its time (the host compensates it); changing it while playing restarts the compressor (a short gap).
 - **Taking off 10 dB or more pumps.** Raise THRESH or lower RATIO. A very fast ATTACK on the peak detector takes the transient away.
 - **MIX under 100% blends the compressed path with the dry one**; the meter and the transfer curve show the compressed path, not the blend. The dry sound is delayed by the look-ahead like the compressed one, so the blend does not comb.
+- **LEVEL MATCH is slow and is not a loudness meter.** It equals the RMS of the whole sound (about 0.6 s to settle, so it follows a section, not a note), stops at 12 dB, and does not weigh frequencies as an ear does; judge by ear, and with DELTA.
 - **The RMS detector's 10 ms** means a very short peak (a click) is hardly seen: use the peak detector for them.
 - **KEY with nothing connected listens to itself**, so a session saved with it still works without a sidechain.
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).

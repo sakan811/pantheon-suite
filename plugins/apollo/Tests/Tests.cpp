@@ -243,6 +243,27 @@ int main()
         check (atSwitch < 1.3 * steady, fmt ("a +12 dB bell switched off while a 1 kHz tone plays: the largest step is %.4f (a steady tone's is %.4f x 4 = %.4f): it fades, there is no click", atSwitch, steady / 4.0, steady));
         const double tailGain = db (rms (b.l, 40000) / rms (tone (1000.0, 8000).l, 0));
         check (std::fabs (tailGain) < 0.05, fmt ("... and after the fade the tone is back at its own level (%+.3f dB)", tailGain));
+
+        // A band without a gain (notch, high-pass, low-pass) has none to take to 0: it fades out through its mix. 1000.25 Hz: the tone is at a crest when it is switched off at 1 s.
+        struct Kind { Type type; double hz, q; int slope; const char* name; };
+        const Kind kinds[] = { { Type::notch, 1000.25, 8.0, 0, "notch" }, { Type::highPass, 3000.0, 0.707, 3, "48 dB high-pass at 3 kHz" }, { Type::lowPass, 300.0, 0.707, 3, "48 dB low-pass at 300 Hz" } };
+        for (const auto phase : { Phase::minimum, Phase::linear })
+            for (const auto& k : kinds)
+            {
+                const auto t = tone (1000.25, n, 0.25);
+                EngineParams onP = one (k.type, k.hz, 0.0, k.q, phase, Target::stereo, k.slope), offP = onP;
+                offP.bands[0].on = false;
+                Engine eg;
+                eg.prepare (kFs, phase);
+                Stereo h { std::vector<float> (t.l.begin(), t.l.begin() + 48000), std::vector<float> (t.r.begin(), t.r.begin() + 48000) };
+                Stereo tl { std::vector<float> (t.l.begin() + 48000, t.l.end()), std::vector<float> (t.r.begin() + 48000, t.r.end()) };
+                run (eg, h, onP);
+                const auto after = run (eg, tl, offP);
+                const double step = jump (after, 0), refStep = 0.25 * 2.0 * M_PI * 1000.25 / kFs;
+                // Linear phase swaps its kernel once a hop, so a fading kernel steps a little more than the tone does (0.05 against 0.03); a cut would be 0.25.
+                check (step < (phase == Phase::minimum ? 1.3 : 2.0) * refStep, fmt ("%s, %s, switched off mid-tone: the largest step is %.4f (a steady tone's is %.4f): it fades, there is no click",
+                                                  phase == Phase::minimum ? "minimum phase" : "linear phase", k.name, step, refStep));
+            }
     }
 
     // [7] Bad input, and the output gain.
@@ -361,6 +382,42 @@ int main()
             for (size_t i = 0; i < none.l.size(); ++i)
                 biggest = std::fmax (biggest, std::fmax (std::fabs ((double) none.l[i]), std::fabs ((double) none.r[i])));
             check (biggest == 0.0, fmt ("%s: DELTA with nothing on is silence (largest sample %.1e): the delayed input is the output, exactly", name, biggest));
+        }
+    }
+
+    // [10] LISTEN: the selected band's region alone, a band-pass at its frequency and width after the bands.
+    std::printf("\n[10] Listen\n");
+    {
+        const int n = 48000 * 2;
+        for (const Phase phase : { Phase::minimum, Phase::linear })
+        {
+            const char* name = phase == Phase::minimum ? "minimum phase" : "linear phase";
+            auto p = one (Type::bell, 1000.0, 6.0, 2.0, phase);
+            const auto level = [&] (double hz, int band)
+            {
+                Engine e;
+                e.prepare (kFs, phase);
+                e.listen = band;
+                const auto in = tone (hz, n);
+                return db (rms (run (e, in, p).l, (size_t) n - 24000) / rms (in.l, (size_t) n - 24000));
+            };
+            const double centre = level (1000.0, 0), far = level (100.0, 0), above = level (10000.0, 0), off = level (100.0, -1);
+            check (std::fabs (centre - 6.0) < 0.3, fmt ("%s: listening to a +6 dB bell at 1 kHz, its own frequency comes through with the bell's gain (%+.2f dB)", name, centre));
+            check (far < -20.0 && above < -20.0, fmt ("%s: ... and 100 Hz (%+.1f dB) and 10 kHz (%+.1f dB) are taken away", name, far, above));
+            check (std::fabs (off) < 0.05, fmt ("%s: listening to nothing leaves the sound as it was (%+.3f dB at 100 Hz)", name, off));
+            // A band that is not the first, and a block size that is not the tick.
+            p.bands[5] = { true, Type::notch, 3000.0, 0.0, 4.0, 0, Target::stereo };
+            const auto in = tone (3000.0, 4000, 0.25);
+            Engine a, b;
+            a.prepare (kFs, phase);
+            b.prepare (kFs, phase);
+            a.listen = b.listen = 5;
+            const auto ra = run (a, in, p, 512);
+            bool finite = true;
+            for (const float v : ra.l)
+                finite = finite && std::isfinite (v);
+            check (finite, fmt ("%s: a notch exactly on a bin of the kernel (3000 Hz at 48 kHz) gives numbers, not NaN", name));
+            check (ra.l == run (b, in, p, 7).l, fmt ("%s: with LISTEN on, blocks of 7 and 512 samples give the same output, bit for bit", name));
         }
     }
 

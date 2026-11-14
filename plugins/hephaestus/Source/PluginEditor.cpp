@@ -93,7 +93,9 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
       deltaButton (p.apvts, id::delta, "DELTA",
                    "Listen to only what the plugin adds (wet minus dry). Use it to hear exactly what the harmonics are doing."),
       matchButton (p.apvts, id::match, "GAIN MATCH",
-                   "Matches the processed loudness to the dry signal so 'louder' doesn't sound 'better'.")
+                   "Matches the processed loudness to the dry signal so 'louder' doesn't sound 'better'."),
+      undoButtons (p.undo, *this),
+      abButtons (p.ab)
 {
     setLookAndFeel (&look);
     addAndMakeVisible (spectrum);
@@ -178,14 +180,13 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
     }
 
     // Header.
-    for (int i = 0; i < (int) presets().size(); ++i)
-        presetBox.addItem (presets()[(size_t) i].name, i + 1);
-    presetBox.setSelectedId (proc.getCurrentProgram() + 1, juce::dontSendNotification);
-    presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); setPresetTooltip(); };
-    setPresetTooltip();
+    presetBox.onChange = [this] { presetBoxChanged(); };
+    fillPresetBox();
     addAndMakeVisible (presetBox);
 
     addAndMakeVisible (guideButton);
+    addAndMakeVisible (undoButtons);
+    addAndMakeVisible (abButtons);
 
     clearMetersButton.setTooltip ("Clear the IN and OUT level meters. Use it if a reading looks stuck.");
     clearMetersButton.onClick = [this]
@@ -317,13 +318,80 @@ juce::String HephaestusEditor::bandHint() const
            "CHARACTER picks how: Warm shapes the signal, Clean and Octave build pure sines (Octave for mids and highs).";
 }
 
+namespace
+{
+constexpr int kUserPresetBase = 1000, kSavePresetId = 2001, kDeletePresetId = 2002; // item ids after the factory presets (1 .. N)
+}
+
+// Factory presets, then the user's own, then the two actions. What is shown follows the processor (the host can change the program too).
+void HephaestusEditor::fillPresetBox()
+{
+    presetBox.clear (juce::dontSendNotification);
+    for (int i = 0; i < (int) presets().size(); ++i)
+        presetBox.addItem (presets()[(size_t) i].name, i + 1);
+
+    const auto users = proc.userPresets.names();
+    if (! users.isEmpty())
+    {
+        presetBox.addSeparator();
+        presetBox.addSectionHeading ("User");
+        for (int i = 0; i < users.size(); ++i)
+            presetBox.addItem (users[i], kUserPresetBase + i + 1);
+    }
+    presetBox.addSeparator();
+    presetBox.addItem ("Save current settings as...", kSavePresetId);
+    const int chosen = users.indexOf (proc.getCurrentUserPreset());
+    if (chosen >= 0)
+        presetBox.addItem ("Delete \"" + users[chosen] + "\"", kDeletePresetId);
+
+    presetBox.setSelectedId (chosen >= 0 ? kUserPresetBase + chosen + 1 : proc.getCurrentProgram() + 1, juce::dontSendNotification);
+    lastPresetKey = juce::String (proc.getCurrentProgram()) + "|" + proc.getCurrentUserPreset();
+    setPresetTooltip();
+}
+
+void HephaestusEditor::presetBoxChanged()
+{
+    const int id = presetBox.getSelectedId();
+    if (id >= 1 && id <= (int) presets().size())
+        proc.setCurrentProgram (id - 1);
+    else if (id > kUserPresetBase && id < kSavePresetId)
+        proc.applyUserPreset (proc.userPresets.names()[id - kUserPresetBase - 1]);
+    else if (id == kSavePresetId)
+        askUserPresetName();
+    else if (id == kDeletePresetId)
+    {
+        proc.deleteUserPreset (proc.getCurrentUserPreset()); // the settings stay as they are; the box goes back to the factory preset it was on
+    }
+    fillPresetBox();
+}
+
+void HephaestusEditor::askUserPresetName()
+{
+    auto* window = new juce::AlertWindow ("Save preset", "Name for the preset. An existing name is replaced.", juce::MessageBoxIconType::NoIcon, this);
+    window->addTextEditor ("name", proc.getCurrentUserPreset(), "");
+    window->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([safe = juce::Component::SafePointer<HephaestusEditor> (this), window] (int result)
+                                                                         {
+                                                                             if (safe == nullptr || result != 1)
+                                                                                 return;
+                                                                             const auto name = window->getTextEditorContents ("name").trim();
+                                                                             if (safe->proc.saveUserPreset (name))
+                                                                                 safe->fillPresetBox();
+                                                                         }),
+                             true);
+}
+
 void HephaestusEditor::setPresetTooltip()
 {
     const auto& list = presets();
     const int index = presetBox.getSelectedId() - 1;
-    juce::String text = "Presets. Global settings (gain, mix, stereo mode, oversampling) are kept.";
+    juce::String text = "Presets. Global settings (gain, mix, stereo mode, oversampling) are kept. \"Save current settings as...\" keeps the band settings under a name "
+                        "of your own, in a folder of yours, for every session.";
     if (juce::isPositiveAndBelow (index, (int) list.size()))
         text << "\n\n" << list[(size_t) index].name << ": " << list[(size_t) index].purpose;
+    else if (presetBox.getSelectedId() > kUserPresetBase && presetBox.getSelectedId() < kSavePresetId)
+        text << "\n\n" << presetBox.getText() << ": your own preset.";
     presetBox.setTooltip (text);
 }
 
@@ -427,6 +495,12 @@ void HephaestusEditor::resized()
     header.removeFromLeft (24);
     meterArea = header.removeFromRight (120).reduced (0, 10);
     header.removeFromRight (8);
+    {
+        // UNDO / REDO and A / B in the strip above the controls, which the captions leave free.
+        const auto strip = header.withHeight (18).translated (0, -4);
+        undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
+        abButtons.setBounds (strip.getX() + ui::UndoButtons::kWidth + 10, strip.getY(), ui::AbButtons::kWidth, strip.getHeight());
+    }
     {
         // The clear button sits right next to the meters it clears; the row is tight at the fixed editor width.
         auto h = header.withTrimmedTop (28).withHeight (28);
@@ -625,12 +699,8 @@ void HephaestusEditor::timerCallback()
         repaint (panelBounds[(size_t) Panel::band]);
     }
 
-    if (const int prog = proc.getCurrentProgram(); prog != lastProgram)
-    {
-        lastProgram = prog;
-        presetBox.setSelectedId (prog + 1, juce::dontSendNotification);
-        setPresetTooltip();
-    }
+    if (juce::String (proc.getCurrentProgram()) + "|" + proc.getCurrentUserPreset() != lastPresetKey)
+        fillPresetBox();
 
     // The notes depend on the parameters and the solos, which change without the editor's help.
     if (const auto text = notesSignature(); text != shownNotes)

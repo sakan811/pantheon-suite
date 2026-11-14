@@ -32,4 +32,7 @@ inline const std::vector<ui::Preset>& presets()
     };
     return list;
 }
+
+// A preset leaves how you judge it alone: LEVEL MATCH stays as it was.
+inline bool keepsParameter (const juce::String& pid) { return pid == id::match; }
 } // namespace hera

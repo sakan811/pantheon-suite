@@ -37,8 +37,8 @@ Tests/                     Tests.cpp (DSP), UiCheck.cpp (editor on the real proc
 ## Rules that keep it correct
 
 **A band that does nothing is not run.** `isIdentity()` (off, or a bell or shelf under `kIdentityDb`) takes it out of the chain; this is what makes the idle sound bit-exact even
-when the compiler fuses multiplies and adds (a biquad at 0 dB is the identity only on paper). The engine keeps running a band whose gain is on its way to 0 (`fading`) so a gain
-taken to 0 or a band switched off fades instead of cutting; once the smoothed gain reaches 0 exactly (the last bit is snapped) it stops and is reset. A band that starts, or whose type,
+when the compiler fuses multiplies and adds (a biquad at 0 dB is the identity only on paper). The engine keeps running a band that is on its way out (`fading`) so a gain
+taken to 0 or a band switched off fades instead of cutting; once the smoothed gain reaches 0 exactly (the last bit is snapped) it stops and is reset. A high-pass, low-pass or notch has no gain to take to 0, so it fades `BandState::mix` (1 = the filter, 0 = the plain input; the sample loop adds `mix * (filtered - input)`, and `Convolver::design` raises the magnitude to `mix`); the same snap applies. A band that starts, or whose type,
 target or slope changes, starts from clean filters and from 0 dB, and then moves to its gain like any change.
 
 **The tick.** Smoothing, the output gain and the linear kernels step every `Engine::kTick` = 64 samples, counted from the start; a segment never crosses one. That is what makes the output the
@@ -67,6 +67,12 @@ curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCh
 **GAIN MATCH and DELTA compare with the input as the output hears it.** In linear phase the dry input is delayed by the latency in a ring (`dryL` / `dryR`, sized in `prepare()`; the Convolver's idle delay is the same integer, so DELTA with no band on is exactly 0); in minimum phase it is the input. The energies in and out are summed per sample and read at the tick (never per block: test [9] pins bit-for-bit block independence with the match on); the match gain is exactly 1.0 with the parameter off, so the idle output stays bit-exact (test [2]). It is applied before OUTPUT. DELTA is `Engine::delta`, an atomic the editor sets, not a parameter: never saved, ended by the editor's destructor, and it shows in the notes.
 
 **PASTE takes free bands, never bands in use.** `pasteBands()` (Parameters.h) reads `pdsp::link::decode`; a band is free when `isIdentity()` (so the default high-pass, low-pass, shelves and bells all are), kinds go to their own end first (`slotOrder`), a link `lowCut` is Apollo's high-pass, left and right bands and fill bands are skipped and counted. The `curve` line becomes the display's reference (`CurveView::setReference`, kept in the state as `referenceCurve`, drawn dashed at the track's level: the analyser's mean over 200 Hz to 5 kHz without the tilt, which is added back). Themis' wording names Apollo (`ThemisUi.h`'s `linkDestination`): run Themis' `ThemisSmoke` when you change what it writes.
+
+**LISTEN is `Engine::listen`, an atomic like `delta`.** The band (0 to 7, or -1) whose region is heard alone, through a band-pass at its frequency and Q placed after the bands and GAIN MATCH, before OUTPUT. The display's LISTEN button (`CurveView::setListen`, which follows `select()`) sets it through `onListen`; the editor's destructor ends it; it shows in the notes. Double-clicking empty glass calls `CurveView::addBandAt` (first free bell slot, `slotOrder`). Every change of a parameter from the display that is not a drag goes through `setWithGesture`.
+
+**Bypass keeps the latency.** `processBlockBypassed` delays the audio by `getLatencySamples()` through `pdsp::BypassDelay` (prepared for the longest latency, `linearSizesFor (fs).latency()`); `ApolloUiCheck` pins it.
+
+**Linear-phase magnitudes are clamped at 0.** `Convolver::design` takes `sqrt (max (power, 0))`: a notch on a bin's exact frequency sums to a hair below 0 and its root was NaN (test [10]).
 
 **Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()` (the FFT tables, the rings, the kernels). A change of phase mode restarts the equaliser (`configure()`).
 

@@ -19,23 +19,29 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
 
     static constexpr int kHistory = 600; // readings at 10 Hz: a minute
 
     ui::Knob trim, referenceTrim;
     ui::Choice listen;
-    ui::Toggle polarity, reference, levelMatch;
-    juce::TextButton loadButton { "LOAD" }, restartButton { "RESTART" }, resetButton { "RESET" };
+    ui::Toggle polarity, reference, levelMatch, autoReset;
+    juce::TextButton loadButton { "LOAD" }, restartButton { "RESTART" }, resetButton { "RESET" }, autoTrimButton { "AUTO TRIM" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { hermes::guideTitle(), hermes::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return hermes::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     void loadFile (const juce::File&);                                              // what LOAD does with the file that was picked (the checks call it too)
+    void seekTo (juce::Point<int>);                                                 // a click on the reference's bar (the checks call it too)
+    juce::Point<int> barPoint (float fraction) const { const auto b = referenceBar(); return { (int) (b.getX() + fraction * b.getWidth()), (int) b.getCentreY() }; }
     void tickDisplay() { timerCallback(); }                                         // one reading of the meters (a snapshot calls it as the timer would)
     juce::String status;                                                            // what the last LOAD said, if it failed
 
 private:
     void timerCallback() override;
+    juce::Rectangle<float> referenceBar() const; // the reference's progress bar: a click or a drag on it seeks
+    bool seeking = false;
     hermes::AdviceInput adviceInput() const;
 
     HermesProcessor& proc;

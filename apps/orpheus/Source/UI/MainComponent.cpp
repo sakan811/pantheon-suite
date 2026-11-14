@@ -8,7 +8,8 @@ namespace orpheus::gui
 // ---- background analysis -------------------------------------------------------------------------------------------------
 struct MainComponent::Job : public juce::Thread
 {
-    Job (MainComponent& o, std::vector<float> samples, double rate, int id) : juce::Thread ("Orpheus analysis"), owner (o), mono (std::move (samples)), sampleRate (rate), serial (id) {}
+    Job (MainComponent& o, std::vector<float> samples, double rate, int id, int voiceRange)
+        : juce::Thread ("Orpheus analysis"), owner (o), mono (std::move (samples)), sampleRate (rate), serial (id), range (voiceRange) {}
     ~Job() override { stopThread (20000); }
 
     void run() override
@@ -17,7 +18,7 @@ struct MainComponent::Job : public juce::Thread
                                                                               {
                                                                                   progress.store (p);
                                                                                   return ! threadShouldExit();
-                                                                              }));
+                                                                              }, range));
         if (threadShouldExit())
             return;
         // identified by a number, not by address: a newer job can be allocated where this one was
@@ -31,7 +32,7 @@ struct MainComponent::Job : public juce::Thread
     MainComponent& owner;
     std::vector<float> mono;
     double sampleRate;
-    int serial;
+    int serial, range;
     std::atomic<float> progress { 0.0f };
 };
 
@@ -52,15 +53,18 @@ MainComponent::MainComponent (bool withAudioDevice)
 
     addAndMakeVisible (roll);
     addAndMakeVisible (navigator);
-    for (auto* b : { &zoomOutButton, &zoomInButton, &fitButton })
+    for (auto* b : { &zoomOutButton, &zoomInButton, &fitButton, &zoomSelButton })
         addAndMakeVisible (*b);
     roll.onSelectionChanged = [this] { refreshInspector(); updateLoop(); };
     roll.onEdited = [this] { refreshInspector(); };
     roll.onSeek = [this] (juce::int64 s) { seek (s); };
 
-    for (auto* b : { &openButton, &saveButton, &exportButton, &undoButton, &redoButton, &playButton, &rewindButton, &loopButton, &originalButton, &snapButton, &correctAllButton,
-                     &detectKeyButton, &detectTuneButton, &resetAllButton, &snapNoteButton, &straightenButton, &splitButton, &mergeButton, &resetNoteButton })
+    for (auto* b : { &openButton, &saveButton, &saveAsButton, &exportButton, &undoButton, &redoButton, &playButton, &rewindButton, &loopButton, &originalButton, &snapButton, &correctAllButton,
+                     &detectKeyButton, &detectTuneButton, &resetAllButton, &snapNoteButton, &straightenButton, &splitButton, &mergeButton, &resetNoteButton,
+                     &reanalyseButton, &copyButton, &pasteButton, &selectOffButton })
         addAndMakeVisible (*b);
+    addAndMakeVisible (offBox);
+    addAndMakeVisible (rangeBox);
     addAndMakeVisible (guideButton);
 
     styleToggle (loopButton);
@@ -68,8 +72,9 @@ MainComponent::MainComponent (bool withAudioDevice)
     styleToggle (snapButton);
     snapButton.setToggleState (true, juce::dontSendNotification);
 
-    openButton.setTooltip ("Open an audio file, or a saved project (Cmd/Ctrl+O). You can also drop one on the window.");
-    saveButton.setTooltip ("Save the edit as a project next to the audio (Cmd/Ctrl+S). The audio itself is not copied.");
+    openButton.setTooltip ("Open an audio file, or a saved project (Cmd/Ctrl+O), or one of the last ones. You can also drop a file on the window.");
+    saveButton.setTooltip ("Save the edit to its project (Cmd/Ctrl+S); the first time it asks where. The audio itself is not copied.");
+    saveAsButton.setTooltip ("Save the edit as a new project file (Shift+Cmd/Ctrl+S).");
     exportButton.setTooltip ("Write the corrected audio as a 24-bit WAV (Cmd/Ctrl+E).");
     undoButton.setTooltip ("Undo (Cmd/Ctrl+Z)");
     redoButton.setTooltip ("Redo (Shift+Cmd/Ctrl+Z)");
@@ -82,11 +87,14 @@ MainComponent::MainComponent (bool withAudioDevice)
     zoomOutButton.setTooltip ("Zoom out in time (-). Drag the edges of the window in the bar on the left to zoom as well.");
     zoomInButton.setTooltip ("Zoom in in time (+)");
     fitButton.setTooltip ("Show the first part of the recording at a readable size (F)");
+    zoomSelButton.setTooltip ("Zoom to the selected notes, in time and in pitch (Z)");
     zoomOutButton.onClick = [this] { roll.zoomTime (1.0 / 1.5, roll.getWidth() * 0.5); };
     zoomInButton.onClick = [this] { roll.zoomTime (1.5, roll.getWidth() * 0.5); };
     fitButton.onClick = [this] { roll.fitToSession(); };
-    openButton.onClick = [this] { chooseAndOpen(); };
-    saveButton.onClick = [this] { chooseAndSave(); };
+    zoomSelButton.onClick = [this] { roll.zoomToSelection(); };
+    openButton.onClick = [this] { showOpenMenu(); };
+    saveButton.onClick = [this] { save(); };
+    saveAsButton.onClick = [this] { saveAs(); };
     exportButton.onClick = [this] { chooseAndExport(); };
     undoButton.onClick = [this] { undo(); };
     redoButton.onClick = [this] { redo(); };
@@ -121,10 +129,23 @@ MainComponent::MainComponent (bool withAudioDevice)
         roll.repaint();
     };
 
+    for (int i = 0; i < kNumVoiceRanges; ++i)
+        rangeBox.addItem (juce::String ("Voice: ") + kVoiceRangeNames[i], i + 1);
+    rangeBox.setTooltip ("Which voices the pitch tracker looks for. Wide 65-1100 Hz; Low 65-400 (bass, baritone); Mid 100-700 (most singers); High 200-1100 (soprano). "
+                         "A narrower range cannot jump an octave to a pitch outside it. It is used the next time the notes are found: RE-ANALYSE.");
+    rangeBox.onChange = [this]
+    {
+        session.voiceRange = rangeBox.getSelectedId() - 1;
+        if (session.isAnalysed() && session.voiceRange != session.analysedRange)
+            say ("Press RE-ANALYSE to find the notes again with this range");
+    };
+    reanalyseButton.setTooltip ("Find the notes again with the chosen voice range. Every edit is taken back.");
+    reanalyseButton.onClick = [this] { reanalyse(); };
+
     for (auto* k : { &tuningKnob, &glideKnob, &amountKnob, &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob })
         addAndMakeVisible (*k);
 
-    setupKnob (tuningKnob, "Tuning A4", 415.0, 466.0, 0.1, 440.0, " Hz", 1, "The reference pitch of the song. Detect A4 reads it from the notes (a song recorded at 432 Hz, or a singer who is flat all the way through).");
+    setupKnob (tuningKnob, "Tuning A4", kMinA4Hz, kMaxA4Hz, 0.1, 440.0, " Hz", 1, "The reference pitch of the song. Detect A4 reads it from the notes (a song recorded at 432 Hz, or a singer who is flat all the way through).");
     tuningKnob.onGestureStart = [this] { session.pushUndo(); };
     tuningKnob.onChange = [this] (double v) { session.key.a4Hz = v; ++session.version; roll.repaint(); };
 
@@ -230,9 +251,38 @@ MainComponent::MainComponent (bool withAudioDevice)
     splitButton.onClick = [this] { juce::int64 a, b; if (roll.selectionSpan (a, b)) { const auto at = playback.position(); roll.splitAtSample (at > a && at < b ? at : (a + b) / 2); } };
     mergeButton.onClick = [this] { roll.mergeSelected(); };
 
+    copyButton.setTooltip ("Copy the settings of the selected note: shift, drift, vibrato, formant and gain (Cmd/Ctrl+C)");
+    pasteButton.setTooltip ("Put the copied settings on the selected notes (Cmd/Ctrl+V). The shift is the same distance from each note's own pitch.");
+    copyButton.onClick = [this] { copySettings(); };
+    pasteButton.onClick = [this] { pasteSettings(); };
+    for (const int cents : { 5, 10, 15, 25, 50 })
+        offBox.addItem (juce::String (cents) + " ct", cents);
+    offBox.setSelectedId (15, juce::dontSendNotification);
+    offBox.setTooltip ("How far from the nearest note of the scale counts as out of tune.");
+    selectOffButton.setTooltip ("Select the notes whose pitch, as it is now, is more than this far from the nearest note of the scale (the amber and red ones).");
+    selectOffButton.onClick = [this]
+    {
+        const double limit = offBox.getSelectedId();
+        const int found = roll.selectOffScale (limit);
+        say (found > 0 ? juce::String (found) + (found == 1 ? " note is" : " notes are") + " off by more than " + numberText (limit) + " ct"
+                       : "No note is off by more than " + numberText (limit) + " ct");
+    };
+
+    // ---- files ---------------------------------------------------------------------------------------------------------
+    ask = [this] (const juce::String& message, const juce::String& okText, std::function<void()> onOk)
+    {
+        juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::WarningIcon, "Orpheus", message, okText, "Cancel", this,
+                                            juce::ModalCallbackFunction::create ([onOk] (int result)
+                                                                                 {
+                                                                                     if (result != 0 && onOk)
+                                                                                         onOk();
+                                                                                 }));
+    };
+
     // ---- audio --------------------------------------------------------------------------------------------------------
     if (withAudioDevice)
     {
+        recent = RecentFiles (RecentFiles::defaultStore()); // the tests and the snapshot keep the list in memory only
         audioError = deviceManager.initialise (0, 2, nullptr, true);
         audioOn = audioError.isEmpty();
         if (audioOn)
@@ -271,9 +321,23 @@ void MainComponent::setupKnob (ui::ValueKnob& knob, const juce::String& caption,
 // ---- files ------------------------------------------------------------------------------------------------------------------
 void MainComponent::loadFile (const juce::File& f)
 {
+    askToDiscard ("Open " + f.getFileName() + " and lose them?", [this, f] { openNow (f); });
+}
+
+void MainComponent::reopenLast()
+{
+    if (const auto f = recent.last(); f != juce::File())
+        openNow (f);
+}
+
+// Everything that can fail is done before the open recording is touched: a bad file dropped on the window, or a project for another take,
+// must not cancel the analysis that is running or stop the playback.
+void MainComponent::openNow (const juce::File& f)
+{
     juce::File audio = f;
     std::unique_ptr<juce::XmlElement> project;
-    if (f.hasFileExtension ("orpheus"))
+    const bool isProject = f.hasFileExtension ("orpheus");
+    if (isProject)
     {
         project = juce::XmlDocument::parse (f);
         if (project == nullptr || ! project->hasTagName ("Orpheus"))
@@ -281,36 +345,55 @@ void MainComponent::loadFile (const juce::File& f)
             showError (f.getFileName() + " is not an Orpheus project.");
             return;
         }
-        audio = juce::File (project->getStringAttribute ("source"));
+        audio = Session::sourceOf (*project, f);
         if (! audio.existsAsFile())
         {
             showError ("The audio of this project is not where it was:\n" + audio.getFullPathName());
             return;
         }
     }
-    job.reset();
-    transport.stop();
+    juce::AudioBuffer<float> samples;
+    double rate = 0.0;
     juce::String error;
-    if (! session.load (audio, error))
+    if (! Session::read (audio, samples, rate, error))
     {
         showError (error);
         return;
     }
+    if (isProject)
+    {
+        const auto fingerprint = project->getStringAttribute ("fingerprint");
+        if (fingerprint.isNotEmpty() && fingerprint != Session::fingerprintOf (Session::mixDown (samples)))
+        {
+            showError (f.getFileName() + " was made for a different recording than\n" + audio.getFullPathName() + "\n(the audio is not the same any more). Nothing was opened.");
+            return;
+        }
+        session.voiceRange = juce::jlimit (0, kNumVoiceRanges - 1, project->getIntAttribute ("range"));
+    }
+    job.reset();
+    transport.stop();
+    session.adoptAudio (std::move (samples), rate, audio);
     pendingProject = std::move (project);
-    projectFile = f.hasFileExtension ("orpheus") ? f : juce::File();
+    reanalysing = false;
+    projectFile = isProject ? f : juce::File();
+    recent.add (f);
+    copied.reset();
     if (audioOn)
         transport.setSource (&playback, 0, nullptr, session.sampleRate);
     playback.setNextReadPosition (0);
     roll.clearSelection();
+    refreshScalePanel();
     startAnalysis();
+    updateTitle();
 }
 
 void MainComponent::startAnalysis()
 {
     roll.overlayText = "Analysing " + session.file.getFileName();
     roll.overlayProgress = 0.0f;
-    job = std::make_unique<Job> (*this, session.mono, session.sampleRate, ++analysisSerial);
+    job = std::make_unique<Job> (*this, session.mono, session.sampleRate, ++analysisSerial, session.voiceRange);
     job->startThread();
+    refreshInspector();
     roll.repaint();
 }
 
@@ -321,6 +404,7 @@ void MainComponent::analysisDone (Session::Analysis&& result)
     {
         roll.overlayText = "Could not analyse this audio";
         roll.overlayProgress = -1.0f;
+        refreshInspector();
         return;
     }
     session.adopt (std::move (result));
@@ -330,24 +414,41 @@ void MainComponent::analysisDone (Session::Analysis&& result)
             showError ("This project does not belong to that recording. The audio was opened without it.");
         pendingProject.reset();
     }
+    else if (reanalysing && projectFile != juce::File())
+        session.markUnsaved(); // the project on disk has the old notes: the new ones are a change to it
+    reanalysing = false;
     roll.overlayText = {};
     roll.overlayProgress = -1.0f;
     roll.fitToSession();
     refreshScalePanel();
     refreshInspector();
     updateLoop();
+    updateTitle();
     repaint();
 }
 
 void MainComponent::analyseNow()
 {
     job.reset();
-    session.adopt (Session::analyse (session.mono, session.sampleRate));
+    session.adopt (Session::analyse (session.mono, session.sampleRate, {}, session.voiceRange));
     roll.overlayText = {};
     roll.overlayProgress = -1.0f;
     roll.fitToSession();
     refreshScalePanel();
     refreshInspector();
+}
+
+void MainComponent::reanalyse()
+{
+    if (! session.isLoaded() || job != nullptr)
+        return;
+    askToDiscard ("Finding the notes again takes every edit back.",
+                  [this]
+                  {
+                      pendingProject.reset();
+                      reanalysing = true;
+                      startAnalysis();
+                  });
 }
 
 void MainComponent::say (const juce::String& message)
@@ -359,7 +460,63 @@ void MainComponent::say (const juce::String& message)
 
 void MainComponent::showError (const juce::String& message)
 {
-    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Orpheus", message);
+    if (reportError)
+        reportError (message);
+    else
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Orpheus", message);
+}
+
+void MainComponent::askToDiscard (const juce::String& action, std::function<void()> proceed)
+{
+    if (! session.dirty())
+    {
+        proceed();
+        return;
+    }
+    ask ("There are edits that are not saved. " + action, "Discard", std::move (proceed));
+}
+
+juce::String MainComponent::windowTitle() const
+{
+    if (! session.isLoaded())
+        return "Orpheus";
+    return "Orpheus - " + (projectFile != juce::File() ? projectFile : session.file).getFileName() + (session.dirty() ? " *" : "");
+}
+
+void MainComponent::updateTitle()
+{
+    const auto title = windowTitle();
+    if (title != lastTitle)
+    {
+        lastTitle = title;
+        if (onTitleChanged)
+            onTitleChanged();
+    }
+}
+
+void MainComponent::showOpenMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, "Open file...");
+    const auto files = recent.files();
+    if (! files.isEmpty())
+    {
+        menu.addSeparator();
+        for (int i = 0; i < files.size(); ++i)
+            menu.addItem (100 + i, files[i].getFileName() + "    " + files[i].getParentDirectory().getFileName());
+        menu.addSeparator();
+        menu.addItem (2, "Clear this list");
+    }
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (openButton),
+                        [this, files] (int id)
+                        {
+                            if (id == 1)
+                                chooseAndOpen();
+                            else if (id == 2)
+                                recent.clear();
+                            else if (id >= 100 && id - 100 < files.size())
+                                loadFile (files[id - 100]);
+                        });
 }
 
 void MainComponent::chooseAndOpen()
@@ -373,9 +530,24 @@ void MainComponent::chooseAndOpen()
                           });
 }
 
-void MainComponent::chooseAndSave()
+bool MainComponent::save()
 {
-    if (! session.isAnalysed())
+    if (! session.isAnalysed() || job != nullptr)
+        return false;
+    if (projectFile == juce::File())
+    {
+        saveAs();
+        return false;
+    }
+    const bool ok = saveTo (projectFile);
+    if (ok)
+        say ("Saved " + projectFile.getFileName());
+    return ok;
+}
+
+void MainComponent::saveAs()
+{
+    if (! session.isAnalysed() || job != nullptr)
         return;
     const auto start = projectFile != juce::File() ? projectFile : session.file.withFileExtension ("orpheus");
     chooser = std::make_unique<juce::FileChooser> ("Save project", start, "*.orpheus");
@@ -383,14 +555,26 @@ void MainComponent::chooseAndSave()
                           [this] (const juce::FileChooser& fc)
                           {
                               auto f = fc.getResult();
-                              if (f == juce::File())
-                                  return;
-                              f = f.withFileExtension ("orpheus");
-                              if (session.toXml()->writeTo (f))
-                                  projectFile = f;
-                              else
-                                  showError ("Cannot write " + f.getFullPathName());
+                              if (f != juce::File())
+                                  saveTo (f.withFileExtension ("orpheus"));
                           });
+}
+
+// Written to a temporary file and moved over the project, so a failed save does not destroy the last good one.
+bool MainComponent::saveTo (const juce::File& f)
+{
+    juce::TemporaryFile temp (f);
+    if (! session.toXml (f)->writeTo (temp.getFile()) || ! temp.overwriteTargetFileWithTemporary())
+    {
+        showError ("Cannot write " + f.getFullPathName());
+        return false;
+    }
+    projectFile = f;
+    session.markSaved();
+    recent.add (f);
+    updateTitle();
+    repaint();
+    return true;
 }
 
 void MainComponent::chooseAndExport()
@@ -402,13 +586,29 @@ void MainComponent::chooseAndExport()
     chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
                           [this] (const juce::FileChooser& fc)
                           {
-                              auto f = fc.getResult();
-                              if (f == juce::File())
-                                  return;
-                              juce::String error;
-                              if (! session.exportWav (f.withFileExtension ("wav"), error))
-                                  showError (error);
+                              if (fc.getResult() != juce::File())
+                                  exportTo (fc.getResult());
                           });
+}
+
+void MainComponent::exportTo (const juce::File& chosen)
+{
+    const auto target = chosen.withFileExtension ("wav");
+    const auto write = [this, target]
+    {
+        juce::String error;
+        if (session.exportWav (target, error))
+            say ("Exported " + target.getFileName());
+        else
+            showError (error);
+    };
+    const float peak = session.outputPeak();
+    if (peak > 1.0001f)
+        ask ("The corrected audio peaks at +" + numberText (20.0 * std::log10 ((double) peak), 1) + " dB. A WAV cannot hold more than 0 dB, so the loudest parts "
+             "would be clipped. Turn GAIN down on the loud notes first, or export it as it is.",
+             "Export anyway", write);
+    else
+        write();
 }
 
 // ---- transport ------------------------------------------------------------------------------------------------------------
@@ -484,6 +684,7 @@ void MainComponent::applyToSelection (const std::function<void (Note&)>& change)
     for (const auto i : which)
     {
         change (session.notes[i]);
+        session.notes[i].clampTarget();
         first = std::min (first, session.notes[i].start);
         last = std::max (last, session.notes[i].end);
     }
@@ -491,6 +692,45 @@ void MainComponent::applyToSelection (const std::function<void (Note&)>& change)
     roll.repaint();
     // the knobs that were not touched follow the new state (the shift moves when CORRECT does)
     refreshInspector();
+}
+
+void MainComponent::copySettings()
+{
+    const auto which = roll.selectedIndices();
+    if (which.size() != 1)
+    {
+        say ("Select one note to copy its settings");
+        return;
+    }
+    const auto& n = session.notes[which[0]];
+    copied = NoteSettings { n.shift(), n.drift, n.vibrato, n.formant, n.gainDb };
+    refreshInspector();
+    say ("Copied: shift " + numberText (n.shift() * 100.0) + " ct, drift " + numberText (n.drift * 100.0) + " %, vibrato " + numberText (n.vibrato * 100.0) + " %, formant "
+         + numberText (n.formant, 1) + " st, gain " + numberText (n.gainDb, 1) + " dB");
+}
+
+void MainComponent::pasteSettings()
+{
+    if (! copied.has_value())
+    {
+        say ("Nothing copied yet: select a note and press COPY");
+        return;
+    }
+    if (roll.selectedIndices().empty())
+    {
+        say ("Select the notes to paste onto");
+        return;
+    }
+    session.pushUndo();
+    applyToSelection ([c = *copied] (Note& n)
+                      {
+                          n.target = n.centre + c.shift; // the same distance from this note's own pitch, not the same pitch
+                          n.drift = c.drift;
+                          n.vibrato = c.vibrato;
+                          n.formant = c.formant;
+                          n.gainDb = c.gainDb;
+                      });
+    say ("Pasted onto " + juce::String ((int) roll.selectedIndices().size()) + (roll.selectedIndices().size() == 1 ? " note" : " notes"));
 }
 
 void MainComponent::refreshScalePanel()
@@ -501,6 +741,7 @@ void MainComponent::refreshScalePanel()
     tuningKnob.setValue (session.key.a4Hz);
     glideKnob.setValue (session.glideMs);
     amountKnob.setValue (correctAmount);
+    rangeBox.setSelectedId (session.voiceRange + 1, juce::dontSendNotification);
 }
 
 void MainComponent::refreshInspector()
@@ -516,7 +757,12 @@ void MainComponent::refreshInspector()
     undoButton.setEnabled (session.canUndo());
     redoButton.setEnabled (session.canRedo());
     const bool ready = session.isAnalysed() && job == nullptr;
-    for (auto* b : { &saveButton, &exportButton, &correctAllButton, &detectKeyButton, &detectTuneButton, &resetAllButton, &playButton, &rewindButton })
+    reanalyseButton.setEnabled (session.isLoaded() && job == nullptr);
+    copyButton.setEnabled (which.size() == 1);
+    pasteButton.setEnabled (any && copied.has_value());
+    selectOffButton.setEnabled (ready);
+    zoomSelButton.setEnabled (any);
+    for (auto* b : { &saveButton, &saveAsButton, &exportButton, &correctAllButton, &detectKeyButton, &detectTuneButton, &resetAllButton, &playButton, &rewindButton })
         b->setEnabled (ready);
 
     const auto spread = [&] (auto value, double& lo, double& hi)
@@ -577,7 +823,9 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
     if (cmd && character == 'o') { chooseAndOpen(); return true; }
-    if (cmd && character == 's') { chooseAndSave(); return true; }
+    if (cmd && character == 's') { mods.isShiftDown() ? saveAs() : (void) save(); return true; }
+    if (cmd && character == 'c') { copySettings(); return true; }
+    if (cmd && character == 'v') { pasteSettings(); return true; }
     if (cmd && character == 'e') { chooseAndExport(); return true; }
     if (cmd && character == 'a') { roll.selectAll(); return true; }
     if (cmd && (character == '+' || character == '=')) { roll.zoomTime (1.4, roll.getWidth() * 0.5); return true; }
@@ -590,6 +838,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (code == juce::KeyPress::spaceKey) { togglePlay(); return true; }
     if (code == juce::KeyPress::homeKey) { seek (0); return true; }
     if (character == 'f' && ! mods.isAnyModifierKeyDown()) { roll.fitToSession(); return true; }
+    if (character == 'z' && ! mods.isAnyModifierKeyDown()) { roll.zoomToSelection(); return true; }
     if (code == juce::KeyPress::tabKey) { originalButton.setToggleState (! originalButton.getToggleState(), juce::sendNotification); return true; }
     if (code == juce::KeyPress::backspaceKey || code == juce::KeyPress::deleteKey) { roll.resetSelected(); return true; }
     if (code == juce::KeyPress::returnKey) { roll.snapSelected(); return true; }
@@ -657,6 +906,7 @@ void MainComponent::timerCallback()
     if (playing || lastVersion != session.version.load())
     {
         lastVersion = session.version.load();
+        updateTitle();
         repaint (timeBox);
         roll.repaint();
         undoButton.setEnabled (session.canUndo());
@@ -671,8 +921,8 @@ AdviceInput MainComponent::adviceInput() const
     in.busy = job != nullptr;
     in.hasAudio = session.isAnalysed();
     in.playingOriginal = ! playback.corrected.load();
-    in.hasEdits = session.canUndo();
-    in.projectSaved = projectFile != juce::File();
+    in.unsaved = session.dirty();
+    in.outputPeakDb = session.isAnalysed() ? 20.0 * std::log10 (std::max (1.0e-6, (double) session.outputPeak())) : -120.0;
     for (const auto& n : session.notes)
     {
         in.largestShiftSemitones = std::max (in.largestShiftSemitones, (double) std::fabs (n.shift()));
@@ -704,8 +954,8 @@ void MainComponent::resized()
     place (snapButton, 64, 14);
     place (guideButton, 64, 22);
     // right-aligned: file and history
-    auto right = h.removeFromRight (400);
-    for (auto* b : { &openButton, &saveButton, &exportButton })
+    auto right = h.removeFromRight (440);
+    for (auto* b : { &openButton, &saveButton, &saveAsButton, &exportButton })
         b->setBounds (right.removeFromLeft (76).withSizeKeepingCentre (72, 30)), right.removeFromLeft (4);
     right.removeFromLeft (10);
     undoButton.setBounds (right.removeFromLeft (60).withSizeKeepingCentre (56, 30));
@@ -713,12 +963,13 @@ void MainComponent::resized()
 
     r.removeFromBottom (8);
     noteStrip = r.removeFromBottom (ui::kNoteStripHeight + 6).withTrimmedTop (6).reduced (8, 0);
-    auto bottom = r.removeFromBottom (168).reduced (8, 6);
+    auto bottom = r.removeFromBottom (204).reduced (8, 6);
     scalePanel = bottom.removeFromLeft (500);
     bottom.removeFromLeft (8);
     notePanel = bottom;
     auto navRow = r.removeFromBottom (46).reduced (8, 4);
     fitButton.setBounds (navRow.removeFromRight (56).withSizeKeepingCentre (52, 28));
+    zoomSelButton.setBounds (navRow.removeFromRight (56).withSizeKeepingCentre (52, 28));
     zoomInButton.setBounds (navRow.removeFromRight (40).withSizeKeepingCentre (36, 28));
     zoomOutButton.setBounds (navRow.removeFromRight (40).withSizeKeepingCentre (36, 28));
     navRow.removeFromRight (4);
@@ -739,6 +990,11 @@ void MainComponent::resized()
         detectTuneButton.setBounds (row.removeFromLeft (94));
         p.removeFromTop (8);
         auto knobs = p.removeFromTop (84);
+        p.removeFromTop (8);
+        auto voiceRow = p.removeFromTop (28);
+        rangeBox.setBounds (voiceRow.removeFromLeft (150));
+        voiceRow.removeFromLeft (6);
+        reanalyseButton.setBounds (voiceRow.removeFromLeft (110));
         tuningKnob.setBounds (knobs.removeFromLeft (92));
         glideKnob.setBounds (knobs.removeFromLeft (92));
         amountKnob.setBounds (knobs.removeFromLeft (92));
@@ -756,6 +1012,16 @@ void MainComponent::resized()
         (void) info;
         p.removeFromTop (6);
         auto buttons = p.removeFromRight (96);
+        auto row = p.removeFromBottom (28);
+        p.removeFromBottom (8);
+        copyButton.setBounds (row.removeFromLeft (70));
+        row.removeFromLeft (4);
+        pasteButton.setBounds (row.removeFromLeft (70));
+        row.removeFromLeft (24);
+        offLabelArea = row.removeFromLeft (206);
+        offBox.setBounds (row.removeFromLeft (74));
+        row.removeFromLeft (4);
+        selectOffButton.setBounds (row.removeFromLeft (80));
         auto knobs = p;
         const int w = knobs.getWidth() / 6;
         for (auto* k : { &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob })
@@ -788,12 +1054,26 @@ void MainComponent::paint (juce::Graphics& g)
     const bool noticeShown = notice.isNotEmpty() && juce::Time::getMillisecondCounter() < noticeUntil;
     if (infoLine.isNotEmpty() || noticeShown)
     {
-        const auto box = notePanel.reduced (84, 9).withHeight (20).withTrimmedRight (20);
+        const auto box = notePanel.reduced (84, 9).withHeight (20).withTrimmedRight (110);
         ui::hw::drawGlass (g, box.toFloat(), 3.0f, colours::amber);
         g.setColour (colours::amber);
         g.setFont (ui::lcdFont (11.5f));
         g.drawText (noticeShown ? notice : infoLine, box.reduced (8, 0), juce::Justification::centredLeft, true);
         ui::hw::drawGlassOverlay (g, box.toFloat(), 3.0f, false);
+    }
+    ui::hw::drawLabel (g, "Select notes off by more than", offLabelArea.withTrimmedRight (8), juce::Justification::centredRight, colours::dim, 10.0f);
+
+    // the loudest sample of what would be exported: red past full scale, where a WAV clips
+    if (session.isAnalysed())
+    {
+        peakBox = notePanel.reduced (20, 9).withHeight (20).removeFromRight (150);
+        const double db = 20.0 * std::log10 (std::max (1.0e-6, (double) session.outputPeak()));
+        const bool clips = db > 0.001;
+        ui::hw::drawGlass (g, peakBox.toFloat(), 3.0f, clips ? colours::bad : colours::amber);
+        g.setColour (clips ? colours::bad : colours::amber);
+        g.setFont (ui::lcdFont (11.5f));
+        g.drawText ("OUT PEAK " + (db < -90.0 ? juce::String ("--") : (db > 0.0 ? "+" : "") + numberText (db, 1)) + " dB", peakBox.reduced (8, 0), juce::Justification::centredLeft, true);
+        ui::hw::drawGlassOverlay (g, peakBox.toFloat(), 3.0f, false);
     }
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
     if (audioError.isNotEmpty())

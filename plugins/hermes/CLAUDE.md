@@ -43,7 +43,7 @@ the length of the programme, so the meter runs on the audio thread, and the same
 
 **The reference crosses to the audio thread by a pointer.** The editor's thread (`HermesProcessor::loadReference`) builds a `Reference`, keeps the last two alive in `loaded` and gives the engine a raw pointer (`setReference`, an atomic
 store with release); the audio thread reads it with acquire once per block. Deleting the one before the previous is safe because a block never lasts that long. Do not free the previous one at once. The restart of the position
-is a flag the audio thread takes (`restart`), never a write to `position` from another thread.
+and a seek (`seekReference`, a fraction) are flags the audio thread takes (`restart`, `seekTo`), never a write to `position` from another thread; because the pointer and the flag are not one atomic, `process` also wraps `position` into the reference it just loaded (a shorter one swapped in must not be read at the old position).
 
 **The match is read at ticks.** The reference's gain follows the sound's integrated loudness, read every `kTick` = 64 samples counted from the start, not every block: that is what makes the output the same for any block size
 (test [5], with a reference playing). Anything that reads a meter inside `process` has to be read at a tick.
@@ -52,7 +52,7 @@ is a flag the audio thread takes (`restart`), never a write to `position` from a
 
 **Idle is the input.** Trim 1.0 exactly, no polarity, Stereo, A: `l = x x 1.0` and the output is the input, bit for bit (test [3]). The trim is smoothed per sample and starts at its target.
 
-**State.** The reference's path is a property of the state (`refPath`), not a parameter; a processor given the state loads the file again with `callAsync` through a `WeakReference` (the processor may be gone by then), and
+**State.** The reference's path is a property of the state (`refPath`), not a parameter; a state with no `refPath`, or whose file is gone, clears the reference (`clearReference`); a processor given a state with a file loads it again with `callAsync` through a `WeakReference` (the processor may be gone by then), and
 `prepareToPlay` loads it again if the sample rate changed.
 
 **Real time.** `Engine::process` allocates and locks nothing (the histograms are fixed arrays). **Bad samples:** NaN and infinity are replaced by 0 on the way in.
@@ -60,7 +60,7 @@ is a flag the audio thread takes (`restart`), never a write to `position` from a
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
-**Parameters.** Ids (`hermes::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`hermes::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `reset_play` (AUTO RESET, version 2, off: the processor clears the meters on the rising edge of the host's `isPlaying`; `keepsParameter` keeps it through presets); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `listenNames` is the order of `Listen`.
 
 ## DRY: where each thing lives

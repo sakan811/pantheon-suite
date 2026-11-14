@@ -13,6 +13,7 @@ public:
         setUsingNativeTitleBar (true);
         content = new orpheus::gui::MainComponent();
         setContentOwned (content, true);
+        content->onTitleChanged = [this] { setName (content->windowTitle()); };
         setResizable (true, true);
         setResizeLimits (1020, 620, 4000, 3000);
         centreWithSize (getWidth(), getHeight());
@@ -34,11 +35,21 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         window = std::make_unique<MainWindow>();
-        open (commandLine);
+        if (commandLine.unquoted().trim().isNotEmpty())
+            open (commandLine);
+        else
+            window->content->reopenLast();
     }
 
     void shutdown() override { window.reset(); }
-    void systemRequestedQuit() override { quit(); }
+    // Cmd-Q and the close button: asks first if there are edits that would be lost
+    void systemRequestedQuit() override
+    {
+        if (window == nullptr)
+            quit();
+        else
+            window->content->askToDiscard ("Quit and lose them?", [] { quit(); });
+    }
     void anotherInstanceStarted (const juce::String& commandLine) override { open (commandLine); }
 
 private:

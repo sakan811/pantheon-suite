@@ -27,6 +27,7 @@ void AtlasProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     const auto p = atlas::readParams (apvts);
     engine.prepare (sampleRate, p.phase, p.oversampling, p.lookahead);
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
+    bypassDelay.prepare (2, engine.maxLatency());
     reportedLatency = engine.latencySamples.load();
     setLatencySamples (reportedLatency.load());
 }
@@ -72,6 +73,14 @@ void AtlasProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     }
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
+}
+
+void AtlasProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    auto main = getBusBuffer (buffer, false, 0);
+    bypassDelay.process (main.getArrayOfWritePointers(), main.getNumChannels(), main.getNumSamples(), getLatencySamples());
+    for (int c = getMainBusNumOutputChannels(); c < buffer.getNumChannels(); ++c)
+        buffer.clear (c, 0, buffer.getNumSamples());
 }
 
 void AtlasProcessor::setCurrentProgram (int index)

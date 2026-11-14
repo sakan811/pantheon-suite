@@ -7,6 +7,7 @@
 #include "DSP/ReferenceMatch.h"
 
 #include <pantheon/dsp/BandLink.h>
+#include <pantheon/ui/Undo.h>
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -290,6 +291,20 @@ inline void setParameterValue (juce::AudioProcessorValueTreeState& s, const juce
         setParameter (*param, param->convertTo0to1 (value));
 }
 
+// Every band there is works on `place` (an index of `placeNames`): the display's "All bands to" menu. Returns how many bands it changed.
+inline int setAllPlacements (juce::AudioProcessorValueTreeState& s, int place)
+{
+    ui::beginUndoStep (s, "Placement");
+    int changed = 0;
+    for (int i = 0; i < maxBands; ++i)
+        if (s.getRawParameterValue (bandIds (i).on)->load() > 0.5f && juce::roundToInt (s.getRawParameterValue (bandIds (i).place)->load()) != place)
+        {
+            setParameterValue (s, bandIds (i).place, (float) place);
+            ++changed;
+        }
+    return changed;
+}
+
 inline bool isBandOn (juce::AudioProcessorValueTreeState& s, int band)
 {
     return s.getRawParameterValue (bandIds (band).on)->load() > 0.5f;
@@ -324,6 +339,7 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double
     if (slot < 0)
         return -1;
 
+    ui::beginUndoStep (s, "Add band");
     const auto& ids = bandIds (slot);
     for (auto* pid : { &ids.place, &ids.q, &ids.slope, &ids.dyn, &ids.dynMode, &ids.threshold, &ids.ratio, &ids.range, &ids.attack, &ids.release, &ids.listen })
         if (auto* param = s.getParameter (*pid))
@@ -337,7 +353,11 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double
     return slot;
 }
 
-inline void removeBand (juce::AudioProcessorValueTreeState& s, int band) { setParameterValue (s, bandIds (band).on, 0.0f); }
+inline void removeBand (juce::AudioProcessorValueTreeState& s, int band)
+{
+    ui::beginUndoStep (s, "Remove band");
+    setParameterValue (s, bandIds (band).on, 0.0f);
+}
 
 // Bands handed over as text by another plugin of the repository (pdsp::link, e.g. Themis' COPY), each into the next free slot.
 // A harmonic-fill band is not an equaliser band and is left out. Returns the slots used; `skipped` counts what did not fit.
@@ -345,6 +365,7 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
 {
     std::vector<int> slots;
     skipped = 0;
+    ui::beginUndoStep (s, "Paste bands");
     std::vector<pdsp::LinkBand> bands;
     if (! pdsp::link::decode (text.toStdString(), bands))
         return slots;
@@ -399,6 +420,7 @@ inline int freeBandSlots (juce::AudioProcessorValueTreeState& s)
 inline std::vector<int> addMatchedBands (juce::AudioProcessorValueTreeState& s, const std::vector<match::Band>& bands)
 {
     std::vector<int> slots;
+    ui::beginUndoStep (s, "Match EQ");
     for (const auto& b : bands)
     {
         const int slot = addBand (s, b.type, b.freqHz, b.gainDb);
@@ -446,6 +468,8 @@ inline void applyPreset (juce::AudioProcessorValueTreeState& s, int index)
     const auto& list = presets();
     if (! juce::isPositiveAndBelow (index, (int) list.size()))
         return;
+
+    ui::beginUndoStep (s, "Preset");
 
     // Start from defaults so presets don't inherit leftovers from the previous one.
     for (auto* param : s.processor.getParameters())

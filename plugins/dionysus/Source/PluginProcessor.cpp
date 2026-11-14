@@ -22,6 +22,7 @@ bool DionysusProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
 void DionysusProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate, dionysus::readParams (apvts).oversampling);
+    bypassDelay.prepare (2, dionysus::kMaxLatency); // the longest latency it can report (8x)
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
     reportedLatency = engine.latencySamples.load();
     setLatencySamples (reportedLatency.load());
@@ -55,6 +56,13 @@ void DionysusProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
     if (engine.latencySamples.load (std::memory_order_relaxed) != reportedLatency)
         triggerAsyncUpdate();
+}
+
+void DionysusProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+    auto main = getBusBuffer (buffer, false, 0);
+    bypassDelay.process (main.getArrayOfWritePointers(), main.getNumChannels(), main.getNumSamples(), getLatencySamples());
 }
 
 void DionysusProcessor::getStateInformation (juce::MemoryBlock& dest)

@@ -114,6 +114,19 @@ int main()
     removeBand (proc.apvts, 3);
     check (addBand (proc.apvts, BandMode::saturate, 1000.0, 3) == 3, "a freed slot is reused, and is the preferred one when asked for");
 
+    // Duplicate band: every setting is copied to the first free slot, and nothing when there is none.
+    check (duplicateBand (proc.apvts, 1) == -1, "duplicating with no free slot returns -1");
+    setParameterValue (proc.apvts, bandIds (2).on, 0.0f);
+    setParameterValue (proc.apvts, bandIds (1).amount, 0.37f);
+    setParameterValue (proc.apvts, bandIds (1).character, 1.0f);
+    setParameterValue (proc.apvts, bandIds (1).rebuild, 0.6f);
+    const int copy = duplicateBand (proc.apvts, 1);
+    bool same = copy == 2 && isBandOn (proc.apvts, 2);
+    for (auto id : { &BandIds::mode, &BandIds::lo, &BandIds::hi, &BandIds::drive, &BandIds::amount, &BandIds::tone, &BandIds::adapt, &BandIds::rebuild, &BandIds::character })
+        same = same && std::fabs (value (proc, bandIds (1).*id) - value (proc, bandIds (2).*id)) < 1.0e-3f;
+    check (same, fmt ("Duplicate band copies mode, range and every knob into the first free slot (%d)", copy));
+    check (duplicateBand (proc.apvts, copy) == -1, "...and is refused again once the slots are full");
+
     std::printf ("\nLatency follows oversampling (processor level)\n");
     {
         HephaestusProcessor p2;
@@ -138,6 +151,29 @@ int main()
             previous = p2.getLatencySamples();
         }
         check (ok, "reported latency by oversampling mode (0 = off):" + line);
+
+        // The host bypasses a plugin that reports latency (the AU path): the audio must still come out that many samples late.
+        {
+            const int latency = p2.getLatencySamples();
+            const int total = 512 * ((latency + 512) / 512 + 2);
+            std::vector<float> out ((size_t) total, 0.0f);
+            for (int start = 0; start < total; start += 512)
+            {
+                buffer.clear();
+                if (start == 0)
+                    buffer.setSample (0, 100, 1.0f), buffer.setSample (1, 100, -0.5f);
+                p2.processBlockBypassed (buffer, midi);
+                for (int i = 0; i < 512; ++i)
+                    out[(size_t) (start + i)] = buffer.getSample (0, i);
+            }
+            int at = -1;
+            for (int i = 0; i < total; ++i)
+                if (std::fabs (out[(size_t) i]) > 0.5f)
+                    at = i;
+            check (latency > 0 && at == 100 + latency,
+                   fmt ("a bypassed block comes out delayed by the reported latency: impulse at 100 -> %d (latency %d)", at, latency));
+            check (std::fabs (p2.getTailLengthSeconds() - (double) latency / 48000.0) < 1.0e-9, "the tail is the latency (the delayed audio is still to play when the input stops)");
+        }
 
         // An Octave band adds its generator's latency, and only while a band uses it.
         setParameterValue (p2.apvts, id::oversampling, 0.0f);
@@ -455,6 +491,129 @@ int main()
         host.engine.monitor.regions = 0u;
         check (editor.guide().isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
                "the GUIDE button is there and its text says what the plugin is not for");
+    }
+
+    std::printf ("\nUser presets\n");
+    {
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("hephaestus-uicheck-presets");
+        folder.deleteRecursively();
+        HephaestusProcessor host;
+        host.userPresets = hep::UserPresets (folder);
+        host.setPlayConfigDetails (2, 2, 48000.0, 512);
+        host.prepareToPlay (48000.0, 512);
+
+        check (host.userPresets.names().isEmpty(), "no user presets at first");
+        applyPreset (host.apvts, 1);
+        setParameterValue (host.apvts, id::outGain, -3.0f); // a session-wide control: not part of a preset
+        const float tone = value (host, bandIds (0).tone), amount = value (host, bandIds (0).amount);
+        check (host.saveUserPreset ("  My bass: warm/thick  ") && host.userPresets.names().size() == 1 && host.userPresets.names()[0] == "My bass: warm/thick",
+               "a preset is saved under the name typed (trimmed, any characters)");
+        check (! host.saveUserPreset ("   "), "an empty name is refused");
+
+        const float drive = value (host, bandIds (0).drive);
+        applyPreset (host.apvts, 0);
+        host.apvts.getParameter (bandIds (0).drive)->setValueNotifyingHost (1.0f - host.apvts.getParameter (bandIds (0).drive)->getValue());
+        setParameterValue (host.apvts, id::outGain, -9.0f);
+        check (std::fabs (value (host, bandIds (0).drive) - drive) > 1.0e-3f, "(setup) the settings differ from the saved ones");
+        host.applyUserPreset ("My bass: warm/thick");
+        check (std::fabs (value (host, bandIds (0).tone) - tone) < 1.0e-3f && std::fabs (value (host, bandIds (0).amount) - amount) < 1.0e-3f
+                   && std::fabs (value (host, bandIds (0).drive) - drive) < 1.0e-3f && std::fabs (value (host, id::outGain) + 9.0f) < 1.0e-3f,
+               "applying it brings the band settings back and leaves the output gain alone");
+
+        juce::MemoryBlock state;
+        host.getStateInformation (state);
+        HephaestusProcessor other;
+        other.userPresets = hep::UserPresets (folder);
+        other.setStateInformation (state.getData(), (int) state.getSize());
+        check (other.getCurrentUserPreset() == "My bass: warm/thick", "the chosen user preset is kept with the session");
+
+        HephaestusEditor editor (other);
+        check (editor.presetSelector().getText() == "My bass: warm/thick", "the preset box shows it");
+        bool hasSave = false;
+        for (int i = 0; i < editor.presetSelector().getNumItems(); ++i)
+            hasSave = hasSave || editor.presetSelector().getItemText (i).startsWith ("Save current");
+        check (hasSave, "the preset box offers 'Save current settings as...'");
+
+        other.setCurrentProgram (2);
+        check (other.getCurrentUserPreset().isEmpty(), "choosing a factory preset clears the user preset");
+        host.deleteUserPreset ("My bass: warm/thick");
+        check (host.userPresets.names().isEmpty() && host.getCurrentUserPreset().isEmpty(), "deleting removes the file and forgets the name");
+        folder.deleteRecursively();
+    }
+
+    std::printf ("\nUndo and A/B compare\n");
+    {
+        HephaestusProcessor h;
+        h.setPlayConfigDetails (2, 2, 48000.0, 512);
+        h.prepareToPlay (48000.0, 512);
+        HephaestusEditor editor (h);
+        const auto settle = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (150); }; // the state records a change on its next sync
+        const auto step = [&] (float db)
+        {
+            ui::beginUndoStep (h.apvts);
+            setParameterValue (h.apvts, id::outGain, db);
+            settle();
+        };
+        step (-6.0f);
+        step (-12.0f);
+        check (editor.undoControls().undoSwitch().isEnabled() && ! editor.undoControls().redoSwitch().isEnabled(), "after two changes UNDO is lit and REDO is not");
+        editor.undoControls().undo();
+        check (std::fabs (value (h, id::outGain) + 6.0f) < 0.05f, fmt ("UNDO brings back the earlier output gain (%.1f dB)", value (h, id::outGain)));
+        const auto cmd = juce::ModifierKeys (juce::ModifierKeys::commandModifier);
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', cmd, 'z')) && std::fabs (value (h, id::outGain)) < 0.05f, fmt ("Cmd+Z undoes the first change (%.1f dB)", value (h, id::outGain)));
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', cmd.withFlags (juce::ModifierKeys::shiftModifier), 'Z')) && std::fabs (value (h, id::outGain) + 6.0f) < 0.05f,
+               fmt ("Shift+Cmd+Z redoes it (%.1f dB)", value (h, id::outGain)));
+        check (! editor.undoControls().handleKey (juce::KeyPress ('q', cmd, 'q')), "another key is not taken");
+
+        // A preset is one step, however many parameters it moves.
+        const auto everything = [&]
+        {
+            std::vector<float> v;
+            for (auto* param : h.getParameters())
+                v.push_back (param->getValue());
+            return v;
+        };
+        h.apvts.undoManager->clearUndoHistory();
+        const auto before = everything();
+        ui::beginUndoStep (h.apvts);
+        h.setCurrentProgram (2);
+        settle();
+        const bool moved = everything() != before;
+        editor.undoControls().undo();
+        check (moved && everything() == before, "a preset moves many parameters and one UNDO puts every one of them back");
+
+        // A/B: set up two ways and switch.
+        HephaestusProcessor ab;
+        ab.setPlayConfigDetails (2, 2, 48000.0, 512);
+        ab.prepareToPlay (48000.0, 512);
+        HephaestusEditor abEditor (ab);
+        setParameterValue (ab.apvts, id::outGain, -3.0f);
+        setParameterValue (ab.apvts, id::mix, 40.0f);
+        abEditor.abControls().button (1).onClick(); // B starts as a copy of A
+        check (ab.ab.active() == 1 && abEditor.abControls().button (1).getToggleState() && ! abEditor.abControls().button (0).getToggleState()
+                   && std::fabs (value (ab, id::outGain) + 3.0f) < 0.05f,
+               "choosing B the first time keeps the settings (a copy of A) and lights B");
+        setParameterValue (ab.apvts, id::outGain, -9.0f);
+        setParameterValue (ab.apvts, id::mix, 80.0f);
+        abEditor.abControls().button (0).onClick();
+        check (std::fabs (value (ab, id::outGain) + 3.0f) < 0.05f && std::fabs (value (ab, id::mix) - 40.0f) < 0.05f, "back to A: A's settings are loaded");
+        abEditor.abControls().button (1).onClick();
+        check (std::fabs (value (ab, id::outGain) + 9.0f) < 0.05f && std::fabs (value (ab, id::mix) - 80.0f) < 0.05f, "B again: B kept what was set in it");
+
+        juce::MemoryBlock saved;
+        ab.getStateInformation (saved);
+        HephaestusProcessor reopened;
+        reopened.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (reopened.ab.active() == 1 && ! reopened.ab.hasSettings (0), "the session keeps which slot is active, not the slots");
+
+        // UNDO also takes back a switch (it is one step).
+        ab.apvts.undoManager->clearUndoHistory();
+        settle();
+        abEditor.abControls().button (0).onClick();
+        settle();
+        check (std::fabs (value (ab, id::outGain) + 3.0f) < 0.05f, "(setup) switched to A");
+        abEditor.undoControls().undo();
+        check (std::fabs (value (ab, id::outGain) + 9.0f) < 0.05f && std::fabs (value (ab, id::mix) - 80.0f) < 0.05f, "UNDO takes back the A/B switch as one step");
     }
 
     return finish ("UI CHECK");

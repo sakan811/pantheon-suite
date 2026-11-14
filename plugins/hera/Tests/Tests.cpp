@@ -382,5 +382,99 @@ int main()
         check (d.latencySamples.load() == (int) std::lround (0.002 * kFs), "changing the look-ahead while running changes the latency the engine reports (2 ms: 96 samples)");
     }
 
+    // [10] LEVEL MATCH, DELTA and SC LISTEN.
+    std::printf("\n[10] Level match, delta, sidechain listen\n");
+    {
+        std::mt19937 gen (31);
+        std::uniform_real_distribution<float> white (-0.2f, 0.2f);
+        const int n = 48000 * 6;
+        Stereo noise { std::vector<float> ((size_t) n), std::vector<float> ((size_t) n) };
+        for (auto& v : noise.l) v = white (gen);
+        for (auto& v : noise.r) v = white (gen);
+        const auto rmsOf = [] (const std::vector<float>& x, size_t from)
+        {
+            double sum = 0.0;
+            for (size_t i = from; i < x.size(); ++i)
+                sum += (double) x[i] * x[i];
+            return std::sqrt (sum / (double) (x.size() - from));
+        };
+        const size_t last = (size_t) n - 48000;
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.ratio = 4.0f;
+        p.kneeDb = 0.0f;
+        Engine plain;
+        plain.prepare (kFs);
+        const double louder = db (rmsOf (run (plain, noise, p).l, last) / rmsOf (noise.l, last));
+        p.match = true;
+        Engine matched;
+        matched.prepare (kFs);
+        const auto m = run (matched, noise, p);
+        const double after = db (rmsOf (m.l, last) / rmsOf (noise.l, last));
+        check (louder < -3.0 && std::fabs (after) < 0.5 && std::fabs (matched.matchDb.load() + louder) < 0.5,
+               fmt ("noise at 4:1 over -30 dB comes out %.2f dB; with LEVEL MATCH it is %+.2f dB after 5 s (applying %+.2f dB)", louder, after, matched.matchDb.load()));
+        EngineParams off = p;
+        off.match = false;
+        Engine offE;
+        offE.prepare (kFs);
+        run (offE, noise, off);
+        check (offE.matchDb.load() == 0.0f, "with LEVEL MATCH off it applies 0.00 dB");
+        bool same = true;
+        Stereo head { std::vector<float> (noise.l.begin(), noise.l.begin() + 60000), std::vector<float> (noise.r.begin(), noise.r.begin() + 60000) };
+        Engine a;
+        a.prepare (kFs);
+        const auto ref = run (a, head, p, 512);
+        for (const int block : { 1, 7, 333, 4096 })
+        {
+            Engine b;
+            b.prepare (kFs);
+            const auto o = run (b, head, p, block);
+            same = same && o.l == ref.l && o.r == ref.r;
+        }
+        check (same, "with LEVEL MATCH on, blocks of 1, 7, 333 and 4096 samples give the output of 512, bit for bit");
+
+        // DELTA: output minus the sound that came in (delayed like the output). A +6 dB makeup alone leaves (10^(6/20) - 1) of the sound.
+        EngineParams gainOnly;
+        gainOnly.thresholdDb = 0.0f;
+        gainOnly.makeupDb = 6.0f;
+        Engine d;
+        d.prepare (kFs);
+        d.delta = true;
+        const auto t = sine (1000.0, -20.0, n);
+        const double got = db (rmsOf (run (d, t, gainOnly).l, last) / rmsOf (t.l, last)), want = db (std::pow (10.0, 6.0 / 20.0) - 1.0);
+        check (std::fabs (got - want) < 0.1, fmt ("DELTA of +6 dB makeup is %+.2f dB of the input (the wanted %+.2f)", got, want));
+        Engine silent;
+        silent.prepare (kFs, 3);
+        silent.delta = true;
+        EngineParams idle;
+        idle.thresholdDb = 0.0f;
+        idle.lookahead = 3;
+        const auto none = run (silent, noise, idle);
+        check (peakOf (none.l, 0, none.l.size()) == 0.0 && peakOf (none.r, 0, none.r.size()) == 0.0, "DELTA with nothing to compress is silence, exactly (with look-ahead too: the input is delayed like the output)");
+
+        // SC LISTEN: the key after the detector's high-pass, not the sound; the key itself when KEY is on.
+        const auto levelOf = [&] (double hz, double hpf, bool useKey)
+        {
+            EngineParams q;
+            q.hpfHz = (float) hpf;
+            q.external = useKey;
+            Engine e;
+            e.prepare (kFs);
+            e.scListen = true;
+            const auto tone = sine (hz, -20.0, 48000), other = sine (useKey ? hz : 200.0, -6.0, 48000);
+            const auto out = run (e, useKey ? other : tone, q, 512, useKey ? &tone : nullptr);
+            return db (rmsOf (out.l, 24000) / rmsOf (tone.l, 24000));
+        };
+        const double passes = levelOf (5000.0, 1000.0, false), cut = levelOf (100.0, 1000.0, false), key = levelOf (5000.0, 1000.0, true);
+        check (std::fabs (passes) < 0.5 && cut < -30.0 && std::fabs (key) < 0.5, fmt ("SC LISTEN with the high-pass at 1 kHz: 5 kHz passes (%+.2f dB), 100 Hz is %+.1f dB; with KEY on it is the key (%+.2f dB), not the sound", passes, cut, key));
+        Engine quietListen;
+        quietListen.prepare (kFs);
+        const auto o1 = run (quietListen, noise, EngineParams());
+        Engine un;
+        un.prepare (kFs);
+        un.scListen = false;
+        check (run (un, noise, EngineParams()).l == o1.l, "with SC LISTEN off the sound is as it was");
+    }
+
     return test::finish ("HeraTests");
 }

@@ -31,6 +31,7 @@ struct EngineParams
     int oversampling = 0; // 0 = off, 1 = 2x, 2 = 4x
     int lookahead = 0;    // index into kLookaheadMs
     double outGainDb = 0.0;
+    double mix = 1.0;     // 0 = the dry bands, 1 = the compressed ones: what the compressors take off or add is scaled by it (parallel compression)
 };
 
 // The edges are kept in order and at least this ratio apart; the editor and the engine agree on it.
@@ -166,6 +167,9 @@ public:
             b.idle = true;
         }
     }
+
+    // The largest latency any mode combination can report (the host's bypass delay is sized for it).
+    int maxLatency() const noexcept { return latencyFor (PhaseMode::linear, kNumOsModes - 1, kNumLookahead - 1); }
 
     int latencyFor (PhaseMode p, int os, int look = 0) const noexcept { return (p == PhaseMode::linear ? linear.latency() : 0) + osLatency[(size_t) os] + lookaheadSamples (fs, look); }
 
@@ -319,6 +323,9 @@ private:
         outGain = first ? std::pow (10.0, p.outGainDb / 20.0) : outGainTarget;
         outGainTarget = std::pow (10.0, p.outGainDb / 20.0);
         outGainStep = (outGainTarget - outGain) / tick;
+        mixNow = first ? std::clamp (p.mix, 0.0, 1.0) : mixTarget; // a ramp ends exactly on its target, so a mix at rest is exact
+        mixTarget = std::clamp (p.mix, 0.0, 1.0);
+        mixStep = (mixTarget - mixNow) / tick;
         first = false;
     }
 
@@ -380,6 +387,7 @@ private:
                          band[(size_t) b].listenSc ? scBuffer[(size_t) b][0].data() : nullptr, band[(size_t) b].listenSc ? scBuffer[(size_t) b][1].data() : nullptr,
                          l, r, n);
 
+        mixNow += mixStep * n; // the bands above read the ramp from the start of the segment; the next one starts here
         for (int i = 0; i < n; ++i)
         {
             outGain += outGainStep;
@@ -459,8 +467,9 @@ private:
             double yL = dryL, yR = dryR;
             if (run)
             {
-                // The difference goes back where it came from: Mid to both, Side to left and minus to right.
-                const double a = w[0][i], b = w[1][i];
+                // The difference goes back where it came from: Mid to both, Side to left and minus to right. MIX scales it (1 is exact).
+                const double mixHere = mixNow + mixStep * (i + 1);
+                const double a = w[0][i] * mixHere, b = w[1][i] * mixHere;
                 yL += ms ? a + b : a;
                 yR += ms ? a - b : b;
             }
@@ -526,6 +535,7 @@ private:
     std::array<double, kCrossovers> appliedCrossover {};
     std::array<int, kBands> owner { 0, 1, 2, 3, 4, 5 };
     double outGain = 1.0, outGainTarget = 1.0, outGainStep = 0.0;
+    double mixNow = 1.0, mixTarget = 1.0, mixStep = 0.0; // MIX: the value at the start of the segment, its target at the end of the tick, and the step per sample
 
     pdsp::BandSplitter splitter, scSplitter; // the sidechain gets its own, so the main signal's filters never hear it
     LinearSplit linear, scLinear;

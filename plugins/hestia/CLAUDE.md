@@ -57,7 +57,7 @@ the processor passes `juce::Time::getMillisecondCounter()`, a test passes a cloc
 change what another sees of it: there is no feedback loop and no order the instances have to run in. Keep it so.
 
 **Decentralised.** Every instance decides only about itself, from what the others publish and the shared rule (`pressureOn`, `claims`). There is no
-master and no message from one to another asking for a cut. A new behaviour that needs one stem to tell another what to do does not belong here.
+master and no message from one to another asking for a cut. (COPY TO MIX is not that: it hands over *settings* once, which the receiver sets on its own parameters, never a cut or a decision; see below.) A new behaviour that needs one stem to tell another what to do does not belong here.
 
 **The rule.** `pressureOn(mine, other, myLevel, otherLevel, reach)` = dominance (the other's claim over mine, by `kDominanceSpan` 0.5 it is all) x presence
 (the other's level from -80 to -60 dB) x audibility (the other within `reach` dB under me, or louder). The pressures of the stems combine as shares of
@@ -102,10 +102,14 @@ on a band's centre reads `20 log10 A`: every threshold and the -80/-60 dB presen
 **Monitoring is not state.** DELTA lives in `Engine::deltaOn` (an atomic), not in a parameter, and the editor ends it in its destructor. It fades
 over a tick through `deltaMix`; the output is `wet - deltaMix x dry`, `wet` being the stem after the cut and the depth.
 
+**HOLD** (`EngineParams::hold`, the parameter `hold`, version 2) skips the whole decision in `tick` (the rule, the follow, `carver.setTarget`), so `cut`, `cutShown` and the bells stay as they are; the level, the publishing, the gathering and the depth go on. With it off the code is the code that was, so every earlier test stands.
+
+**Track names and COPY TO MIX live on the bus.** A slot keeps `kNameChars` (24) characters of the host's track name in six relaxed atomic words (`Bus::setName` / `nameOf`, message thread; cleared on claim and release); `HestiaProcessor::updateTrackProperties` sets it, `SpaceView::tick` reads it (`stemLabel`, `thisLabel`: the name, else the role). `Bus::broadcast` writes carve, reach, attack and release with the sender's slot and group and moves a sequence number; every `Engine::tick` compares it with the one it has seen (`seenBroadcast`, taken at construction, so a new instance does not get an old copy) and, if it is for its group and not from itself, raises `broadcastPending`; `processBlock` then `triggerAsyncUpdate`s and `handleAsyncUpdate` (message thread) takes the values with `takeBroadcast` and sets the parameters with a gesture each. Two broadcasts at once may mix their numbers: a copy is a rare, deliberate click.
+
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
-**Parameters.** Ids (`hestia::id`) are stored in sessions and automation: never rename or remove one once a release has them (`carve` was `depth` before the Depth knob existed and the plugin had not been released; the user-facing names are Carve for the cut and Depth for the distance, the ids `carve` and `distance`). All are `ParameterID` version 1; a new one needs
+**Parameters.** Ids (`hestia::id`) are stored in sessions and automation: never rename or remove one once a release has them (`carve` was `depth` before the Depth knob existed and the plugin had not been released; the user-facing names are Carve for the cut and Depth for the distance, the ids `carve` and `distance`). All are `ParameterID` version 1 except `hold`, version 2 (off; kept by presets); a new one needs
 a higher version, an entry in `readParams()` and a place in the editor. The order of the roles (`Role`, `roleNames()`) and of the mixes (`mixNames`: the
 index is the group, 0 off) is stored in sessions: add at the end, never reorder.
 

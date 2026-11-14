@@ -16,11 +16,11 @@ It changes nothing but the level and what you listen to.
 
 | | |
 |---|---|
-| **Trim** | -24 to +24 dB, 0 by default; **Polarity** inverts both channels. The meters read the sound after them. |
+| **Trim** | -24 to +24 dB, 0 by default; **Polarity** inverts both channels. The meters read the sound after them. **AUTO TRIM** sets TRIM once, so that the integrated loudness reads -14 LUFS (it adds `-14 - integrated` to the current trim, within the range; nothing happens before the meter has read anything). |
 | **Listen** | *Stereo* (as it is), *Mono* (`(L + R) / 2` in both: what a mono speaker plays), *Left* and *Right* (one channel in both), *Side* (`(L - R) / 2` in both: what differs between the channels), *Swap*. A check: the meters still read the whole sound. |
-| **Meters** | **Momentary** (400 ms) and **short-term** (3 s) loudness in LUFS; **integrated** loudness (gated, since RESET); **range** in LU; the **true peak** in dBTP and the sample peak in dBFS; and a graph of the last minute. |
-| **Reference** | **LOAD** a track (WAV, AIFF, FLAC, OGG, MP3 where the system can read it; at most 10 minutes, kept in memory), **REF (B)** to hear it instead of your sound (A) with a 20 ms crossfade, **LEVEL MATCH** to bring it to the integrated loudness of your sound, **REF TRIM** (+-12 dB) to add to that, **RESTART**. It loops, and plays on while you listen to A. The file's path is kept in the session. |
-| **Presets** | Eight listening setups (Normal, Mono Check, Side Only, Left Only, Right Only, Swap Check, Reference A/B, Reference As Is). A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY and REF TRIM are kept. LISTEN and REF are saved with the session: choose Normal before a bounce. |
+| **Meters** | **Momentary** (400 ms) and **short-term** (3 s) loudness in LUFS; **integrated** loudness (gated, since RESET); **range** in LU; the **true peak** in dBTP and the sample peak in dBFS; and a graph of the last minute. **RESET** clears the integrated loudness, the range and the peaks; **AUTO RESET** (off by default, saved with the session) does it each time the host starts playing. |
+| **Reference** | **LOAD** a track (WAV, AIFF, FLAC, OGG, MP3 where the system can read it; at most 10 minutes, kept in memory), **REF (B)** to hear it instead of your sound (A) with a 20 ms crossfade, **LEVEL MATCH** to bring it to the integrated loudness of your sound, **REF TRIM** (+-12 dB) to add to that, **RESTART**, and a click or drag on the progress bar to play from there. It loops, and plays on while you listen to A. The file's path is kept in the session. |
+| **Presets** | Eight listening setups (Normal, Mono Check, Side Only, Left Only, Right Only, Swap Check, Reference A/B, Reference As Is). A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY, REF TRIM and AUTO RESET are kept. LISTEN and REF are saved with the session: choose Normal before a bounce. |
 
 ## How it works
 
@@ -43,6 +43,7 @@ It changes nothing but the level and what you listen to.
 - TRIM +6 dB is +6.00 dB; POLARITY, MONO, LEFT, RIGHT, SIDE and SWAP are exact (the formulas above, bit for bit); with nothing set the output is the input, bit for bit, with no delay.
 - The reference: a -14 dBFS sine reads -14.04 LUFS; with LEVEL MATCH the reference and a -26.7 LUFS sound are heard at the same loudness (the reference brought -12.7 dB); without it the reference is heard as it is (-14.04 LUFS);
   REF TRIM +3 dB adds exactly +3.00 dB. Switching A and B four times in a tone gives no step over what the tone has (0.0131 against 0.0131): a crossfade, no click.
+- AUTO TRIM: a -26.7 LUFS sound trimmed by it and played again reads -14.00 LUFS. Seeking to 50% of the reference puts it at 0.500 of the track, and a shorter reference swapped in while the position is past its end plays from inside it.
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit, with a reference playing. NaN and infinity in the input are silence.
 
 ## Limits
@@ -53,7 +54,7 @@ It changes nothing but the level and what you listen to.
 - **The true peak is read at 8x** within 0.1 dB of a separate reader; BS.1770 asks for 4x with 0.2 dB. It is the peak of the sound after the trim, and not of what is listened to.
 - **LISTEN and REF are parameters and are saved with the session**: set LISTEN back to Stereo and REF off before you bounce (a note reminds you).
 - **A reference is kept whole in memory** (at most 10 minutes; about 230 MB at 48 kHz). It is brought to the sample rate the session had when it was loaded; if the session's rate changes it is made again from the file.
-- **It reads the file again from its path** when a session is opened: if the file has moved, the session opens without a reference.
+- **It reads the file again from its path** when a session is opened: if the file has moved, or the session was saved without a reference, it opens without one (the one loaded before is cleared).
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building

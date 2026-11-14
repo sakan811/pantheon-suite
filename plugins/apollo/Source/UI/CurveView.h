@@ -11,7 +11,7 @@
 namespace apollo::gui
 {
 // The curve of the bands on glass, and a node for each: drag it sideways for the frequency and up and down for the gain, turn the wheel over it for the width,
-// double-click it to switch the band on or off. The curve is `responseDb` of the settings, so it is the filter that runs (minimum phase and linear phase have
+// double-click it to switch the band on or off, double-click empty glass to add a band there. LISTEN in the corner plays the selected band's region alone (a band-pass at its frequency and width). The curve is `responseDb` of the settings, so it is the filter that runs (minimum phase and linear phase have
 // the same magnitude). Behind the curve, an analyser draws the sound before the bands (dim) and after them (bright), on its own scale (kAnalyzerTopDb down
 // kAnalyzerRangeDb) with the tilt every analyser of the repository has; the ANALYZER switch in the corner turns it off, and it is kept with the session.
 class CurveView : public juce::Component
@@ -29,6 +29,18 @@ public:
     bool analyzerOn() const { return (bool) apvts.state.getProperty (analyzerProperty, true); }
     void setAnalyzer (bool on) { apvts.state.setProperty (analyzerProperty, on, nullptr); repaint(); }
     juce::Rectangle<float> analyzerButton() const { return getLocalBounds().toFloat().removeFromTop (22.0f).removeFromRight (84.0f).reduced (4.0f, 3.0f); }
+    juce::Rectangle<float> listenButton() const { return analyzerButton().translated (-84.0f, 0.0f); }
+
+    // LISTEN: monitoring, not a setting (the editor passes it to the engine and ends it with the window). It follows the selected band.
+    std::function<void (int)> onListen; // the band to hear alone, or -1
+    int listening = -1;
+    void setListen (bool on)
+    {
+        listening = on ? selected : -1;
+        if (onListen)
+            onListen (listening);
+        repaint();
+    }
 
     // The editor's timer calls this: it takes what the audio thread has sent and updates the two traces. Off, nothing is read (and nothing is computed).
     void tick()
@@ -85,6 +97,12 @@ public:
     void select (int band)
     {
         selected = band;
+        if (listening >= 0 && listening != band)
+        {
+            listening = band;
+            if (onListen)
+                onListen (listening);
+        }
         if (onSelect)
             onSelect (band);
         repaint();
@@ -130,6 +148,30 @@ public:
             set (ids.gain, (float) dbAt (p.y));
     }
 
+    // What double-clicking empty glass does: the first free band (the same order a PASTE uses for a bell) becomes a bell there, on. A click on the 0 dB line would add a band that does
+    // nothing, so its gain is at least 1 dB either way. Returns the band, or -1 when all eight are in use.
+    int addBandAt (juce::Point<float> p)
+    {
+        const auto now = readParams (apvts);
+        std::array<bool, kBands> used {};
+        for (const int slot : slotOrder (pdsp::LinkBand::Kind::bell))
+        {
+            if (! isFree (now, slot, used))
+                continue;
+            const auto& ids = bandIds (slot);
+            const double gain = dbAt (p.y);
+            setWithGesture (ids.type, (float) (int) Type::bell);
+            setWithGesture (ids.freq, (float) juce::jlimit (kMinHz, kMaxHz, hzAt (p.x)));
+            setWithGesture (ids.gain, (float) (std::fabs (gain) < 1.0 ? (gain < 0.0 ? -1.0 : 1.0) : gain));
+            setWithGesture (ids.q, 1.0f);
+            setWithGesture (ids.target, (float) (int) Target::stereo);
+            setWithGesture (ids.on, 1.0f);
+            select (slot);
+            return slot;
+        }
+        return -1;
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (e.mods.isPopupMenu())
@@ -146,6 +188,11 @@ public:
         if (analyzerButton().contains (e.position))
         {
             setAnalyzer (! analyzerOn());
+            return;
+        }
+        if (listenButton().contains (e.position))
+        {
+            setListen (listening < 0);
             return;
         }
         dragged = nodeNear (e.position);
@@ -170,19 +217,25 @@ public:
     }
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
+        if (analyzerButton().contains (e.position) || listenButton().contains (e.position))
+            return;
         if (const int band = nodeNear (e.position); band >= 0)
         {
             auto* on = apvts.getParameter (bandIds (band).on);
+            on->beginChangeGesture();
             on->setValueNotifyingHost (on->getValue() > 0.5f ? 0.0f : 1.0f);
+            on->endChangeGesture();
             select (band);
         }
+        else if (plot().contains (e.position))
+            addBandAt (e.position);
     }
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
         if (const int band = nodeNear (e.position); band >= 0)
         {
             const float q = readParams (apvts).bands[(size_t) band].q;
-            set (bandIds (band).q, juce::jlimit (0.1f, 10.0f, q * std::pow (1.25f, w.deltaY > 0.0f ? 1.0f : -1.0f)));
+            setWithGesture (bandIds (band).q, juce::jlimit (0.1f, 10.0f, q * std::pow (1.25f, w.deltaY > 0.0f ? 1.0f : -1.0f)));
             select (band);
         }
     }
@@ -275,6 +328,10 @@ public:
         g.setColour (analyzerOn() ? colours::lampInk : colours::dim);
         g.setFont (ui::lcdFont (9.0f, juce::Font::bold));
         g.drawText ("ANALYZER", button, juce::Justification::centred);
+        const auto listen = listenButton();
+        ui::hw::drawPushButton (g, listen, listening >= 0, colours::amber);
+        g.setColour (listening >= 0 ? colours::lampInk : colours::dim);
+        g.drawText ("LISTEN", listen, juce::Justification::centred);
         ui::hw::drawGlassOverlay (g, glass, 4.0f, false);
     }
 
@@ -377,6 +434,15 @@ private:
         g.fillPath (filled);
         g.setColour (line);
         g.strokePath (path, juce::PathStrokeType (1.2f));
+    }
+
+    // A change that is not a drag (a click, the wheel): the host sees it as one gesture, so it is one step in its automation recording and undo.
+    void setWithGesture (const juce::String& pid, float value)
+    {
+        auto* p = apvts.getParameter (pid);
+        p->beginChangeGesture();
+        set (pid, value);
+        p->endChangeGesture();
     }
 
     void set (const juce::String& pid, float value)

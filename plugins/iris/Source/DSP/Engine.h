@@ -56,7 +56,7 @@ public:
     void prepare (double sampleRate, int maxBlockSize, PhaseMode initialPhase = PhaseMode::zeroLatency)
     {
         fs = sampleRate;
-        linear.prepare();
+        linear.prepare (fs);
         maxBlock = std::max (maxBlockSize, 1);
 
         const double tickSeconds = tick / fs;
@@ -254,7 +254,7 @@ private:
     void applyPhase (PhaseMode m)
     {
         phaseMode = m;
-        latencySamples.store (latencyFor (m), std::memory_order_relaxed);
+        latencySamples.store (latencyFor (m, fs), std::memory_order_relaxed);
         linear.start (m);
         for (auto& b : bands)
         {
@@ -562,7 +562,9 @@ private:
         const auto working = [] (const BandState& s) { return s.running && (s.active || s.dynamic); };
         const bool filtering = std::any_of (bands.begin(), bands.end(), working);
         const bool curve = shownIndex >= 0 && shownKind == SoloKind::curve && (soloIndex >= 0 || soloAmount > 0.0);
-        if (filtering && kernelsDirty)
+        // processHop takes the filtering path whenever a solo of a curve is on as well, so the main kernels have to be current then too (with no band working
+        // they are the plain delay): a solo that starts or ends fades through them for 10 ms.
+        if ((filtering || curve) && kernelsDirty)
         {
             linear.beginKernels();
             for (const auto& s : bands)

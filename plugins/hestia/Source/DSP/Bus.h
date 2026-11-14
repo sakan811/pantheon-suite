@@ -6,6 +6,7 @@
 #include "Roles.h"
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 
 // How the Hestia instances of one session see each other. Every instance on a stem publishes its input's level in each of the thirty bands, a few
 // hundred times a second, into a slot of a table that lives in the plugin's own binary: all the instances a host loads from it into one process share
@@ -21,6 +22,13 @@ inline constexpr int kMaxStems = 32;   // instances that can see each other; a t
 inline constexpr int kMaxGroups = 8;   // the mixes A to H; group 0 is "off"
 inline constexpr std::uint32_t kFreshMs = 500; // a slot not published in this long belongs to an instance that has stopped (the transport, a muted track)
 inline constexpr float kFloorDb = -120.0f;
+inline constexpr int kNameChars = 24;  // the longest track name a slot keeps (longer ones are cut), so a stem can be called what the host calls its track
+
+// What one instance hands to the others of its mix to take as their own (COPY TO MIX): the settings that describe how a mix gives room, not what a stem is.
+struct Shared
+{
+    float carveDb = 6.0f, reachDb = 12.0f, attackMs = 30.0f, releaseMs = 250.0f;
+};
 
 struct Stem
 {
@@ -49,6 +57,7 @@ public:
             if (slots[(size_t) i].owner.compare_exchange_strong (expected, me))
             {
                 slots[(size_t) i].group.store (0, std::memory_order_release);
+                setName (i, "");
                 return i;
             }
         }
@@ -61,6 +70,64 @@ public:
             return;
         slots[(size_t) slot].group.store (0, std::memory_order_release); // first unseen, then free
         slots[(size_t) slot].owner.store (0, std::memory_order_release);
+        setName (slot, "");
+    }
+
+    // The track name the host gave the instance in `slot` (message thread). Packed four characters to a word; a reader may see half of a name that is being
+    // changed, which is a name for one repaint. Longer than kNameChars is cut.
+    void setName (int slot, const char* name) noexcept
+    {
+        if (slot < 0)
+            return;
+        char padded[kNameWords * 4] = {};
+        if (name != nullptr)
+            std::strncpy (padded, name, (size_t) kNameChars);
+        for (int w = 0; w < kNameWords; ++w)
+        {
+            std::uint32_t word;
+            std::memcpy (&word, padded + w * 4, 4);
+            slots[(size_t) slot].name[(size_t) w].store (word, std::memory_order_relaxed);
+        }
+    }
+
+    // Into `out`, which holds kNameChars + 1 characters; empty when the host has not said.
+    void nameOf (int slot, char* out) const noexcept
+    {
+        out[0] = '\0';
+        if (slot < 0)
+            return;
+        char padded[kNameWords * 4 + 1] = {};
+        for (int w = 0; w < kNameWords; ++w)
+        {
+            const std::uint32_t word = slots[(size_t) slot].name[(size_t) w].load (std::memory_order_relaxed);
+            std::memcpy (padded + w * 4, &word, 4);
+        }
+        std::memcpy (out, padded, (size_t) kNameChars);
+        out[kNameChars] = '\0';
+    }
+
+    // COPY TO MIX: `sender` of `group` hands its settings over. A receiver (another instance of the same group) sees the sequence number move and takes them; see Engine.
+    void broadcast (int sender, int group, const Shared& s) noexcept
+    {
+        bCarve.store (s.carveDb, std::memory_order_relaxed);
+        bReach.store (s.reachDb, std::memory_order_relaxed);
+        bAttack.store (s.attackMs, std::memory_order_relaxed);
+        bRelease.store (s.releaseMs, std::memory_order_relaxed);
+        bSender.store (sender, std::memory_order_relaxed);
+        bGroup.store ((std::uint32_t) group, std::memory_order_relaxed);
+        bSeq.fetch_add (1, std::memory_order_release);
+    }
+    std::uint32_t broadcastSeq() const noexcept { return bSeq.load (std::memory_order_acquire); }
+    // True when the last broadcast was for `group` and came from another instance; `out` is what it carried.
+    bool broadcastFor (int self, int group, Shared& out) const noexcept
+    {
+        if (bSender.load (std::memory_order_relaxed) == self || bGroup.load (std::memory_order_relaxed) != (std::uint32_t) group || group <= 0)
+            return false;
+        out.carveDb = bCarve.load (std::memory_order_relaxed);
+        out.reachDb = bReach.load (std::memory_order_relaxed);
+        out.attackMs = bAttack.load (std::memory_order_relaxed);
+        out.releaseMs = bRelease.load (std::memory_order_relaxed);
+        return true;
     }
 
     // The owner of `slot` says what it is and how loud each band of its input is. Group 0 hides it.
@@ -113,12 +180,18 @@ private:
     {
         std::atomic<std::uint32_t> owner { 0 }, group { 0 }, beat { 0 };
         std::atomic<int> role { 0 };
+        std::array<std::atomic<std::uint32_t>, 6> name {};
         std::atomic<float> importance { 0.5f }, distance { 0.0f };
         std::array<std::atomic<float>, kBands> level;
         Slot() { for (auto& l : level) l.store (kFloorDb, std::memory_order_relaxed); }
     };
+    static constexpr int kNameWords = kNameChars / 4;
+    static_assert (kNameChars % 4 == 0 && kNameChars / 4 == 6, "a slot's name is six words");
     std::array<Slot, kMaxStems> slots;
     std::atomic<std::uint32_t> lastOwner { 0 };
+    std::atomic<std::uint32_t> bSeq { 0 }, bGroup { 0 };
+    std::atomic<int> bSender { -1 };
+    std::atomic<float> bCarve { 6.0f }, bReach { 12.0f }, bAttack { 30.0f }, bRelease { 250.0f };
 };
 
 // The one table of the plugin's binary: the instances of one host process that came from it all find each other here.

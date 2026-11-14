@@ -25,12 +25,22 @@ struct LinearSpec
     constexpr int latency() const noexcept { return half + hop; }
 };
 
-inline constexpr LinearSpec linearSpec (PhaseMode m) noexcept
+// The sizes are for 44.1 and 48 kHz; above that they double (over 50 kHz) or quadruple (over 100 kHz), as Atlas' linear split does, so the resolution
+// in Hz and the delay in milliseconds stay what they are at 48 kHz (a kernel of fixed length is 2x / 4x coarser at 96 / 192 kHz). A power of two
+// keeps `half * 2 + hop <= 2^order` and the hop a multiple of the engine's tick.
+inline constexpr int sizeScaleFor (double sampleRate) noexcept { return sampleRate > 100000.0 ? 4 : (sampleRate > 50000.0 ? 2 : 1); }
+
+inline constexpr LinearSpec linearSpec (PhaseMode m, double sampleRate = 48000.0) noexcept
 {
-    return m == PhaseMode::linearHq ? LinearSpec { 15, 8192, 1024 } : LinearSpec { 13, 2048, 256 };
+    const int k = sizeScaleFor (sampleRate), extraOrder = k == 4 ? 2 : (k == 2 ? 1 : 0);
+    const LinearSpec base = m == PhaseMode::linearHq ? LinearSpec { 15, 8192, 1024 } : LinearSpec { 13, 2048, 256 };
+    return { base.order + extraOrder, base.half * k, base.hop * k };
 }
 
-inline constexpr int latencyFor (PhaseMode m) noexcept { return m == PhaseMode::zeroLatency ? 0 : linearSpec (m).latency(); }
+inline constexpr int latencyFor (PhaseMode m, double sampleRate = 48000.0) noexcept { return m == PhaseMode::zeroLatency ? 0 : linearSpec (m, sampleRate).latency(); }
+
+// The largest latency any mode can report at this rate (a bypass delay is sized for it).
+inline constexpr int maxLatencyFor (double sampleRate) noexcept { return latencyFor (PhaseMode::linearHq, sampleRate); }
 
 // A linear-phase equaliser, driven by the engine. Every band is given as its minimum-phase filter (the one the display draws); only
 // the magnitude |H|^2 is used, evaluated on the FFT's frequency grid, and the result is a symmetric FIR: the same curve as the
@@ -48,12 +58,12 @@ inline constexpr int latencyFor (PhaseMode m) noexcept { return m == PhaseMode::
 class LinearFilter
 {
 public:
-    void prepare()
+    void prepare (double sampleRate = 48000.0)
     {
         int maxSize = 0;
         for (int i = 0; i < 2; ++i)
         {
-            const auto spec = linearSpec (i == 0 ? PhaseMode::linear : PhaseMode::linearHq);
+            const auto spec = linearSpec (i == 0 ? PhaseMode::linear : PhaseMode::linearHq, sampleRate);
             auto made = std::make_unique<Plan>();
             made->spec = spec;
             made->fft = std::make_unique<juce::dsp::FFT> (spec.order);
@@ -95,7 +105,7 @@ public:
             p.assign (big / 2 + 1, 1.0);
         for (auto& a : amp)
             a.assign (big / 2 + 1, 0.0);
-        const auto hopMax = (size_t) linearSpec (PhaseMode::linearHq).hop;
+        const auto hopMax = (size_t) linearSpec (PhaseMode::linearHq, sampleRate).hop;
         for (auto* v : { &wetL, &wetR, &soloL, &soloR })
             v->assign (hopMax, 0.0);
         start (PhaseMode::linear);

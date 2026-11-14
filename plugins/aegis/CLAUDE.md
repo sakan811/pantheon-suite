@@ -52,6 +52,12 @@ reader had not seen (0.3 to 0.7 dB over on noise). Two means of half the width f
 
 **OUT PEAK reads the output with its own `TruePeakReader`s** (`outPeak`), after the final clamp, so it is what leaves. It is the same reader as the detector's: it proves the clamp and the gain, not the reader (test [8] and [12] do, with an independent one). It costs a second pair of readers; do not drop them for speed.
 
+**DELTA and MATCH LEVEL are listening aids after the limiter.** OUT PEAK reads the limited output before them (it proves the clamp, not the aid). DELTA is `delayL[read] - limited` (the sound after GAIN, aligned by the same read position, minus the output); MATCH multiplies the output by `min (1, sqrt (inPower / outPower))` (a mean of the RMS over `kMatchMeanMs`, smoothed by `kMatchStepMs`), so it only turns down and the ceiling holds. With both off nothing changes, bit for bit (test [13]). Presets switch both off (they are not in `keepsParameter`); both are `ParameterID` version 2.
+
+**Bypass.** The plugin reports latency, so `processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay` (prepared for the longest look-ahead + `kDetectorDelay`); UiCheck pins that an impulse comes out that late.
+
+**MAX REDUCTION** is a hold in the editor (`reductionHold`, from the engine's `reductionMeter` each tick): cleared by CLEAR, by a click on its number (`holdArea`, set in `resized()`) and when CEILING or TRUE PEAK changes.
+
 **PASTE** (`pasteLimiter` in `Parameters.h`) reads the `limiter` line of `pdsp::link` (`shared/dsp` BandLink.h, written by Themis' COPY): the ceiling is absolute, the gain change is relative to GAIN, and both are clamped to the parameters' ranges. A ceiling switches TRUE PEAK on. It says what it did in the strip (`AegisEditor::shownNotes`), for eight seconds.
 
 **Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()`. `configure()` (a change of look-ahead) clears the state: it clicks, so
@@ -67,7 +73,7 @@ input bit for bit (test [3]). The smoothed input GAIN starts at its target (`gai
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
-**Parameters.** Ids (`aegis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `autorel` (version 2, off: a session saved before it has the old behaviour; UiCheck pins it); a new one needs a higher version, an entry in
+**Parameters.** Ids (`aegis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `autorel`, `delta` and `match` (version 2, off: a session saved before them has the old behaviour; UiCheck pins `autorel`); a new one needs a higher version, an entry in
 `readParams()` and a place in the editor.
 
 ## DRY: where each thing lives

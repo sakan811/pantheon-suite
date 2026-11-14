@@ -20,6 +20,7 @@ const Preset kPresets[3] = {
     { "Hard-tune",  0.0f, 100.0f,  0.0f },
 };
 
+const juce::Identifier kScaleProperty { "uiScale" };
 constexpr int kKnobX = 190, kKnobW = 111, kKnobTop = 412, kKnobH = 140, kNumKnobs = 6;
 constexpr int kRowTop = 96, kRowH = 292;       // the graph and the key module
 constexpr int kStyleTop = 400, kStyleH = 168;  // the style and knob module
@@ -39,6 +40,7 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
                      "Follow the key of the vocal by itself, and change it when the song changes key. "
                      "Works out the key from the singing, so give it a few seconds of vocal. Major/minor only.")
 {
+    const float savedScale = juce::jlimit (0.75f, 2.0f, (float) (double) p.apvts.state.getProperty (kScaleProperty, 1.0));
     setLookAndFeel (&laf);
 
     addAndMakeVisible (content);
@@ -58,7 +60,7 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
             detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
         awaitingKeyResult = false;
     };
-    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton, &resetButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton, &resetButton, &guideButton, &undoButtons, &abButtons })
         content.addAndMakeVisible (c);
 
     detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
@@ -71,6 +73,18 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
     keyboard.onToggle = [this] (int pc) { toggleNote (pc); };
     keyboard.setTooltip ("Click a key to allow or block that note. Lit keys are the notes your vocal can be tuned to.");
     content.addAndMakeVisible (keyboard);
+
+    const char* noteTips[4] = { "Allow every note (a chromatic correction, pitch only).", "Block every note. Click keys to allow the ones the song uses.",
+                                "Flip every key: allowed notes become blocked and blocked ones allowed.",
+                                "Back to the scale of the key shown (the last scale you chose, Major at first), after editing the keys by hand." };
+    const char* noteNames[4] = { "ALL", "NONE", "INVERT", "SCALE" };
+    for (int i = 0; i < 4; ++i)
+    {
+        noteButtons[i].setButtonText (noteNames[i]);
+        noteButtons[i].setTooltip (noteTips[i]);
+        noteButtons[i].onClick = [this, i] { noteAction ((NoteAction) i); };
+        content.addAndMakeVisible (noteButtons[i]);
+    }
 
     content.addAndMakeVisible (graph);
 
@@ -102,7 +116,9 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
     setResizable (true, true);
     setResizeLimits (kDesignW * 3 / 4, kDesignH * 3 / 4, kDesignW * 2, kDesignH * 2);
     getConstrainer()->setFixedAspectRatio ((double) kDesignW / (double) kDesignH);
-    setSize (kDesignW, kDesignH);
+    // The size is kept with the session (a property of the state, as the other plug-ins keep `uiScale`), so the window opens as it was left.
+    // (read at the top of the constructor: setResizeLimits resizes the window and resized() writes the property)
+    setSize (juce::roundToInt ((float) kDesignW * savedScale), juce::roundToInt ((float) kDesignH * savedScale));
 
     latencyText = makeLatencyText();
     startTimerHz (20);
@@ -123,12 +139,17 @@ void HarmoniaEditor::setupKnob (int index, const char* id, const juce::String& t
 void HarmoniaEditor::resized()
 {
     content.setBounds (0, 0, kDesignW, kDesignH);
-    content.setTransform (juce::AffineTransform::scale ((float) getWidth() / (float) kDesignW));
+    const float scale = (float) getWidth() / (float) kDesignW;
+    content.setTransform (juce::AffineTransform::scale (scale));
+    if (std::fabs (scale - (float) (double) proc.apvts.state.getProperty (kScaleProperty, -1.0)) > 0.002f)
+        proc.apvts.state.setProperty (kScaleProperty, (double) scale, nullptr);
 
     rangeBox.setBounds (580, 36, 190, 28);
     bypassButton.setBounds (784, 36, 76, 28);
     resetButton.setBounds (kLatencyBounds.getRight() + 16, 36, 84, 28);
     guideButton.setBounds (resetButton.getRight() + 10, 36, 76, 28);
+    undoButtons.setBounds (kLatencyBounds.getX(), 6, ui::UndoButtons::kWidth, 17); // in the strip above the controls, which the captions leave free
+    abButtons.setBounds (kLatencyBounds.getX() + ui::UndoButtons::kWidth + 10, 6, ui::AbButtons::kWidth, 17);
 
     graph.setBounds (20, kRowTop, 560, kRowH);
 
@@ -138,6 +159,9 @@ void HarmoniaEditor::resized()
     autoKeyButton.setBounds (770, kRowTop + 76, 74, 32);
     statusLabel.setBounds (616, kRowTop + 114, 228, 34);
     keyboard.setBounds (616, kRowTop + 154, 228, 100);
+
+    for (int i = 0; i < 4; ++i)
+        noteButtons[i].setBounds (616 + i * 58, kRowTop + 260, 54, 24);
 
     for (int i = 0; i < 3; ++i)
         presetButtons[i].setBounds (36, kStyleTop + 40 + i * 40, 130, 32);
@@ -166,9 +190,12 @@ void HarmoniaEditor::paintContent (juce::Graphics& g)
     // key and scale
     hw::drawModule (g, juce::Rectangle<float> (600.0f, (float) kRowTop, 260.0f, (float) kRowH));
     hw::drawLabel (g, "Key & scale", { 620, kRowTop + 12, 220, 16 }, juce::Justification::left, colours::text, 10.5f);
-    g.setColour (colours::dim);
-    g.setFont (ui::font (11.0f));
-    g.drawText (keysLocked ? "The key follows your vocal" : "Click keys to allow or block notes", 616, kRowTop + 258, 228, 28, juce::Justification::centredLeft);
+    if (keysLocked)
+    {
+        g.setColour (colours::dim);
+        g.setFont (ui::font (11.0f));
+        g.drawText ("Follows your vocal", 716, kRowTop + 10, 128, 20, juce::Justification::centredRight);
+    }
 
     ui::drawNoteStrip (g, kNoteStrip, harmonia::adviceFor (adviceInput()));
 
@@ -191,7 +218,7 @@ harmonia::AdviceInput HarmoniaEditor::adviceInput() const
     in.formantSemitones = proc.paramValue (ids::formant);
     in.tuningHz = proc.paramValue (ids::tuning);
     in.voiceRangeFixed = (int) proc.paramValue (ids::range) != 0;
-    const uint16_t mask = proc.currentNoteMask();
+    const uint16_t mask = proc.keyboardNoteMask(); // not the MIDI notes held: a chord on a keyboard is not a setting to warn about
     in.allowedNotes = 0;
     for (int i = 0; i < 12; ++i)
         in.allowedNotes += (mask >> i) & 1u;
@@ -212,24 +239,47 @@ void HarmoniaEditor::setParam (const juce::String& id, float plainValue)
 
 void HarmoniaEditor::toggleNote (int pc)
 {
+    ui::beginUndoStep (proc.apvts, "Note");
     int root = 0;
     bool minor = false;
     if (proc.followedKey (root, minor)) // the key is being followed: the keys on screen are not editable
         return;
     if (proc.scaleIndex() != kCustomScale)
-    {
-        // Start from what is currently lit, then switch to Custom so edits stick.
-        const uint16_t mask = proc.currentNoteMask();
-        for (int i = 0; i < 12; ++i)
-            setParam (ids::note (i), (mask & (1u << i)) != 0 ? 1.0f : 0.0f);
-        setParam (ids::scale, (float) kCustomScale);
-    }
+        setNotes (proc.keyboardNoteMask()); // start from what is currently lit, then switch to Custom so edits stick
     const bool now = proc.paramValue (ids::note (pc)) >= 0.5f;
     setParam (ids::note (pc), now ? 0.0f : 1.0f);
 }
 
+void HarmoniaEditor::setNotes (uint16_t mask)
+{
+    ui::beginUndoStep (proc.apvts, "Notes");
+    for (int i = 0; i < 12; ++i)
+        setParam (ids::note (i), (mask & (1u << i)) != 0 ? 1.0f : 0.0f);
+    setParam (ids::scale, (float) kCustomScale);
+}
+
+void HarmoniaEditor::noteAction (NoteAction action)
+{
+    int root = 0;
+    bool minor = false;
+    if (proc.followedKey (root, minor)) // the key is being followed: the keys are not editable
+        return;
+    switch (action)
+    {
+        case NoteAction::all: setNotes (kAllNotes); break;
+        case NoteAction::none: setNotes (0); break;
+        case NoteAction::invert: setNotes ((uint16_t) (~proc.keyboardNoteMask() & kAllNotes)); break;
+        case NoteAction::scale:
+            ui::beginUndoStep (proc.apvts, "Scale");
+            if (proc.scaleIndex() == kCustomScale)
+                setParam (ids::scale, (float) lastRealScale);
+            break;
+    }
+}
+
 void HarmoniaEditor::applyPreset (int index)
 {
+    ui::beginUndoStep (proc.apvts, "Style");
     setParam (ids::speed, kPresets[index].speed);
     setParam (ids::strength, kPresets[index].strength);
     setParam (ids::natural, kPresets[index].natural);
@@ -241,6 +291,8 @@ void HarmoniaEditor::onDetectClicked()
     {
         detectedText = "Listening starts now.";
         awaitingKeyResult = false;
+        awaitingListen = true;
+        detectClickedAt = juce::Time::getMillisecondCounter();
         proc.startKeyLearn();
     }
     else
@@ -259,11 +311,15 @@ void HarmoniaEditor::timerCallback()
     const bool following = proc.followedKey (followRoot, followMinor);
     const bool usesRoot = scaleUsesRoot (proc.scaleIndex());
 
+    if (const int sc = proc.scaleIndex(); sc != kCustomScale)
+        lastRealScale = sc;
     keyboard.setState (proc.currentNoteMask(), following ? followRoot : (usesRoot ? (int) proc.paramValue (ids::key) : -1), graph.singingPitchClass());
     if (following != keysLocked)
     {
         keysLocked = following;
-        content.repaint (616, kRowTop + 258, 228, 28);
+        content.repaint (716, kRowTop + 10, 128, 20);
+        for (auto& b : noteButtons)
+            b.setEnabled (! keysLocked);
     }
     keyBox.setEnabled (! autoKey && usesRoot);
     scaleBox.setEnabled (! autoKey);
@@ -272,6 +328,7 @@ void HarmoniaEditor::timerCallback()
     HarmoniaProcessor::KeyResult result;
     if (proc.takeKeyResult (result))
     {
+        ui::beginUndoStep (proc.apvts, "Detected key");
         setParam (ids::key, (float) result.root);
         setParam (ids::scale, (float) (result.minor ? kMinorScale : kMajorScale));
         detectedText = "Detected " + juce::String (kNoteNames[result.root]) + (result.minor ? " minor" : " major")
@@ -285,6 +342,18 @@ void HarmoniaEditor::timerCallback()
     }
 
     const bool listening = proc.learnState() == HarmoniaProcessor::LearnState::listening;
+    if (awaitingListen)
+    {
+        // Listening starts in the audio callback: a host that is stopped (or not calling this plug-in) never starts it, and the click would seem to do nothing.
+        if (listening)
+            awaitingListen = false;
+        else if (juce::Time::getMillisecondCounter() - detectClickedAt > 1000)
+        {
+            awaitingListen = false;
+            proc.finishKeyLearn(); // withdraw the request, or it would start by itself when the host does run
+            detectedText = "The host is not running audio. Press play, then click Detect key again.";
+        }
+    }
     detectButton.setToggleState (listening, juce::dontSendNotification);
     detectButton.setButtonText (listening ? "Stop & detect" : "Detect key");
     detectButton.setEnabled (! autoKey);

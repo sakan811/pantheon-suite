@@ -172,6 +172,20 @@ int main()
     check (value (proc, bandIds (1).freq) < 500.0f && value (proc, bandIds (1).freq) > 420.0f && value (proc, bandIds (1).gain) > 1.0f,
            fmt ("with Shift the same drag is a fifth as far (%.0f Hz, %+.1f dB)", value (proc, bandIds (1).freq), value (proc, bandIds (1).gain)));
 
+    // Double-click on a node: flat and Q 1, frequency where it was.
+    setParameterValue (proc.apvts, bandIds (1).q, 4.0f);
+    {
+        const float f = value (proc, bandIds (1).freq), g = value (proc, bandIds (1).gain);
+        view.mouseDoubleClick (mouse (view, { xOf (f), yOfGain (g) }, { xOf (f), yOfGain (g) }, false));
+        check (isBandOn (proc.apvts, 1) && isBandOn (proc.apvts, 0) && ! isBandOn (proc.apvts, 2) && std::fabs (value (proc, bandIds (1).gain)) < 0.01f
+                   && std::fabs (value (proc, bandIds (1).q) - 1.0f) < 0.01f && std::fabs (value (proc, bandIds (1).freq) / f - 1.0f) < 0.001f,
+               fmt ("double-clicking a node resets it: gain %+.2f dB, Q %.2f, still at %.0f Hz (and does not add a band)", value (proc, bandIds (1).gain), value (proc, bandIds (1).q), value (proc, bandIds (1).freq)));
+        setParameterValue (proc.apvts, bandIds (1).gain, g);
+    }
+    check (setAllPlacements (proc.apvts, (int) Placement::mid) == 2 && bandPlacement (proc.apvts, 0) == Placement::mid && bandPlacement (proc.apvts, 1) == Placement::mid
+               && ! isBandOn (proc.apvts, 2) && setAllPlacements (proc.apvts, (int) Placement::stereo) == 2 && bandPlacement (proc.apvts, 1) == Placement::stereo,
+           "the display's \"All bands to\" puts every band there is on one placement (and none that is off)");
+
     // The gain stops at the ends of its range.
     dragFrom (view, { xOf (value (proc, bandIds (1).freq)), yOfGain (value (proc, bandIds (1).gain)) }, { xOf (value (proc, bandIds (1).freq)), -400.0f });
     check (value (proc, bandIds (1).gain) == maxGainDb, "dragging far above the display stops at the top of the gain range");
@@ -466,6 +480,110 @@ int main()
         p2.prepareToPlay (48000.0, 512);
         check (p2.getLatencySamples() == latencyFor (PhaseMode::linear), "prepared with LINEAR already set, the latency is reported at once");
         setParameterValue (p2.apvts, id::phase, 0.0f);
+    }
+
+    // Bypass: a bypassed plugin that reports latency delays by it (the host compensates for it either way).
+    std::printf ("\nBypass\n");
+    for (int mode : { 1, 2 })
+    {
+        IrisProcessor q;
+        setParameterValue (q.apvts, id::phase, (float) mode);
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        const int latency = q.getLatencySamples();
+        juce::AudioBuffer<float> in (2, 512);
+        juce::MidiBuffer none;
+        int found = -1;
+        for (int block = 0; block < 40 && found < 0; ++block)
+        {
+            in.clear();
+            if (block == 0)
+                in.setSample (0, 5, 1.0f);
+            q.processBlockBypassed (in, none);
+            for (int i = 0; i < 512 && found < 0; ++i)
+                if (in.getSample (0, i) > 0.5f)
+                    found = block * 512 + i;
+        }
+        check (latency == latencyFor ((PhaseMode) mode) && found == 5 + latency, fmt ("bypassed in %s: an impulse comes out %d samples late, the reported latency is %d", phaseNames[mode].toRawUTF8(), found - 5, latency));
+    }
+
+    std::printf ("\nUndo and A/B compare\n");
+    {
+        IrisProcessor h;
+        h.setPlayConfigDetails (2, 2, 48000.0, 512);
+        h.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> made (h.createEditor());
+        auto& editor = ui::innerOf<IrisEditor> (*made);
+        made->setVisible (true);
+        auto& display = editor.display();
+        pump (150);
+        const auto settle = [] { pump (150); }; // the state records a change on its next sync
+        h.apvts.undoManager->clearUndoHistory();
+
+        display.mouseDoubleClick (mouse (display, { xOf (1000.0), yOfGain (0.0) }, { xOf (1000.0), yOfGain (0.0) }, false));
+        settle();
+        check (isBandOn (h.apvts, 0) && editor.undoControls().undoSwitch().isEnabled() && ! editor.undoControls().redoSwitch().isEnabled(), "a band added on the display lights UNDO and not REDO");
+        const float f0 = value (h, bandIds (0).freq), g0 = value (h, bandIds (0).gain);
+        dragFrom (display, { xOf (f0), yOfGain (g0) }, { xOf (3000.0), yOfGain (6.0) });
+        settle();
+        check (value (h, bandIds (0).freq) > 2000.0f && value (h, bandIds (0).gain) > 3.0f, "(setup) the node was dragged");
+        editor.undoControls().undo();
+        check (isBandOn (h.apvts, 0) && std::fabs (value (h, bandIds (0).freq) / f0 - 1.0f) < 0.01f && std::fabs (value (h, bandIds (0).gain) - g0) < 0.05f,
+               fmt ("one UNDO takes back the whole drag (frequency and gain: %.0f Hz, %+.1f dB) and keeps the band", value (h, bandIds (0).freq), value (h, bandIds (0).gain)));
+        editor.undoControls().undo();
+        check (! isBandOn (h.apvts, 0), "the next UNDO takes the added band away");
+        const auto cmd = juce::ModifierKeys (juce::ModifierKeys::commandModifier);
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', cmd.withFlags (juce::ModifierKeys::shiftModifier), 'Z')) && isBandOn (h.apvts, 0), "Shift+Cmd+Z puts the band back");
+
+        // A preset is one step, however many parameters it moves.
+        const auto everything = [&]
+        {
+            std::vector<float> v;
+            for (auto* param : h.getParameters())
+                v.push_back (param->getValue());
+            return v;
+        };
+        h.apvts.undoManager->clearUndoHistory();
+        settle();
+        const auto before = everything();
+        h.setCurrentProgram (h.getNumPrograms() - 1);
+        settle();
+        const bool moved = everything() != before;
+        editor.undoControls().undo();
+        check (moved && everything() == before, "a preset moves many parameters and one UNDO puts every one of them back");
+
+        // A/B: set up two ways and switch.
+        IrisProcessor ab;
+        ab.setPlayConfigDetails (2, 2, 48000.0, 512);
+        ab.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> abMade (ab.createEditor());
+        auto& abEditor = ui::innerOf<IrisEditor> (*abMade);
+        setParameterValue (ab.apvts, id::out, -3.0f);
+        addBand (ab.apvts, BandType::bell, 500.0, 4.0);
+        abEditor.abControls().button (1).onClick(); // B starts as a copy of A
+        check (ab.ab.active() == 1 && abEditor.abControls().button (1).getToggleState() && ! abEditor.abControls().button (0).getToggleState()
+                   && std::fabs (value (ab, id::out) + 3.0f) < 0.05f && isBandOn (ab.apvts, 0),
+               "choosing B the first time keeps the settings (a copy of A) and lights B");
+        setParameterValue (ab.apvts, id::out, -9.0f);
+        removeBand (ab.apvts, 0);
+        abEditor.abControls().button (0).onClick();
+        check (std::fabs (value (ab, id::out) + 3.0f) < 0.05f && isBandOn (ab.apvts, 0), "back to A: A's settings are loaded (output and the band)");
+        abEditor.abControls().button (1).onClick();
+        check (std::fabs (value (ab, id::out) + 9.0f) < 0.05f && ! isBandOn (ab.apvts, 0), "B again: B kept what was set in it");
+
+        juce::MemoryBlock saved;
+        ab.getStateInformation (saved);
+        IrisProcessor reopened;
+        reopened.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (reopened.ab.active() == 1 && ! reopened.ab.hasSettings (0), "the session keeps which slot is active, not the slots");
+
+        ab.apvts.undoManager->clearUndoHistory();
+        settle();
+        abEditor.abControls().button (0).onClick();
+        settle();
+        check (std::fabs (value (ab, id::out) + 3.0f) < 0.05f && isBandOn (ab.apvts, 0), "(setup) switched to A");
+        abEditor.undoControls().undo();
+        check (std::fabs (value (ab, id::out) + 9.0f) < 0.05f && ! isBandOn (ab.apvts, 0), "UNDO takes back the A/B switch as one step");
     }
 
     std::printf ("\nAdvice: the notes that keep the equaliser from being used for the wrong job\n");

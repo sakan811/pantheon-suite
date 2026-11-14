@@ -24,7 +24,8 @@ public:
     ui::Knob threshold, ratio, attack, release, knee, makeup, mix, link, hpf;
     ui::Choice detector, lookahead;
     ui::PresetBox presetBox;
-    ui::Toggle autoRelease, autoMakeup, key;
+    ui::Toggle autoRelease, autoMakeup, key, levelMatch;
+    juce::TextButton deltaButton { "DELTA" }, listenButton { "SC LISTEN" };
     ui::GuideButton guideButton { hera::guideTitle(), hera::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return hera::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks

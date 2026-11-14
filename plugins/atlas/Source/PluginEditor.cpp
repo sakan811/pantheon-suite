@@ -9,7 +9,7 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int stripHeight = 540;
+constexpr int stripHeight = 570;
 constexpr int stripGap = 8;
 constexpr int stripWidth = 196;
 constexpr int viewHeight = 230;
@@ -45,6 +45,9 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
                                                 ui::Knob::Layout::below);
     solo.setTooltip ("Solo this band. Click more bands to hear them together; any combination adds up flat. Not saved with the session.");
     delta.setTooltip ("Listen to only what this band's compressor changes (its output minus its input). Not saved with the session.");
+    learn.setTooltip ("Listens to this band for two seconds and sets THRESH just under the loudest it hears (switches the band on). Play the loudest part you want it to work on.");
+    toAll.setTooltip ("Copies this band's THRESH, RATIO, ATTACK and RELEASE to every other band.");
+    toAll.onClick = [&p, band] { copyDynamicsToAll (p.apvts, band); };
     auto& monitor = p.engine.monitor;
     solo.onClick = [&monitor, band] { monitor.solo ^= 1u << band; };
     delta.onClick = [&monitor, band] { monitor.delta ^= 1u << band; };
@@ -60,7 +63,9 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
       lookaheadBox (p.apvts, id::lookahead,
                     "The compressors read the sound this long before it is heard, so a fast peak is already being turned down when it arrives: set it "
                     "to about the ATTACK time. The whole sound is delayed by it (the host compensates). Changing it while playing restarts the bands."),
-      outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything.")
+      outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything."),
+      mixKnob (p.apvts, id::mix, "MIX", "Dry / wet: how much of what the compressors do is heard. 100 % is the compressed sound; lower mixes in the untouched bands "
+                                          "(parallel compression). The bands are aligned, so it does not comb.")
 {
     setLookAndFeel (&look);
     for (int b = 0; b < kBands; ++b)
@@ -68,6 +73,7 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
         auto& s = *(strips[(size_t) b] = std::make_unique<Strip> (p, b));
         for (auto* c : s.components())
             addChildComponent (*c);
+        s.learn.onClick = [this, b] { view.learnThreshold (b, gui::BandView::kLearnSwingDb); };
     }
     addAndMakeVisible (view);
     view.onLayoutChanged = [this] { layoutStrips(); };
@@ -78,7 +84,7 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
     presetBox.setSelectedId (p.getCurrentProgram() + 1, juce::dontSendNotification);
     presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); setPresetTooltip(); };
     setPresetTooltip();
-    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &lookaheadBox, &presetBox, &outKnob, &clearButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &lookaheadBox, &presetBox, &outKnob, &mixKnob, &clearButton, &guideButton })
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
@@ -99,25 +105,27 @@ void AtlasEditor::resized()
     auto header = bounds.removeFromTop (headerHeight).withTrimmedTop (8).withTrimmedBottom (8);
     nameplate = header.removeFromLeft (250);
     header.removeFromLeft (24);
-    outKnob.setBounds (header.removeFromRight (170).withSizeKeepingCentre (170, 52));
-    header.removeFromRight (16);
+    outKnob.setBounds (header.removeFromRight (140).withSizeKeepingCentre (140, 52));
+    header.removeFromRight (6);
+    mixKnob.setBounds (header.removeFromRight (126).withSizeKeepingCentre (126, 52));
+    header.removeFromRight (12);
     auto row = header.withTrimmedTop (28).withHeight (28);
     phaseLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    phaseBox.setBounds (row.removeFromLeft (140));
-    row.removeFromLeft (14);
+    phaseBox.setBounds (row.removeFromLeft (112));
+    row.removeFromLeft (10);
     oversamplingLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    oversamplingBox.setBounds (row.removeFromLeft (84));
-    row.removeFromLeft (14);
+    oversamplingBox.setBounds (row.removeFromLeft (72));
+    row.removeFromLeft (10);
     lookaheadLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    lookaheadBox.setBounds (row.removeFromLeft (84));
-    row.removeFromLeft (14);
+    lookaheadBox.setBounds (row.removeFromLeft (72));
+    row.removeFromLeft (10);
     presetLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    presetBox.setBounds (row.removeFromLeft (140));
-    row.removeFromLeft (14);
-    latencyLabel = row.removeFromLeft (96);
-    clearButton.setBounds (row.removeFromRight (96));
+    presetBox.setBounds (row.removeFromLeft (110));
+    row.removeFromLeft (10);
+    latencyLabel = row.removeFromLeft (76);
+    clearButton.setBounds (row.removeFromRight (88));
     row.removeFromRight (8);
-    guideButton.setBounds (row.removeFromRight (64));
+    guideButton.setBounds (row.removeFromRight (58));
 
     bounds.removeFromTop (10);
     view.setBounds (bounds.removeFromTop (viewHeight));
@@ -132,7 +140,7 @@ void AtlasEditor::setPresetTooltip()
     const auto& list = presets();
     const int index = presetBox.getSelectedId() - 1;
     juce::String text = "Presets: starting points. The thresholds suit a master around -14 LUFS, so set THRESH where each band's meter first moves. "
-                        "Phase, oversampling, look-ahead and output are kept.";
+                        "Phase, oversampling, look-ahead, output and mix are kept.";
     if (juce::isPositiveAndBelow (index, (int) list.size()))
         text << "\n\n" << list[(size_t) index].name << ": " << list[(size_t) index].purpose;
     presetBox.setTooltip (text);
@@ -194,6 +202,7 @@ void AtlasEditor::layoutStrips()
         };
         pair (s.on, s.match);
         pair (s.solo, s.delta);
+        pair (s.learn, s.toAll);
         s.channels.setBounds (r.removeFromTop (24));
         r.removeFromTop (6);
         s.listen.setBounds (r.removeFromTop (24));
@@ -277,6 +286,7 @@ void AtlasEditor::timerCallback()
         auto& s = *strips[(size_t) b];
         s.solo.setToggleState ((solo & (1u << b)) != 0u, juce::dontSendNotification);
         s.delta.setToggleState ((delta & (1u << b)) != 0u, juce::dontSendNotification);
+        s.learn.setToggleState (view.learningSlot() == b, juce::dontSendNotification);
         // Up at once, down slowly, so a short reduction can be read.
         const float now = proc.engine.reductionMeter[(size_t) b].load();
         const float fall = gui::kMeterRangeDb / (float) kTimerHz;

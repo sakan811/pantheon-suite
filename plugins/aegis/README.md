@@ -10,7 +10,7 @@ The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. 
 
 ![Aegis Ceiling](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A loud programme with a beat, GAIN +8 dB, CEILING -1.0 dBTP, RELEASE 100 ms, look-ahead 2 ms and TRUE PEAK on. The amber trace is the reduction over the last seconds (-5.1 dB now, down to about -10 dB on the peaks); OUT PEAK reads -1.0 dBTP, held until CLEAR; the IN and OUT bars are on the right. The strip under the controls warns that taking off 10 dB or more will sound squashed and says what the look-ahead costs in delay. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A loud programme with a beat, GAIN +8 dB, CEILING -1.0 dBTP, RELEASE 100 ms, look-ahead 2 ms and TRUE PEAK on. The amber trace is the reduction over the last seconds (-5.1 dB now, down to about -10 dB on the peaks); OUT PEAK reads -1.0 dBTP, held until CLEAR, MAX REDUCTION -9.8 dB; the IN and OUT bars are on the right. The strip under the controls warns that taking off 10 dB or more will sound squashed and says what the look-ahead costs in delay. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -23,9 +23,11 @@ The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. 
 | **Auto release** | Off by default (the gain always comes back at RELEASE). On: a short peak is let go sooner (a fifth of RELEASE, never under 2 ms), a reduction that has lasted about 4 dB for 150 ms or so is let go at RELEASE, which is then the slow end. Smoother on music with transients; the ceiling does not depend on it. |
 | **True peak** | On by default: the detector reads 7 points between every two samples (8x) with a 64-tap windowed sinc. Off: only the samples. |
 | **Presets** | Six starting points (Init, Streaming Master, Loud Master, Gentle Peak Catch, Broadcast Safe, Tracking Safety; the first three of the music ones have AUTO RELEASE on). A preset sets every control, GAIN included; what it does not list goes back to its default. Set GAIN by ear afterwards. |
+| **Delta** | Off by default. Listen to what the limiter takes away: the sound after GAIN minus the output, aligned by the latency (the delta plus the output is the delayed sound). If you hear the music and not only the peaks, the limiter is working too hard. Presets switch it off. |
+| **Match** | Off by default. Turns the output down to the loudness of the input (the RMS of both channels over about a second), so raising GAIN does not win an A/B only by being louder. It only turns down, so the ceiling holds; with the input quieter than the limited output it does nothing more than take GAIN back. Presets switch it off. |
 | **Paste** | **PASTE** takes the limiter setting that [Themis](../themis/README.md) copied from its master plan (COPY on the ceiling or the loudness item): it sets CEILING (and switches TRUE PEAK on, because a ceiling in dBTP needs it) and moves GAIN by the amount Themis measured, stopping at the ends of GAIN's range and saying so. Anything else on the clipboard changes nothing. |
 
-The display is the reduction of the last nine seconds (hanging from the top, in dB), the number now, the input level, and **OUT PEAK**: the highest true peak that has left (read the way the detector reads, a bar beside IN with a mark at the ceiling), held until **CLEAR** or until CEILING or TRUE PEAK changes, red if it is ever over the ceiling.
+The display is the reduction of the last nine seconds (hanging from the top, in dB), the number now, the input level, and **OUT PEAK**: the highest true peak that has left (read the way the detector reads, a bar beside IN with a mark at the ceiling), held until **CLEAR** or until CEILING or TRUE PEAK changes, red if it is ever over the ceiling. **MAX** under the reduction number is the most the limiter has taken off since then; click it to clear it alone. OUT PEAK reads the limiter's output before DELTA and MATCH.
 
 ## How it works
 
@@ -52,6 +54,8 @@ The display is the reduction of the last nine seconds (hanging from the top, in 
 - AUTO RELEASE (RELEASE 400 ms, a burst of 25 ms at 6 dB over the ceiling): 250 ms later the deficit of the gain is 0.064 with AUTO against 0.268 without; after 1 s of the same burst it is 0.264 against 0.268 (it releases at RELEASE). The ceiling test above also runs with AUTO on.
 - OUT PEAK against an independent reading of the output (8x, a 64-point Hann sinc): -1.000 and -0.998 dB with the ceiling at -1 (TRUE PEAK on); -1.000 and -1.000 with it off.
 - RELEASE 200 ms: 200 ms after a burst the deficit of the gain is 0.37 of what it was (1/e).
+- DELTA plus the output equals the sound after GAIN, aligned by the 128 samples of latency (largest difference 6e-8); DELTA of a sound that is not limited is silent. MATCH on a programme limited by 7 dB: the input reads -20.78 dB RMS, the limited output -13.37 dB, matched -20.74 dB; a plain +9 dB of GAIN with nothing to limit is taken back to within 0.01 dB. With both off the output is bit for bit what it was before they existed.
+- Bypassed by the host, the sound is delayed by the reported latency (an impulse at sample 10 is heard at 138 with 128 samples of latency), so the track does not jump against the rest of the mix.
 - Latency, as reported to the host: 56, 80, 128 and 272 samples for 0.5, 1, 2 and 5 ms (look-ahead + 32), an impulse is heard exactly that late.
 - A loud left and a quiet right keep their ratio (0.1000 in, 0.1000 out). NaN and infinity in the input are silence.
 
@@ -60,6 +64,7 @@ The display is the reduction of the last nine seconds (hanging from the top, in 
 - **It limits; it does not compress.** More than about 6 dB of reduction sounds squashed, and a RELEASE under about 40 ms follows the bass and distorts it. Compress before it.
 - **The true peak is read at 8x.** That is the standard's 4x with a margin; a converter or a codec that reconstructs differently can still differ by a few hundredths of a dB. -1 dBTP is the usual ceiling for that reason.
 - **It delays the sound** by the look-ahead + 32 samples (the host compensates it); changing LOOK-AHEAD while playing restarts the limiter.
+- **DELTA and MATCH are for listening** and are saved with the session; presets switch them off, and notes remind you to do so before a bounce. MATCH is a plain RMS, not a BS.1770 loudness (Hermes and Themis measure that).
 - It does not measure loudness and does not clip. Loudness is Themis' job: put Themis after it, read its plan, COPY the ceiling or loudness item and PASTE it here. Themis' true peak is a 4x reading, so it reads the same or a little under what OUT PEAK reads.
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 

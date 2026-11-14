@@ -17,6 +17,7 @@ struct AdviceInput
     EngineParams params;
     double latencyMs = 0.0;
     bool delta = false; // DELTA is on (the editor's monitor, not a parameter)
+    int listen = -1;    // LISTEN is on for this band (0 to 7), or -1 (the same kind of monitor)
 };
 
 constexpr double kBigBoostDb = 9.0;
@@ -33,6 +34,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
 
     if (in.delta)
         warn ("DELTA is on: you hear only what the bands change, not your track. Switch it off to hear it.");
+    if (in.listen >= 0)
+        warn ("LISTEN is on: you hear only the region of band " + std::to_string (in.listen + 1) + ", not your track. Switch it off to hear it.");
     const bool anyRunning = std::any_of (p.bands.begin(), p.bands.end(), [] (const BandParams& b) { return ! isIdentity (b); });
     if (! anyRunning && std::fabs (p.outDb) < 0.05)
         info ("No band changes anything yet. Drag a node on the display, or raise a band's GAIN.");
@@ -80,7 +83,7 @@ inline const char* guideText()
 {
     return "FOR\n"
            "Shaping the tone of a track or a master: eight bands, each a bell, a shelf, a notch, or a high or low-pass of 12 to 48 dB per octave. "
-           "Drag a node on the display: sideways is the frequency, up and down the gain, the wheel the width (Q). Each band can work on the whole sound, "
+           "Drag a node on the display: sideways is the frequency, up and down the gain, the wheel the width (Q); double-click empty glass to add a band there. LISTEN plays the selected band's region alone. Each band can work on the whole sound, "
            "only the middle, or only the sides.\n\n"
            "PHASE\n"
            "MINIMUM is the usual equaliser: no delay, and the phase turns around each band. LINEAR has no phase shift at all, which keeps a master's "

@@ -69,10 +69,19 @@ public:
         int band = 0;
         while (band < l.numBands - 1 && l.edgeHz[(size_t) (band + 1)] <= centre)
             ++band;
-        learning = { l.slot[(size_t) band], s.swingDb, 0.0f, -120.0f };
-        setValue (proc.apvts, bandIds (learning.slot).on, 1.0f);
+        learnThreshold (l.slot[(size_t) band], s.swingDb);
         layoutChanged();
     }
+
+    // Listens to a band for kLearnSeconds and sets its threshold half of `swingDb` under the loudest level it read (also the LEARN button of a strip, with kLearnSwingDb).
+    // Switches the band on: an off band reads nothing.
+    static constexpr float kLearnSwingDb = 6.0f;
+    void learnThreshold (int slot, float swingDb)
+    {
+        learning = { slot, swingDb, 0.0f, -120.0f };
+        setValue (proc.apvts, bandIds (slot).on, 1.0f);
+    }
+    int learningSlot() const noexcept { return learning.slot; }
 
     void paint (juce::Graphics& g) override
     {

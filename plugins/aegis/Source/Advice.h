@@ -33,6 +33,10 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
 
     if (! p.truePeak)
         warn ("TRUE PEAK is off: only the samples are held; the sound between them can go over. Switch it on for a master.");
+    if (p.delta)
+        warn ("DELTA is on: you hear what the limiter takes away, not the sound. Switch it off before you bounce.");
+    if (p.matchLevel && ! p.delta)
+        warn ("MATCH is on: the output is turned down to the input's loudness. Switch it off before you bounce.");
     if (p.ceilingDb > kHotCeilingDb)
         warn ("A ceiling above -0.3 dBTP leaves no room for a codec or converter, which can add peaks. -1 dBTP is usual.");
     if (in.heldDb >= kHeavyDb)
@@ -56,7 +60,10 @@ inline const char* guideText()
            "HOW\n"
            "It looks ahead (LOOK-AHEAD) and turns the sound down before a peak arrives, so there is no click, and lets go at RELEASE. "
            "Both channels share one gain, so the stereo image does not move. AUTO RELEASE lets a short peak go sooner than RELEASE. "
-           "OUT PEAK is the highest true peak that leaves.\n\n"
+           "OUT PEAK is the highest true peak that leaves; MAX under REDUCTION is the most it took off (click it, or CLEAR, to start again).\n\n"
+           "LISTENING\n"
+           "DELTA plays what the limiter takes away: if you hear the music and not just the peaks, it is working too hard. "
+           "MATCH turns the output down to the input's loudness, so a higher GAIN does not win the comparison only by being louder. Switch both off before you bounce.\n\n"
            "WITH THEMIS\n"
            "Put Themis after it. COPY on its plan's ceiling or loudness item, then PASTE here: it sets CEILING and moves GAIN by the amount "
            "Themis measured. Aegis does not measure loudness; Themis does.\n\n"

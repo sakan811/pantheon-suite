@@ -61,6 +61,8 @@ inline const char* guideText()
            "  - A solo lead vocal, or a solo instrument that plays one note at a time, snapped to the notes of a key. Vibrato and "
            "expression stay (NATURAL), and the voice keeps its colour (the grains are re-spaced, not resampled).\n"
            "  - From transparent (Natural) to polished (Pop) to the robotic effect (Hard-tune).\n"
+           "  - Following a melody or chord you play: while MIDI notes are held, only their note names are allowed (any octave); release them and the "
+           "piano keys are back. The host has to send MIDI to the plug-in (VST3 and the standalone do; most AU hosts do not for an effect).\n"
            "\n"
            "IT IS NOT FOR:\n"
            "  - Chords, backing-vocal stacks or full mixes: it follows one pitch, so it will pull the wrong thing. Put it on the "

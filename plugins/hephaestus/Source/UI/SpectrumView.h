@@ -78,6 +78,7 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        ui::beginUndoStep (apvts, "Band"); // a drag of an edge or a body is one step
         const auto hit = findHit (e.position);
         if (hit.part != Part::none)
             select (hit.band);
@@ -479,6 +480,10 @@ private:
         menu.addItem (1, "Saturate", true, mode == BandMode::saturate);
         menu.addItem (2, "Harmonic Fill", true, mode == BandMode::fill);
         menu.addSeparator();
+        int free = 0;
+        for (int i = 0; i < maxBands; ++i)
+            free += isBandOn (apvts, i) ? 0 : 1;
+        menu.addItem (4, "Duplicate band", free > 0);
         menu.addItem (3, "Remove band");
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
                             [this, band] (int result)
@@ -487,6 +492,11 @@ private:
                                     setBandMode (apvts, band, result == 2 ? BandMode::fill : BandMode::saturate);
                                 else if (result == 3)
                                     removeBand (apvts, band);
+                                else if (result == 4)
+                                {
+                                    if (const int copy = duplicateBand (apvts, band); copy >= 0)
+                                        select (copy);
+                                }
                                 repaint();
                             });
     }

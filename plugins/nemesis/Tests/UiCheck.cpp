@@ -22,12 +22,12 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 9, fmt ("%d parameters: frequency, width, threshold, range, release, mode, detection, listen and look-ahead", proc.getParameters().size()));
+    check (proc.getParameters().size() == 10, fmt ("%d parameters: frequency, width, threshold, range, release, mode, detection, listen, look-ahead and delta", proc.getParameters().size()));
     check (lookaheadNames.size() == kNumLookaheads, "the look-ahead list matches the engine's");
     check (modeNames.size() == kNumModes && detectionNames.size() == kNumDetections, "the choice lists match the engine's");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.freqHz - 6500.0f) < 5.0f && std::fabs (d.q - 1.5f) < 0.01f && std::fabs (d.thresholdDb + 30.0f) < 0.01f && std::fabs (d.rangeDb - 8.0f) < 0.01f && std::fabs (d.releaseMs - 40.0f) < 0.01f &&
-               d.mode == Mode::splitBand && d.detection == Detection::absolute && ! d.listen && d.lookahead == 0 && proc.getLatencySamples() == 0,
+               d.mode == Mode::splitBand && d.detection == Detection::absolute && ! d.listen && ! d.delta && d.lookahead == 0 && proc.getLatencySamples() == 0,
            "a new instance: 6.5 kHz, Q 1.5, -30 dB, 8 dB range, 40 ms, split-band, absolute, no look-ahead, no latency");
 
     // The audio path through the real processor: a loud tone in the band is turned down, a quiet one is not.
@@ -86,6 +86,66 @@ int main()
         r.setPlayConfigDetails (2, 2, 48000.0, 512);
         r.prepareToPlay (48000.0, 512);
         check (r.getLatencySamples() == 48, "a session opened with LOOK-AHEAD 1 ms tells the host 48 samples at once");
+    }
+
+    // Bypassed by the host: the sound comes out as late as the look-ahead the plugin reports.
+    {
+        NemesisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        setValue (q.apvts, id::lookahead, 3.0f);
+        q.prepareToPlay (48000.0, 512);
+        const int latency = q.getLatencySamples();
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        std::vector<float> heard;
+        for (int block = 0; block < 3; ++block)
+        {
+            buffer.clear();
+            if (block == 0)
+                for (int c = 0; c < 2; ++c)
+                    buffer.setSample (c, 7, 0.5f);
+            q.processBlockBypassed (buffer, midi);
+            for (int i = 0; i < 512; ++i)
+                heard.push_back (buffer.getSample (0, i));
+        }
+        int at = -1;
+        for (size_t i = 0; i < heard.size(); ++i)
+            if (heard[i] != 0.0f)
+                at = (int) i;
+        check (latency == 96 && at == 7 + latency && heard[(size_t) at] == 0.5f, fmt ("a bypassed block comes out delayed by the reported latency: an impulse at 7 is heard at %d (latency %d)", at, latency));
+    }
+
+    // DELTA through the processor, and FIND in the editor: it sets FREQ from the sound that plays.
+    {
+        NemesisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<NemesisEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.findButton.getRight() <= editor.getWidth() && ! editor.listen.getBounds().intersects (editor.delta.getBounds()) && ! editor.delta.getBounds().intersects (editor.findButton.getBounds()) && editor.findButton.getBottom() <= editor.getHeight(),
+               "LISTEN, DELTA and FIND fit side by side in the window");
+        editor.tickDisplay();
+        check (! editor.findButton.isEnabled(), "FIND is off while LISTEN is off");
+        setValue (q.apvts, id::listen, 1.0f);
+        editor.tickDisplay();
+        check (editor.findButton.isEnabled(), "FIND is on while LISTEN is on");
+        editor.findButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (editor.findPending() && editor.findButton.getButtonText() == "FINDING", "pressing FIND starts listening");
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        for (int block = 0; block < 200; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+                for (int c = 0; c < 2; ++c)
+                    buffer.setSample (c, i, 0.1f * std::sin (2.0f * 3.14159265f * 8200.0f * (float) (block * 512 + i) / 48000.0f));
+            q.processBlock (buffer, midi);
+        }
+        editor.tickDisplay();
+        check (! editor.findPending() && std::fabs (readParams (q.apvts).freqHz - 8200.0f) < 330.0f, fmt ("FIND set FREQ to %.0f Hz for an 8.2 kHz sound", readParams (q.apvts).freqHz));
+        setValue (q.apvts, id::delta, 1.0f);
+        check (ui::hasNote (editor.notes(), "DELTA is on", ui::Severity::warning) && ! ui::hasNote (editor.notes(), "LISTEN is on", ui::Severity::warning), "DELTA on is flagged (and replaces LISTEN's note)");
     }
 
     // Presets: each applies, has a name and a one-line purpose, and the chosen one is kept with the session.

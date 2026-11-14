@@ -46,6 +46,22 @@ int main()
         proc.processBlock (buffer, midi);
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         check (proc.getLatencySamples() == linearSizesFor (48000.0).latency(), fmt ("linear phase: the host is told %d samples", proc.getLatencySamples()));
+        // Bypassed by the host: the sound is still delayed by the reported latency, or the track would jump early against the rest of the mix.
+        {
+            const int latency = proc.getLatencySamples();
+            int at = -1, seen = 0;
+            for (int block = 0; block < 8; ++block)
+            {
+                buffer.clear();
+                if (block == 0)
+                    buffer.setSample (0, 0, 1.0f), buffer.setSample (1, 0, 0.5f);
+                proc.processBlockBypassed (buffer, midi);
+                for (int i = 0; i < buffer.getNumSamples(); ++i)
+                    if (buffer.getSample (0, i) != 0.0f)
+                        at = block * 512 + i, ++seen;
+            }
+            check (latency > 0 && at == latency && seen == 1, fmt ("bypassed in linear phase, an impulse comes out %d samples late (the reported latency, %d)", at, latency));
+        }
         setValue (proc.apvts, id::phase, 0.0f);
     }
 
@@ -73,7 +89,28 @@ int main()
         setValue (proc.apvts, bandIds (3).type, (float) (int) Type::highPass);
         editor.showTypes();
         check (editor.strips[3]->slope.isVisible() && ! editor.strips[3]->gain.isVisible(), "a strip changes its controls with its type");
+
+        // Double-click on empty glass adds a band in the first free slot, at that frequency and gain.
+        const juce::Point<float> empty { view.xOf (5000.0), view.yOf (-6.0) };
+        view.mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), empty, juce::ModifierKeys(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &view, &view,
+                                                  juce::Time::getCurrentTime(), empty, juce::Time::getCurrentTime(), 1, false));
+        const auto added = readParams (proc.apvts).bands[2];
+        check (added.on && added.type == Type::bell && std::fabs (added.freqHz - 5000.0) < 50.0 && std::fabs (added.gainDb + 6.0) < 0.2 && view.selected == 2,
+               fmt ("a double-click on empty glass adds a bell in the first free band (%.0f Hz, %+.1f dB) and selects it", added.freqHz, added.gainDb));
+        for (int i = 0; i < kBands; ++i)
+            if (isIdentity (readParams (proc.apvts).bands[(size_t) i]))
+                setValue (proc.apvts, bandIds (i).on, 1.0f), setValue (proc.apvts, bandIds (i).gain, 4.0f);
+        check (view.addBandAt (empty) == -1, "with every band in use a double-click adds nothing");
+
+        // LISTEN: monitoring, not a parameter; it follows the selected band and ends with the window.
+        view.mouseDown (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), view.listenButton().getCentre(), juce::ModifierKeys(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &view, &view,
+                                          juce::Time::getCurrentTime(), view.listenButton().getCentre(), juce::Time::getCurrentTime(), 1, false));
+        check (proc.engine.listen.load() == 2 && ui::hasNote (editor.notes(), "LISTEN is on", ui::Severity::warning), "the LISTEN button plays the selected band alone, and a warning says so");
+        view.select (5);
+        check (proc.engine.listen.load() == 5 && proc.getParameters().size() == 3 + 7 * kBands, "LISTEN follows the selected band and is not a parameter");
     }
+
+    check (proc.engine.listen.load() == -1, "closing the editor ends LISTEN");
 
     // The state survives a round trip.
     {
@@ -240,6 +277,8 @@ int main()
         in.params.match = true;
         check (! ui::hasNote (adviceFor (in), "to judge it fairly", ui::Severity::info) && ui::hasNote (adviceFor (in), "GAIN MATCH is on", ui::Severity::info), "... and with it on, says what it does instead");
         in.delta = true;
+        in.listen = 7;
+        check (ui::hasNote (adviceFor (in), "LISTEN is on", ui::Severity::warning), "LISTEN on says you do not hear your track");
         in.params.phase = Phase::linear;
         in.latencyMs = 48.0;
         bool fits = true;

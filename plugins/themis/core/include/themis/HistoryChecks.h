@@ -192,16 +192,17 @@ inline BalanceReport analyseBalance (const FrameStats* frames, int n, int column
 // ---- peaks and clipping ----------------------------------------------------------------------
 namespace clip
 {
-inline constexpr float kTruePeakWarnDb = -1.0f; // the usual streaming-delivery ceiling: above it lossy encoding can clip
+inline constexpr float kTruePeakWarnDb = -1.0f; // the usual streaming-delivery ceiling: above it lossy encoding can clip; the default of the user's ceiling
 inline constexpr float kTruePeakBadDb = 0.0f;
+inline constexpr float kMinCeilingDb = -6.0f; // the range the user can set the ceiling in (the plugin's parameter takes it from here)
 
-// A master with flat-topped clips, samples at 0 dBFS or inter-sample peaks over 0 dBTP is bad; one that is merely closer
-// than 1 dB to full scale is a warning.
-inline Level level (float truePeakDb, uint64_t clipEvents, uint64_t overSamples)
+// A master with flat-topped clips, samples at 0 dBFS or inter-sample peaks over 0 dBTP is bad; one that is merely above the
+// ceiling (-1 dBTP unless the user set another) is a warning.
+inline Level level (float truePeakDb, uint64_t clipEvents, uint64_t overSamples, float ceilingDb = kTruePeakWarnDb)
 {
     if (clipEvents > 0 || overSamples > 0)
         return Level::bad;
-    return translation::classify (truePeakDb, kTruePeakWarnDb, kTruePeakBadDb);
+    return translation::classify (truePeakDb, std::min (ceilingDb, kTruePeakBadDb), kTruePeakBadDb);
 }
 } // namespace clip
 
@@ -226,7 +227,7 @@ struct PeakReport
     Level level = Level::good;
 };
 
-inline PeakReport analysePeaks (const FrameStats* frames, int n)
+inline PeakReport analysePeaks (const FrameStats* frames, int n, float ceilingDb = clip::kTruePeakWarnDb)
 {
     PeakReport r;
     for (int i = 0; i < n; ++i)
@@ -240,7 +241,7 @@ inline PeakReport analysePeaks (const FrameStats* frames, int n)
         r.clippedFrames += f.clipped() ? 1 : 0;
     }
     r.have = n >= kMinFrames && hasLevel (r.truePeakDb);
-    r.level = clip::level (r.truePeakDb, r.clipEvents, r.overSamples);
+    r.level = clip::level (r.truePeakDb, r.clipEvents, r.overSamples, ceilingDb);
     return r;
 }
 

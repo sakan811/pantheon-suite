@@ -35,7 +35,7 @@ int main()
     setValue (proc.apvts, id::mix, 0.0f); // this one is on its own; the pair below meet in mix H
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 11, fmt ("%d parameters: role, mix, importance, carve, reach, attack, release, output, depth, and the sidechain's role and importance", proc.getParameters().size()));
+    check (proc.getParameters().size() == 12, fmt ("%d parameters: role, mix, importance, carve, reach, attack, release, output, depth, the sidechain's role and importance, and hold", proc.getParameters().size()));
     check (roleNames().size() == kNumRoles && mixNames.size() == kMaxGroups + 1, "the choice lists match the engine's roles and mixes");
     const auto defaults = readParams (proc.apvts);
     check (defaults.role == Role::fullRange && std::fabs (defaults.carveDb - 6.0f) < 1e-3f && std::fabs (defaults.distance) < 1e-6f && defaults.scRole == Role::fullRange && std::fabs (defaults.importance - 0.5f) < 1e-6f && std::fabs (defaults.outDb) < 1e-3f, // (a stepped range lands within a rounding error of its default, and which way depends on the build)
@@ -104,6 +104,43 @@ int main()
         const auto r = readParams (other.apvts);
         check (r.role == Role::leadVocal && r.group == 8 && std::fabs (r.carveDb - 11.0f) < 0.05f && std::fabs (r.distance - 0.4f) < 0.01f && r.scRole == Role::kick && std::fabs (r.importance - 0.8f) < 0.01f,
                "a saved state comes back in another instance");
+
+        // The host's names for the tracks: the lists and the depth map call a stem by it. (updateTrackProperties is what a host calls.)
+        {
+            juce::AudioProcessor::TrackProperties props;
+            props.name = "Bass DI";
+            bass.updateTrackProperties (props);
+            props.name = "Lead";
+            vocal.updateTrackProperties (props);
+            std::unique_ptr<juce::AudioProcessorEditor> holder (vocal.createEditor());
+            auto& editor = ui::innerOf<HestiaEditor> (*holder);
+            editor.setVisible (true);
+            editor.view.tick();
+            check (editor.view.otherStems() == 1 && editor.view.stemLabel (0) == "Bass DI" && editor.view.thisLabel() == "Lead",
+                   "the other stem is listed by its track's name ('" + editor.view.stemLabel (0).toStdString() + "'), and this one by its own ('" + editor.view.thisLabel().toStdString() + "')");
+            props.name = std::nullopt;
+            bass.updateTrackProperties (props);
+            editor.view.tick();
+            check (editor.view.stemLabel (0) == juce::String (roleName (Role::bass)), "a host that gives no name leaves the role as the label");
+
+            // COPY TO MIX: the other instance of the mix takes CARVE, REACH, ATTACK and RELEASE (on the message thread, after its next block).
+            setValue (vocal.apvts, id::carve, 11.0f);
+            setValue (vocal.apvts, id::reach, 20.0f);
+            setValue (vocal.apvts, id::attack, 5.0f);
+            setValue (vocal.apvts, id::release, 400.0f);
+            editor.copyToMix();
+            for (int block = 0; block < 4; ++block)
+                bass.processBlock (b, midi);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (150);
+            const auto got = readParams (bass.apvts);
+            check (std::fabs (got.carveDb - 11.0f) < 0.05f && std::fabs (got.reachDb - 20.0f) < 0.3f && std::fabs (got.attackMs - 5.0f) < 0.6f && std::fabs (got.releaseMs - 400.0f) < 3.0f,
+                   fmt ("COPY TO MIX: the bass has CARVE %.1f, REACH %.1f, ATTACK %.1f and RELEASE %.0f from the vocal", got.carveDb, got.reachDb, got.attackMs, got.releaseMs));
+            check (readParams (bass.apvts).role == Role::bass && readParams (bass.apvts).group == 8, "... and keeps its own role and mix");
+            check (ui::hasNote (editor.notes(), "Copied CARVE, REACH, ATTACK and RELEASE to 1 other instance", ui::Severity::info), "the strip says what was copied and to how many");
+            setValue (vocal.apvts, id::hold, 1.0f);
+            check (ui::hasNote (editor.notes(), "HOLD is on", ui::Severity::info), "HOLD on is said in the strip");
+            setValue (vocal.apvts, id::hold, 0.0f);
+        }
     }
     {
         // An instance that goes gives its place back.
@@ -325,6 +362,10 @@ int main()
         q.setCurrentProgram (indexOf ("Pads and Strings"));
         check ((int) raw (id::role) == 8 && std::fabs (raw (id::distance) - 55.0f) < 0.5f && std::fabs (raw (id::importance) - 25.0f) < 0.5f, "Pads and Strings: the pad role, importance 25%, DEPTH 55%");
         check ((int) raw (id::mix) == 3 && std::fabs (raw (id::out) + 2.0f) < 0.01f, "the mix letter and OUTPUT are kept by a preset");
+        setValue (q.apvts, id::hold, 1.0f);
+        q.setCurrentProgram (0);
+        check (raw (id::hold) > 0.5f, "HOLD is kept by a preset");
+        setValue (q.apvts, id::hold, 0.0f);
         q.setCurrentProgram (indexOf ("Kick"));
         check ((int) raw (id::role) == 0 && std::fabs (raw (id::distance)) < 0.5f, "Kick: the kick role, and DEPTH back at the front (a preset does not inherit the last one)");
         q.setCurrentProgram (0);

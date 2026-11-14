@@ -60,10 +60,10 @@ inline const char* guideText()
     return "FOR\n"
            "Gain staging and checking: TRIM sets the level (and POLARITY the sign), LISTEN checks the sound in mono, one channel, the sides only, or with the channels swapped. "
            "The meters read BS.1770 / EBU R128 loudness: MOMENTARY (400 ms), SHORT-TERM (3 s), INTEGRATED (gated, since RESET) and the loudness range, and the true peak "
-           "(the peaks between the samples, in dBTP).\n\n"
+           "(the peaks between the samples, in dBTP). AUTO TRIM sets TRIM so the integrated loudness reads -14 LUFS (play the passage first); AUTO RESET starts the meters again whenever the host starts playing.\n\n"
            "REFERENCE\n"
            "LOAD a finished track and press REF to hear it instead of yours; with LEVEL MATCH it is brought to the loudness of your sound, so you compare the tone and not the level. "
-           "RESTART takes it to its start; it loops.\n\n"
+           "RESTART takes it to its start, a click on its bar plays from there; it loops.\n\n"
            "NOT FOR\n"
            "It changes nothing but the level and the listening: no compression, no limiting, no EQ. The meters are not a limiter: they tell you what to do, they do not do it. "
            "Remember to set LISTEN back to Stereo and REF off before you bounce.";

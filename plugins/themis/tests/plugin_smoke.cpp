@@ -322,6 +322,8 @@ int main (int argc, char** argv)
         cut.place = themis::EqMove::Place::side;
         cut.freqHz = 150.0f;
         std::vector<pdsp::LinkBand> back;
+        pdsp::LinkCurve curve0;
+        pdsp::LinkLimiter got0;
         CHECK (pdsp::link::decode (ui::linkText ({ cut }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut
                    && back[0].place == pdsp::LinkBand::Place::side && std::abs (back[0].freq - 150.0) < 0.5,
                "a copied side low cut reads back as one");
@@ -331,6 +333,17 @@ int main (int argc, char** argv)
                "an unknown key with a non-numeric value does not drop the band");
         CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=abc gain=1 q=1", back) && back.empty(),
                "a known key with a bad number still drops the band");
+        // Text around the data: a byte order mark, leading spaces and a trailing tab do not reject the paste.
+        CHECK (pdsp::link::decode ("\xEF\xBB\xBF  pantheon-bands 1\t\r\n  bell freq=270 gain=-2.0 q=0.70 place=mid\t\n\t\n", back) && back.size() == 1 && std::abs (back[0].freq - 270.0) < 0.5,
+               "a leading BOM and space, a trailing tab and a blank line are ignored");
+        CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=1e9 gain=1e9 q=1e-300", back) && back.size() == 1 && back[0].freq == pdsp::limits::kMaxFreqHz
+                   && back[0].gainDb == pdsp::limits::kMaxGainDb && back[0].q == pdsp::limits::kMinQ,
+               "a frequency, gain and q outside the ranges are clamped into them");
+        CHECK (pdsp::link::decode ("pantheon-bands 1\nfill lo=1 hi=1e9\nhighcut freq=5 slope=1e6", back) && back.size() == 2 && back[0].loHz == pdsp::limits::kMinFreqHz
+                   && back[0].hiHz == pdsp::limits::kMaxFreqHz && back[1].freq == pdsp::limits::kMinFreqHz && back[1].slopeDbPerOct == pdsp::limits::kMaxSlopeDbPerOct,
+               "a fill band's edges and a cut's corner and slope are clamped too");
+        CHECK (pdsp::link::decode ("pantheon-bands 1\ncurve f0=20 oct=1e-300 db=0,1,2", back, &curve0) && !curve0.valid(), "a curve with an absurd grid is dropped");
+        CHECK (pdsp::link::decodeLimiter ("  pantheon-bands 1 \n limiter ceiling=-1.0\t", got0) && got0.hasCeiling, "the limiter reader trims white space too");
         // Copy EQ hands the target curve over with its bands (Iris and Apollo draw it as their reference); a reader without curves still gets the bands.
         const auto target = proc.activeTarget();
         pdsp::LinkCurve curve;
@@ -548,6 +561,147 @@ int main (int argc, char** argv)
         CHECK (done && error.isNotEmpty(), "bad file should report an error");
     }
 
+    std::printf ("[5b] reference player: a rate change stops it at once and decodes it again; going down is low-passed first\n");
+    {
+        const auto writeTone = [] (const juce::File& file, double rate, double hz) {
+            file.deleteFile();
+            juce::WavAudioFormat fmt;
+            std::unique_ptr<juce::OutputStream> out (file.createOutputStream());
+            const auto options = juce::AudioFormatWriterOptions().withSampleRate (rate).withNumChannels (2).withBitsPerSample (24);
+            if (auto w = fmt.createWriterFor (out, options))
+            {
+                std::vector<float> v (static_cast<size_t> (rate * 4.0));
+                for (size_t i = 0; i < v.size(); ++i)
+                    v[i] = static_cast<float> (0.3 * std::sin (2.0 * juce::MathConstants<double>::pi * hz * static_cast<double> (i) / rate));
+                const float* chans[] = { v.data(), v.data() };
+                w->writeFromFloatArrays (chans, 2, static_cast<int> (v.size()));
+            }
+        };
+        const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory);
+        const auto wav = temp.getChildFile ("themis_smoke_ref96.wav"), ultra = temp.getChildFile ("themis_smoke_ultra96.wav");
+        writeTone (wav, 96000.0, 1000.0);
+        writeTone (ultra, 96000.0, 30000.0);
+
+        ThemisProcessor refProc;
+        refProc.setRateAndBufferSizeDetails (fs, 512); // a host does this before prepareToPlay; getSampleRate() reads it
+        refProc.prepareToPlay (fs, 512);
+        const auto load = [&] (const juce::File& f) {
+            bool done = false;
+            juce::String error = "not called";
+            refProc.loadReference (f, [&] (const juce::String& e) { error = e; done = true; });
+            for (int i = 0; i < 400 && !done; ++i)
+                pump (50);
+            return error;
+        };
+        const auto ultraError = load (ultra);
+        CHECK (ultraError.isNotEmpty() || refProc.referenceLufs() < -40.0f, "a 30 kHz tone at 96 kHz must not fold back into the band when decoded for 48 kHz (unfiltered it reads about -13 LUFS, read %.1f)",
+               static_cast<double> (refProc.referenceLufs()));
+        const auto error = load (wav);
+        CHECK (error.isEmpty() && refProc.hasReference(), "%s", error.toRawUTF8());
+        CHECK (refProc.referenceLufs() > -20.0f && refProc.referenceLufs() < -10.0f, "a 0.3 sine reads about -13 LUFS, read %.1f", static_cast<double>(refProc.referenceLufs()));
+        refProc.setReferenceOn (true);
+        CHECK (refProc.referenceOn(), "the reference switches on");
+        refProc.setRateAndBufferSizeDetails (44100.0, 512);
+        refProc.prepareToPlay (44100.0, 512);
+        CHECK (!refProc.referenceOn(), "a new sample rate stops the reference at once, with no editor timer to do it");
+        refProc.setReferenceOn (true);
+        CHECK (!refProc.referenceOn(), "... and it cannot be switched on until it is decoded for the new rate");
+        for (int i = 0; i < 400 && !(refProc.setReferenceOn (true), refProc.referenceOn()); ++i)
+            pump (50);
+        CHECK (refProc.referenceOn(), "... which the processor does by itself");
+        refProc.setReferenceOn (false);
+        wav.deleteFile();
+        ultra.deleteFile();
+    }
+
+    std::printf ("[5c] auto reset: a start from the beginning of the timeline restarts the measurement (when it is on)\n");
+    {
+        struct TestPlayHead : juce::AudioPlayHead
+        {
+            bool playing = false;
+            juce::int64 samples = 0;
+            juce::Optional<PositionInfo> getPosition() const override
+            {
+                PositionInfo info;
+                info.setIsPlaying (playing);
+                info.setTimeInSamples (samples);
+                return info;
+            }
+        };
+        ThemisProcessor p2;
+        p2.setRateAndBufferSizeDetails (fs, 512);
+        p2.prepareToPlay (fs, 512);
+        TestPlayHead head;
+        p2.setPlayHead (&head);
+        const auto l = pinkNoise (static_cast<size_t> (fs * 25.0), 31, 0.2f), r = pinkNoise (static_cast<size_t> (fs * 25.0), 32, 0.2f);
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer midi;
+        // Plays `seconds` from the head's position, the way a host would: block after block, the position advancing.
+        const auto play = [&] (double seconds) {
+            const int blocks = static_cast<int> (seconds * fs / 512.0);
+            for (int b = 0; b < blocks; ++b)
+            {
+                const auto at = static_cast<size_t> (head.samples) % (l.size() - 512);
+                buf.copyFrom (0, 0, l.data() + at, 512);
+                buf.copyFrom (1, 0, r.data() + at, 512);
+                head.playing = true;
+                p2.processBlock (buf, midi);
+                head.samples += 512;
+            }
+            head.playing = false; // the host stops
+            p2.processBlock (buf, midi);
+        };
+        const auto measured = [&] { return p2.loudnessMonitor().seconds(); };
+
+        CHECK (p2.paramReader.resetsOnPlay() == false, "off by default: a session saved before the setting keeps its behaviour");
+        play (22.0);
+        CHECK (measured() > 20.0, "22 s played, read %.1f", measured());
+        head.samples = 0;
+        play (0.1); // starts from the beginning again, the setting is off
+        CHECK (measured() > 20.0, "off: starting from the beginning keeps the measurement, read %.1f", measured());
+
+        if (auto* parameter = p2.apvts.getParameter (params::resetOnPlay))
+            parameter->setValueNotifyingHost (1.0f);
+        CHECK (p2.paramReader.resetsOnPlay());
+        head.samples = 4 * 512 * 100; // part-way into the song
+        play (0.1);
+        CHECK (measured() > 20.0, "on: starting part-way in does not reset, read %.1f", measured());
+        head.samples = 0;
+        play (3.0);
+        CHECK (measured() > 2.5 && measured() < 4.0, "on: a start from the beginning measured afresh (3 s played), read %.1f", measured());
+        p2.setPlayHead (nullptr);
+    }
+
+    std::printf ("[5d] held curve, true-peak ceiling and the added loudness targets\n");
+    {
+        ThemisProcessor p3;
+        p3.setRateAndBufferSizeDetails (fs, 512);
+        p3.prepareToPlay (fs, 512);
+        CHECK (!p3.holdCurve() && !p3.hasHeldCurve(), "nothing to hold before anything is measured");
+        runAudio (p3, 8.0, fs, 512, 0.2f, 41);
+        settle();
+        themis::BandArray live {}, held {};
+        CHECK (p3.readSpectrum (live) && p3.holdCurve() && p3.hasHeldCurve() && p3.readHeldCurve (held) && held == live, "the held curve is the live one at that moment");
+        runAudio (p3, 8.0, fs, 512, 0.2f, 42, 0.9f); // a different image: the live curve moves, the held one does not
+        settle();
+        themis::BandArray after {}, heldAfter {};
+        CHECK (p3.readSpectrum (after) && p3.readHeldCurve (heldAfter) && heldAfter == held, "the held curve does not follow the live one");
+        p3.releaseHeldCurve();
+        CHECK (!p3.hasHeldCurve());
+
+        CHECK (std::abs (p3.paramReader.truePeakCeilingDb() + 1.0f) < 1.0e-6f, "the ceiling defaults to the old -1 dBTP");
+        if (auto* parameter = p3.apvts.getParameter (params::truePeakCeiling))
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (-3.0f));
+        CHECK (std::abs (p3.masterInputs().truePeakCeilingDb + 3.0f) < 1.0e-4f, "the plan reads the ceiling the user set");
+        CHECK (params::kNumLoudnessTargets == 5 && params::loudnessTargets[3].lufs == -16.0f && params::loudnessTargets[4].lufs == -23.0f, "-16 and -23 LUFS are appended");
+        if (auto* parameter = p3.apvts.getParameter (params::loudnessTarget))
+        {
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (4.0f));
+            CHECK (std::abs (p3.masterInputs().targetLufs + 23.0f) < 1.0e-4f && p3.masterInputs().deliveryName == "broadcast", "the broadcast target reaches the plan");
+        }
+        p3.releaseResources();
+    }
+
     std::printf ("[6] editor builds, paints and survives resizing\n");
     {
         // The screenshot: a built-in target (like a real session) and the demo programme, which has 0.5 ms of channel delay.
@@ -640,6 +794,16 @@ int main (int argc, char** argv)
                 for (const auto& item : advice.items)
                     std::printf ("      [%s] %s\n", item.level == themis::Level::bad ? "bad " : "warn", item.headline.c_str());
                 CHECK (!advice.measuring && !advice.items.empty());
+                {
+                    // TEXT: the plan as plain text, the same items in the same order.
+                    const auto text = plan->planText().toStdString();
+                    CHECK (text.rfind ("Themis master plan", 0) == 0 && text.find ("true-peak ceiling -1.0 dBTP") != std::string::npos, "the plan text names the target and the ceiling");
+                    bool allThere = true;
+                    int number = 0;
+                    for (const auto& item : advice.items)
+                        allThere = allThere && text.find (std::to_string (++number) + ". [" + (item.level == themis::Level::bad ? "FIX" : "CHECK") + "] " + item.headline) != std::string::npos;
+                    CHECK (allThere, "every item is in the plan text, worst first");
+                }
                 const auto has = [&] (themis::Topic t) { return std::any_of (advice.items.begin(), advice.items.end(), [t] (const themis::Advice& a) { return a.topic == t; }); };
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
                 CHECK (has (themis::Topic::width), "the demo programme has a widened top");
@@ -684,9 +848,34 @@ int main (int argc, char** argv)
             CHECK (graphs.isValid());
             if (argc > 2 && graphs.isValid())
                 CHECK (writePng (graphs, argv[2]));
-            editor->setSize (1120, 760);
+            // HOLD CURVE: keep the demo programme's curve, measure something else, and the tonal view shows both (docs/hold.png).
+            CHECK (proc.holdCurve() && proc.hasHeldCurve());
+            proc.resetAnalyzer();
+            settle();
+            runAudio (proc, 40.0, fs, 512, 0.25f, 77, 0.6f);
+            settle();
+            pump (400);
+            for (auto* child : editor->getChildren())
+                if (auto* tonal = dynamic_cast<TonalBalanceView*> (child))
+                {
+                    tonal->update();
+                    const auto picture = tonal->createComponentSnapshot (tonal->getLocalBounds(), true, 1.0f);
+                    CHECK (picture.isValid());
+                    if (argc > 3 && picture.isValid())
+                        CHECK (writePng (picture, argv[3]));
+                }
+            proc.releaseHeldCurve();
+            editor->setSize (1400, 780);
             editor->setSize (2200, 1300);
             pump (100);
+            // Closing the editor ends what only it shows and keeps current: the audition (its panel is the only place it is shown) and the listening aids.
+            themis::Switches engaged;
+            engaged.solo = themis::Switches::bit (themis::Source::side);
+            proc.setAudition (engaged);
+            proc.setStreamingPreview (true);
+            CHECK (proc.auditionSwitches().active() && proc.streamingPreview());
+            editor.reset();
+            CHECK (!proc.auditionSwitches().active() && !proc.streamingPreview(), "closing the editor releases the audition and the preview");
         }
     }
 

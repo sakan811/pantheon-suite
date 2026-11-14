@@ -22,12 +22,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { avgTime, 1 }, "Averaging", avgTimeNames(), kDefaultAvgTime));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { device, 1 }, "Translation Device", deviceNames(), kDefaultDevice));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { loudnessTarget, 1 }, "Loudness Target", loudnessTargetNames(), kDefaultLoudnessTarget));
+    // Added later, so version 2 (a session saved before them opens with these defaults, which are the old behaviour).
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { truePeakCeiling, 2 }, "True-Peak Ceiling",
+                                                       NormalisableRange<float> (kMinTruePeakCeilingDb, kMaxTruePeakCeilingDb, 0.1f), kDefaultTruePeakCeilingDb,
+                                                       FloatAttr()
+                                                           .withStringFromValueFunction ([] (float v, int) { return juce::String (v, 1) + " dBTP"; })
+                                                           .withValueFromStringFunction ([] (const juce::String& t) { return t.getFloatValue(); })));
+    layout.add (std::make_unique<juce::AudioParameterBool> (ParameterID { resetOnPlay, 2 }, "Reset On Play", false));
     return layout;
 }
 
-Reader::Reader (juce::AudioProcessorValueTreeState& apvts) : state (apvts), avgTimeRaw (apvts.getRawParameterValue (avgTime))
+Reader::Reader (juce::AudioProcessorValueTreeState& apvts)
+    : state (apvts), avgTimeRaw (apvts.getRawParameterValue (avgTime)), truePeakRaw (apvts.getRawParameterValue (truePeakCeiling)),
+      resetOnPlayRaw (apvts.getRawParameterValue (resetOnPlay))
 {
-    jassert (avgTimeRaw != nullptr);
+    jassert (avgTimeRaw != nullptr && truePeakRaw != nullptr && resetOnPlayRaw != nullptr);
 }
 
 float Reader::value (const juce::String& id) const

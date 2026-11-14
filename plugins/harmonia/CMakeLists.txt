@@ -35,7 +35,7 @@ juce_add_plugin(Harmonia
     PLUGIN_CODE Hmna
     FORMATS VST3 AU Standalone
     IS_SYNTH FALSE
-    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
     VST3_CATEGORIES Fx "Pitch Shift"
     AU_MAIN_TYPE kAudioUnitType_Effect

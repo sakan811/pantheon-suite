@@ -797,6 +797,44 @@ void testUpward()
     const auto plain = run (allOff(), quietTone, quietTone);
     check (maxDiff (after.l, plain.l, second / 2, second / 2) <= 0.0, "a lifting band switched off: after its release the output is the plain output, bit for bit");
 }
+
+void testMix()
+{
+    std::printf ("\n[13] Mix (parallel compression)\n");
+    const auto l = noise (51, 0.3, second), r = noise (52, 0.3, second);
+    for (int os = 0; os < kNumOsModes; ++os)
+    {
+        auto wet = midrangeOnly (-30.0, 6.0);
+        wet.oversampling = os;
+        auto half = wet, dryMix = wet;
+        half.mix = 0.5;
+        dryMix.mix = 0.0;
+        auto plain = allOff();
+        plain.oversampling = os;
+        const auto w = run (wet, l, r), h = run (half, l, r), d = run (dryMix, l, r), ref = run (plain, l, r);
+        double worst = 0.0;
+        for (int i = 0; i < second; ++i)
+            worst = std::max (worst, (double) std::fabs (h.l[(size_t) i] - 0.5f * (w.l[(size_t) i] + d.l[(size_t) i])));
+        check (d.l == ref.l && d.r == ref.r && worst < 1.0e-6 && maxDiff (w.l, d.l, 0, second) > 0.01,
+               fmt ("oversampling %d: MIX 0 is the uncompressed bands bit for bit, and MIX 50 %% is the mean of the two (within %.1e)", os, worst));
+    }
+    // A mix that moves mid-stream is the same for any block size, and ends on its target.
+    const auto go = [&] (int block)
+    {
+        Engine e;
+        e.prepare (fs);
+        auto p = midrangeOnly (-30.0, 6.0);
+        Stereo out { l, r };
+        for (int start = 0; start < second; start += block)
+        {
+            p.mix = start < second / 2 ? 1.0 : 0.25;
+            e.process (out.l.data() + start, out.r.data() + start, std::min (block, second - start), p);
+        }
+        return out;
+    };
+    const auto a = go (64), b = go (64 * 3);
+    check (a.l == b.l && a.r == b.r, "a mix that changes half way: the output is the same for blocks of 64 and 192 (the tick), bit for bit");
+}
 } // namespace
 
 int main()
@@ -813,6 +851,7 @@ int main()
     testLookahead();
     testSidechain();
     testUpward();
+    testMix();
     testIssueFinder();
     return test::finish ("AtlasTests");
 }

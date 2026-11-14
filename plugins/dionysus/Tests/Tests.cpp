@@ -274,5 +274,75 @@ int main()
         check (fine, "a NaN and an infinity in the input are silence: the output is finite");
     }
 
+    // [8] LOW CUT on the saturated path, DELTA, and the level that reaches the curve.
+    std::printf("\n[8] Low cut, delta, drive level\n");
+    {
+        const int n = 48000 * 2;
+        EngineParams p;
+        p.driveDb = 0.0f;
+        p.autoGain = false;
+        p.oversampling = 1;
+        const auto bassTone = sine (50.0, -30.0, n);
+        const auto lowAt = [&] (const EngineParams& q) { Engine e; e.prepare (kFs, q.oversampling); return levelAt (run (e, bassTone, q).l, 50.0); };
+        const double off = lowAt (p);
+        EngineParams cut = p;
+        cut.lowCutHz = 500.0f;
+        const double wetCut = lowAt (cut) - off;
+        cut.mix = 0.5f;
+        const double blended = lowAt (cut) - off;
+        cut.mix = 0.0f;
+        const double dryOnly = lowAt (cut) - off;
+        check (wetCut < -30.0 && std::fabs (blended + 6.0) < 1.0 && std::fabs (dryOnly) < 0.01,
+               fmt ("a 500 Hz low cut takes a 50 Hz tone out of the saturated path (%+.1f dB at MIX 100%%), and not out of the dry sound (%+.2f dB at MIX 0%%; %+.1f dB at 50%%, half of it is the dry sound)", wetCut, dryOnly, blended));
+        EngineParams offAgain = p;
+        offAgain.lowCutHz = 20.0f;
+        Engine plain, filtered;
+        plain.prepare (kFs, 1);
+        filtered.prepare (kFs, 1);
+        const auto in = sine (1000.0, -12.0, 4800);
+        check (run (plain, in, p).l == run (filtered, in, offAgain).l, "with LOW CUT at 20 Hz (Off) the sound is as it was, bit for bit");
+
+        // DELTA is the output minus the input delayed like the output: the two add up to the output, and the harmonics are all that is left of a clean tone.
+        EngineParams hot;
+        hot.driveDb = 18.0f;
+        hot.shape = Shape::clip;
+        hot.oversampling = 1;
+        Engine a, b;
+        a.prepare (kFs, 1);
+        b.prepare (kFs, 1);
+        b.delta = true;
+        const auto t = sine (1000.0, -12.0, n);
+        const auto normal = run (a, t, hot), deltaOut = run (b, t, hot);
+        const int latency = a.latencySamples.load();
+        double worst = 0.0;
+        for (int i = latency; i < n; ++i)
+            worst = std::fmax (worst, std::fabs ((double) normal.l[(size_t) i] - (double) deltaOut.l[(size_t) i] - (double) t.l[(size_t) (i - latency)]));
+        check (worst < 1e-6, fmt ("DELTA plus the input delayed by %d samples is the output (largest difference %.1e)", latency, worst));
+        const double h3 = levelAt (deltaOut.l, 3000.0) - levelAt (normal.l, 3000.0);
+        check (std::fabs (h3) < 0.01, fmt ("the 3rd harmonic of a hard-clipped tone is as loud in DELTA as in the output (%+.3f dB)", h3));
+        Engine idle;
+        idle.prepare (kFs, 1);
+        idle.delta = true;
+        EngineParams dry = hot;
+        dry.mix = 0.0f;
+        const auto zero = run (idle, t, dry);
+        check (rms (zero.l, 0) == 0.0, "DELTA at MIX 0% is silence, exactly");
+
+        // The level that reaches the curve: a 0.25 sine at +12 dB of drive peaks at 1.0 (0.251 x 3.98); a low cut that removes the tone lowers it.
+        Engine m;
+        m.prepare (kFs, 1);
+        EngineParams drive12;
+        drive12.driveDb = 12.0f;
+        run (m, sine (1000.0, -12.0, 9600), drive12);
+        const float reaches = m.drivePeak.exchange (0.0f);
+        EngineParams cutHigh = drive12;
+        cutHigh.lowCutHz = 500.0f;
+        Engine m2;
+        m2.prepare (kFs, 1);
+        run (m2, sine (50.0, -12.0, 9600), cutHigh);
+        check (std::fabs (reaches - 1.0f) < 0.02f && m2.drivePeak.load() < 0.5f * reaches,
+               fmt ("the level that reaches the curve: %.3f for a -12 dBFS sine at +12 dB (1.00), and a 500 Hz low cut keeps a 50 Hz tone down to %.3f", reaches, m2.drivePeak.load()));
+    }
+
     return test::finish ("DionysusTests");
 }

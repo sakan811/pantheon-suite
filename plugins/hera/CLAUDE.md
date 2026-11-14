@@ -50,13 +50,17 @@ The bus is the processor's second input, off by default, and `sidechainConnected
 `delaySamples == 0` the ring returns the input itself, so the engine is bit-identical to the one without look-ahead. A change of the setting clears the ring (a short gap) and moves `latencySamples`, which the processor hands to the host on the message thread (`handleAsyncUpdate`, as Apollo does). The list is `kLookaheadMs`;
 its order is the order of `lookaheadNames`, the parameter's choice.
 
-**Presets** are `ui::Preset`s in `Presets.h`; the processor's `ui::Programs` applies them (every parameter back to its default first) and saves the chosen index with the session. A new parameter needs to be thought about in each preset (it goes back to its default unless the preset lists it).
+**LEVEL MATCH, DELTA and SC LISTEN.** `match` is a parameter (`EngineParams::match`): the energies of the delayed input and of the output are followed per sample (0.6 s), the gain that equals them (within 12 dB) at 0.15 s, applied after MIX, exactly 1.0 when off (so the idle plug-in stays bit-exact). `Engine::delta` and `Engine::scListen` are atomics the editor sets, not parameters: never saved, ended by the editor's destructor, shown in the notes. SC LISTEN replaces the output with the key after the detector's high-pass (it wins over DELTA); DELTA is output minus the delayed input.
+
+**Bypass keeps the latency.** `processBlockBypassed` delays the main bus by `getLatencySamples()` through `pdsp::BypassDelay` (prepared for `Engine::maxLatencySamples()`); `HeraUiCheck` pins it.
+
+**Presets** are `ui::Preset`s in `Presets.h`; the processor's `ui::Programs` applies them (every parameter back to its default first, except what `keepsParameter` claims: LEVEL MATCH) and saves the chosen index with the session. A new parameter needs to be thought about in each preset (it goes back to its default unless the preset lists it).
 
 **Smoothing.** Makeup and mix are smoothed per sample (5 ms); everything else is per sample by nature, so the output does not depend on the host's block size (test [8], bit for bit). The first block starts them at their targets.
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
-**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off) and `match`, version 3 (off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `detectorNames` is the order of `Detector`.
 
 ## DRY: where each thing lives

@@ -29,7 +29,9 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     const auto info = [&] (std::string t) { notes.push_back ({ ui::Severity::info, std::move (t) }); };
     const auto& p = in.params;
 
-    if (p.listen)
+    if (p.delta)
+        warn ("DELTA is on: you hear only what is turned down, not your sound. Switch it off before you bounce.");
+    else if (p.listen)
         warn ("LISTEN is on: you hear only the band the detector hears, not your sound. Switch it off.");
     if (p.rangeDb <= 0.05f)
         warn ("RANGE is 0 dB: Nemesis takes nothing off. Raise it.");
@@ -54,7 +56,8 @@ inline const char* guideText()
            "Taming the s, sh and t of a voice (sibilance): it listens to a band (FREQ and WIDTH), and when the band is louder than THRESH it turns it down, "
            "by up to RANGE. SPLIT-BAND turns down only that band, so the rest of the voice is not touched; WIDEBAND turns the whole sound down.\n\n"
            "FINDING IT\n"
-           "Switch LISTEN on and move FREQ until you hear the hiss of the s: that is the band the detector hears. RELATIVE detection compares the band with the "
+           "Switch LISTEN on and move FREQ until you hear the hiss of the s: that is the band the detector hears. FIND does it for you: with LISTEN on, play a passage with s in it and press FIND; it listens for a second and a half and sets FREQ to the strongest place between 4 and 10 kHz. "
+           "DELTA plays only what is turned down: if it is the voice and not just the hiss, THRESH is too low or RANGE too high. Switch both off before you bounce. RELATIVE detection compares the band with the "
            "whole sound, so one threshold works for a quiet and a loud passage.\n\n"
            "NOT FOR\n"
            "Not a cure for a harsh recording: taking off more than about 10 dB makes a lisp. With LOOK-AHEAD off, the very first millisecond of a loud s gets through. "

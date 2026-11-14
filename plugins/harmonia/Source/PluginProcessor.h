@@ -5,8 +5,10 @@
 
 #include "dsp/AutoTuneEngine.h"
 
+#include <array>
 #include <atomic>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <pantheon/ui/AbCompare.h>
 #include <memory>
 
 namespace ids
@@ -40,7 +42,7 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return JucePlugin_Name; }
-    bool acceptsMidi() const override { return false; }
+    bool acceptsMidi() const override { return true; } // held notes are the allowed notes (see currentNoteMask)
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     // The last `latency` of the vocal is still inside the engine when the input ends.
@@ -60,12 +62,17 @@ public:
 
     juce::AudioProcessorParameter* getBypassParameter() const override { return bypassParam; }
 
+    juce::UndoManager undo; // UNDO / REDO of the parameters (shared/ui Undo.h); declared before the state that records into it
     juce::AudioProcessorValueTreeState apvts;
+    ui::AbCompare ab { apvts, [] (const juce::String& id) { return id == ids::bypass; } }; // A/B compare (shared/ui AbCompare.h); the host's bypass is not part of a setting
 
     // ---- shared with the editor ----
     // Notes the tuner is currently allowed to land on (bit 0 = C): the selected key and scale,
     // or the custom note switches for the "Custom" scale. With Auto Key on, the key being followed.
+    // While a MIDI note is held (any channel) the held notes' pitch classes are the allowed notes; otherwise keyboardNoteMask().
     uint16_t currentNoteMask() const;
+    // The notes the keyboard, key and scale say, without MIDI: what the keyboard buttons edit.
+    uint16_t keyboardNoteMask() const;
     // The key the vocal is being followed in, when Auto Key is on and the key is known.
     bool followedKey (int& root, bool& minor) const;
     int scaleIndex() const { return (int) pScale->load(); }
@@ -79,8 +86,12 @@ public:
 
     // Key detection ("listen to my vocal and tell me the key").
     enum class LearnState { idle, listening };
-    void startKeyLearn() { learnCommand.store (1); }
-    void finishKeyLearn() { learnCommand.store (2); }
+    // The editor (message thread, the only writer) says what it wants, then bumps the sequence: the audio thread acts once per change, on the last
+    // wish, so a start and a stop that arrive between two blocks cannot cancel each other into nothing or run in the wrong order.
+    void startKeyLearn() { requestLearn (true); }
+    void finishKeyLearn() { requestLearn (false); }
+    // How many blocks the host has run: the editor uses it to say that the host is not running audio when Detect has no effect.
+    uint32_t blocksRun() const { return blockCount.load(); }
     LearnState learnState() const { return learning.load() ? LearnState::listening : LearnState::idle; }
     float learnedAmount() const { return learnAmount.load(); }
 
@@ -95,12 +106,20 @@ public:
     bool takeKeyResult (KeyResult& out);
 
 private:
+    void requestLearn (bool listen)
+    {
+        learnWanted.store (listen);
+        learnSequence.fetch_add (1);
+    }
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     harmonia::EngineParams readParams() const;
 
     std::unique_ptr<harmonia::AutoTuneEngine> engine;
     std::atomic<bool> prepared { false };
     std::atomic<bool> resetRequested { false };
+    std::array<uint8_t, 128> heldNotes {}; // audio thread only: which MIDI notes are down
+    std::atomic<uint16_t> heldMask { 0 };  // their pitch classes, for the audio thread and the editor
+    void followMidi (const juce::MidiBuffer&);
     juce::AudioParameterBool* bypassParam = nullptr;
 
     std::atomic<float>* pKey = nullptr;
@@ -116,7 +135,10 @@ private:
     std::atomic<float>* pAutoKey = nullptr;
     std::atomic<float>* pNote[12] {};
 
-    std::atomic<int> learnCommand { 0 };
+    std::atomic<bool> learnWanted { false };
+    std::atomic<uint32_t> learnSequence { 0 };
+    uint32_t learnSeen = 0; // audio thread only
+    std::atomic<uint32_t> blockCount { 0 };
     std::atomic<bool> learning { false };
     std::atomic<float> learnAmount { 0.0f };
     std::atomic<bool> resultReady { false };

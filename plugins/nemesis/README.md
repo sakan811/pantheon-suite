@@ -10,7 +10,7 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 
 ![Nemesis Hush](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB and RELEASE 40 ms. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-2.0 dB now) and rests at 0 between them. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB and RELEASE 40 ms. LISTEN, DELTA and FIND (dimmed: LISTEN is off) are under the selectors. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-2.0 dB now) and rests at 0 between them. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -24,6 +24,8 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 | **Mode** | *Split-band:* only the band is turned down (the rest of the voice is not touched). *Wideband:* the whole sound is turned down. |
 | **Detection** | *Absolute* or *Relative* (see Thresh). |
 | **Listen** | Hear the band the detector hears. Monitoring: switch it off before a bounce. |
+| **Delta** | Off by default. Hear only what is turned down (the sound minus the output: `(1 - gain) x band` in split-band, `(1 - gain) x sound` in wideband): if it is the voice and not just the hiss of the s, THRESH is too low or RANGE too high. It takes the place of LISTEN while it is on; presets switch it off. |
+| **Find** | With LISTEN on, **FIND** listens to the next 1.5 s of the sound that plays and sets FREQ to the strongest place between 4 and 10 kHz: a bank of 17 narrow band-passes (Q 10, equal ratios) keeps the energy of the mono sum, the energy per hertz is smoothed over the neighbours, and the strongest place is refined between the bins. A sound under -100 dBFS gives no answer and FREQ is left alone. |
 | **Look-ahead** | Off (default), 0.5, 1, 2 or 5 ms: the detector hears the sound as it arrives and the sound is heard that long after, so the first of a loud s is already turned down. It is a delay (the host compensates). |
 | **Presets** | Seven starting points (Init, Male Vocal, Female Vocal, Gentle Touch, Hard Sibilance, Broadcast Voice, Find the S). A preset sets every control; what it does not list goes back to its default. Find the s with LISTEN and move FREQ onto it first. |
 
@@ -43,6 +45,9 @@ The display shows the response of the band the detector hears and the reduction 
 - A sibilant (a 6.5 kHz tone) at -20 dBFS over a -30 dB threshold is turned down by 9.95 dB (the law: 10, it holds the band at the threshold); RANGE 6 dB stops the reduction at 6.00 dB.
 - Split-band: with a vowel (300 Hz, -12 dBFS) and a sibilant (6.5 kHz, -16 dBFS) the vowel changes by -0.00 dB and the sibilant by -12.0 dB (RANGE 12). Wideband: both by -12.0 dB.
 - A tone at 1.5 kHz as loud as the sibilant is not touched (-0.000 dB): the detector listens to the band.
+- DELTA: the output plus DELTA is the input to 1e-8 in split-band and wideband (the delta reaches 0.19 and 0.26 for a -12 dBFS sibilant); with nothing turned down it is exactly silent.
+- FIND: tones at 4.5, 6.2, 7.8 and 9.5 kHz are found at 4484, 6206, 7813 and 9497 Hz; a 7 kHz tone at -26 dBFS under a 300 Hz tone at 0 dBFS at 7011 Hz; noise with a hump at 5.6 kHz at 5574 Hz; a sound at -130 dBFS gives no answer.
+- Bypassed by the host, the sound is delayed by the reported look-ahead (an impulse at 7 is heard at 103 with 96 samples of latency).
 - LISTEN: the 6.5 kHz tone passes (-0.00 dB) and the 300 Hz tone is 31 dB down.
 - Under the threshold the output is the input, bit for bit, in both modes; half a second after a loud sibilant the gain is back at exactly 1 and a quiet sound is the input, bit for bit.
 - RELEASE 50 ms: 14.8 dB at the end of a one-second sibilant, 38% of it (5.6 dB) 50 ms later, and gone after a second.
@@ -52,6 +57,8 @@ The display shows the response of the band the detector hears and the reduction 
 
 ## Limits
 
+- **FIND reads the sound that plays**, so play a passage with the s in it; it finds the strongest place of the whole 1.5 s (a loud vowel with energy above 4 kHz can win over a quiet s), and a very loud sound just under 4 kHz leaks a little into its lowest bin. Check the result with LISTEN.
+- **DELTA and LISTEN are monitoring**; switch them off before a bounce (a note says so).
 - **With LOOK-AHEAD off** the first 0.3 ms of a very loud s gets through before the attack closes; with it on the gain is already down (in split-band the band-pass itself takes about 70 microseconds to answer, so the very first cycle of a burst is still not turned down). LOOK-AHEAD delays the sound by its time (the host compensates); changing it while playing restarts the de-esser (a short gap).
 - **Taking off 10 dB or more makes a lisp.** Raise THRESH or lower RANGE. In wideband mode the whole voice ducks with the s.
 - **One band.** It cannot follow a voice whose s moves much in frequency; widen the band (a low Q) or use two instances. It is not a dynamic equaliser (Iris is).

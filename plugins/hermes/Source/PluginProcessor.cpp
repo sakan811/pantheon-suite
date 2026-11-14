@@ -23,6 +23,7 @@ bool HermesProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void HermesProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate);
+    wasPlaying = false;
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
     setLatencySamples (0);
     // A reference made for another sample rate is made again for this one.
@@ -34,6 +35,14 @@ void HermesProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 {
     juce::ScopedNoDenormals noDenormals;
     const auto params = hermes::readParams (apvts);
+    // The host starts playing: the integrated loudness and the peaks start again (a setting, off by default).
+    bool playing = false;
+    if (auto* head = getPlayHead())
+        if (const auto position = head->getPosition())
+            playing = position->getIsPlaying();
+    if (playing && ! wasPlaying && params.resetOnPlay)
+        engine.resetMeters();
+    wasPlaying = playing;
     auto main = getBusBuffer (buffer, false, 0);
     const int n = main.getNumSamples();
     if (main.getNumChannels() >= 2)
@@ -70,7 +79,9 @@ void HermesProcessor::setStateInformation (const void* data, int size)
             const auto path = tree.getProperty ("refPath").toString();
             apvts.replaceState (tree);
             programs.loadFrom (apvts.state);
-            if (path.isNotEmpty() && path != referencePath && juce::File (path).existsAsFile())
+            if (path.isEmpty() || ! juce::File (path).existsAsFile())
+                clearReference(); // a session saved without a reference, or whose file has gone, opens without one (and not with the last session's)
+            else if (path != referencePath)
                 juce::MessageManager::callAsync ([weak = juce::WeakReference<HermesProcessor> (this), path] { if (weak != nullptr) weak->loadReference (juce::File (path)); });
         }
 }

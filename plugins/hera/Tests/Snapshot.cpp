@@ -29,6 +29,7 @@ int main (int argc, char** argv)
     set (hera::id::hpf, 90.0f);
     set (hera::id::autoMakeup, 1.0f);
     set (hera::id::autoRelease, 1.0f);
+    set (hera::id::match, 1.0f);
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);

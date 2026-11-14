@@ -19,18 +19,21 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent&) override; // a click on the MAX REDUCTION number clears it
 
     static constexpr int kHistory = 270; // reduction readings, one a timer tick: 9 seconds
 
     ui::Knob gainKnob, ceilingKnob, releaseKnob;
     ui::Choice lookaheadBox;
-    ui::Toggle truePeakButton, autoReleaseButton;
+    ui::Toggle truePeakButton, autoReleaseButton, deltaButton, matchButton;
     juce::TextButton pasteButton { "PASTE" }, clearOutButton { "CLEAR" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { aegis::guideTitle(), aegis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return aegis::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     float heldReductionDb() const noexcept; // the most the limiter took off in the history
+    float reductionHoldDb() const noexcept { return reductionHold; } // the most the limiter took off since CLEAR, a click on the number, or CEILING or TRUE PEAK changed
+    juce::Rectangle<int> reductionHoldArea() const { return holdArea; }
     float outHoldDb() const noexcept { return outHold; } // the highest true peak of the output since CLEAR (or since CEILING or TRUE PEAK changed)
     std::vector<ui::Note> shownNotes() const; // the notes, with what the last PASTE did first while it is shown
     void pasteFromClipboard (const juce::String& text); // what PASTE does with the clipboard's text (a limiter setting from Themis' plan)
@@ -45,6 +48,8 @@ private:
     juce::Rectangle<int> nameplate, presetLabel, display, lookaheadLabel, noteStrip, latencyLabel;
     std::array<float, kHistory> history {}; // the reduction in dB (positive), oldest first
     float shownReduction = 0.0f, inLevelDb = aegis::gui::kLevelFloorDb, outLevelDb = aegis::gui::kLevelFloorDb, outHold = aegis::gui::kLevelFloorDb;
+    float reductionHold = 0.0f;
+    juce::Rectangle<int> holdArea;
     float shownCeilingDb = -1.0f;
     bool shownTruePeak = true;
     std::string pasteSaid;

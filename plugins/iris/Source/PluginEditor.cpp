@@ -38,11 +38,15 @@ IrisEditor::IrisEditor (IrisProcessor& p)
                                     "For tracking, live, and mixing.\nLINEAR: no phase shift at all, so a boost and a cut leave the waveform's shape alone and parallel or "
                                     "stem processing stays in phase; the whole sound is delayed (the host compensates) and a sharp boost can ring before the beat. For mastering.\n"
                                     "LINEAR HQ: the same with four times the resolution for narrow bass bands, at four times the delay. SAT works in Zero Latency only."),
+      undoButtons (p.undo, *this),
+      abButtons (p.ab),
       matchButton (p.apvts, id::match, "GAIN MATCH", "Matches the output loudness to the input, so a boost that is merely louder doesn't sound better. Slow, and never more than 12 dB.")
 {
     (void) g_unused;
     setLookAndFeel (&look);
     addAndMakeVisible (view);
+    addAndMakeVisible (undoButtons);
+    addAndMakeVisible (abButtons);
     view.onSelectionChanged = [this] (int) { refreshBandPanel(); layoutBandPanel(); repaint(); };
 
     // Knobs of the selected band (re-bound in refreshBandPanel).
@@ -304,7 +308,7 @@ iris::AdviceInput IrisEditor::adviceInput() const
     in.gainMatch = value (id::match) > 0.5f;
     in.satChosen = value (id::mode) > 0.5f;
     in.phase = (PhaseMode) std::clamp ((int) value (id::phase), 0, 2);
-    in.latencyMs = 1000.0 * latencyFor (in.phase) / proc.currentSampleRate;
+    in.latencyMs = 1000.0 * latencyFor (in.phase, proc.currentSampleRate) / proc.currentSampleRate;
     for (int i = 0; i < maxBands; ++i)
         if (isBandOn (proc.apvts, i) && hasGain (bandType (proc.apvts, i)) && value (bandIds (i).gain) >= kBigBoostDb)
             in.anyBoostOver = true;
@@ -362,6 +366,12 @@ void IrisEditor::resized()
     header.removeFromLeft (24);
     meterArea = header.removeFromRight (120).reduced (0, 10);
     header.removeFromRight (8);
+    {
+        // UNDO / REDO and A / B in the strip above the selectors, which the nameplate leaves free.
+        const auto strip = header.withHeight (16).translated (0, -4);
+        undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
+        abButtons.setBounds (strip.getX() + ui::UndoButtons::kWidth + 10, strip.getY(), ui::AbButtons::kWidth, strip.getHeight());
+    }
     {
         auto h = header.withTrimmedTop (28).withHeight (28);
         clearMetersButton.setBounds (h.removeFromRight (64));

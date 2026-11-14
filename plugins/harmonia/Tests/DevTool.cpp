@@ -146,6 +146,42 @@ static int selftest()
     }
 
     {
+        // The key-learn handshake loses nothing: a start, a stop and a start again between two blocks end up listening (the last wish wins),
+        // and a stop with nothing started does not publish a result.
+        proc.prepareToPlay (fs, 512);
+        proc.finishKeyLearn();
+        run (proc, std::vector<float> (512, 0.0f));
+        proc.startKeyLearn();
+        proc.finishKeyLearn();
+        proc.startKeyLearn();
+        run (proc, std::vector<float> (512, 0.0f));
+        check (proc.learnState() == HarmoniaProcessor::LearnState::listening, "start, stop, start between two blocks: listening", 0);
+        proc.finishKeyLearn();
+        run (proc, std::vector<float> (512, 0.0f));
+        HarmoniaProcessor::KeyResult none;
+        check (proc.learnState() == HarmoniaProcessor::LearnState::idle && ! proc.takeKeyResult (none), "stop after silence: idle, no result", 0);
+        proc.finishKeyLearn();
+        run (proc, std::vector<float> (512, 0.0f));
+        check (! proc.takeKeyResult (none), "a stop with nothing started gives no result", 0);
+    }
+    {
+        // The host does not run audio: Detect must say so instead of "Listening starts now." for ever, and withdraw its request.
+        HarmoniaProcessor idleHost;
+        idleHost.setPlayConfigDetails (2, 2, fs, 512);
+        idleHost.prepareToPlay (fs, 512);
+        HarmoniaEditor editor (idleHost);
+        editor.detect().onClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+        check (editor.status().contains ("Listening starts now"), "Detect with no audio running: 'Listening starts now' at first", 0);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (1200);
+        check (editor.status().contains ("not running audio"), "still idle a second later: the editor says the host is not running audio", 0);
+        const auto before = idleHost.blocksRun();
+        run (idleHost, std::vector<float> (1024, 0.0f));
+        check (idleHost.blocksRun() > before && idleHost.learnState() == HarmoniaProcessor::LearnState::idle,
+               "the withdrawn request does not start listening when the host does run", 0);
+    }
+
+    {
         // Auto key through the processor: the chosen key (F# minor) is overruled by what is sung (C major),
         // and the editor-facing mask follows. Turning it off hands control back.
         proc.prepareToPlay (fs, 512);
@@ -161,6 +197,112 @@ static int selftest()
         check (following && proc.currentNoteMask() == harmonia::scaleMask (0, harmonia::kMajorScale), "auto key follows what is sung", proc.currentNoteMask());
         setParam (proc, ids::autoKey, 0.0f);
         check (! proc.followedKey (root, minor) && proc.currentNoteMask() == harmonia::scaleMask (6, harmonia::kMinorScale), "auto key off: the chosen key is back", proc.currentNoteMask());
+    }
+
+    {
+        // MIDI: held notes are the allowed notes; releasing them brings the keyboard's mask back.
+        proc.prepareToPlay (fs, 512);
+        setParam (proc, ids::key, 9);
+        setParam (proc, ids::scale, (float) harmonia::kMajorScale);
+        const auto keys = proc.currentNoteMask();
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer midi;
+        const auto block = [&] { proc.processBlock (buf, midi); midi.clear(); };
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+        midi.addEvent (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 100), 10);
+        midi.addEvent (juce::MidiMessage::noteOn (2, 79, (juce::uint8) 100), 20); // G in another octave and channel
+        block();
+        check (proc.currentNoteMask() == ((1u << 0) | (1u << 4) | (1u << 7)), "held MIDI notes C4, E4, G5 are the allowed notes C, E, G", proc.currentNoteMask());
+        check (proc.keyboardNoteMask() == keys, "the keyboard's own mask is untouched meanwhile", proc.keyboardNoteMask());
+        midi.addEvent (juce::MidiMessage::noteOff (1, 60), 0);
+        block();
+        check (proc.currentNoteMask() == ((1u << 4) | (1u << 7)), "a released note leaves the mask", proc.currentNoteMask());
+        midi.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+        block();
+        check (proc.currentNoteMask() == keys, "all notes off: the keyboard's mask is back", proc.currentNoteMask());
+        midi.addEvent (juce::MidiMessage::noteOn (1, 62, (juce::uint8) 90), 0);
+        block();
+        proc.reset();
+        block();
+        check (proc.currentNoteMask() == keys, "a host reset drops held notes (a stopped host may never send the note-offs)", proc.currentNoteMask());
+        check (proc.acceptsMidi(), "the plug-in accepts MIDI", 0);
+    }
+    {
+        // The buttons under the piano keys.
+        HarmoniaProcessor p2;
+        p2.setPlayConfigDetails (2, 2, fs, 512);
+        p2.prepareToPlay (fs, 512);
+        setParam (p2, ids::key, 2);
+        setParam (p2, ids::scale, (float) harmonia::kMajorScale);
+        HarmoniaEditor e (p2);
+        const auto d = harmonia::scaleMask (2, harmonia::kMajorScale);
+        using A = HarmoniaEditor::NoteAction;
+        e.noteAction (A::none);
+        check (p2.currentNoteMask() == 0 && p2.scaleIndex() == harmonia::kCustomScale, "NONE blocks every note (Custom)", p2.currentNoteMask());
+        e.noteAction (A::all);
+        check (p2.currentNoteMask() == harmonia::kAllNotes, "ALL allows every note", p2.currentNoteMask());
+        e.noteAction (A::none);
+        e.noteAction (A::invert);
+        check (p2.currentNoteMask() == harmonia::kAllNotes, "INVERT of none is all", p2.currentNoteMask());
+        setParam (p2, ids::scale, (float) harmonia::kMajorScale);
+        e.noteAction (A::invert);
+        check (p2.currentNoteMask() == (uint16_t) (~d & harmonia::kAllNotes), "INVERT of D major is the five notes it lacks", p2.currentNoteMask());
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100); // the editor's timer notes the scale it was on
+        setParam (p2, ids::scale, (float) harmonia::kMajorScale);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        e.noteAction (A::invert); // now Custom
+        e.noteAction (A::scale);
+        check (p2.scaleIndex() == harmonia::kMajorScale && p2.currentNoteMask() == d, "SCALE goes back to the scale of the key", p2.currentNoteMask());
+    }
+    {
+        // The window size is kept with the session.
+        HarmoniaProcessor p2;
+        p2.apvts.state.setProperty ("uiScale", 1.5, nullptr);
+        HarmoniaEditor e (p2);
+        check (std::abs (e.getWidth() - (int) std::lround (1.5 * HarmoniaEditor::kDesignW)) <= 1, "the editor opens at the saved size", e.getWidth());
+        e.setSize (HarmoniaEditor::kDesignW * 3 / 4, HarmoniaEditor::kDesignH * 3 / 4);
+        check (std::fabs ((double) p2.apvts.state.getProperty ("uiScale") - 0.75) < 0.01, "resizing it is written to the state", (double) p2.apvts.state.getProperty ("uiScale"));
+        juce::MemoryBlock mb;
+        p2.getStateInformation (mb);
+        HarmoniaProcessor p3;
+        p3.setStateInformation (mb.getData(), (int) mb.getSize());
+        HarmoniaEditor e3 (p3);
+        check (std::abs (e3.getWidth() - HarmoniaEditor::kDesignW * 3 / 4) <= 1, "...and comes back with the session", e3.getWidth());
+    }
+
+    {
+        // UNDO / REDO and A/B compare.
+        HarmoniaProcessor p2;
+        p2.setPlayConfigDetails (2, 2, fs, 512);
+        p2.prepareToPlay (fs, 512);
+        HarmoniaEditor e (p2);
+        const auto settle = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (150); };
+        const auto get = [&] (const char* id) { return p2.apvts.getRawParameterValue (id)->load(); };
+        setParam (p2, ids::speed, 100.0f);
+        settle();
+        e.noteAction (HarmoniaEditor::NoteAction::none); // one step: Custom scale and twelve switches
+        settle();
+        check (p2.currentNoteMask() == 0, "(setup) NONE blocks every note", p2.currentNoteMask());
+        e.undoControls().undo();
+        check (p2.currentNoteMask() == harmonia::kAllNotes && p2.scaleIndex() == harmonia::kChromaticScale, "one UNDO puts back the scale and all twelve notes", p2.scaleIndex());
+        e.undoControls().redo();
+        check (p2.currentNoteMask() == 0, "REDO blocks them again", p2.currentNoteMask());
+
+        setParam (p2, ids::speed, 20.0f);
+        setParam (p2, ids::bypass, 1.0f);
+        e.abControls().button (1).onClick();
+        setParam (p2, ids::speed, 200.0f);
+        setParam (p2, ids::bypass, 0.0f); // the host's bypass is not part of a setting
+        e.abControls().button (0).onClick();
+        check (std::fabs (get (ids::speed) - 20.0f) < 0.5f, "A/B: A has its own speed back", get (ids::speed));
+        check (get (ids::bypass) < 0.5f, "A/B: the bypass is left alone", get (ids::bypass));
+        e.abControls().button (1).onClick();
+        check (std::fabs (get (ids::speed) - 200.0f) < 0.5f, "A/B: B kept what was set in it", get (ids::speed));
+        juce::MemoryBlock mb;
+        p2.getStateInformation (mb);
+        HarmoniaProcessor p3;
+        p3.setStateInformation (mb.getData(), (int) mb.getSize());
+        check (p3.ab.active() == 1, "the active slot is kept with the session", p3.ab.active());
     }
 
     std::printf ("\nAdvice: the notes that keep a pitch corrector from being used for the wrong job\n");

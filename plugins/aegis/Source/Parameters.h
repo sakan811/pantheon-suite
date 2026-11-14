@@ -13,7 +13,8 @@ namespace aegis
 namespace id
 {
 inline const juce::String gain { "gain" }, ceiling { "ceiling" }, release { "release" }, lookahead { "look" }, truePeak { "tp" },
-    autoRelease { "autorel" }; // version 2: a session saved before it opens with it off, the old behaviour
+    autoRelease { "autorel" }, // version 2: a session saved before it opens with it off, the old behaviour
+    delta { "delta" }, matchLevel { "match" }; // version 2 too: listening aids, off
 }
 
 inline juce::StringArray lookaheadNames()
@@ -49,6 +50,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 1 }, "Look-ahead", lookaheadNames(), d.lookahead));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::truePeak, 1 }, "True Peak", d.truePeak));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::autoRelease, 2 }, "Auto Release", d.autoRelease));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::delta, 2 }, "Delta", d.delta));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::matchLevel, 2 }, "Match Level", d.matchLevel));
     return { p.begin(), p.end() };
 }
 
@@ -63,6 +66,8 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookahead - 1);
     e.truePeak = v (id::truePeak) > 0.5f;
     e.autoRelease = v (id::autoRelease) > 0.5f;
+    e.delta = v (id::delta) > 0.5f;
+    e.matchLevel = v (id::matchLevel) > 0.5f;
     return e;
 }
 

@@ -50,6 +50,7 @@ public:
 
 private:
     juce::AudioFormatManager formats;
+    bool wasPlaying = false; // the host's transport at the last block, for AUTO RESET
     juce::String referencePath;
     std::vector<float> monoRight; // a mono host: the engine's second channel
     std::vector<std::unique_ptr<hermes::Reference>> loaded; // the references, newest last: the audio thread may still read the one before the newest for a block, never the one before that

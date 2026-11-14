@@ -26,12 +26,13 @@ public:
         Strip (AtlasProcessor&, int band);
         ui::Toggle on, match;
         juce::TextButton solo { "SOLO" }, delta { "DELTA" };
+        juce::TextButton learn { "LEARN" }, toAll { "TO ALL" }; // set THRESH from what the band reads over two seconds; copy THRESH, RATIO, ATTACK, RELEASE to every band
         ui::Choice channels, listen, direction; // what the compressor works on; what it listens to (its own band or the sidechain's); whether it turns down or lifts
         ui::Knob threshold, ratio, attack, release, makeup;
         std::unique_ptr<ui::Knob> crossover; // the edge to the next band; the top band has none
         std::vector<juce::Component*> components()
         {
-            std::vector<juce::Component*> all { &on, &match, &solo, &delta, &channels, &listen, &direction, &threshold, &ratio, &attack, &release, &makeup };
+            std::vector<juce::Component*> all { &on, &match, &solo, &delta, &learn, &toAll, &channels, &listen, &direction, &threshold, &ratio, &attack, &release, &makeup };
             if (crossover != nullptr)
                 all.push_back (crossover.get());
             return all;
@@ -57,7 +58,7 @@ private:
     juce::TooltipWindow tooltips { this, 600 };
     ui::Choice phaseBox, oversamplingBox, lookaheadBox;
     juce::ComboBox presetBox;
-    ui::Knob outKnob;
+    ui::Knob outKnob, mixKnob;
     juce::Rectangle<int> nameplate, phaseLabel, oversamplingLabel, lookaheadLabel, presetLabel, latencyLabel;
     int lastProgram = -1;
     void setPresetTooltip();

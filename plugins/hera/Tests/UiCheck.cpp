@@ -22,12 +22,12 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 14, fmt ("%d parameters: nine knobs, the detector, three switches and the look-ahead", proc.getParameters().size()));
+    check (proc.getParameters().size() == 15, fmt ("%d parameters: nine knobs, the detector, three switches, the look-ahead and LEVEL MATCH", proc.getParameters().size()));
     check (lookaheadNames.size() == kNumLookaheads, "the look-ahead list matches the engine's");
     check (detectorNames.size() == kNumDetectors, "the choice list matches the engine's detectors");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.thresholdDb + 18.0f) < 1e-3f && std::fabs (d.ratio - 2.0f) < 1e-3f && std::fabs (d.attackMs - 10.0f) < 0.01f && std::fabs (d.releaseMs - 150.0f) < 0.1f &&
-               std::fabs (d.kneeDb - 6.0f) < 1e-3f && d.mix > 0.999f && d.link > 0.999f && d.detector == Detector::rms && ! d.autoRelease && ! d.autoMakeup && ! d.external && d.lookahead == 0 && proc.getLatencySamples() == 0,
+               std::fabs (d.kneeDb - 6.0f) < 1e-3f && d.mix > 0.999f && d.link > 0.999f && d.detector == Detector::rms && ! d.autoRelease && ! d.autoMakeup && ! d.external && d.lookahead == 0 && ! d.match && proc.getLatencySamples() == 0,
            "a new instance: -18 dB, 2:1, 10 ms, 150 ms, 6 dB knee, MIX and LINK 100%, RMS, no look-ahead, no latency");
 
     // The sidechain bus is there, off, and a mono layout is supported.
@@ -144,6 +144,61 @@ int main()
         check (std::fabs (readParams (other.apvts).thresholdDb + 31.5f) < 0.01f && std::fabs (readParams (other.apvts).mix - 0.4f) < 0.01f, "the state of a session comes back as it was saved");
     }
 
+    // Bypassed by the host: the sound is still delayed by the look-ahead the host was told, or the track would jump early.
+    {
+        HeraProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        setValue (q.apvts, id::lookahead, 4.0f); // 10 ms
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        buffer.clear();
+        q.processBlock (buffer, midi);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        const int latency = q.getLatencySamples();
+        int at = -1, seen = 0;
+        for (int block = 0; block < 4; ++block)
+        {
+            buffer.clear();
+            if (block == 0)
+                buffer.setSample (0, 0, 1.0f), buffer.setSample (1, 0, 0.5f);
+            q.processBlockBypassed (buffer, midi);
+            for (int i = 0; i < 512; ++i)
+                if (buffer.getSample (0, i) != 0.0f)
+                    at = block * 512 + i, ++seen;
+        }
+        check (latency == 480 && at == latency && seen == 1, fmt ("bypassed with 10 ms of look-ahead, an impulse comes out %d samples late (the reported latency, %d)", at, latency));
+    }
+
+    // LEVEL MATCH, DELTA and SC LISTEN: the controls, and what the notes say about them.
+    {
+        HeraProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        {
+            std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+            auto& editor = ui::innerOf<HeraEditor> (*holder);
+            editor.setVisible (true);
+            check (editor.key.getRight() < editor.levelMatch.getX() && editor.levelMatch.getRight() < editor.deltaButton.getX() && editor.deltaButton.getRight() < editor.listenButton.getX()
+                       && editor.listenButton.getRight() < editor.getWidth(),
+                   "LEVEL MATCH, DELTA and SC LISTEN sit in the switch row after KEY, overlapping nothing");
+            editor.deltaButton.triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            check (q.engine.delta.load() && ui::hasNote (editor.notes(), "DELTA is on", ui::Severity::warning), "DELTA turns the engine's monitor on, and a warning says you do not hear your track");
+            editor.listenButton.triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            check (q.engine.scListen.load() && ui::hasNote (editor.notes(), "SC LISTEN is on", ui::Severity::warning), "SC LISTEN turns the engine's monitor on, and a warning says you hear the key");
+            check (q.getParameters().size() == 15 && ! (bool) q.apvts.state.getProperty ("delta", false), "neither is a parameter: they are never saved or automated");
+        }
+        check (! q.engine.delta.load() && ! q.engine.scListen.load(), "closing the editor ends both: monitoring never outlives its window");
+        setValue (q.apvts, id::match, 1.0f);
+        q.setCurrentProgram (2);
+        check (readParams (q.apvts).match, "a preset keeps LEVEL MATCH");
+        AdviceInput in;
+        in.params.match = true;
+        check (ui::hasNote (adviceFor (in), "LEVEL MATCH is on", ui::Severity::info), "LEVEL MATCH on says what it does");
+    }
+
     // The notes.
     {
         AdviceInput in;
@@ -162,6 +217,8 @@ int main()
         in.params.makeupDb = 3.0f;
         in.params.external = true;
         in.params.autoRelease = true;
+        in.params.match = true;
+        in.delta = true;
         check (ui::hasNote (adviceFor (in), "MIX under 100%", ui::Severity::info) && ui::hasNote (adviceFor (in), "AUTO makeup is on", ui::Severity::info), "parallel mix and auto makeup are explained");
         bool tooLong = false;
         for (const auto& n : adviceFor (in))

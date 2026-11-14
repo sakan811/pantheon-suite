@@ -74,7 +74,7 @@ public:
     // (the editor's timer calls it) and frees a replaced reference once the audio thread has let go of it.
     void setStreamingPreview (bool on) { previewOn.store (on); updateListen(); }
     bool streamingPreview() const { return previewOn.load(); }
-    void setReferenceOn (bool on) { listen.setReferenceOn (on && referenceClip != nullptr); updateListen(); }
+    void setReferenceOn (bool on) { listen.setReferenceOn (on && referenceClip != nullptr && !referenceStale.load()); updateListen(); }
     bool referenceOn() const { return listen.isReferenceOn(); }
     bool hasReference() const { return referenceClip != nullptr; }
     juce::String referenceName() const { return referenceFile.getFileNameWithoutExtension(); }
@@ -92,6 +92,26 @@ public:
 
     // Thread-safe read of the long-term spectrum. Returns false until enough audio has been analysed.
     bool readSpectrum (themis::BandArray& out) const;
+
+    // A held copy of the tonal curve, drawn behind the live one as a ghost trace so a change can be judged against what it was (A/B).
+    // Message thread. Not saved with the session. Taking one needs a measured curve; Reset leaves it, releasing it ends it.
+    bool holdCurve()
+    {
+        themis::BandArray now {};
+        if (!readSpectrum (now))
+            return false;
+        heldCurve = now;
+        curveHeld = true;
+        return true;
+    }
+    void releaseHeldCurve() { curveHeld = false; }
+    bool hasHeldCurve() const { return curveHeld; }
+    bool readHeldCurve (themis::BandArray& out) const
+    {
+        if (curveHeld)
+            out = heldCurve;
+        return curveHeld;
+    }
 
     // Per-band mono fold in dB (<= 0): how much of each band's power survives a sum to mono.
     // Returns false until enough audio has been analysed.
@@ -151,6 +171,7 @@ private:
     void setParameterValue (const juce::String& id, float plainValue);
     const params::LoudnessTarget& deliveryTarget() const;
     void stopAnalysis();
+    void syncReferenceRate();
 
     themis::TonalAnalyzer analyzer;
     themis::LowCrestMeter lowCrest;
@@ -162,12 +183,17 @@ private:
     std::unique_ptr<themis::ReferenceClip> referenceClip;
     std::vector<std::unique_ptr<themis::ReferenceClip>> retiredClips; // message thread only; the audio thread reads through `listen`
     juce::File referenceFile;
-    double referenceRate = 0.0;
+    themis::BandArray heldCurve {}; // message thread only
+    bool curveHeld = false;
+    std::atomic<double> referenceRate { 0.0 }; // the rate the loaded reference was decoded for; 0 = none (read by prepareToPlay)
+    std::atomic<bool> referenceStale { false }; // decoded for another rate: not playable until the decode for this one lands
     float previewDb = 0.0f;
     themis::listen::ReferenceGain refGain;
     std::atomic<bool> loadingReference { false };
     std::unique_ptr<AnalysisThread> analysisThread; // exists between prepareToPlay and releaseResources
     std::atomic<bool> prepared { false };
+    bool wasPlaying = false;       // audio thread: the host was playing at the previous block
+    int64_t expectedPosition = -1; // audio thread: where that block ended on the host's timeline (-1: unknown)
 
     mutable juce::CriticalSection curveLock;
     themis::TargetCurve customCurve;

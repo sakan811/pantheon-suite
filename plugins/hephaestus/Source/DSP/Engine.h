@@ -113,7 +113,8 @@ public:
             maxLatency = std::max (maxLatency, latencyTable[(size_t) m]);
         }
 
-        forEachDelay ([&] (IntDelay& d) { d.prepare (maxLatency + OctaveGenerator::latencyFor (sampleRate) + 8); });
+        largestLatency = maxLatency + OctaveGenerator::latencyFor (sampleRate);
+        forEachDelay ([&] (IntDelay& d) { d.prepare (largestLatency + 8); });
         for (auto* b : { &dryBuf, &wetBuf, &fundBuf, &octBuf, &satBuf, &tmpBuf, &soloBuf, &soloFillBuf, &soloFillOctBuf, &soloSatBuf })
             b->setSize (maxChannels, maxBlockSize, false, false, true);
 
@@ -154,7 +155,10 @@ public:
         lastRegionMask = 0;
     }
 
-    int getLatency() const noexcept { return latency; }
+    // Read from the message thread (the processor's AsyncUpdater) while the audio thread may change it, hence atomic.
+    int getLatency() const noexcept { return latency.load (std::memory_order_relaxed); }
+    // The longest latency any setting can make (the slowest oversampling plus the octave generator): what a bypass delay is sized for.
+    int getMaxLatency() const noexcept { return largestLatency; }
 
     void process (juce::AudioBuffer<float>& buffer, const EngineParams& p)
     {
@@ -258,10 +262,10 @@ private:
         currentOs = osMode;
         currentOct = octaveLatency;
         const int osLatency = latencyTable[(size_t) osMode];
-        latency = osLatency + octaveLatency;
+        latency.store (osLatency + octaveLatency, std::memory_order_relaxed);
         saturator.onOversamplingChanged();
         for (auto* set : { &dryDelay, &fundDelay, &bypassDelay, &soloDelay })
-            for (auto& d : *set) { d.setDelay (latency); d.reset(); }
+            for (auto& d : *set) { d.setDelay (latency.load (std::memory_order_relaxed)); d.reset(); }
         for (auto* set : { &octDelay, &soloOctDelay })
             for (auto& d : *set) { d.setDelay (osLatency); d.reset(); }
         for (auto* set : { &satDelay, &soloSatDelay })
@@ -504,7 +508,8 @@ private:
     }
 
     double fs = 48000.0;
-    int maxBlock = 512, currentOs = -1, currentOct = -1, latency = 0;
+    int maxBlock = 512, currentOs = -1, currentOct = -1, largestLatency = 0;
+    std::atomic<int> latency { 0 };
     std::array<int, Saturator::numOsModes> latencyTable {};
 
     Saturator saturator;
