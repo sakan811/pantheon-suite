@@ -155,8 +155,9 @@ alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arriv
 
 - parameter ranges, defaults, choice lists (`typeNames`, `placeNames`, ...) -> `Parameters.h` (the editor reads the
   items from the parameters); the crossover defaults -> `defaultCrossoverHz` in `DSP/Band.h` (`Parameters.h` and the engine use it)
-- per-band parameter ids -> `bandIds()`; adding and removing a band -> `addBand`, `removeBand` (the display's double-click, its menu and the
-  ADD BAND / REMOVE buttons all call them)
+- per-band parameter ids -> `bandIds()`; adding, removing and clearing bands -> `addBand`, `removeBand`, `clearBands` (the display's double-click, its menu, Delete and
+  Backspace, and the ADD BAND / REMOVE / CLEAR ALL buttons all call them; a solo on a band that goes off ends with it: `EqView::keyPressed` ends it
+  at once, every other way of removing a band (REMOVE, the menu, CLEAR ALL, UNDO) is caught by `EqView::timerCallback`)
 - which channels a placement touches -> `touchesLeft` / `touchesRight` / `touchesMid` / `touchesSide` in `Band.h`
 - the curve of a band -> `BandFilter` (the engine runs it, the display draws it through `magnitudeAt`, the linear modes sample it with `powerAt`, the tests measure it: all agree)
 - the phase mode's latency and sizes -> `LinearSpec` / `latencyFor()` in `DSP/LinearPhase.h` (the README, the editor and the tests read them; the choice list is `phaseNames` in `Parameters.h`)

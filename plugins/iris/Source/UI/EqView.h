@@ -44,6 +44,7 @@ public:
 
         setTooltip ("Double-click to add a band. Drag a node to set its frequency and gain (Shift = fine), turn the wheel over it for Q; double-click it to reset gain and Q. "
                     "Right-click a node for its menu. The strip along the bottom solos a part of the spectrum.");
+        setWantsKeyboardFocus (true);
         startTimerHz (30);
     }
 
@@ -326,9 +327,37 @@ public:
         repaint();
     }
 
+    // Delete / Backspace removes the selected band (and a solo on it), then selects the next band that is on, wrapping round.
+    // A text field that has the focus keeps the keys.
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        const int code = key.getKeyCode();
+        if (code != juce::KeyPress::deleteKey && code != juce::KeyPress::backspaceKey)
+            return false;
+        if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+            return false;
+        if (! isBandOn (apvts, selected))
+            return false;
+
+        if (engine.monitor.soloBand.load() == selected)
+            engine.monitor.soloBand = -1; // the solo is the engine's monitor, not a parameter: it ends with its band
+        removeBand (apvts, selected);
+        for (int step = 1; step < maxBands; ++step)
+        {
+            const int next = (selected + step) % maxBands;
+            if (isBandOn (apvts, next))
+            {
+                setSelectedBand (next);
+                break;
+            }
+        }
+        return true;
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
         drag = {};
+        grabKeyboardFocus(); // so Delete reaches the view
         ui::beginUndoStep (apvts, "Drag"); // a drag of a node or a crossover is one step
 
         if (pillArea().contains (e.position) && anySolo())

@@ -642,5 +642,104 @@ int main()
                "the GUIDE button is there and its text says what the plugin is not for");
     }
 
+    std::printf ("\nClearing and removing bands\n");
+    {
+        IrisProcessor h;
+        h.setPlayConfigDetails (2, 2, 48000.0, 512);
+        h.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> made (h.createEditor());
+        auto& editor = ui::innerOf<IrisEditor> (*made);
+        made->setVisible (true);
+        pump (150);
+        juce::UndoManager& um = *h.apvts.undoManager;
+        const auto onCount = [&] { int n = 0; for (int i = 0; i < maxBands; ++i) n += isBandOn (h.apvts, i) ? 1 : 0; return n; };
+        const auto clearButton = [&] { return findButton (editor, "CLEAR ALL"); };
+
+        addBand (h.apvts, BandType::bell, 1000.0); // slot 0
+        addBand (h.apvts, BandType::bell, 3000.0); // slot 1
+        pump (150);
+        um.clearUndoHistory();
+        pump (150);
+        check (onCount() == 2 && clearButton() != nullptr && clearButton()->isEnabled(), "CLEAR ALL is there and enabled while bands are on");
+
+        h.engine.monitor.soloBand = 1;
+        clearButton()->onClick();
+        pump (150);
+        check (onCount() == 0 && h.engine.monitor.soloBand.load() == -1, "CLEAR ALL switches every band off and ends a band solo");
+        check (um.getUndoDescription() == "Clear bands", "... as one undo step named Clear bands");
+        check (! clearButton()->isEnabled(), "CLEAR ALL is disabled with no band on");
+        um.undo();
+        pump (150);
+        check (onCount() == 2, "one UNDO brings both bands back");
+
+        clearBands (h.apvts);
+        pump (150);
+        um.clearUndoHistory();
+        pump (150);
+        const int none = clearBands (h.apvts);
+        pump (150);
+        check (none == 0 && ! um.canUndo(), "clearing with no band on opens no undo step");
+
+        addBand (h.apvts, BandType::bell, 1000.0); // slot 0
+        addBand (h.apvts, BandType::bell, 3000.0); // slot 1
+        addBand (h.apvts, BandType::bell, 6000.0); // slot 2
+        pump (150);
+        editor.selectBand (0);
+        pump (150);
+        h.engine.monitor.soloBand = 0;
+        findButton (editor, "REMOVE")->onClick();
+        pump (150);
+        check (! isBandOn (h.apvts, 0) && onCount() == 2 && h.engine.monitor.soloBand.load() == -1,
+               "REMOVE switches the selected band off and ends a solo on it");
+
+        um.clearUndoHistory();
+        pump (150);
+        removeBand (h.apvts, 0);
+        pump (150);
+        check (! um.canUndo(), "removing a band that is already off opens no undo step");
+
+        // Delete and Backspace on the display. Slots 1 and 2 are on at this point.
+        auto& display = editor.display();
+        const auto press = [&] (int code) { return display.keyPressed (juce::KeyPress (code)); };
+        display.setSelectedBand (1);
+        h.engine.monitor.soloBand = 1;
+        pump (150);
+        check (press (juce::KeyPress::deleteKey) && ! isBandOn (h.apvts, 1) && display.getSelectedBand() == 2 && h.engine.monitor.soloBand.load() == -1,
+               "Delete removes the selected band, selects the next band that is on, and ends a solo on it");
+        addBand (h.apvts, BandType::bell, 1000.0); // slot 0, the first free one: on are now 0 and 2
+        pump (150);
+        display.setSelectedBand (2);
+        check (press (juce::KeyPress::backspaceKey) && ! isBandOn (h.apvts, 2) && display.getSelectedBand() == 0 && onCount() == 1,
+               "Backspace removes the selected band and wraps the selection round to the first band on");
+        display.setSelectedBand (3);
+        check (! press (juce::KeyPress::deleteKey) && onCount() == 1, "Delete on a free slot takes no key");
+        display.setSelectedBand (0);
+
+        // One paste of several bands is one undo step.
+        um.clearUndoHistory();
+        pump (150);
+        int skipped = 0;
+        const auto pasted = pasteBands (h.apvts, "pantheon-bands 1\nbell freq=270 gain=-2.5 q=1.40 place=mid\nbell freq=1200 gain=2 q=1.0 place=stereo\n"
+                                                 "bell freq=5000 gain=-1 q=2 place=stereo", skipped);
+        pump (150);
+        check (pasted.size() == 3 && onCount() == 4 && um.getUndoDescription() == "Paste bands",
+               fmt ("a paste of three bands adds three (%d on), as one step named Paste bands", onCount()));
+        um.undo();
+        pump (150);
+        check (onCount() == 1, "one UNDO takes back the whole paste");
+
+        // One match is one undo step.
+        um.clearUndoHistory();
+        pump (150);
+        const std::vector<match::Band> matched { { BandType::bell, 1000.0, 3.0, 1.0 }, { BandType::bell, 4000.0, -2.0, 1.0 } };
+        const auto matchSlots = addMatchedBands (h.apvts, matched);
+        pump (150);
+        check (matchSlots.size() == 2 && onCount() == 3 && um.getUndoDescription() == "Match EQ",
+               fmt ("a match of two bands adds two (%d on), as one step named Match EQ", onCount()));
+        um.undo();
+        pump (150);
+        check (onCount() == 1, "one UNDO takes back the whole match");
+    }
+
     return finish ("UI CHECK");
 }

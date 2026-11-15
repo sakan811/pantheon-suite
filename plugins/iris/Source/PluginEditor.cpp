@@ -93,6 +93,13 @@ IrisEditor::IrisEditor (IrisProcessor& p)
 
     removeButton.setTooltip ("Free this band slot.");
     removeButton.onClick = [this] { removeBand (proc.apvts, view.getSelectedBand()); };
+    clearAllButton.setTooltip ("Switch every band off in one step (UNDO brings them back). Also ends a band solo.");
+    clearAllButton.onClick = [this]
+    {
+        clearBands (proc.apvts);
+        proc.engine.monitor.soloBand = -1;
+    };
+    addAndMakeVisible (clearAllButton);
     addButton.setTooltip ("Put a bell band in this slot. (Double-click the display to place one where you want it.)");
     addButton.onClick = [this] { addBand (proc.apvts, BandType::bell, defaultFreq (view.getSelectedBand()), 0.0, view.getSelectedBand()); };
 
@@ -252,6 +259,12 @@ void IrisEditor::refreshBandPanel()
     soloBandButton.setVisible (on);
     soloCurveButton.setVisible (on);
     addButton.setVisible (! on);
+
+    // CLEAR ALL is only useful while a band is on; the signature already changes with each band.
+    bool anyOn = false;
+    for (int i = 0; i < maxBands; ++i)
+        anyOn = anyOn || isBandOn (proc.apvts, i);
+    clearAllButton.setEnabled (anyOn);
 }
 
 juce::String IrisEditor::bandHint() const
@@ -328,6 +341,8 @@ void IrisEditor::layoutBandPanel()
     addButton.setBounds (buttonSlot);
     pasteButton.setBounds (panel.getRight() - 14 - 64, panel.getY() + 6, 64, 20);
     guideButton.setBounds (pasteButton.getX() - 8 - 64, panel.getY() + 6, 64, 20);
+    // The chips fill the row under the title, so CLEAR ALL sits in the free top row, left of GUIDE.
+    clearAllButton.setBounds (guideButton.getX() - 8 - 84, panel.getY() + 6, 84, 20);
 
     const int boxY = panel.getY() + 78;
     typeBoxes[(size_t) band]->setBounds (panel.getX() + 14, boxY, 118, 26);
