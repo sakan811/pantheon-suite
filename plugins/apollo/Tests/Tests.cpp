@@ -264,6 +264,27 @@ int main()
                 check (step < (phase == Phase::minimum ? 1.3 : 2.0) * refStep, fmt ("%s, %s, switched off mid-tone: the largest step is %.4f (a steady tone's is %.4f): it fades, there is no click",
                                                   phase == Phase::minimum ? "minimum phase" : "linear phase", k.name, step, refStep));
             }
+
+        // A notch exactly on a bin of the kernel (48 kHz, 4096-point frame: 11.72 Hz a bin) sums to a hair below 0 there; a fade takes it to a fractional power, which was NaN.
+        {
+            struct OnBin { double hz, q; };
+            for (const auto& nb : { OnBin { 3000.0, 4.0 }, OnBin { 6000.0, 0.5 }, OnBin { 1500.0, 1.0 } })
+            {
+                const auto t = tone (nb.hz, n, 0.25);
+                EngineParams onP = one (Type::notch, nb.hz, 0.0, nb.q, Phase::linear, Target::stereo, 0), offP = onP;
+                offP.bands[0].on = false;
+                Engine eg;
+                eg.prepare (kFs, Phase::linear);
+                Stereo h { std::vector<float> (t.l.begin(), t.l.begin() + 48000), std::vector<float> (t.r.begin(), t.r.begin() + 48000) };
+                Stereo tl { std::vector<float> (t.l.begin() + 48000, t.l.end()), std::vector<float> (t.r.begin() + 48000, t.r.end()) };
+                run (eg, h, onP);
+                const auto after = run (eg, tl, offP);
+                bool finite = true;
+                for (size_t i = 0; i < after.l.size(); ++i)
+                    finite = finite && std::isfinite (after.l[i]) && std::isfinite (after.r[i]);
+                check (finite, fmt ("linear phase, a notch on a kernel bin (%.0f Hz, Q %.1f) switched off while it plays: the fade gives numbers, not NaN", nb.hz, nb.q));
+            }
+        }
     }
 
     // [7] Bad input, and the output gain.

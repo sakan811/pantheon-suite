@@ -72,7 +72,7 @@ curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCh
 
 **Bypass keeps the latency.** `processBlockBypassed` delays the audio by `getLatencySamples()` through `pdsp::BypassDelay` (prepared for the longest latency, `linearSizesFor (fs).latency()`); `ApolloUiCheck` pins it.
 
-**Linear-phase magnitudes are clamped at 0.** `Convolver::design` takes `sqrt (max (power, 0))`: a notch on a bin's exact frequency sums to a hair below 0 and its root was NaN (test [10]).
+**Linear-phase magnitudes are clamped at 0.** `Convolver::design` clamps each band's `powerAt` at 0 before the fade's fractional power (`pow (p, mix)`, NaN for a negative `p`; `std::max (NaN, 0)` is NaN too, so the clamp has to come first) and takes `sqrt (max (power, 0))`: a notch on a bin's exact frequency sums to a hair below 0 and its root was NaN (tests [6] for the fade, [10] for `mix` 1).
 
 **Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()` (the FFT tables, the rings, the kernels). A change of phase mode restarts the equaliser (`configure()`).
 

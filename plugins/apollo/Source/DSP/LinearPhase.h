@@ -130,7 +130,8 @@ public:
             for (int b = 0; b < kBands; ++b)
                 if (running[(size_t) b])
                 {
-                    const double p = sections[(size_t) b].powerAt (cosW[(size_t) k], cos2W[(size_t) k]);
+                    // A notch on a bin's exact frequency can give a hair below 0, and a fractional power of that is NaN (std::max (NaN, 0) is NaN too): clamp before the power.
+                    const double p = std::max (sections[(size_t) b].powerAt (cosW[(size_t) k], cos2W[(size_t) k]), 0.0);
                     power *= mix[(size_t) b] == 1.0 ? p : std::pow (p, mix[(size_t) b]);
                 }
             const double m = std::sqrt (std::max (power, 0.0)); // a notch on a bin's exact frequency sums to a hair below 0: its root was NaN, and the NaN went into every sample
