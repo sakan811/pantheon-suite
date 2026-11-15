@@ -8,6 +8,7 @@
 #include "UI/ApolloUi.h"
 #include "UI/CurveView.h"
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 
 // The curve of the eight bands on glass, and a strip under it for each; the phase mode and the output gain in the header. Everything drawn is the
 // shared kit's (shared/ui).
@@ -35,7 +36,9 @@ public:
     apollo::gui::CurveView view;
     ui::PresetBox presetBox;
     ui::Toggle matchButton;
+    ui::UndoButtons undoButtons; // UNDO / REDO (Cmd+Z); the processor's UndoManager
     juce::TextButton deltaButton { "DELTA" }, pasteButton { "PASTE" };
+    juce::TextButton clearAllButton { "CLEAR ALL" }; // every band off in one step; enabled only while one is on
     ui::GuideButton guideButton { apollo::guideTitle(), apollo::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return apollo::adviceFor (adviceInput()); } // what the strip under the bands says, for the checks

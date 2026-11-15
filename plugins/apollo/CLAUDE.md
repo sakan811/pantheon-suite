@@ -78,6 +78,8 @@ curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCh
 
 **Bad samples.** NaN and infinity are replaced by 0 on the way in.
 
+**Undo.** The processor owns `juce::UndoManager undo`, declared before `apvts` and handed to it (`shared/ui` `Undo.h`, opt-in). A gesture that moves several parameters opens its step first with `ui::beginUndoStep`: a preset (`setCurrentProgram`), PASTE, `clearBands`, a node drag (`CurveView::mouseDown`), a double-click on empty glass (`addBandAt`), a wheel step, Delete. A new gesture that changes more than one parameter needs one too, or it merges into the step before it.
+
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
@@ -88,6 +90,7 @@ curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCh
 
 - band types, targets, slopes and what a type has (`hasGain`, `hasSlope`) -> `Bands.h`; the names the user reads -> `Parameters.h`
 - the response of the EQ -> `responseDb()` in `Bands.h` (the editor's curve, the tests)
+- band helpers that change several bands (`clearBands`, `pasteBands`) -> `Parameters.h`; the CLEAR ALL button in `PluginEditor.cpp` only calls `clearBands`; Delete / Backspace is `CurveView::keyPressed` (it switches the selected band off through `setWithGesture`, moves the selection and ends LISTEN itself)
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
   section, and at most `ui::kMaxNoteChars` characters
 - the plugin's name -> `APOLLO_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/ApolloUi.h` (`UiCheck` checks they agree)

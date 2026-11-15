@@ -14,12 +14,14 @@ namespace apollo::gui
 // double-click it to switch the band on or off, double-click empty glass to add a band there. LISTEN in the corner plays the selected band's region alone (a band-pass at its frequency and width). The curve is `responseDb` of the settings, so it is the filter that runs (minimum phase and linear phase have
 // the same magnitude). Behind the curve, an analyser draws the sound before the bands (dim) and after them (bright), on its own scale (kAnalyzerTopDb down
 // kAnalyzerRangeDb) with the tilt every analyser of the repository has; the ANALYZER switch in the corner turns it off, and it is kept with the session.
-class CurveView : public juce::Component
+class CurveView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     CurveView (juce::AudioProcessorValueTreeState& state, std::function<double()> sampleRateOf, pdsp::StereoTap& before, pdsp::StereoTap& after)
         : apvts (state), sampleRate (std::move (sampleRateOf)), tapBefore (before), tapAfter (after)
     {
+        setWantsKeyboardFocus (true); // so Delete reaches the display
+        setTooltip ("Delete or Backspace switches the selected band off.");
         loadReference();
     }
 
@@ -160,6 +162,7 @@ public:
                 continue;
             const auto& ids = bandIds (slot);
             const double gain = dbAt (p.y);
+            ui::beginUndoStep (apvts, "Add band"); // the band's settings are one step
             setWithGesture (ids.type, (float) (int) Type::bell);
             setWithGesture (ids.freq, (float) juce::jlimit (kMinHz, kMaxHz, hzAt (p.x)));
             setWithGesture (ids.gain, (float) (std::fabs (gain) < 1.0 ? (gain < 0.0 ? -1.0 : 1.0) : gain));
@@ -172,8 +175,37 @@ public:
         return -1;
     }
 
+    // Delete / Backspace switches the selected band off: its settings stay, as its ON switch keeps them. The selection moves to the next band that is on
+    // (wrapping round); with none on it stays here, and LISTEN, which follows it, ends. A text field that has the focus keeps the keys.
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        const int code = key.getKeyCode();
+        if (code != juce::KeyPress::deleteKey && code != juce::KeyPress::backspaceKey)
+            return false;
+        if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+            return false;
+        if (! readParams (apvts).bands[(size_t) selected].on)
+            return false;
+
+        ui::beginUndoStep (apvts, "Remove band");
+        setWithGesture (bandIds (selected).on, 0.0f);
+        for (int step = 1; step < kBands; ++step)
+        {
+            const int next = (selected + step) % kBands;
+            if (readParams (apvts).bands[(size_t) next].on)
+            {
+                select (next);
+                return true;
+            }
+        }
+        if (listening >= 0)
+            setListen (false);
+        return true;
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
+        grabKeyboardFocus(); // so Delete reaches the display
         if (e.mods.isPopupMenu())
         {
             juce::PopupMenu menu;
@@ -199,6 +231,7 @@ public:
         if (dragged < 0)
             return;
         select (dragged);
+        ui::beginUndoStep (apvts, "Band"); // a drag of a node, or the double-click that follows it, is one step
         for (auto* name : { &bandIds (dragged).freq, &bandIds (dragged).gain })
             apvts.getParameter (*name)->beginChangeGesture();
     }
@@ -232,6 +265,7 @@ public:
         if (const int band = nodeNear (e.position); band >= 0)
         {
             const float q = readParams (apvts).bands[(size_t) band].q;
+            ui::beginUndoStep (apvts, "Q"); // each wheel step is one undo step
             setWithGesture (bandIds (band).q, juce::jlimit (0.1f, 10.0f, q * std::pow (1.25f, w.deltaY > 0.0f ? 1.0f : -1.0f)));
             select (band);
         }

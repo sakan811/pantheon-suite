@@ -388,5 +388,166 @@ int main()
         check (! editor.view.hasReference() && ! r.apvts.state.hasProperty ("referenceCurve"), "clearing the reference removes it from the display and from the session");
     }
 
+    // Clearing and removing bands: CLEAR ALL is one undo step, Delete and Backspace switch the selected band off, and a preset is one undo step.
+    std::printf ("\nClearing and removing bands\n");
+    {
+        ApolloProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<ApolloEditor> (*holder);
+        editor.setVisible (true);
+        auto& um = *q.apvts.undoManager;
+        const auto onCount = [&]
+        {
+            int n = 0;
+            for (const auto& b : readParams (q.apvts).bands)
+                n += b.on ? 1 : 0;
+            return n;
+        };
+        const auto settle = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (300); }; // the undo history takes a parameter change when the message loop runs
+        const auto snapshot = [&]
+        {
+            std::vector<float> v;
+            for (const auto& b : readParams (q.apvts).bands)
+            {
+                v.push_back (b.on ? 1.0f : 0.0f);
+                v.push_back ((float) b.freqHz);
+                v.push_back ((float) b.gainDb);
+            }
+            return v;
+        };
+
+        // CLEAR ALL's enabled state is set by the editor's timer: all bands off disables it, and the bands back on enable it again.
+        const auto defaults = readParams (q.apvts);
+        for (int i = 0; i < kBands; ++i)
+            setValue (q.apvts, bandIds (i).on, 0.0f);
+        settle();
+        check (onCount() == 0 && ! editor.clearAllButton.isEnabled(), "CLEAR ALL is disabled while every band is off (the timer sets it)");
+        for (int i = 0; i < kBands; ++i)
+            setValue (q.apvts, bandIds (i).on, defaults.bands[(size_t) i].on ? 1.0f : 0.0f);
+        settle();
+        check (onCount() == 6 && editor.clearAllButton.isEnabled(), "CLEAR ALL is enabled while bands are on (the default has six)");
+        settle(); // pending state changes reach the history first, so they are not undone
+        um.clearUndoHistory();
+        editor.view.setListen (true);
+        editor.clearAllButton.triggerClick();
+        settle();
+        check (onCount() == 0 && um.getUndoDescription() == "Clear bands", "CLEAR ALL switches every band off as one undo step named Clear bands");
+        check (q.engine.listen.load() == -1, "CLEAR ALL ends LISTEN");
+        settle();
+        check (! editor.clearAllButton.isEnabled(), "CLEAR ALL is disabled with no band on");
+        um.undo();
+        settle();
+        check (onCount() == 6 && editor.clearAllButton.isEnabled(), "one UNDO brings every band back, and CLEAR ALL is enabled again");
+        check (std::fabs (readParams (q.apvts).bands[1].freqHz - 100.0) < 0.5, "... with the settings each band had");
+
+        // Nothing on: no step is opened, and nothing changes.
+        for (int i = 0; i < kBands; ++i)
+            setValue (q.apvts, bandIds (i).on, 0.0f);
+        settle(); // pending state changes reach the history first, so they are not undone
+        um.clearUndoHistory();
+        check (clearBands (q.apvts) == 0 && ! um.canUndo(), "clearing with no band on changes nothing and opens no undo step");
+
+        // Delete switches the selected band off and selects the next one that is on; the settings stay.
+        setValue (q.apvts, bandIds (1).on, 1.0f);
+        setValue (q.apvts, bandIds (4).on, 1.0f);
+        settle(); // pending state changes reach the history first, so they are not undone
+        um.clearUndoHistory();
+        editor.view.select (1);
+        check (! editor.view.keyPressed (juce::KeyPress ('x', juce::ModifierKeys(), 'x')) && onCount() == 2, "a key other than Delete or Backspace is not taken");
+        const bool deleted = editor.view.keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+        settle(); // the state records a change when the message loop runs (as with CLEAR ALL)
+        check (deleted && onCount() == 1 && ! readParams (q.apvts).bands[1].on && editor.view.selected == 4,
+               "Delete switches the selected band off and selects the next band that is on");
+        check (std::fabs (readParams (q.apvts).bands[1].freqHz - 100.0) < 0.5 && um.getUndoDescription() == "Remove band", "the band keeps its settings, and the step is named Remove band");
+        const bool backspaced = editor.view.keyPressed (juce::KeyPress (juce::KeyPress::backspaceKey));
+        settle();
+        check (backspaced && onCount() == 0 && editor.view.selected == 4, "Backspace switches the last band on off too, and the selection stays put");
+        const bool nothingSelected = editor.view.keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+        settle();
+        check (! nothingSelected && onCount() == 0, "Delete on a band that is off does nothing");
+        um.undo();
+        settle();
+        check (onCount() == 1 && readParams (q.apvts).bands[4].on, "UNDO brings back the band that Backspace removed");
+        um.undo();
+        settle();
+        check (onCount() == 2, "and a second UNDO brings back the one Delete removed");
+
+        // A preset is one undo step, and UNDO takes it back.
+        settle(); // pending state changes reach the history first, so they are not undone
+        um.clearUndoHistory();
+        settle();
+        const auto beforePreset = snapshot();
+        q.setCurrentProgram (1); // Low Cut
+        settle();
+        check (um.getUndoDescription() == "Preset" && snapshot() != beforePreset, "a preset is one undo step named Preset");
+        um.undo();
+        settle();
+        const auto after = snapshot(); // the values come back through the state as text, so compare to a tolerance
+        bool same = after.size() == beforePreset.size();
+        for (size_t k = 0; same && k < after.size(); ++k)
+            same = std::fabs (after[k] - beforePreset[k]) < 1e-3f * std::max (1.0f, std::fabs (beforePreset[k]));
+        check (same, "UNDO takes a preset back as one step");
+    }
+
+    // A paste of several bands is one undo step; the UNDO / REDO buttons and Cmd+Z take it back and put it on again. The display's tooltip names Delete.
+    std::printf ("\nUndo of a paste, and the UNDO / REDO buttons\n");
+    {
+        ApolloProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<ApolloEditor> (*holder);
+        editor.setVisible (true);
+        auto& um = *q.apvts.undoManager;
+        const auto settle = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (300); };
+        const auto onCount = [&]
+        {
+            int n = 0;
+            for (const auto& b : readParams (q.apvts).bands)
+                n += b.on ? 1 : 0;
+            return n;
+        };
+        const auto cmd = juce::ModifierKeys (juce::ModifierKeys::commandModifier);
+
+        // Clear the bands so there are free ones for the paste, then start from an empty history.
+        settle();
+        clearBands (q.apvts);
+        settle();
+        um.clearUndoHistory();
+        settle();
+        check (! editor.undoButtons.undoSwitch().isEnabled() && ! editor.undoButtons.redoSwitch().isEnabled(), "with no change in the history, UNDO and REDO are both off");
+
+        // Three bands pasted are one step named Paste bands, and one UNDO takes all three back.
+        using K = pdsp::LinkBand::Kind;
+        const auto bandOf = [] (K kind, double hz, double gain, double qv)
+        {
+            pdsp::LinkBand b;
+            b.kind = kind;
+            b.freq = hz;
+            b.gainDb = gain;
+            b.q = qv;
+            b.place = pdsp::LinkBand::Place::stereo;
+            return b;
+        };
+        editor.pasteFromClipboard (juce::String (pdsp::link::encode ({ bandOf (K::lowShelf, 90.0, 3.0, 0.7), bandOf (K::bell, 270.0, -2.5, 1.5), bandOf (K::highShelf, 9000.0, 1.5, 0.7) })));
+        settle();
+        check (onCount() == 3 && um.getUndoDescription() == "Paste bands", "a paste of three bands sets three bands as one undo step named Paste bands");
+        check (editor.undoButtons.undoSwitch().isEnabled() && ! editor.undoButtons.redoSwitch().isEnabled(), "after the paste UNDO is on and REDO is off");
+        editor.undoButtons.undoSwitch().triggerClick();
+        settle();
+        check (onCount() == 0, "UNDO takes back all three pasted bands in one step");
+        check (! editor.undoButtons.undoSwitch().isEnabled() && editor.undoButtons.redoSwitch().isEnabled(), "after that UNDO is off and REDO is on");
+        editor.undoButtons.redoSwitch().triggerClick();
+        settle();
+        check (onCount() == 3, "REDO puts the three bands back");
+        check (editor.undoButtons.handleKey (juce::KeyPress ('z', cmd, 'z')) && onCount() == 0, "Cmd+Z takes the paste back");
+        check (editor.undoButtons.handleKey (juce::KeyPress ('z', cmd.withFlags (juce::ModifierKeys::shiftModifier), 'Z')) && onCount() == 3, "Shift+Cmd+Z puts it back");
+        check (! editor.undoButtons.handleKey (juce::KeyPress ('q', cmd, 'q')), "another key is not taken");
+
+        check (editor.view.getTooltip().contains ("Delete"), "the display's tooltip says that Delete or Backspace switches the selected band off");
+    }
+
     return test::finish ("ApolloUiCheck");
 }
