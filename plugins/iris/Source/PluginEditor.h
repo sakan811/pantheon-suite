@@ -53,6 +53,7 @@ private:
     std::array<std::unique_ptr<ui::Toggle>, iris::maxBands> dynToggles, autoToggles;
     ui::GuideButton guideButton { iris::guideTitle(), iris::guideText() };
     juce::TextButton removeButton { "REMOVE" }, addButton { "ADD BAND" }, pasteButton { "PASTE" }, soloBandButton { "BAND" }, soloCurveButton { "CURVE" };
+    juce::TextButton clearAllButton { "CLEAR ALL" };
     std::array<juce::Rectangle<int>, iris::maxBands> chipBounds;
     int shownSignature = -1;
 

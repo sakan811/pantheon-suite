@@ -326,20 +326,25 @@ inline BandParams bandParamsOf (juce::AudioProcessorValueTreeState& s, int band)
     return readParams (s).bands[(size_t) band];
 }
 
-// Puts a new band into the first free slot (or `preferredSlot`, if that one is free) with every other control of the slot
-// back at its default. Returns the slot, or -1 when all are in use.
-inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double freqHz, double gainDb = 0.0, int preferredSlot = -1)
+// The slot a new band takes: `preferredSlot` if that one is free, else the first free slot; -1 when all are in use.
+inline int freeBandSlot (juce::AudioProcessorValueTreeState& s, int preferredSlot = -1)
 {
-    int slot = -1;
     if (preferredSlot >= 0 && preferredSlot < maxBands && ! isBandOn (s, preferredSlot))
-        slot = preferredSlot;
-    for (int i = 0; slot < 0 && i < maxBands; ++i)
+        return preferredSlot;
+    for (int i = 0; i < maxBands; ++i)
         if (! isBandOn (s, i))
-            slot = i;
+            return i;
+    return -1;
+}
+
+// Sets up a band in the free slot (see freeBandSlot) with every other control of the slot back at its default. It leaves the band
+// OFF: the caller switches it on last, so the audio thread never runs it half made. Opens no undo step. Returns the slot, or -1.
+inline int placeBand (juce::AudioProcessorValueTreeState& s, BandType type, double freqHz, double gainDb = 0.0, int preferredSlot = -1)
+{
+    const int slot = freeBandSlot (s, preferredSlot);
     if (slot < 0)
         return -1;
 
-    ui::beginUndoStep (s, "Add band");
     const auto& ids = bandIds (slot);
     for (auto* pid : { &ids.place, &ids.q, &ids.slope, &ids.dyn, &ids.dynMode, &ids.threshold, &ids.ratio, &ids.range, &ids.attack, &ids.release, &ids.listen })
         if (auto* param = s.getParameter (*pid))
@@ -349,14 +354,46 @@ inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double
     setParameterValue (s, ids.freq, (float) std::clamp (freqHz, minHz, maxHz));
     setParameterValue (s, ids.gain, hasGain (type) ? (float) std::clamp (gainDb, (double) minGainDb, (double) maxGainDb) : 0.0f);
     setParameterValue (s, ids.autoTimes, 1.0f);
-    setParameterValue (s, ids.on, 1.0f);
     return slot;
 }
 
+// Puts a new band into the first free slot (or `preferredSlot`, if that one is free) with every other control of the slot
+// back at its default. Returns the slot, or -1 when all are in use (and then no undo step is opened).
+inline int addBand (juce::AudioProcessorValueTreeState& s, BandType type, double freqHz, double gainDb = 0.0, int preferredSlot = -1)
+{
+    if (freeBandSlot (s, preferredSlot) < 0)
+        return -1;
+
+    ui::beginUndoStep (s, "Add band");
+    const int slot = placeBand (s, type, freqHz, gainDb, preferredSlot);
+    setParameterValue (s, bandIds (slot).on, 1.0f); // last
+    return slot;
+}
+
+// Switches a band off. A band that is already off is left alone, with no undo step.
 inline void removeBand (juce::AudioProcessorValueTreeState& s, int band)
 {
+    if (! isBandOn (s, band))
+        return;
     ui::beginUndoStep (s, "Remove band");
     setParameterValue (s, bandIds (band).on, 0.0f);
+}
+
+// Switches every band off as one undo step. Returns how many were on; with none on, nothing is changed and no step is opened.
+// The band solo is not a parameter: the editor ends it (see CLEAR ALL in PluginEditor.cpp).
+inline int clearBands (juce::AudioProcessorValueTreeState& s)
+{
+    int count = 0;
+    for (int i = 0; i < maxBands; ++i)
+        count += isBandOn (s, i) ? 1 : 0;
+    if (count == 0)
+        return 0;
+
+    ui::beginUndoStep (s, "Clear bands");
+    for (int i = 0; i < maxBands; ++i)
+        if (isBandOn (s, i))
+            setParameterValue (s, bandIds (i).on, 0.0f);
+    return count;
 }
 
 // Bands handed over as text by another plugin of the repository (pdsp::link, e.g. Themis' COPY), each into the next free slot.
@@ -365,10 +402,10 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
 {
     std::vector<int> slots;
     skipped = 0;
-    ui::beginUndoStep (s, "Paste bands");
     std::vector<pdsp::LinkBand> bands;
     if (! pdsp::link::decode (text.toStdString(), bands))
-        return slots;
+        return slots; // unusable text: no undo step
+    ui::beginUndoStep (s, "Paste bands");
     using K = pdsp::LinkBand::Kind;
     for (const auto& b : bands)
     {
@@ -379,7 +416,7 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
         }
         const auto type = b.kind == K::lowShelf ? BandType::lowShelf : b.kind == K::highShelf ? BandType::highShelf
                         : b.kind == K::lowCut ? BandType::lowCut : b.kind == K::highCut ? BandType::highCut : BandType::bell;
-        const int slot = addBand (s, type, b.freq, b.gainDb);
+        const int slot = placeBand (s, type, b.freq, b.gainDb);
         if (slot < 0)
         {
             ++skipped;
@@ -391,6 +428,7 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
             setParameterValue (s, ids.slope, (float) std::clamp ((int) std::lround (b.slopeDbPerOct / 12.0) - 1, 0, 3));
         else
             setParameterValue (s, ids.q, (float) b.q);
+        setParameterValue (s, ids.on, 1.0f); // last: the band never runs with the centred frequency placeBand set
         slots.push_back (slot);
     }
     return slots;
@@ -420,13 +458,16 @@ inline int freeBandSlots (juce::AudioProcessorValueTreeState& s)
 inline std::vector<int> addMatchedBands (juce::AudioProcessorValueTreeState& s, const std::vector<match::Band>& bands)
 {
     std::vector<int> slots;
+    if (bands.empty() || freeBandSlot (s) < 0)
+        return slots; // no step for a match that changes nothing
     ui::beginUndoStep (s, "Match EQ");
     for (const auto& b : bands)
     {
-        const int slot = addBand (s, b.type, b.freqHz, b.gainDb);
+        const int slot = placeBand (s, b.type, b.freqHz, b.gainDb);
         if (slot < 0)
             break;
         setParameterValue (s, bandIds (slot).q, (float) b.q);
+        setParameterValue (s, bandIds (slot).on, 1.0f); // last
         slots.push_back (slot);
     }
     return slots;
