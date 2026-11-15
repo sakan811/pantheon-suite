@@ -123,7 +123,14 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
     removeButton.setTooltip ("Free this band slot.");
     saturateModeButton.onClick = [this] { setBandMode (proc.apvts, spectrum.getSelectedBand(), BandMode::saturate); };
     fillModeButton.onClick = [this] { setBandMode (proc.apvts, spectrum.getSelectedBand(), BandMode::fill); };
-    removeButton.onClick = [this] { removeBand (proc.apvts, spectrum.getSelectedBand()); };
+    removeButton.onClick = [this] { spectrum.removeBandAndSolo (spectrum.getSelectedBand()); };
+    clearAllButton.setTooltip ("Switch every band off in one step (UNDO brings them back). Also ends a band solo.");
+    clearAllButton.onClick = [this]
+    {
+        clearBands (proc.apvts);
+        proc.engine.monitor.soloBand = -1;
+    };
+    addAndMakeVisible (clearAllButton);
     addSaturateButton.onClick = [this] { addBand (proc.apvts, BandMode::saturate, 800.0, spectrum.getSelectedBand()); };
     addFillButton.onClick = [this] { addBand (proc.apvts, BandMode::fill, 80.0, spectrum.getSelectedBand()); };
     pasteButton.setTooltip ("Add the harmonic-fill bands another plugin of the suite copied (Themis: COPY on a bass item), each in the next free "
@@ -300,6 +307,12 @@ void HephaestusEditor::refreshBandPanel()
         b->setVisible (on);
     for (auto* b : { &addSaturateButton, &addFillButton })
         b->setVisible (! on);
+
+    // CLEAR ALL is only useful while a band is on; the signature already changes with each band.
+    bool anyOn = false;
+    for (int i = 0; i < maxBands; ++i)
+        anyOn = anyOn || isBandOn (proc.apvts, i);
+    clearAllButton.setEnabled (anyOn);
 }
 
 juce::String HephaestusEditor::bandHint() const
@@ -447,6 +460,8 @@ void HephaestusEditor::layoutBandPanel()
     soloBandButton.setBounds (soloAddsButton.getX() - 6 - 86, panel.getY() + 6, 86, 20);
     characterBox.setBounds (soloBandButton.getX() - 14 - 112, panel.getY() + 6, 112, 20);
     auto buttons = juce::Rectangle<int> (panel.getX(), panel.getY() + 34, panel.getWidth() - 14, chipHeight);
+    clearAllButton.setBounds (buttons.removeFromRight (84));
+    buttons.removeFromRight (8);
     removeButton.setBounds (buttons.removeFromRight (76));
     buttons.removeFromRight (8);
     fillModeButton.setBounds (buttons.removeFromRight (124));

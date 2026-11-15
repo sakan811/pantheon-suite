@@ -34,7 +34,9 @@ public:
         applyAnalyzerSettings();
 
         setTooltip ("Double-click to add a band. Drag a band's edges to resize it, its body to move it. "
-                    "Right-click for the band menu, or on empty space for analyzer range, speed and tilt.");
+                    "Right-click for the band menu, or on empty space for analyzer range, speed and tilt. "
+                    "Delete removes the selected band.");
+        setWantsKeyboardFocus (true);
         startTimerHz (30);
     }
 
@@ -78,6 +80,7 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        grabKeyboardFocus(); // so Delete reaches the view
         ui::beginUndoStep (apvts, "Band"); // a drag of an edge or a body is one step
         const auto hit = findHit (e.position);
         if (hit.part != Part::none)
@@ -145,6 +148,39 @@ public:
     {
         if (findHit (e.position).part == Part::none)
             showAddMenu (e.position);
+    }
+
+    // Delete / Backspace removes the selected band. Selection moves to the next band that is on (wrapping round), else it stays on
+    // the freed slot, which the panel shows as free. A text field that has the focus keeps the keys.
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        const int code = key.getKeyCode();
+        if (code != juce::KeyPress::deleteKey && code != juce::KeyPress::backspaceKey)
+            return false;
+        if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+            return false;
+        if (! isBandOn (apvts, selected))
+            return false;
+
+        removeBandAndSolo (selected);
+        for (int step = 1; step < maxBands; ++step)
+        {
+            const int next = (selected + step) % maxBands;
+            if (isBandOn (apvts, next))
+            {
+                select (next);
+                break;
+            }
+        }
+        return true;
+    }
+
+    // Removes a band, and a band solo on it: the solo is the engine's monitor, not a parameter, so the view that makes the solo ends it.
+    void removeBandAndSolo (int band)
+    {
+        if (engine.monitor.soloBand.load() == band)
+            engine.monitor.soloBand = -1;
+        removeBand (apvts, band);
     }
 
 private:
@@ -491,7 +527,7 @@ private:
                                 if (result == 1 || result == 2)
                                     setBandMode (apvts, band, result == 2 ? BandMode::fill : BandMode::saturate);
                                 else if (result == 3)
-                                    removeBand (apvts, band);
+                                    removeBandAndSolo (band);
                                 else if (result == 4)
                                 {
                                     if (const int copy = duplicateBand (apvts, band); copy >= 0)

@@ -616,5 +616,102 @@ int main()
         check (std::fabs (value (ab, id::outGain) + 9.0f) < 0.05f && std::fabs (value (ab, id::mix) - 80.0f) < 0.05f, "UNDO takes back the A/B switch as one step");
     }
 
+    std::printf ("\nClearing and removing bands\n");
+    {
+        HephaestusProcessor h;
+        h.setPlayConfigDetails (2, 2, 48000.0, 512);
+        h.prepareToPlay (48000.0, 512);
+        HephaestusEditor editor (h);
+        juce::UndoManager& um = *h.apvts.undoManager;
+        const auto settle = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (150); };
+        const auto onCount = [&]
+        {
+            int n = 0;
+            for (int i = 0; i < maxBands; ++i)
+                n += isBandOn (h.apvts, i) ? 1 : 0;
+            return n;
+        };
+        const auto buttonNamed = [&] (const char* text) -> juce::TextButton*
+        {
+            for (int i = 0; i < editor.getNumChildComponents(); ++i)
+                if (auto* b = dynamic_cast<juce::TextButton*> (editor.getChildComponent (i)); b != nullptr && b->getButtonText() == text)
+                    return b;
+            return nullptr;
+        };
+
+        addBand (h.apvts, BandMode::saturate, 1000.0); // slot 1
+        addBand (h.apvts, BandMode::fill, 80.0);       // slot 2
+        settle();
+        um.clearUndoHistory();
+        settle();
+        check (onCount() == 3 && buttonNamed ("CLEAR ALL") != nullptr && buttonNamed ("CLEAR ALL")->isEnabled(),
+               "CLEAR ALL is there and enabled while bands are on");
+
+        h.engine.monitor.soloBand = 1;
+        buttonNamed ("CLEAR ALL")->onClick();
+        settle();
+        check (onCount() == 0 && h.engine.monitor.soloBand.load() == -1, "CLEAR ALL switches every band off and ends a band solo");
+        check (um.getUndoDescription() == "Clear bands", "... as one undo step named Clear bands");
+        check (! buttonNamed ("CLEAR ALL")->isEnabled(), "CLEAR ALL is disabled with no band on");
+        um.undo();
+        settle();
+        check (onCount() == 3, "one UNDO brings all three bands back");
+
+        um.clearUndoHistory();
+        settle();
+        clearBands (h.apvts);
+        settle();
+        um.clearUndoHistory();
+        settle();
+        const int none = clearBands (h.apvts);
+        settle();
+        check (none == 0 && ! um.canUndo(), "clearing with no band on opens no undo step");
+
+        addBand (h.apvts, BandMode::saturate, 1000.0); // slot 0
+        addBand (h.apvts, BandMode::fill, 80.0);       // slot 1
+        addBand (h.apvts, BandMode::saturate, 4000.0); // slot 2
+        settle();
+        h.engine.monitor.soloBand = 0;
+        editor.selectBand (0);
+        buttonNamed ("REMOVE")->onClick();
+        settle();
+        check (! isBandOn (h.apvts, 0) && onCount() == 2 && h.engine.monitor.soloBand.load() == -1,
+               "REMOVE switches the selected band off and ends a solo on it");
+
+        um.clearUndoHistory();
+        settle();
+        removeBand (h.apvts, 0);
+        settle();
+        check (! um.canUndo(), "removing a band that is already off opens no undo step");
+
+        // Delete and Backspace on the spectrum view.
+        gui::SpectrumView keys (h.engine, h.apvts, h.currentSampleRate);
+        const auto press = [&] (int code) { return keys.keyPressed (juce::KeyPress (code)); };
+        keys.setSelectedBand (1);
+        h.engine.monitor.soloBand = 1;
+        check (press (juce::KeyPress::deleteKey) && ! isBandOn (h.apvts, 1) && keys.getSelectedBand() == 2 && h.engine.monitor.soloBand.load() == -1,
+               "Delete removes the selected band, selects the next band that is on, and ends a solo on it");
+        addBand (h.apvts, BandMode::saturate, 1000.0); // slot 0 again, so the selection has a band to wrap round to
+        settle();
+        keys.setSelectedBand (2);
+        check (press (juce::KeyPress::backspaceKey) && ! isBandOn (h.apvts, 2) && keys.getSelectedBand() == 0 && onCount() == 1,
+               "Backspace removes the selected band and wraps the selection round to the first band on");
+        keys.setSelectedBand (3);
+        check (! press (juce::KeyPress::deleteKey) && onCount() == 1, "Delete on a free slot takes no key");
+        keys.setSelectedBand (0);
+
+        // One paste of three fill bands is one undo step.
+        um.clearUndoHistory();
+        settle();
+        int skipped = 0;
+        const auto slots = pasteBands (h.apvts, "pantheon-bands 1\nfill lo=40 hi=90 place=mid\nfill lo=100 hi=200 place=mid\nfill lo=300 hi=600 place=mid", skipped);
+        settle();
+        check (slots.size() == 3 && onCount() == 4 && um.getUndoDescription() == "Paste bands",
+               fmt ("a paste of three fill bands adds three (%d on), as one step named Paste bands", onCount()));
+        um.undo();
+        settle();
+        check (onCount() == 1, "one UNDO takes back the whole paste");
+    }
+
     return finish ("UI CHECK");
 }
