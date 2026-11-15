@@ -10,6 +10,7 @@ namespace
 {
 constexpr int headerHeight = 84;
 constexpr int viewHeight = 262;
+constexpr int undoRowHeight = 22; // UNDO / REDO and CLEAR ALL, above the display
 constexpr int stripWidth = 156;
 constexpr int stripGap = 6;
 constexpr int stripHeight = 332;
@@ -42,6 +43,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
       presetBox (p, presets(), "The bands it does not use go back to 0 dB. PHASE, OUTPUT and GAIN MATCH are kept."),
       matchButton (p.apvts, id::match, "GAIN MATCH", "Takes the level the bands add or take away off again, slowly (about 0.6 s, within 12 dB), so a boost that is merely louder is not mistaken for better. "
                                                       "OUTPUT is applied after it."),
+      undoButtons (p.undo, *this),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -59,11 +61,17 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
     pasteButton.setTooltip ("Take what Themis copied: the bands of a plan item or of Copy EQ go into free bands (type, frequency, gain, width, channels), and the target curve of Copy EQ "
                             "is drawn dashed behind the analyser to follow. Right-click the display to clear it.");
     pasteButton.onClick = [this] { pasteFromClipboard (juce::SystemClipboard::getTextFromClipboard()); };
-    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &matchButton, &deltaButton, &pasteButton, &guideButton })
+    clearAllButton.setTooltip ("Switch every band off in one step (UNDO brings them back). Also ends LISTEN.");
+    clearAllButton.onClick = [this]
+    {
+        clearBands (proc.apvts);
+        view.setListen (false); // LISTEN follows a band; a band that is off is not heard alone
+    };
+    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &matchButton, &undoButtons, &clearAllButton, &deltaButton, &pasteButton, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     showTypes();
-    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12); // last: it lays everything out
+    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + undoRowHeight + 10 + viewHeight + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12); // last: it lays everything out
 }
 
 ApolloEditor::~ApolloEditor()
@@ -97,6 +105,11 @@ void ApolloEditor::resized()
     row.removeFromLeft (8);
     deltaButton.setBounds (row.removeFromLeft (70));
 
+    bounds.removeFromTop (10);
+    auto undoRow = bounds.removeFromTop (undoRowHeight);
+    undoButtons.setBounds (undoRow.removeFromLeft (ui::UndoButtons::kWidth));
+    undoRow.removeFromLeft (8);
+    clearAllButton.setBounds (undoRow.removeFromLeft (96));
     bounds.removeFromTop (10);
     view.setBounds (bounds.removeFromTop (viewHeight));
     bounds.removeFromTop (10);
@@ -220,6 +233,10 @@ void ApolloEditor::timerCallback()
     if (pasteTicks > 0)
         --pasteTicks;
     deltaButton.setToggleState (proc.engine.delta.load(), juce::dontSendNotification);
+    bool anyOn = false;
+    for (const auto& b : params.bands)
+        anyOn = anyOn || b.on;
+    clearAllButton.setEnabled (anyOn); // CLEAR ALL does nothing with no band on
     presetBox.sync();
     repaint();
 }

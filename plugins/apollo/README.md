@@ -33,7 +33,8 @@ Themis writes (see [BandLink.h](../../shared/dsp/include/pantheon/dsp/BandLink.h
 
 | | |
 |---|---|
-| **Bands** | Eight. A new instance opens with a high-pass and a low-pass at the ends (off), two shelves and four bells, all at 0 dB, so dragging a node does something at once. |
+| **Bands** | Eight, always there. A new instance opens with a high-pass and a low-pass at the ends (off), two shelves and four bells, all at 0 dB, so dragging a node does something at once. A band is taken out of the sound by switching its ON off (its settings stay): Delete or Backspace on the selected band, or **CLEAR ALL** (above the display) for every band at once, one undo step. |
+| **Undo** | **UNDO / REDO** (above the display; Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus, Ctrl on other systems) take back and redo changes to the controls, a dragged node, a wheel step on a Q, a band switched on or off, a pasted set of bands, a preset and CLEAR ALL, each as one step; they are not kept with the session. The shared kit does it (`Undo.h`); the processor owns the undo history. |
 | **Type** | Bell (raises or cuts around a frequency), Low shelf, High shelf, High-pass, Low-pass, Notch. |
 | **Freq / Gain / Q** | 20 Hz to 20 kHz; -18 to +18 dB (bells and shelves); Q 0.1 to 10 (the width of a bell or notch, the turn of a shelf). |
 | **Slope** | For a high-pass or low-pass: 12, 24, 36 or 48 dB per octave (Butterworth; -3 dB at the corner). |
@@ -47,7 +48,7 @@ Themis writes (see [BandLink.h](../../shared/dsp/include/pantheon/dsp/BandLink.h
 | **Presets** | Nine starting points (Init, Low Cut, Vocal Presence, Mud Cut, Air Lift, Bass Weight, Master Smile, Sides Open Top, Telephone). A preset sets the bands it needs; the others go back to 0 dB. PHASE, OUTPUT and GAIN MATCH are kept. |
 
 On the display, drag a node sideways for the frequency and up and down for the gain; the wheel over a node changes the Q; a double click on a node switches the band
-on or off, and a double click on empty glass adds a bell there in the first free band. The amber curve is the response of the settings; a teal one appears when a band works on the sides only (it is the sides' response). The curve is the
+on or off, and a double click on empty glass adds a bell there in the first free band. Select a band and press Delete or Backspace to switch it off (the selection moves to the next band that is on); **CLEAR ALL** switches every band off in one undo step and is greyed out while none is on. The amber curve is the response of the settings; a teal one appears when a band works on the sides only (it is the sides' response). The curve is the
 filter that runs, not a drawing of it.
 
 ## How it works

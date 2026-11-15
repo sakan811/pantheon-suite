@@ -6,6 +6,7 @@
 #include "DSP/Engine.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <pantheon/dsp/BandLink.h>
+#include <pantheon/ui/Undo.h>
 
 // The single source of truth for parameters: ids, ranges, defaults, choice lists, and readParams().
 namespace apollo
@@ -121,6 +122,24 @@ inline void setValue (juce::AudioProcessorValueTreeState& s, const juce::String&
     p->setValueNotifyingHost (p->convertTo0to1 (value));
 }
 
+// Switches every band that is on off, as one undo step ("Clear bands"). Returns how many were on; with none on nothing is changed and no step is opened.
+// LISTEN is not a parameter: the editor ends it when it clears (CLEAR ALL in PluginEditor.cpp).
+inline int clearBands (juce::AudioProcessorValueTreeState& s)
+{
+    const auto now = readParams (s);
+    int count = 0;
+    for (const auto& b : now.bands)
+        count += b.on ? 1 : 0;
+    if (count == 0)
+        return 0;
+
+    ui::beginUndoStep (s, "Clear bands");
+    for (int i = 0; i < kBands; ++i)
+        if (now.bands[(size_t) i].on)
+            setValue (s, bandIds (i).on, 0.0f);
+    return count;
+}
+
 // ---- PASTE: the bands another plugin of the repository copied (pdsp::link: Themis' COPY on a plan item, and its Copy EQ) ------------------------------
 
 // What a paste did, for the line the editor says.
@@ -158,7 +177,8 @@ inline PasteResult pasteBands (juce::AudioProcessorValueTreeState& s, const juce
     std::vector<pdsp::LinkBand> bands;
     pdsp::LinkCurve curve;
     if (! pdsp::link::decode (text.toStdString(), bands, &curve))
-        return result;
+        return result; // unusable text: no undo step
+    ui::beginUndoStep (s, "Paste bands");
     result.curve = curve.valid();
     result.curveName = curve.name;
     std::array<bool, kBands> used {};
