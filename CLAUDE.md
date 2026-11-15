@@ -42,6 +42,26 @@ Skill tool before you start, and follow its steps instead of improvising them. D
 
 This file keeps only the rules; do not copy a skill's steps into it. A new skill is listed here with the request it answers, and its `description` says the same in its first sentence (that is what Claude chooses from).
 
+## Sub-agents: the main session is the orchestrator
+
+Five cheap agents live in [.claude/agents/](.claude/agents) (read-only except the fixer; each file owns its tools, limits and report format, so this section only says how they are chained). **The main session is the orchestrator:** it
+decides which agents run, passes one agent's report to the next as text, and owns every decision; the agents never call each other and never talk to the user. Use them without being asked, as with the skills.
+
+```
+bug-hunter ──┐
+             ├─► fixer ─► code-checker ─► feature-checker ─► commit-writer
+code-checker ┘   (edits)   (the diff)      (completeness)     (only on request)
+```
+
+- `bug-hunter`: a symptom, a plugin or app → cause and place. `code-checker`: a diff or named files → findings. `fixer`: findings → the smallest edit, built with `scripts/build.sh`. `feature-checker`: a plugin and a feature → what is missing. `commit-writer`: commits by topic.
+- **Fix chain** (a bug or a review finding): `bug-hunter` (skip it when the cause is already known) → `fixer` with its report → `code-checker` on the diff → back to `fixer` with the findings, **at most two rounds**; if it is not clean after the second, stop and
+  tell the user what is left. **Feature chain** (after a change is made): `code-checker` and `feature-checker` in parallel → `fixer` for what they report → `code-checker` once more.
+- Run agents in parallel only when they read the same state and do not depend on each other (the two checkers). Never run two `fixer`s at once, and never one while another agent reads the same files.
+- The agents are cheap and narrow: they find and check, they do not decide. The orchestrator reads a report before acting on it, drops what it cannot verify in the code (an agent's guess is marked "unverified"), and does the judgement work itself: design, a `shared/` change, anything that touches several plugins.
+- **What the orchestrator does itself, not through an agent:** the skills above (`plugin-parameter-change`, `shared-change`, `new-plugin`), regenerating and looking at screenshots, and the `/install-and-validate` request to the user. `fixer` stops and reports when a finding needs one of these.
+- **Commits and pushes happen only when the user asks.** Then `commit-writer` does them, after the checks pass: say "push" to it only when the user said push. It never commits to `main`.
+- A fix chain ends with a short report to the user: what was found, what changed (`git diff --stat`), the check that ran and its result, and what is left for them. Do not claim "done" on an agent's word: the build or test output decides.
+
 ## shared/ui
 
 - All the plugins and apps draw with it (Themis, Hephaestus, Harmonia, Iris, Atlas, Hestia, Aegis, Apollo, Hera, Castor, Nemesis, Dionysus, Hermes, Orpheus); nothing in one draws its own panel, lamp, knob, button,
