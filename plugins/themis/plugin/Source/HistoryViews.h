@@ -167,7 +167,7 @@ public:
         if (numFrames == 0)
         {
             g.setColour (colours::dim);
-            g.setFont (font (13.0f));
+            g.setFont (ui::font (13.0f));
             g.drawText ("Waiting for audio", plot.toNearestInt(), juce::Justification::centred);
         }
         else if (hoverFrame >= 0)
@@ -268,8 +268,8 @@ private:
         screen = area;
         plot = screen.withTrimmedLeft (40.0f).withTrimmedTop (8.0f).withTrimmedBottom (kAxisLabels).withTrimmedRight (26.0f);
 
-        titleArea = row1.removeFromLeft (textWidth (labelFont(), title.toUpperCase()) + 14.0f);
-        const auto chipFont = labelFont (9.5f);
+        titleArea = row1.removeFromLeft (textWidth (ui::labelFont(), title.toUpperCase()) + 14.0f);
+        const auto chipFont = ui::labelFont (9.5f);
         for (int i = 0; i < static_cast<int> (tabs.size()); ++i)
         {
             const auto cell = row1.removeFromLeft (textWidth (chipFont, juce::String (tabs[static_cast<size_t> (i)].name).toUpperCase()) + 16.0f);
@@ -313,7 +313,7 @@ private:
 
     void drawZones (juce::Graphics& g, const Tab& t) const
     {
-        g.setFont (font (10.5f));
+        g.setFont (ui::font (10.5f));
         const auto zones = t.liveZones ? t.liveZones() : t.zones;
         for (const auto& z : zones)
         {
@@ -330,7 +330,7 @@ private:
 
     void drawGrid (juce::Graphics& g, const Tab& t) const
     {
-        g.setFont (font (11.0f));
+        g.setFont (ui::font (11.0f));
         const auto gridline = [&] (float v) {
             const float y = yFor (t.axis, v);
             g.setColour (t.spectrogram ? colours::text.withAlpha (0.12f) : colours::glassGrid);
@@ -405,14 +405,14 @@ private:
     void drawChip (juce::Graphics& g, juce::Rectangle<float> r, const juce::String& text, bool active) const
     {
         ui::hw::drawPushButton (g, r, active, colours::amber);
-        g.setFont (labelFont (9.5f));
+        g.setFont (ui::labelFont (9.5f));
         g.setColour (active ? colours::lampInk : colours::text);
         g.drawText (text.toUpperCase(), r.toNearestInt(), juce::Justification::centred);
     }
 
     void drawHeader (juce::Graphics& g, const Tab& t) const
     {
-        hw::drawLabel (g, title, titleArea.toNearestInt());
+        ui::hw::drawLabel (g, title, titleArea.toNearestInt());
 
         for (const auto& h : hits)
         {
@@ -423,13 +423,13 @@ private:
         }
         if (t.chooseRange)
         {
-            hw::drawLabel (g, "RANGE", rangeLabelArea.toNearestInt(), juce::Justification::right, colours::dim, 9.0f);
+            ui::hw::drawLabel (g, "RANGE", rangeLabelArea.toNearestInt(), juce::Justification::right, colours::dim, 9.0f);
         }
 
         if (t.spectrogram)
             drawSpectrogramKey (g);
         const themis::FrameStats* shown = numFrames > 0 && !t.spectrogram ? &frames[static_cast<size_t> (hoverFrame >= 0 ? hoverFrame : numFrames - 1)] : nullptr;
-        g.setFont (font (11.0f));
+        g.setFont (ui::font (11.0f));
         const auto format = t.format ? t.format : std::function<juce::String (float)> (defaultFormat);
         for (const auto& h : hits)
         {
@@ -467,21 +467,21 @@ private:
         if (verdict.text.isNotEmpty())
         {
             if (verdict.lamp)
-                hw::drawLamp (g, { row.getX() + 9.0f, row.getCentreY() }, 3.6f, colours::forLevel (verdict.level));
+                ui::hw::drawLamp (g, { row.getX() + 9.0f, row.getCentreY() }, 3.6f, colours::forLevel (verdict.level));
             g.setColour (colours::text);
-            g.setFont (font (11.5f));
+            g.setFont (ui::font (11.5f));
             g.drawFittedText (verdict.text, row.withTrimmedLeft (verdict.lamp ? 20.0f : 8.0f).reduced (0.0f, 2.0f).toNearestInt(), juce::Justification::centredLeft, 2, 1.0f);
         }
         else if (numFrames > 0)
         {
             g.setColour (colours::dim);
-            g.setFont (lcdFont (11.5f));
+            g.setFont (ui::lcdFont (11.5f));
             g.drawText ("Collecting...", row.withTrimmedLeft (8.0f).toNearestInt(), juce::Justification::centredLeft);
         }
         if (right.isNotEmpty())
         {
             g.setColour (colours::dim);
-            g.setFont (font (11.0f));
+            g.setFont (ui::font (11.0f));
             g.drawText (right, detailArea.toNearestInt(), juce::Justification::topRight);
         }
     }
@@ -503,7 +503,7 @@ private:
         constexpr float kBarWidth = 100.0f;
         auto row = legendRow;
         g.setColour (colours::dim);
-        g.setFont (font (10.5f));
+        g.setFont (ui::font (10.5f));
         g.drawText ("quiet", row.removeFromLeft (34.0f).toNearestInt(), juce::Justification::centredLeft);
         const auto bar = row.removeFromLeft (kBarWidth).withSizeKeepingCentre (kBarWidth, 6.0f);
         for (int i = 0; i < static_cast<int> (kBarWidth); ++i)
