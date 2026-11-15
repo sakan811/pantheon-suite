@@ -67,7 +67,9 @@ public:
     Result key() const { return current; }
 
     static constexpr float kMemorySeconds = 12.0f;  // of singing
-    static constexpr float kMinSeconds = 6.0f;      // of singing before the first guess
+    // Before the first guess: a total weight of kMinSeconds x hopRate x 0.25. A hop weighs 0..1 (less when unsure, off the grid or gliding), so ordinary
+    // singing, about a quarter of full weight per hop, reaches it in about 6 s (what the README says); perfectly steady, confident notes would in about 1.5 s.
+    static constexpr float kMinSeconds = 6.0f;
     static constexpr float kSwitchSeconds = 4.0f;   // a new key has to win this long
     static constexpr float kSwitchMargin = 0.10f;   // ... and beat the old one by this much
 

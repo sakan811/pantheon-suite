@@ -146,6 +146,10 @@ int main()
         editor.setVisible (true);
         editor.pasteFromClipboard ("hello");
         check (ui::hasNote (editor.shownNotes(), "Nothing to paste", ui::Severity::info), "PASTE with nothing to paste says what to copy, in the strip");
+        bool pasteFits = true;
+        for (const auto& n : editor.shownNotes())
+            pasteFits = pasteFits && (int) n.text.size() <= ui::kMaxNoteChars;
+        check (pasteFits, "the PASTE message and the notes with it fit a line of the strip");
         check (editor.pasteButton.getRight() < editor.guideButton.getX() && editor.presetBox.getRight() < editor.pasteButton.getX(), "the PASTE button fits the header beside GUIDE");
         check (editor.autoReleaseButton.getRight() < editor.getWidth() && editor.autoReleaseButton.getBottom() < editor.getHeight() && ! editor.autoReleaseButton.getBounds().intersects (editor.truePeakButton.getBounds()),
                "AUTO RELEASE fits beside TRUE PEAK");
@@ -226,6 +230,8 @@ int main()
         in.params.matchLevel = true;
         longest();
         in.params.delta = true;
+        longest();
+        in.params.releaseMs = 20.0f; // the fast-release note needs reduction and a short RELEASE together
         longest();
         check (! tooLong, "every note fits a line of the strip");
     }

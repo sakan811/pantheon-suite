@@ -7,8 +7,8 @@
 #include <array>
 #include <cmath>
 
-// The true peak of a stream: the level it reaches between its samples, as a converter or a codec will reconstruct it. Plain C++, no JUCE; used by Aegis (the limiter's detector) and
-// Hermes (the true-peak meter). Both want the same thing, so it is read the same way.
+// The true peak of a stream: the level it reaches between its samples, as a converter or a codec will reconstruct it. Plain C++, no JUCE; used by every plugin that limits by, or meters, the true peak.
+// They all want the same thing, so it is read the same way.
 namespace pdsp
 {
 inline constexpr int kTruePeakTaps = 64;                                // the interpolator: sixty-four taps for each of the points between two samples

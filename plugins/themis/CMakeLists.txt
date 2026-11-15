@@ -39,7 +39,7 @@ if(THEMIS_BUILD_PLUGIN)
     if(NOT TARGET pantheon_ui)
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/ui ${CMAKE_BINARY_DIR}/shared/ui)
     endif()
-    # The shared DSP (shared/dsp): Themis uses only its band hand-off format (BandLink.h), to copy a fix to the equaliser.
+    # The shared DSP (shared/dsp): Themis uses its band hand-off format (BandLink.h), to copy a fix to the equaliser, MusicBands.h (the audition ranges) and Biquad.h (a Butterworth in the processor).
     if(NOT TARGET pantheon_dsp)
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/dsp ${CMAKE_BINARY_DIR}/shared/dsp)
     endif()

@@ -48,7 +48,7 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     if (std::fabs (in.formantSemitones) > 0.05)
         info ("FORMANT is moved: the voice will not sound like the singer. Leave it at 0 to keep their own voice.");
     if (in.voiceRangeFixed)
-        info ("VOICE narrows the pitch search (to G4, F5 or C6 at most). A voice above it is not tracked. Auto covers all.");
+        info ("VOICE narrows the pitch search (up to 440, 780 or 1200 Hz). A voice above it is not tracked. Auto covers all.");
 
     return ui::ordered (std::move (notes));
 }

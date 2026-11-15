@@ -57,8 +57,8 @@ private:
 
     TonalBalanceView view;
     StereoScopeView scopeView;
-    ui::LevelView levelView;
-    ui::FundamentalView fundamentalView;
+    gui::LevelView levelView;
+    gui::FundamentalView fundamentalView;
     AdvicePanel advicePanel;
     AuditionPanel auditionPanel;
 

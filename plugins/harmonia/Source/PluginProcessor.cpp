@@ -238,7 +238,7 @@ void HarmoniaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         {
             const auto guess = engine->stopLearning();
             learning.store (false);
-            if (engine->learnedAmount() >= 150.0f) // roughly >1 s of confidently voiced singing
+            if (engine->learnedAmount() >= 150.0f) // a total weight (0..1 per hop, 250 hops a second): 0.6 s of perfect notes, a few seconds of ordinary singing
             {
                 resultRoot.store (guess.root);
                 resultMinor.store (guess.minor);

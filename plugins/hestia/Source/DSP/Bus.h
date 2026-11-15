@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Roles.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -81,7 +82,14 @@ public:
             return;
         char padded[kNameWords * 4] = {};
         if (name != nullptr)
-            std::strncpy (padded, name, (size_t) kNameChars);
+        {
+            // Cut at a character, not in the middle of one: a UTF-8 sequence that straddles the limit would be read back as a replacement character.
+            std::size_t len = std::min (std::strlen (name), (std::size_t) kNameChars);
+            if (len < std::strlen (name))
+                while (len > 0 && (static_cast<unsigned char> (name[len]) & 0xC0) == 0x80)
+                    --len;
+            std::memcpy (padded, name, len);
+        }
         for (int w = 0; w < kNameWords; ++w)
         {
             std::uint32_t word;

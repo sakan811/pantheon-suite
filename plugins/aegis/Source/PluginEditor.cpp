@@ -113,7 +113,7 @@ void AegisEditor::pasteFromClipboard (const juce::String& text)
 {
     auto said = pasteLimiter (proc.apvts, text);
     if (said.empty())
-        said = "Nothing to paste: copy a limiter setting from Themis' master plan first (COPY on the ceiling or the loudness item).";
+        said = "Nothing to paste: copy a limiter setting from Themis' plan first (COPY on the ceiling or loudness item).";
     pasteSaid = said;
     pasteTicks = kPasteTicks;
     repaint();

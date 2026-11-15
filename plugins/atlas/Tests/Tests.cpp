@@ -835,6 +835,42 @@ void testMix()
     const auto a = go (64), b = go (64 * 3);
     check (a.l == b.l && a.r == b.r, "a mix that changes half way: the output is the same for blocks of 64 and 192 (the tick), bit for bit");
 }
+
+void testOutput()
+{
+    std::printf ("\n[14] Output gain\n");
+    const auto l = noise (61, 0.3, second), r = noise (62, 0.3, second);
+    const auto base = midrangeOnly (-30.0, 6.0);
+    auto quieter = base;
+    quieter.outGainDb = -6.0;
+    const auto ref = run (base, l, r), out = run (quieter, l, r);
+    const double k = std::pow (10.0, -6.0 / 20.0);
+    double worst = 0.0;
+    for (int i = 0; i < second; ++i)
+        worst = std::max (worst, (double) std::fabs (out.l[(size_t) i] - (float) k * ref.l[(size_t) i]));
+    check (worst < 1.0e-5 && maxDiff (out.l, ref.l, 0, second) > 0.01, fmt ("OUTPUT -6 dB is the same sound 6 dB down (within %.1e), after the compressors, and not the same sound as 0 dB", worst));
+    // An output that moves mid-stream is the same for any block size, and ends on its target.
+    const auto go = [&] (int block)
+    {
+        Engine e;
+        e.prepare (fs);
+        auto p = base;
+        Stereo o { l, r };
+        for (int start = 0; start < second; start += block)
+        {
+            p.outGainDb = start < second / 2 ? 0.0 : -12.0;
+            e.process (o.l.data() + start, o.r.data() + start, std::min (block, second - start), p);
+        }
+        return o;
+    };
+    const auto a = go (64), b = go (64 * 3);
+    check (a.l == b.l && a.r == b.r, "an output that changes half way: the same for blocks of 64 and 192 (the tick), bit for bit");
+    const double k12 = std::pow (10.0, -12.0 / 20.0);
+    double tail = 0.0;
+    for (int i = second - second / 4; i < second; ++i)
+        tail = std::max (tail, (double) std::fabs (a.l[(size_t) i] - (float) k12 * ref.l[(size_t) i]));
+    check (tail < 1.0e-5, fmt ("and it ends on its target: the last quarter second is the sound 12 dB down (within %.1e)", tail));
+}
 } // namespace
 
 int main()
@@ -852,6 +888,7 @@ int main()
     testSidechain();
     testUpward();
     testMix();
+    testOutput();
     testIssueFinder();
     return test::finish ("AtlasTests");
 }

@@ -281,6 +281,14 @@ int main()
         check (ui::hasNote (adviceFor (in), "LISTEN is on", ui::Severity::warning), "LISTEN on says you do not hear your track");
         in.params.phase = Phase::linear;
         in.latencyMs = 48.0;
+        check (ui::hasNote (adviceFor (in), "Linear phase delays the sound by 48 ms", ui::Severity::info), "linear phase says how late the sound is");
+        in.params.bands[0] = { true, Type::bell, 30.0, 3.0, 1.0, 0, Target::stereo };
+        in.params.bands[1] = { true, Type::highPass, 30.0, 0.0, 0.7071, 2, Target::stereo };
+        check (ui::hasNote (adviceFor (in), "linear phase resolves about 12 Hz", ui::Severity::info), "a bell under 60 Hz in linear phase says the kernel resolves 12 Hz");
+        check (ui::hasNote (adviceFor (in), "a steep high-pass this low is softer in linear phase", ui::Severity::info), "a steep high-pass under 60 Hz in linear phase says it is softer");
+        in.params.phase = Phase::minimum;
+        check (! ui::hasNote (adviceFor (in), "resolves about 12 Hz", ui::Severity::info) && ! ui::hasNote (adviceFor (in), "Linear phase delays", ui::Severity::info), "... and in minimum phase says neither");
+        in.params.phase = Phase::linear;
         bool fits = true;
         for (const auto& n : adviceFor (in))
         {

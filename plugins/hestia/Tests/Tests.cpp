@@ -611,6 +611,24 @@ int main()
                fmt ("a vocal with a bass on the sidechain, on the same tone: cut %.2f dB, and it counts the sidechain as the one stem it sees", tailDb (out, 0.5) - tailDb (input, 0.5)));
         check (voice.sidechainLevel[5].load() > -14.0f && voice.sidechainLevel[5].load() < -10.0f, fmt ("what the sidechain hears is published for the display: %.1f dB (a 0.25 sine is -12)", voice.sidechainLevel[5].load()));
 
+        // SC IMPORT is the sidechain's IMPORTANCE: the more it matters, the more the stem gives way to it.
+        double cutByImportance[2] = {};
+        {
+            int k = 0;
+            for (const float importance : { 0.0f, 1.0f })
+            {
+                Bus b;
+                Engine e (b);
+                e.prepare (kFs);
+                EngineParams z = p;
+                z.scImportance = importance;
+                runWith (e, z, true, 2.0, 256, 0.25, out);
+                cutByImportance[k++] = tailDb (out, 0.5) - tailDb (input, 0.5);
+            }
+        }
+        check (cutByImportance[1] < cutByImportance[0] - 0.5,
+               fmt ("a sidechain that matters (SC IMPORT 1) takes more from the stem (%.2f dB) than one that does not (SC IMPORT 0: %.2f dB)", cutByImportance[1], cutByImportance[0]));
+
         Bus bus2;
         Engine none (bus2);
         none.prepare (kFs);

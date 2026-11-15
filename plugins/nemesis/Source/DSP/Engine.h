@@ -100,7 +100,6 @@ public:
         writePos = 0;
         gr = 0.0;
         designedFor = { -1.0, -1.0 };
-        started = false;
         findActive = false;
         finding.store (false, std::memory_order_relaxed);
     }
@@ -255,7 +254,6 @@ private:
     int ringSize = 2, writePos = 0, delaySamples = 0;
     double fs = 48000.0, attackCoef = 0.05, envFall = 0.97, bodyCoef = 0.001, gr = 0.0;
     std::array<double, 2> designedFor { -1.0, -1.0 };
-    bool started = false;
     std::array<Channel, 2> ch;
     std::array<pdsp::Biquad, kFindBins> findBank;
     std::array<double, kFindBins> findEnergy {};

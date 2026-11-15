@@ -87,7 +87,7 @@ private:
 
         g.setColour (juce::Colours::black.withAlpha (0.55f)); // the round bezel the tube sits in
         g.fillEllipse (sq.expanded (5.0f));
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xff6b675d), sq.getX(), sq.getY(), juce::Colour (0xff25231f), sq.getRight(), sq.getBottom(), false));
+        g.setGradientFill (juce::ColourGradient (colours::bezelLit, sq.getX(), sq.getY(), colours::bezelShade, sq.getRight(), sq.getBottom(), false));
         g.fillEllipse (sq.expanded (4.0f));
         g.setGradientFill (juce::ColourGradient (colours::glass.interpolatedWith (colours::accent, 0.07f), c.x, c.y, colours::glass.darker (0.4f), sq.getX(), sq.getY(), true));
         g.fillEllipse (sq);

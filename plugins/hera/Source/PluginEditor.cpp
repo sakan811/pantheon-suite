@@ -213,7 +213,6 @@ void HeraEditor::timerCallback()
     history.back() = now;
     shownReduction = now >= shownReduction ? now : std::max (now, shownReduction - gui::kReductionRangeDb / (float) kTimerHz);
     const float in = proc.engine.inPeak.exchange (0.0f);
-    proc.engine.outPeak.store (0.0f);
     inDb = in > 1e-5f ? 20.0f * std::log10 (in) : -90.0f;
     presetBox.sync();
     deltaButton.setToggleState (proc.engine.delta.load(), juce::dontSendNotification);

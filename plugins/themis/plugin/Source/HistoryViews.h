@@ -13,7 +13,7 @@
 #include <functional>
 #include <vector>
 
-namespace ui
+namespace gui
 {
 // "50 ", "1k ", "2.5k " (a trailing space: the caller adds the unit).
 inline juce::String frequencyText (double hz)
@@ -490,7 +490,7 @@ private:
     static juce::Colour ramp (float b)
     {
         struct Stop { float at; juce::Colour colour; };
-        static const Stop stops[] = { { 0.0f, colours::glass }, { 0.22f, juce::Colour (0xff0f3a40) }, { 0.5f, colours::accent.darker (0.2f) },
+        static const Stop stops[] = { { 0.0f, colours::glass }, { 0.22f, colours::rampTeal }, { 0.5f, colours::accent.darker (0.2f) },
                                       { 0.78f, colours::amber }, { 1.0f, colours::text } };
         for (size_t i = 1; i < std::size (stops); ++i)
             if (b <= stops[i].at)
@@ -827,4 +827,4 @@ private:
         return t;
     }
 };
-} // namespace ui
+} // namespace gui

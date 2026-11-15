@@ -117,18 +117,18 @@ static void pump (int ms) { juce::MessageManager::getInstance()->runDispatchLoop
 // PEAKS, SPECTROGRAM) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
 static juce::Image renderGraphs (juce::Component& editor)
 {
-    ui::HistoryPanel *level = nullptr, *fundamental = nullptr;
+    gui::HistoryPanel *level = nullptr, *fundamental = nullptr;
     for (auto* child : editor.getChildren())
     {
-        if (auto* p = dynamic_cast<ui::LevelView*> (child))
+        if (auto* p = dynamic_cast<gui::LevelView*> (child))
             level = p;
-        else if (auto* f = dynamic_cast<ui::FundamentalView*> (child))
+        else if (auto* f = dynamic_cast<gui::FundamentalView*> (child))
             fundamental = f;
     }
     if (level == nullptr || fundamental == nullptr)
         return {};
 
-    const auto snapshot = [] (ui::HistoryPanel& panel, int tab, int column) {
+    const auto snapshot = [] (gui::HistoryPanel& panel, int tab, int column) {
         panel.selectTab (tab);
         panel.selectColumn (column);
         panel.update();
@@ -151,7 +151,7 @@ static juce::Image renderGraphs (juce::Component& editor)
 }
 
 // Clicks along a row of a graph and reports which tabs and range chips answered (the hit areas are laid out by the panel).
-static void clickAlong (ui::HistoryPanel& panel, float y, float fromX, std::set<int>& tabs, std::set<int>& columns)
+static void clickAlong (gui::HistoryPanel& panel, float y, float fromX, std::set<int>& tabs, std::set<int>& columns)
 {
     for (float x = fromX; x < static_cast<float> (panel.getWidth()); x += 3.0f)
     {
@@ -197,7 +197,7 @@ int main (int argc, char** argv)
 
     std::printf ("[1] audio passes through untouched, zero latency, curve builds up\n");
     CHECK (proc.getLatencySamples() == 0, "latency=%d", proc.getLatencySamples());
-    CHECK (proc.getName() == juce::String (ui::kProjectWord) + " " + ui::kPluginWord, "name %s", proc.getName().toRawUTF8());
+    CHECK (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "name %s", proc.getName().toRawUTF8());
     {
         const size_t n = 512;
         const auto l = pinkNoise (n, 1, 0.5f), r = pinkNoise (n, 2, 0.5f);
@@ -324,7 +324,7 @@ int main (int argc, char** argv)
         std::vector<pdsp::LinkBand> back;
         pdsp::LinkCurve curve0;
         pdsp::LinkLimiter got0;
-        CHECK (pdsp::link::decode (ui::linkText ({ cut }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut
+        CHECK (pdsp::link::decode (gui::linkText ({ cut }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut
                    && back[0].place == pdsp::LinkBand::Place::side && std::abs (back[0].freq - 150.0) < 0.5,
                "a copied side low cut reads back as one");
         // A key from a newer writer is ignored whatever its value, so the band still arrives (the format's promise).
@@ -347,14 +347,14 @@ int main (int argc, char** argv)
         // Copy EQ hands the target curve over with its bands (Iris and Apollo draw it as their reference); a reader without curves still gets the bands.
         const auto target = proc.activeTarget();
         pdsp::LinkCurve curve;
-        CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back, &curve) && back.size() == 1 && curve.valid()
+        CHECK (pdsp::link::decode (gui::linkText ({ cut }, &target).toStdString(), back, &curve) && back.size() == 1 && curve.valid()
                    && curve.db.size() == static_cast<size_t> (themis::BandGrid::kNum) && curve.name == target.name,
                "a copied target curve travels with the bands");
         bool curveOk = true;
         for (size_t i = 0; i < curve.db.size(); ++i)
             curveOk = curveOk && std::abs (curve.db[i] - static_cast<double> (target.medianDb[i])) < 0.06;
         CHECK (curveOk && std::abs (curve.frequency (10) - themis::BandGrid::centreHz (10)) < 1.0e-6, "... point for point, on the analysis grid");
-        CHECK (pdsp::link::decode (ui::linkText ({ cut }, &target).toStdString(), back) && back.size() == 1, "... and a reader without curves skips it");
+        CHECK (pdsp::link::decode (gui::linkText ({ cut }, &target).toStdString(), back) && back.size() == 1, "... and a reader without curves skips it");
         // A limiter setting (the ceiling to set, the gain to move) travels as its own line: a limiter reads it, an equaliser's reader skips it.
         themis::LimiterMove move;
         move.setsCeiling = true;
@@ -362,12 +362,12 @@ int main (int argc, char** argv)
         move.changesGain = true;
         move.gainChangeDb = -3.2f;
         pdsp::LinkLimiter got;
-        const auto text = ui::linkText ({}, nullptr, move).toStdString();
+        const auto text = gui::linkText ({}, nullptr, move).toStdString();
         CHECK (pdsp::link::decodeLimiter (text, got) && got.hasCeiling && std::abs (got.ceilingDb + 1.0) < 0.01 && got.hasGainChange && std::abs (got.gainChangeDb + 3.2) < 0.01,
                "a copied limiter setting reads back: the ceiling and the gain change");
-        CHECK (pdsp::link::decode (text, back) && back.empty() && ui::linkDestination ({}, move) == "Aegis", "... an equaliser's reader sees no band in it, and the destination is Aegis");
-        CHECK (! pdsp::link::decodeLimiter (ui::linkText ({ cut }).toStdString(), got), "a band list holds no limiter setting");
-        CHECK (ui::linkDestination ({ cut }) == "Iris or Apollo", "equaliser bands go to Iris or Apollo (both read them, and Copy EQ's curve)");
+        CHECK (pdsp::link::decode (text, back) && back.empty() && gui::linkDestination ({}, move) == "Aegis", "... an equaliser's reader sees no band in it, and the destination is Aegis");
+        CHECK (! pdsp::link::decodeLimiter (gui::linkText ({ cut }).toStdString(), got), "a band list holds no limiter setting");
+        CHECK (gui::linkDestination ({ cut }) == "Iris or Apollo", "equaliser bands go to Iris or Apollo (both read them, and Copy EQ's curve)");
     }
 
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");
@@ -825,15 +825,15 @@ int main (int argc, char** argv)
             if (argc > 1)
                 CHECK (writePng (img, argv[1]));
             for (auto* child : editor->getChildren())
-                if (auto* panel = dynamic_cast<ui::HistoryPanel*> (child))
+                if (auto* panel = dynamic_cast<gui::HistoryPanel*> (child))
                 {
                     std::set<int> tabs, columns;
                     panel->selectTab (0);
                     clickAlong (*panel, 16.0f, 4.0f, tabs, columns); // the title row: the tabs on the left...
                     CHECK (tabs.count (1) == 1 && tabs.count (2) == 1, "clicking the tabs should select them");
-                    if (dynamic_cast<ui::LevelView*> (panel) != nullptr)
+                    if (dynamic_cast<gui::LevelView*> (panel) != nullptr)
                         CHECK (tabs.count (4) == 1, "the SPECTROGRAM tab can be clicked");
-                    if (dynamic_cast<ui::LevelView*> (panel) != nullptr)
+                    if (dynamic_cast<gui::LevelView*> (panel) != nullptr)
                     {
                         panel->selectTab (1); // ...and, on a tab that has them, the range chips on the right
                         clickAlong (*panel, 16.0f, static_cast<float> (panel->getWidth()) * 0.5f, tabs, columns);

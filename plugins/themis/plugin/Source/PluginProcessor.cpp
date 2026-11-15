@@ -213,7 +213,8 @@ void ThemisProcessor::loadReference (const juce::File& file, std::function<void 
             }
             if (error.isEmpty())
             {
-                // The old clip stays alive until the audio thread has finished a block without it (updateListen frees it).
+                // The old clip stays alive until the audio thread has finished a block without it (updateListen frees it: the editor's timer calls it, and so does the
+                // next load; with the editor closed an old clip therefore waits for the next one).
                 listen.setClip (loaded.get());
                 if (referenceClip != nullptr)
                     retiredClips.push_back (std::move (referenceClip));

@@ -25,7 +25,7 @@ It changes nothing but the level and what you listen to.
 ## How it works
 
 1. **K-weighting**, as BS.1770: a high shelf of +4 dB around 1.68 kHz and a 2nd-order high-pass at 38 Hz, made for the session's sample rate from the standard's analog prototypes by the bilinear transform.
-2. **Blocks.** The weighted energy of both channels (weight 1.0 each) is summed over 100 ms sub-blocks. **Momentary** is the mean of the last four (400 ms, 75% overlap), **short-term** of the last thirty (3 s).
+2. **Blocks.** The weighted energy of both channels (weight 1.0 each) is summed over 100 ms sub-blocks. **Momentary** is the mean of the last four (400 ms, 75% overlap), **short-term** of the last thirty (3 s). Until a window is full (the first 0.4 s and 3 s after a RESET) it is the mean of the blocks heard so far, so the first readings are of a shorter stretch; only full windows count towards the integrated loudness and the range.
 3. **Integrated.** The 400 ms blocks over -70 LUFS (the absolute gate) are kept in a histogram of 0.1 LU bins (count and power); the mean power of those sets the relative gate, 10 LU under it; the integrated loudness is the mean
    power of the blocks over that gate. **Range:** the same on the 3 s values, a relative gate of 20 LU, and the span from the 10th to the 95th percentile.
 4. **True peak** is read by `shared/dsp` TruePeak.h (an 8x, 64-tap windowed-sinc reader, the one Aegis detects with), on the sound after the trim.
@@ -53,6 +53,8 @@ It changes nothing but the level and what you listen to.
   Press RESET at the start of a new passage.
 - **The true peak is read at 8x** within 0.1 dB of a separate reader; BS.1770 asks for 4x with 0.2 dB. It is the peak of the sound after the trim, and not of what is listened to.
 - **LISTEN and REF are parameters and are saved with the session**: set LISTEN back to Stereo and REF off before you bounce (a note reminds you).
+- **REF with no reference loaded plays your own sound**, and a note says to press LOAD. **POLARITY inverts both channels**: it sounds the same alone, but sums differently with other tracks.
+- **The quiet and flat notes are rules of thumb for a finished master.** Under -24 LUFS integrated (broadcast is -23, streaming about -14) and under 3 LU of loudness range the notes say the sound is quiet or flat; for a stem or a mix in progress that can be what you want.
 - **A reference is kept whole in memory** (at most 10 minutes; about 230 MB at 48 kHz). It is brought to the sample rate the session had when it was loaded; if the session's rate changes it is made again from the file.
 - **It reads the file again from its path** when a session is opened: if the file has moved, or the session was saved without a reference, it opens without one (the one loaded before is cleared).
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
