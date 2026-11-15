@@ -17,7 +17,7 @@ enum class Detector { peak, rms };
 inline constexpr int kNumDetectors = 2;
 
 inline constexpr float kMaxMakeupDb = 24.0f;
-inline constexpr float kSlowAttackFactor = 20.0f; // the slow follower of AUTO release is this much slower to go down
+inline constexpr float kSlowAttackFactor = 20.0f; // the slow follower of AUTO release has an ATTACK this many times longer (and its own fixed release, below)
 inline constexpr float kFastAutoReleaseMs = 50.0f, kSlowAutoReleaseMs = 600.0f;
 inline constexpr double kRmsMs = 10.0;            // the window of the RMS detector
 inline constexpr double kPeakFallMs = 15.0;       // the peak detector holds a peak and lets it fall at this rate, so a low tone does not make the gain ripple
@@ -134,7 +134,7 @@ public:
         }
         const double sqrt2 = std::sqrt (2.0);
         const bool deltaOn = delta.load (std::memory_order_relaxed), keyOn = scListen.load (std::memory_order_relaxed);
-        float peakIn = 0.0f, peakOut = 0.0f;
+        float peakIn = 0.0f;
         double deepest = 0.0;
 
         for (int i = 0; i < n; ++i)
@@ -222,15 +222,12 @@ public:
             left[i] = (float) out0;
             right[i] = (float) out1;
             peakIn = std::max (peakIn, (float) std::fmax (std::fabs (now[0]), std::fabs (now[1])));
-            peakOut = std::max (peakOut, (float) std::fmax (std::fabs (out0), std::fabs (out1)));
         }
         matchDb.store ((float) (20.0 * std::log10 (matchNow)), std::memory_order_relaxed);
         if ((float) deepest > reductionMeter.load (std::memory_order_relaxed))
             reductionMeter.store ((float) deepest, std::memory_order_relaxed);
         if (peakIn > inPeak.load (std::memory_order_relaxed))
             inPeak.store (peakIn, std::memory_order_relaxed);
-        if (peakOut > outPeak.load (std::memory_order_relaxed))
-            outPeak.store (peakOut, std::memory_order_relaxed);
     }
 
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB
@@ -238,7 +235,7 @@ public:
     std::atomic<bool> scListen { false };       // SC LISTEN: the output is the detector's key after the sidechain high-pass, to hear what it hears. Monitoring, like delta
     std::atomic<float> matchDb { 0.0f };        // the gain LEVEL MATCH is applying now, for the display
     std::atomic<int> latencySamples { 0 };      // the look-ahead in samples: the processor tells the host
-    std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
+    std::atomic<float> inPeak { 0.0f };
 
 private:
     struct Channel

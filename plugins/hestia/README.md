@@ -81,6 +81,10 @@ not a separate analysis.
 - **HOLD keeps a cut, not a decision.** If the other stems change while it is on (a section that needs different room), the held cut is wrong for it; switch it off to follow them again.
 - **One process.** The instances with Hestia on them see each other only inside one host process. A host that runs each plugin in its own process (some hosts'
   sandboxing or bridging), or a bounce on another machine, does not link them: each then works as if alone, and says so in the notes.
+- **A deep cut can sound hollow.** With CARVE at 9 dB or more, a band that is cut by about 8.5 dB or more loses body, and the notes say so. Lower CARVE or REACH.
+- **A short RELEASE can flutter.** Under 60 ms the cuts follow every note of the other stems; the notes say so. Use 200 ms or more.
+- **IMPORTANCE 0 gives the stem almost no claim.** Its claim is halved, so nearly every other stem is let in front of it; the notes say so when others are playing.
+- **DELTA is a monitor.** With DELTA on you hear only what Hestia changes, not the stem; the notes warn until it is switched off. It is never saved, and it ends when the window closes.
 - **It only cuts.** It never lifts a band, and it never touches the stem that owns one. For a fixed correction use an equaliser (Iris).
 - **Depth is not a reverb.** It is distance cues and eight early reflections up to 37 ms, with no tail and no feedback: it says how far back the dry sound
   sits, it does not make a space around it. Use a reverb for that. The cues are fixed in size (9 dB of air, 4 dB of level, 30% of the sides, 0.45 of

@@ -161,8 +161,8 @@ private:
             return s == themis::Source::left ? "the left channel (played on both sides)" : "the right channel (played on both sides)";
         const int band = static_cast<int> (s) - themis::kFirstBandSource;
         const auto& range = themis::kAuditionRanges[band];
-        return "the " + juce::String (pdsp::bands::kBands[static_cast<size_t> (band)].title) + " band, " + ui::hzText (range.loHz) + " - "
-               + ui::hzText (range.hiHz) + ": " + pdsp::bands::kBands[static_cast<size_t> (band)].role;
+        return "the " + juce::String (pdsp::bands::kBands[static_cast<size_t> (band)].title) + " band, " + gui::hzText (range.loHz) + " - "
+               + gui::hzText (range.hiHz) + ": " + pdsp::bands::kBands[static_cast<size_t> (band)].role;
     }
 
     void setup (juce::TextButton& b, const juce::String& text, juce::Colour on, const juce::String& tip, std::function<void()> onClick)
@@ -178,12 +178,12 @@ private:
     // Two lines: what the preview does, and which reference is loaded and how it is matched.
     juce::String compareText() const
     {
-        juce::String first = proc.streamingPreview() ? ui::signedDb (proc.previewGainDb()) : juce::String (proc.deliveryLufs(), 0) + " LUFS";
+        juce::String first = proc.streamingPreview() ? gui::signedDb (proc.previewGainDb()) : juce::String (proc.deliveryLufs(), 0) + " LUFS";
         juce::String second = "--";
         if (proc.hasReference())
         {
             const auto g = proc.referenceGain();
-            second = proc.referenceName() + " " + ui::signedDb (g.db) + (g.capped ? "!" : "");
+            second = proc.referenceName() + " " + gui::signedDb (g.db) + (g.capped ? "!" : "");
         }
         return first + "\n" + second;
     }

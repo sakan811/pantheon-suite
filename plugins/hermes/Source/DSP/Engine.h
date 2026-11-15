@@ -114,7 +114,9 @@ public:
         // The reference may have been swapped for a shorter one after `restart` was taken: the position is only ever read inside the reference that was just loaded.
         if (position >= refLength)
             position = 0;
-        const double trimT = std::pow (10.0, std::clamp (p.trimDb, -kMaxTrimDb, kMaxTrimDb) / 20.0) * (p.polarity ? -1.0 : 1.0);
+        // std::clamp lets a NaN through, and a NaN gain would stay in the output for good: a non-finite TRIM is 0 dB.
+        const float trimDb = std::isfinite (p.trimDb) ? p.trimDb : 0.0f;
+        const double trimT = std::pow (10.0, std::clamp (trimDb, -kMaxTrimDb, kMaxTrimDb) / 20.0) * (p.polarity ? -1.0 : 1.0);
         if (! started)
         {
             trimNow = trimT;

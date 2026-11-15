@@ -49,6 +49,8 @@ void AegisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
         for (int start = 0; start < n;)
         {
             const int m = std::min (n - start, (int) monoRight.size());
+            if (m <= 0)
+                break; // not prepared: nothing to chunk with, and the loop would never advance
             std::copy (x + start, x + start + m, monoRight.begin());
             engine.process (x + start, monoRight.data(), m, params);
             start += m;

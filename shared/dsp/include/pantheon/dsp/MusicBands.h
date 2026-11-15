@@ -10,8 +10,8 @@
 
 namespace pdsp
 {
-// The six main frequency bands of music, the one definition every plugin's solo strip uses (Themis' AUDITION ranges, Iris'
-// regions by default, Hephaestus' band solo strip), so a band soloed in one plugin is the same part of the spectrum in another.
+// The six main frequency bands of music, the one definition every plugin's solo strip uses (an audition range, the default regions of a
+// processor, a band solo strip), so a band soloed in one plugin is the same part of the spectrum in another.
 namespace bands
 {
 struct MusicBand

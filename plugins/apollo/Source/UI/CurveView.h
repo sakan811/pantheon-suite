@@ -221,10 +221,7 @@ public:
             return;
         if (const int band = nodeNear (e.position); band >= 0)
         {
-            auto* on = apvts.getParameter (bandIds (band).on);
-            on->beginChangeGesture();
-            on->setValueNotifyingHost (on->getValue() > 0.5f ? 0.0f : 1.0f);
-            on->endChangeGesture();
+            setWithGesture (bandIds (band).on, apvts.getParameter (bandIds (band).on)->getValue() > 0.5f ? 0.0f : 1.0f);
             select (band);
         }
         else if (plot().contains (e.position))

@@ -142,9 +142,9 @@ public:
     juce::String getTooltip() override
     {
         if (overBroadbandStrip && !overTranslationStrip)
-            return fundamentalHz > 0.0f ? "FUNDAMENTAL: the lowest tonal bass peak (" + ui::hzText (fundamentalHz) + ") is "
+            return fundamentalHz > 0.0f ? "FUNDAMENTAL: the lowest tonal bass peak (" + gui::hzText (fundamentalHz) + ") is "
                                               + (noFundamentalHarmonics ? juce::String ("the only tonal component found: no harmonics. ")
-                                                                        : ui::signedDb (fundamentalTiltDb) + " against its harmonics. ")
+                                                                        : gui::signedDb (fundamentalTiltDb) + " against its harmonics. ")
                                               + "Sub-heavy bass has little above it for small speakers to play; harmonic-rich bass is carried by its upper partials. "
                                                 "See the FUNDAMENTAL graph for how it moves."
                                         : juce::String();
@@ -152,8 +152,8 @@ public:
             return {};
         juce::StringArray lines;
         if (report.haveDevice && device != nullptr)
-            lines.add (juce::String (device->name) + ": the track changes by " + ui::signedDb (report.deviceChangeDb) + " overall, the target by "
-                       + ui::signedDb (report.referenceChangeDb) + ". Positive DEVICE LOSS means this track depends more on what the device cannot "
+            lines.add (juce::String (device->name) + ": the track changes by " + gui::signedDb (report.deviceChangeDb) + " overall, the target by "
+                       + gui::signedDb (report.referenceChangeDb) + ". Positive DEVICE LOSS means this track depends more on what the device cannot "
                          "reproduce than the target does.");
         if (report.haveFold)
             lines.add ("MONO FOLD is the power lost when the channels are summed (0 dB = mono-safe, 3 dB = uncorrelated, more = phase "
@@ -351,7 +351,7 @@ private:
             const float pos = static_cast<float> (juce::jlimit (-1.0, 1.0, delta / (tol * 3.0))) * half;
             ui::MeterCell::fillSpan (g, bar, centre - half / 3.0f, centre + half / 3.0f, colours::accent.withAlpha (0.35f)); // in-tolerance zone
             ui::MeterCell::drawMarker (g, bar, centre + pos, c);
-            cell.drawReadout (g, ui::signedDb (static_cast<float> (delta)), c);
+            cell.drawReadout (g, gui::signedDb (static_cast<float> (delta)), c);
         }
     }
 
@@ -413,7 +413,7 @@ private:
         g.fillPath (dashed);
         g.restoreState();
         g.setFont (ui::font (12.0f));
-        g.drawText ("Via " + juce::String (device->name) + "  (plays " + ui::hzText (deviceLoHz) + " - " + ui::hzText (deviceHiHz) + ")", annotationRow (1, false),
+        g.drawText ("Via " + juce::String (device->name) + "  (plays " + gui::hzText (deviceLoHz) + " - " + gui::hzText (deviceHiHz) + ")", annotationRow (1, false),
                     juce::Justification::left);
     }
 
@@ -472,7 +472,7 @@ private:
 
         if (report.haveDevice)
             drawMeter (g, cell (0), "DEVICE LOSS", report.extraLossDb, tr::kDeviceWarnDb, tr::kDeviceBadDb, report.deviceLevel,
-                       ui::signedDb (report.extraLossDb) + " vs target");
+                       gui::signedDb (report.extraLossDb) + " vs target");
         else
             cell (0).drawNote (g, "DEVICE LOSS", "choose a device", colours::dim);
 
@@ -484,7 +484,7 @@ private:
                        "-" + juce::String (report.lowMonoLossDb, 1) + " dB < " + juce::String (juce::roundToInt (tr::kLowEndHz)) + " Hz");
             if (report.worstBand >= 0)
                 cell (3).drawNote (g, "WORST BAND",
-                                   ui::hzText (themis::BandGrid::centreHz (report.worstBand)) + "  -" + juce::String (report.worstBandLossDb, 1) + " dB",
+                                   gui::hzText (themis::BandGrid::centreHz (report.worstBand)) + "  -" + juce::String (report.worstBandLossDb, 1) + " dB",
                                    colours::forLevel (tr::bandMonoLevel (report.worstBand, report.worstBandLossDb)));
             else
                 cell (3).drawNote (g, "WORST BAND", "-", colours::dim);
@@ -556,7 +556,7 @@ private:
             case themis::PhaseCause::delay: return "Delay " + juce::String (p.delayMs, 2) + " ms";
             case themis::PhaseCause::other: break;
         }
-        return ui::hzText (p.loHz) + " - " + ui::hzText (p.hiHz);
+        return gui::hzText (p.loHz) + " - " + gui::hzText (p.hiHz);
     }
 
     // Does a mono sum lose more than uncorrelated channels would, and why.
@@ -567,7 +567,7 @@ private:
 
     juce::String phaseTooltip() const
     {
-        const auto where = ui::hzText (phase.loHz) + " - " + ui::hzText (phase.hiHz);
+        const auto where = gui::hzText (phase.loHz) + " - " + gui::hzText (phase.hiHz);
         const auto depth = juce::String (phase.flaggedBands) + (phase.flaggedBands == 1 ? " band" : " bands") + " lose up to "
                            + juce::String (phase.worstLossDb, 1) + " dB in a mono sum";
         switch (phase.cause)
@@ -579,7 +579,7 @@ private:
                        + ". " + depth + "; the outlined region (" + where + ") is the widest. Check a polarity / phase-invert switch.";
             case themis::PhaseCause::delay:
                 return "PHASE CHECK: one channel (" + juce::String (phase.leftLate ? "left" : "right") + ") is about " + juce::String (phase.delayMs, 2)
-                       + " ms late, which makes a comb filter with the first notch near " + ui::hzText (phase.notchHz) + " in mono. " + depth
+                       + " ms late, which makes a comb filter with the first notch near " + gui::hzText (phase.notchHz) + " in mono. " + depth
                        + "; widest region " + where + ".";
             case themis::PhaseCause::other:
                 break;
@@ -617,7 +617,7 @@ private:
         }
         using themis::fundamental::Balance;
         const auto balance = noFundamentalHarmonics ? Balance::subHeavy : themis::fundamental::balanceOf (fundamentalTiltDb);
-        cell.drawNote (g, "FUNDAMENTAL", ui::hzText (fundamentalHz) + "  " + themis::fundamental::name (balance), colours::text);
+        cell.drawNote (g, "FUNDAMENTAL", gui::hzText (fundamentalHz) + "  " + themis::fundamental::name (balance), colours::text);
     }
 
     void drawHover (juce::Graphics& g) const
@@ -632,14 +632,14 @@ private:
         g.setColour (colours::text);
         g.setFont (ui::font (12.0f));
         const float tilt = tiltDb (hoverBand);
-        juce::String text = ui::hzText (hz) + "   signal " + juce::String (measured[s] + tilt, 1) + "   target " + juce::String (target.medianDb[s] + tilt, 1)
-                            + "   delta " + ui::signedDb (d);
+        juce::String text = gui::hzText (hz) + "   signal " + juce::String (measured[s] + tilt, 1) + "   target " + juce::String (target.medianDb[s] + tilt, 1)
+                            + "   delta " + gui::signedDb (d);
         if (haveFold)
             text += "   mono -" + juce::String (-fold[s], 1) + " dB";
         g.drawText (text, annotationRow (0, true), juce::Justification::right);
         if (device != nullptr)
             g.drawText ("via " + juce::String (device->name) + "   " + juce::String (measured[s] + deviceResponse[s] + tilt, 1) + "   (device "
-                            + ui::signedDb (deviceResponse[s]) + ")",
+                            + gui::signedDb (deviceResponse[s]) + ")",
                         annotationRow (1, true), juce::Justification::right);
     }
 

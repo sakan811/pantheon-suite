@@ -62,8 +62,8 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &matchButton, &deltaButton, &pasteButton, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
-    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12);
     showTypes();
+    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12); // last: it lays everything out
 }
 
 ApolloEditor::~ApolloEditor()

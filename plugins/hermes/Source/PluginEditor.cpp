@@ -171,8 +171,7 @@ void HermesEditor::paint (juce::Graphics& g)
     // The reference: its name, how long it has played, what it was brought by.
     {
         const auto name = proc.referenceName();
-        auto area = referenceArea.withTrimmedTop (28).withTrimmedBottom (34).withTrimmedLeft (0);
-        area = { referenceArea.getX(), referenceArea.getY() + 28, referenceArea.getWidth(), 14 };
+        const juce::Rectangle<int> area { referenceArea.getX(), referenceArea.getY() + 28, referenceArea.getWidth(), 14 };
         hw::drawLabel (g, name.isEmpty() ? juce::String (status.isNotEmpty() ? status : "No reference loaded") : name + "   " + juce::String (proc.referenceLufs(), 1) + " LUFS",
                        area, juce::Justification::left, status.isNotEmpty() && name.isEmpty() ? colours::warn : colours::dim, 9.5f);
         if (name.isNotEmpty())

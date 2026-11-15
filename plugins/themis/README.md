@@ -143,8 +143,8 @@ core/include/themis/   DSP: Common, BandGrid, Biquad, Eq, Compressor, Limiter, T
 plugin/Source/         JUCE layer: Parameters, PluginProcessor, PluginEditor, TonalBalanceView, StereoScopeView, HistoryViews,
                        AdvicePanel, AuditionPanel, UsageNotes (the usage notes and the GUIDE text; plain C++), ThemisUi.h (Themis' own words, number formats and verdict colours)
 ../../shared/ui/       the drawing kit of the interface, shared with the other plugins of the repository: Hardware.h (metal,
-                       glass, lamps, knobs), HardwareLookAndFeel.h, MeterCell.h
-../../shared/dsp/      BandLink.h only: the text COPY and Copy EQ put on the clipboard, which Iris, Apollo and Hephaestus PASTE (and Aegis, for the limiter line)
+                       glass, lamps, knobs), HardwareLookAndFeel.h, MeterCell.h, Controls.h, Note.h and Advice.h (the notes under the controls)
+../../shared/dsp/      BandLink.h (the text COPY and Copy EQ put on the clipboard, which Iris, Apollo and Hephaestus PASTE, and Aegis for the limiter line), MusicBands.h (the audition ranges), Biquad.h
 tests/                 test_main.cpp (DSP), plugin_smoke.cpp (headless JUCE)
 ```
 

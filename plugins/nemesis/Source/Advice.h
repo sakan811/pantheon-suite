@@ -60,7 +60,7 @@ inline const char* guideText()
            "DELTA plays only what is turned down: if it is the voice and not just the hiss, THRESH is too low or RANGE too high. Switch both off before you bounce. RELATIVE detection compares the band with the "
            "whole sound, so one threshold works for a quiet and a loud passage.\n\n"
            "NOT FOR\n"
-           "Not a cure for a harsh recording: taking off more than about 10 dB makes a lisp. With LOOK-AHEAD off, the very first millisecond of a loud s gets through. "
+           "Not a cure for a harsh recording: taking off more than about 10 dB makes a lisp. With LOOK-AHEAD off, the first 0.3 ms of a loud s gets through. "
            "It is not a dynamic equaliser (Iris is).";
 }
 } // namespace nemesis

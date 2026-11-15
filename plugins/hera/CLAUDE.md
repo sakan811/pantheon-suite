@@ -38,8 +38,8 @@ fall (`kPeakFallMs`) and an instant rise. Do not make it faster without redoing 
 **At rest the gain is exactly 1.** A reduction under `kRestDb` with nothing to reduce is set to exactly 0, and `gr == 0` gives a gain of exactly 1 (not `exp (0)` times a rounding). MIX at 100% takes the compressed
 sound itself (`pure`), not `dry + mix x (wet - dry)`. That is what makes the idle compressor bit-exact (tests [2]); keep both.
 
-**AUTO release** is two followers with the same attack but the slow one 20 times slower to go down (`kSlowAttackFactor`), and the gain is the larger of the two. A short burst only moves the fast one far, a long passage
-moves both. The release times are fixed (`kFastAutoReleaseMs`, `kSlowAutoReleaseMs`); RELEASE is not used.
+**AUTO release** is two followers and the gain is the larger of the two. The fast one has ATTACK and a fixed 50 ms release (`kFastAutoReleaseMs`); the slow one has an attack 20 times longer (`kSlowAttackFactor`) and a fixed 600 ms release
+(`kSlowAutoReleaseMs`). A short burst only moves the fast one far, a long passage moves both. RELEASE is not used.
 
 **LINK** is `own + link x (louder - own)` on the linear detector levels, not on the gains: at 100% both channels see the same level and get the same gain exactly.
 

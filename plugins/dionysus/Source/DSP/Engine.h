@@ -75,8 +75,8 @@ public:
     // In place. Everything that is not a number is silence.
     void process (float* left, float* right, int n, const EngineParams& p) noexcept
     {
-        if (p.oversampling != index)
-            configure (p.oversampling);
+        if (const int os = std::clamp (p.oversampling, 0, kNumOversampling - 1); os != index) // configure() clamps: an out-of-range value must not restart the filters every block
+            configure (os);
         const auto shapeNow = p.shape;
         const double bias = std::clamp ((double) p.bias, -1.0, 1.0);
         const double driveT = std::pow (10.0, std::clamp (p.driveDb, 0.0f, kMaxDriveDb) / 20.0);

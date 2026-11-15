@@ -139,13 +139,13 @@ void ThemisEditor::copyTonalEq()
     const auto moves = themis::tonalMoves (measured, proc.activeTarget(), proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0);
     // The target curve goes along with the bands: Iris and Apollo draw it behind their spectrum as the reference to follow.
     const auto target = proc.activeTarget();
-    juce::SystemClipboard::copyTextToClipboard (ui::linkText (moves, &target));
+    juce::SystemClipboard::copyTextToClipboard (gui::linkText (moves, &target));
     if (moves.empty())
     {
         setStatus ("The curve is within 0.5 dB of the target: no bands to copy, but the target curve is on the clipboard for the reference of Iris or Apollo.", false);
         return;
     }
-    setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s) and the target curve: paste them in " + ui::linkDestination (moves) + " (PASTE on its band panel).", false);
+    setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s) and the target curve: paste them in " + gui::linkDestination (moves) + " (PASTE on its band panel).", false);
 }
 
 void ThemisEditor::toggleHeldCurve()
@@ -274,7 +274,7 @@ void ThemisEditor::paint (juce::Graphics& g)
 {
     ui::hw::fillMetal (g, getLocalBounds().toFloat(), colours::background);
     ui::hw::drawHeaderPlate (g, juce::Rectangle<float> (0.0f, 0.0f, static_cast<float> (getWidth()), static_cast<float> (kHeaderHeight + 8)));
-    ui::hw::drawNameplate (g, nameplate, ui::kProjectWord, ui::kPluginWord, "Mastering check suite", signalPresent);
+    ui::hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Mastering check suite", signalPresent);
 
     ui::hw::drawGlass (g, statusWindow.toFloat(), 3.0f, colours::amber);
     ui::hw::drawGlassOverlay (g, statusWindow.toFloat(), 3.0f, false);

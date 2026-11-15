@@ -16,8 +16,8 @@ cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Re
 ```
 
 - Building the plugin targets does **not** install them (`ATLAS_INSTALL_AFTER_BUILD`, off by default).
-- `AtlasTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. There is no `HostCheck` yet, and the plugin has not
-  been built on macOS or run through `auval` (the repository's CLAUDE.md lists it under "Not yet in line").
+- `AtlasTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. There is no `HostCheck` yet and no macOS CI job; the plugin
+  was built on macOS by hand (VST3 and AU) and `auval -v` passes (2026-11-13; the repository's CLAUDE.md lists the rest under "Not yet in line").
 - Definition of done for a DSP change: `AtlasTests` passes **and** the numbers the README quotes still match its output.
 - Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
 

@@ -33,7 +33,7 @@ public:
     enum class NoteAction { all, none, invert, scale };
     void noteAction (NoteAction);
 
-    static constexpr int kDesignW = 880, kDesignH = 584 + 6 + 36 + 0; // the editor is drawn at this size and scaled; the foot strip is the notes' (or GUIDE's reminder)
+    static constexpr int kDesignW = 880, kDesignH = 626; // the editor is drawn at this size and scaled; the foot strip is the notes' (or GUIDE's reminder)
 
 private:
     static constexpr int kHeaderH = 84;

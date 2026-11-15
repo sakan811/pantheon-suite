@@ -26,7 +26,7 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 | **Link** | 0 to 100%, 100 by default: the share of the louder channel's level that both channels see, so the image does not move (0: each channel on its own). |
 | **SC high-pass** | 20 to 500 Hz, off at 20: a high-pass on what the detector listens to (not on the sound). |
 | **Detector** | Peak (quick, follows transients) or RMS (10 ms, closer to the ear; the default). Both read the peak of a sine, so THRESH means the same on both. |
-| **Auto release** | Program-dependent: two followers, one of 50 ms and one of 600 ms that is 20 times slower to go down; the gain is the larger. A short peak lets go quickly, a long loud passage slowly. RELEASE is not used. |
+| **Auto release** | Program-dependent: two followers, a fast one (release 50 ms) and a slow one (release 600 ms, and an attack 20 times longer); the gain is the larger. A short peak lets go quickly, a long loud passage slowly. RELEASE is not used. |
 | **Key** | Listen to the **sidechain** input (a second input, off until the host routes a track to it) instead of the sound. With nothing connected it listens to itself. |
 | **Look-ahead** | Off (default), 1, 2, 5 or 10 ms: the detector sees the sound as it arrives and the sound is heard that long after, so the gain is already down when a peak gets to the output. It is a delay (the host compensates); MIX delays the dry sound the same, so nothing combs. |
 | **Level match** | Takes the level the compressor and MAKEUP add or take away off again, slowly (about 0.6 s, within 12 dB), so an A/B is not decided by loudness. Off by default; while it is on, the gain it applies is read out beside the reduction. Kept by presets. |

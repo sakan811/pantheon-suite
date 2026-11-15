@@ -19,6 +19,7 @@ public:
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override; // delayed by the look-ahead, so the track does not jump when the host bypasses
+    void reset() override { engine.reset(); bypassDelay.reset(); } // a host locate, loop or stop: nothing of the old position may sound at the new one
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }

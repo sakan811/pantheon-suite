@@ -42,12 +42,16 @@ void HeraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     juce::ScopedNoDenormals noDenormals;
     const auto params = hera::readParams (apvts);
     // The sidechain is only listened to, by the detector, when KEY is on: it is never heard.
-    juce::AudioBuffer<float> side;
+    // Only pointers are kept (no AudioBuffer is copied or assigned here: nothing on this path may allocate).
+    const float* scL = nullptr;
+    const float* scR = nullptr;
     if (getBusCount (true) > 1 && getBus (true, 1)->isEnabled())
-        side = getBusBuffer (buffer, true, 1);
-    sidechainConnected.store (side.getNumChannels() > 0, std::memory_order_relaxed);
-    const float* scL = side.getNumChannels() > 0 ? side.getReadPointer (0) : nullptr;
-    const float* scR = side.getNumChannels() > 1 ? side.getReadPointer (1) : nullptr;
+    {
+        const auto side = getBusBuffer (buffer, true, 1);
+        scL = side.getNumChannels() > 0 ? side.getReadPointer (0) : nullptr;
+        scR = side.getNumChannels() > 1 ? side.getReadPointer (1) : nullptr;
+    }
+    sidechainConnected.store (scL != nullptr, std::memory_order_relaxed);
 
     auto main = getBusBuffer (buffer, false, 0);
     const int n = main.getNumSamples();
@@ -60,6 +64,8 @@ void HeraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         for (int start = 0; start < n;)
         {
             const int m = std::min (n - start, (int) monoRight.size());
+            if (m <= 0)
+                break; // not prepared: nothing to chunk with, and the loop would never advance
             std::copy (x + start, x + start + m, monoRight.begin());
             engine.process (x + start, monoRight.data(), m, params, scL != nullptr ? scL + start : nullptr, scR != nullptr ? scR + start : nullptr);
             start += m;

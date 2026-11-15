@@ -174,9 +174,9 @@ public:
         if (row >= 0 && overCopy (e.position.toInt()))
         {
             const auto& item = advice.items[static_cast<size_t> (row)];
-            juce::SystemClipboard::copyTextToClipboard (ui::linkText (item.moves, nullptr, item.limiter));
+            juce::SystemClipboard::copyTextToClipboard (gui::linkText (item.moves, nullptr, item.limiter));
             if (onCopied)
-                onCopied ("Copied: paste it in " + ui::linkDestination (item.moves, item.limiter) + " (PASTE on its " + (item.moves.empty() ? "panel)." : "band panel)."));
+                onCopied ("Copied: paste it in " + gui::linkDestination (item.moves, item.limiter) + " (PASTE on its " + (item.moves.empty() ? "panel)." : "band panel)."));
             return;
         }
         if (row < 0 || !advice.items[static_cast<size_t> (row)].hear.active())
@@ -219,7 +219,7 @@ public:
         const auto& item = advice.items[static_cast<size_t> (hoverRow)];
         if (hoverCopy)
             return juce::String (item.moves.empty() ? "Copy the limiter setting that makes this change" : "Copy the band(s) that make this change") + ", to paste in "
-                   + ui::linkDestination (item.moves, item.limiter) + ". The amounts come from the measurement; judge the result by ear (SNAP first, to compare before and after).";
+                   + gui::linkDestination (item.moves, item.limiter) + ". The amounts come from the measurement; judge the result by ear (SNAP first, to compare before and after).";
         juce::String text = juce::String (item.headline) + "\n\n" + juce::String (item.why);
         if (item.hear.active())
             text += "\n\nClick to hear it: solo " + juce::String (themis::soloText (item.hear)) + ". Click again to release.";

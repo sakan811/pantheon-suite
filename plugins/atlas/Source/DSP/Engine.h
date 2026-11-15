@@ -376,7 +376,8 @@ private:
             peakIn = std::max (peakIn, std::max (std::fabs (l[i]), std::fabs (r[i])));
         }
         splitInto (splitter, linear, bandBuffer, l, r, n);
-        if (scActive)
+        // scActive is refreshed once per tick but the sidechain can vanish between two blocks: no input, nothing to split.
+        if (scActive && scL != nullptr)
             splitInto (scSplitter, scLinear, scBuffer, scL, scR, n); // what a band that listens to the sidechain reads
         for (int i = 0; i < n; ++i)
             l[i] = r[i] = 0.0f;

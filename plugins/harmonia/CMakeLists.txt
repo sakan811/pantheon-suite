@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.22)
 
-# Universal binary so the plug-in loads whether FL Studio runs natively or under Rosetta.
+# Universal binary so the plug-in loads whether the host runs natively or under Rosetta.
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 

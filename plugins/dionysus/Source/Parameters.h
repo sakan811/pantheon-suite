@@ -48,17 +48,19 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 // Reads the current values into the plain struct the engine consumes. Called per block on the audio thread.
 inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
 {
-    const auto v = [&] (juce::StringRef pid) { return s.getRawParameterValue (pid)->load(); };
+    // std::clamp lets a NaN through and the engine's smoothing would keep it for good: a value that is not a number reads as the default.
+    const auto v = [&] (juce::StringRef pid, float fallback) { const float x = s.getRawParameterValue (pid)->load(); return std::isfinite (x) ? x : fallback; };
+    const EngineParams d;
     EngineParams e;
-    e.driveDb = v (id::drive);
-    e.shape = (Shape) std::clamp ((int) v (id::shape), 0, kNumShapes - 1);
-    e.bias = v (id::bias) / 100.0f;
-    e.tone = v (id::tone) / 100.0f;
-    e.mix = v (id::mix) / 100.0f;
-    e.outDb = v (id::out);
-    e.autoGain = v (id::autoGain) > 0.5f;
-    e.oversampling = std::clamp ((int) v (id::oversampling), 0, kNumOversampling - 1);
-    e.lowCutHz = v (id::lowCut);
+    e.driveDb = v (id::drive, d.driveDb);
+    e.shape = (Shape) std::clamp ((int) v (id::shape, (float) (int) d.shape), 0, kNumShapes - 1);
+    e.bias = v (id::bias, d.bias * 100.0f) / 100.0f;
+    e.tone = v (id::tone, d.tone * 100.0f) / 100.0f;
+    e.mix = v (id::mix, d.mix * 100.0f) / 100.0f;
+    e.outDb = v (id::out, d.outDb);
+    e.autoGain = v (id::autoGain, d.autoGain ? 1.0f : 0.0f) > 0.5f;
+    e.oversampling = std::clamp ((int) v (id::oversampling, (float) d.oversampling), 0, kNumOversampling - 1);
+    e.lowCutHz = v (id::lowCut, d.lowCutHz);
     return e;
 }
 

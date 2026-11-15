@@ -23,9 +23,13 @@ inline juce::Colour forLevel (themis::Level l)
 {
     return l == themis::Level::good ? good : l == themis::Level::warn ? warn : bad;
 }
+
+// What the scope and the spectrogram draw that the kit has no colour for: the bezel of the round scope (metal, lit and in shade) and the dark teal
+// the spectrogram's ramp passes through between the glass and its accent.
+inline const juce::Colour bezelLit { 0xff6b675d }, bezelShade { 0xff25231f }, rampTeal { 0xff0f3a40 };
 } // namespace colours
 
-namespace ui
+namespace gui
 {
 // The two words of the plugin's name. The full name ("Themis Verdict") is set once, in CMakeLists.txt (PLUGIN_NAME), and
 // reaches the code as JucePlugin_Name; the smoke test checks that the two agree.
@@ -84,4 +88,4 @@ inline juce::String linkDestination (const themis::EqMoves& moves, const themis:
         (m.kind == themis::EqMove::Kind::harmonicFill ? fill : eq) = true;
     return fill && eq ? "Iris or Apollo (EQ) and Hephaestus (fill)" : fill ? "Hephaestus" : "Iris or Apollo";
 }
-} // namespace ui
+} // namespace gui

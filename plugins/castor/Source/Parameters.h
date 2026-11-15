@@ -51,16 +51,18 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 // Reads the current values into the plain struct the engine consumes. Called per block on the audio thread.
 inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
 {
-    const auto v = [&] (const juce::String& pid) { return s.getRawParameterValue (pid)->load(); };
+    // std::clamp lets a NaN through and the engine's smoothing would keep it for good: a value that is not a number reads as the default.
+    const auto v = [&] (const juce::String& pid, float fallback) { const float x = s.getRawParameterValue (pid)->load(); return std::isfinite (x) ? x : fallback; };
+    const EngineParams d;
     EngineParams e;
     for (int b = 0; b < kBands; ++b)
-        e.width[(size_t) b] = v (id::width (b)) / 100.0f;
-    e.midDb = v (id::mid);
-    e.sideDb = v (id::side);
-    e.monoBelowHz = v (id::monoBelow);
-    e.balance = v (id::balance) / 100.0f;
-    e.outDb = v (id::out);
-    e.listen = (Listen) std::clamp ((int) v (id::listen), 0, kNumListen - 1);
+        e.width[(size_t) b] = v (id::width (b), d.width[(size_t) b] * 100.0f) / 100.0f;
+    e.midDb = v (id::mid, d.midDb);
+    e.sideDb = v (id::side, d.sideDb);
+    e.monoBelowHz = v (id::monoBelow, d.monoBelowHz);
+    e.balance = v (id::balance, d.balance * 100.0f) / 100.0f;
+    e.outDb = v (id::out, d.outDb);
+    e.listen = (Listen) std::clamp ((int) v (id::listen, 0.0f), 0, kNumListen - 1);
     return e;
 }
 

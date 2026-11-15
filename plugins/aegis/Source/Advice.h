@@ -42,7 +42,7 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     if (in.heldDb >= kHeavyDb)
         warn ("Taking off " + std::to_string ((int) (in.heldDb + 0.5f)) + " dB or more: it will sound squashed. Lower GAIN, or compress before the limiter.");
     if (p.releaseMs < kFastReleaseMs && in.heldDb >= 3.0f)
-        info ("A RELEASE under 40 ms with this much reduction follows the waveform of the bass: it can distort. Try 100 ms or more.");
+        info ("A RELEASE under 40 ms with this much reduction follows the bass and can distort. Try 100 ms or more.");
     if (p.gainDb <= 0.0f && in.heldDb <= 0.0f)
         info ("Nothing is being limited. Raise GAIN until the meter moves: the ceiling is where the output stops.");
     if (in.latencyMs > 0.0)
