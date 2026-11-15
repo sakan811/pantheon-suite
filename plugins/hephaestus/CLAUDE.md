@@ -108,7 +108,8 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
 - parameter ranges, defaults, choice lists, "off" thresholds -> `Parameters.h` (the editor reads combo items from the parameter)
 - how a fill band makes its harmonics (Warm / Clean / Octave) -> its `bN_character` parameter (`BandIds::character`, a choice, version 3), read into `Params::character` by `readParams()`; whether it asks for the octave latency -> `usesOctave()` in `Engine.h` (the processor passes it to `Engine::prepare`); the editor's selector is re-bound to the selected fill band in `refreshBandPanel()` and is not a knob slot (the six slots are full)
 - per-band parameter ids -> `bandIds()`; adding / removing a band and switching its mode -> `addBand`, `removeBand`, `setBandMode`
-  (the spectrum menu, the double-click menu and the band panel buttons all call these); bands pasted from another plugin
+  (the spectrum menu, the double-click menu and the band panel buttons all call these; Delete / Backspace in the spectrum calls
+  `SpectrumView::keyPressed`, and removing a soloed band ends the solo there, `removeBandAndSolo`); CLEAR ALL -> `clearBands` (one undo step, none when no band is on; the editor ends the solo); bands pasted from another plugin
   (`pdsp::link`, `shared/dsp/BandLink.h`) -> `pasteBands` (fill bands only)
 - what a fill band's ABOVE read-out shows -> `FundamentalEngine::currentReachDb()` (the same energies the adaptive fill compares), published per band as `Engine::bandReachDb`
 - where a band really sits (minimum width, the 2 kHz fill limit), where its harmonics land (the zone the display shades) and which harmonics

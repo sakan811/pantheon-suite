@@ -363,52 +363,68 @@ inline Range bandRange (juce::AudioProcessorValueTreeState& s, int band)
     return effectiveRange (bandMode (s, band), s.getRawParameterValue (ids.lo)->load(), s.getRawParameterValue (ids.hi)->load());
 }
 
+// The slot a new band takes: `preferredSlot` if that one is free, else the first free slot; -1 when all are in use.
+inline int freeBandSlot (juce::AudioProcessorValueTreeState& s, int preferredSlot = -1)
+{
+    if (preferredSlot >= 0 && preferredSlot < maxBands && ! isBandOn (s, preferredSlot))
+        return preferredSlot;
+    for (int i = 0; i < maxBands; ++i)
+        if (! isBandOn (s, i))
+            return i;
+    return -1;
+}
+
+// Sets up a band in the free slot (see freeBandSlot): centred on `centreHz` with a sensible width, and every other control of
+// the slot back at its default. It leaves the band OFF; the caller switches it on last, so the audio thread never runs it half
+// made. Opens no undo step. Returns the slot, or -1 when all are in use.
+inline int placeBand (juce::AudioProcessorValueTreeState& s, BandMode mode, double centreHz, int preferredSlot = -1)
+{
+    const int slot = freeBandSlot (s, preferredSlot);
+    if (slot < 0)
+        return -1;
+
+    const auto& ids = bandIds (slot);
+    for (auto* pid : { &ids.drive, &ids.amount, &ids.tone, &ids.adapt, &ids.rebuild, &ids.character })
+        if (auto* param = s.getParameter (*pid))
+            setParameter (*param, param->getDefaultValue());
+
+    const double width = mode == BandMode::fill ? 1.5 : 1.8;
+    const auto range = effectiveRange (mode, std::clamp (centreHz / width, 20.0, 20000.0),
+                                       std::clamp (centreHz * width, 20.0, 20000.0));
+    setParameterValue (s, ids.mode, (float) (int) mode);
+    setParameterValue (s, ids.lo, (float) range.lo);
+    setParameterValue (s, ids.hi, (float) range.hi);
+    return slot;
+}
+
 // Puts a new band into the first free slot, centred on `centreHz` with a sensible width, and every
 // other control of the slot back at its default. Uses `preferredSlot` if that one is free, else the
-// first free slot. Returns the slot, or -1 when all are in use.
+// first free slot. Returns the slot, or -1 when all are in use (and then no undo step is opened).
 inline int addBand (juce::AudioProcessorValueTreeState& s, BandMode mode, double centreHz, int preferredSlot = -1)
 {
-    int slot = -1;
-    if (preferredSlot >= 0 && preferredSlot < maxBands && ! isBandOn (s, preferredSlot))
-        slot = preferredSlot;
-    for (int i = 0; slot < 0 && i < maxBands; ++i)
-        if (! isBandOn (s, i))
-            slot = i;
+    if (freeBandSlot (s, preferredSlot) < 0)
+        return -1;
 
-    if (slot >= 0)
-    {
-        ui::beginUndoStep (s, "Add band");
-        const int i = slot;
-        const auto& ids = bandIds (i);
-        for (auto* pid : { &ids.drive, &ids.amount, &ids.tone, &ids.adapt, &ids.rebuild, &ids.character })
-            if (auto* param = s.getParameter (*pid))
-                setParameter (*param, param->getDefaultValue());
-
-        const double width = mode == BandMode::fill ? 1.5 : 1.8;
-        const auto range = effectiveRange (mode, std::clamp (centreHz / width, 20.0, 20000.0),
-                                           std::clamp (centreHz * width, 20.0, 20000.0));
-        setParameterValue (s, ids.mode, (float) (int) mode);
-        setParameterValue (s, ids.lo, (float) range.lo);
-        setParameterValue (s, ids.hi, (float) range.hi);
-        setParameterValue (s, ids.on, 1.0f);
-    }
+    ui::beginUndoStep (s, "Add band");
+    const int slot = placeBand (s, mode, centreHz, preferredSlot);
+    setParameterValue (s, bandIds (slot).on, 1.0f);
     return slot;
 }
 
 // Fill bands handed over as text by another plugin of the repository (pdsp::link, e.g. Themis' COPY on a bass item), each into
 // the next free slot with its range (held to a fill band's limits by effectiveRange). Equaliser bands are not Hephaestus' and
-// are left out. Returns the slots used; `skipped` counts what did not fit or was not a fill band.
+// are left out. The whole paste is one undo step. Returns the slots used; `skipped` counts what did not fit or was not a fill band.
 inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const juce::String& text, int& skipped)
 {
     std::vector<int> slots;
     skipped = 0;
-    ui::beginUndoStep (s, "Paste bands");
     std::vector<pdsp::LinkBand> bands;
     if (! pdsp::link::decode (text.toStdString(), bands))
-        return slots;
+        return slots; // unusable text: no undo step
+    ui::beginUndoStep (s, "Paste bands");
     for (const auto& b : bands)
     {
-        const int slot = b.kind == pdsp::LinkBand::Kind::fill ? addBand (s, BandMode::fill, std::sqrt (b.loHz * b.hiHz)) : -1;
+        const int slot = b.kind == pdsp::LinkBand::Kind::fill ? placeBand (s, BandMode::fill, std::sqrt (b.loHz * b.hiHz)) : -1;
         if (slot < 0)
         {
             ++skipped;
@@ -417,6 +433,7 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
         const auto range = effectiveRange (BandMode::fill, b.loHz, b.hiHz);
         setParameterValue (s, bandIds (slot).lo, (float) range.lo);
         setParameterValue (s, bandIds (slot).hi, (float) range.hi);
+        setParameterValue (s, bandIds (slot).on, 1.0f); // last: the band never runs with the centred range placeBand set
         slots.push_back (slot);
     }
     return slots;
@@ -461,10 +478,30 @@ inline int duplicateBand (juce::AudioProcessorValueTreeState& s, int band)
     return slot;
 }
 
+// Switches a band off. A band that is already off is left alone, with no undo step.
 inline void removeBand (juce::AudioProcessorValueTreeState& s, int band)
 {
+    if (! isBandOn (s, band))
+        return;
     ui::beginUndoStep (s, "Remove band");
     setParameterValue (s, bandIds (band).on, 0.0f);
+}
+
+// Switches every band off as one undo step. Returns how many were on; with none on, nothing is changed and no step is opened.
+// The band solo is not a parameter: the editor ends it (see CLEAR ALL in PluginEditor.cpp).
+inline int clearBands (juce::AudioProcessorValueTreeState& s)
+{
+    int count = 0;
+    for (int i = 0; i < maxBands; ++i)
+        count += isBandOn (s, i) ? 1 : 0;
+    if (count == 0)
+        return 0;
+
+    ui::beginUndoStep (s, "Clear bands");
+    for (int i = 0; i < maxBands; ++i)
+        if (isBandOn (s, i))
+            setParameterValue (s, bandIds (i).on, 0.0f);
+    return count;
 }
 
 // Writes each (parameter, 0..1 value) once, leaving alone the ones that already have it.

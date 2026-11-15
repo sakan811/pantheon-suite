@@ -70,6 +70,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> characterAttachment;
 
     juce::TextButton saturateModeButton, fillModeButton, removeButton, addSaturateButton, addFillButton, pasteButton { "PASTE" }, soloBandButton { "SOLO BAND" }, soloAddsButton { "SOLO ADDS" };
+    juce::TextButton clearAllButton { "CLEAR ALL" }; // every band off in one step; enabled only while one is on
     std::array<juce::Rectangle<int>, hep::maxBands> chipBounds;
     int shownBandSignature = -1, shownSolo = -1;
     void toggleSolo (hep::SoloKind kind);
