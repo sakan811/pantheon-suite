@@ -44,7 +44,7 @@ Tests/               Tests.cpp (DSP), UiCheck.cpp (editor on the real processor)
 ## Rules that keep it correct
 
 **Real time.** `Engine::process` and everything under it must not allocate, lock or log. Everything lives in fixed arrays; `prepare()` only designs
-the filters and the overlap's inverse. A slot on the bus is claimed in `Engine`'s constructor (message thread, one compare-and-swap) and given back in
+the filters and the overlap's inverse, and builds the claim table (`anchorsFor`'s function-local static, which allocates: it must not be first touched on the audio thread). A slot on the bus is claimed in `Engine`'s constructor (message thread, one compare-and-swap) and given back in
 its destructor, never on the audio thread.
 
 **The bus is relaxed atomics, on purpose.** A reader can see half a frame (some bands of this tick, some of the last): the levels are smoothed over

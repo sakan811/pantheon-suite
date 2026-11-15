@@ -69,6 +69,7 @@ public:
     void prepare (double sampleRate)
     {
         fs = sampleRate;
+        (void) anchorsFor (Role::kick); // builds the claim table (a function-local static: it allocates and takes a guard) here, not on the first tick of the audio thread
         bank.prepare (fs);
         scBank.prepare (fs);
         carver.prepare (fs);
