@@ -37,8 +37,8 @@ Skill tool before you start, and follow its steps instead of improvising them. D
 - `new-plugin`: a request to create, add or scaffold a plugin.
 - `plugin-parameter-change`: any edit to a plugin's `Parameters.h`, or adding a control or a setting (a mode, a look-ahead, a preset-able value).
 - `shared-change`: any edit under `shared/`, before the change is called done.
-- `install-and-validate`: build, install for a DAW, `auval`. It **replaces the plugins installed in `~/Library/Audio/Plug-Ins`**, so Claude cannot start it by itself: when a task ends in "build and install", say so and
-  ask the user to run `/install-and-validate`.
+- `install-and-validate`: build, install for a DAW, `auval`. It **replaces the plugins installed in `~/Library/Audio/Plug-Ins`**; the user has allowed Claude to run it itself when a task asks to build and install (the skill says to name what will be replaced before it builds). It
+  installs nothing else and never changes the `*_INSTALL_AFTER_BUILD` options.
 
 This file keeps only the rules; do not copy a skill's steps into it. A new skill is listed here with the request it answers, and its `description` says the same in its first sentence (that is what Claude chooses from).
 
@@ -58,7 +58,7 @@ code-checker ┘   (edits)   (the diff)      (completeness)     (only on request
   tell the user what is left. **Feature chain** (after a change is made): `code-checker` and `feature-checker` in parallel → `fixer` for what they report → `code-checker` once more.
 - Run agents in parallel only when they read the same state and do not depend on each other (the two checkers). Never run two `fixer`s at once, and never one while another agent reads the same files.
 - The agents are cheap and narrow: they find and check, they do not decide. The orchestrator reads a report before acting on it, drops what it cannot verify in the code (an agent's guess is marked "unverified"), and does the judgement work itself: design, a `shared/` change, anything that touches several plugins.
-- **What the orchestrator does itself, not through an agent:** the skills above (`plugin-parameter-change`, `shared-change`, `new-plugin`), regenerating and looking at screenshots, and the `/install-and-validate` request to the user. `fixer` stops and reports when a finding needs one of these.
+- **What the orchestrator does itself, not through an agent:** the skills above (`plugin-parameter-change`, `shared-change`, `new-plugin`), regenerating and looking at screenshots, and `install-and-validate`. `fixer` stops and reports when a finding needs one of these.
 - **Commits and pushes happen only when the user asks.** Then `commit-writer` does them, after the checks pass: say "push" to it only when the user said push. It never commits to `main`.
 - A fix chain ends with a short report to the user: what was found, what changed (`git diff --stat`), the check that ran and its result, and what is left for them. Do not claim "done" on an agent's word: the build or test output decides.
 

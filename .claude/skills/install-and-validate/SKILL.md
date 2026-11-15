@@ -1,7 +1,6 @@
 ---
 name: install-and-validate
 description: Build a plugin's VST3 and AU, install it for the user's DAW and validate the AU with auval. Use when asked to build and install, add a plugin to the DAW, or run auval.
-disable-model-invocation: true
 argument-hint: "[plugin name, or several]"
 allowed-tools: Bash(scripts/build.sh *) Bash(auval -v *)
 ---
