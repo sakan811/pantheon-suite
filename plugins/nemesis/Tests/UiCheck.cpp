@@ -60,6 +60,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<NemesisEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.mode.getNumItems() == kNumModes && editor.detection.getNumItems() == kNumDetections, "the selectors have the parameters' items");
         check (editor.getWidth() > 700 && editor.release.getRight() < editor.mode.getX() && editor.listen.getBottom() < editor.getHeight(), "the controls fit the window");
