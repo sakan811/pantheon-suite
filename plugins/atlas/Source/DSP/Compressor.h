@@ -32,7 +32,15 @@ struct BandParams
     bool match = false; // the band's output is brought back to the loudness of its input
     bool upward = false;    // it lifts what is under the threshold instead of turning down what is over it (up to kUpwardMaxBoostDb, and not what is far under it)
     bool sidechain = false; // its compressor listens to the same band of the sidechain input instead of its own (itself again when none is connected)
+    bool autoThreshold = false; // THRESH is how far under the band's own slow level the threshold sits, not an absolute level (the engine follows the level)
+    bool autoRelease = false;   // RELEASE is the middle of a range: a hit is let go faster, a held stretch slower (see GainFollower::stepAuto)
 };
+
+// AUTO THRESH: the level the threshold follows is the band's mean square over this long, counted only while the band is not silent.
+inline constexpr double kAutoThresholdSeconds = 3.0, kAutoSilenceDb = -75.0;
+// AUTO RELEASE: the release is RELEASE x kAutoFast for a gain that has just come on and RELEASE x kAutoSlow for one that has been down a while
+// (a memory of how far down it was, over kAutoMemorySeconds, in units of kAutoFullDb).
+inline constexpr double kAutoFast = 0.25, kAutoSlow = 2.5, kAutoMemorySeconds = 0.4, kAutoFullDb = 6.0;
 
 inline constexpr double kKneeDb = 6.0;
 
@@ -92,6 +100,8 @@ struct GainFollower
     bool upward = false;
     double detector = 1.0; // the level's smoothing coefficient
     bool on = false;
+    bool autoRelease = false;
+    double releaseFast = 1.0, releaseSlow = 1.0, memoryCoef = 1.0; // AUTO RELEASE: the two release coefficients, and the memory's
 
     void set (const BandParams& p, double sampleRate, double lowestHz) noexcept
     {
@@ -101,16 +111,18 @@ struct GainFollower
         slope = 1.0 - 1.0 / std::max (p.ratio, 1.0);
         attack = 1.0 - std::exp (-1.0 / (std::max (p.attackMs, 0.01) * 0.001 * sampleRate));
         release = 1.0 - std::exp (-1.0 / (std::max (p.releaseMs, 0.01) * 0.001 * sampleRate));
+        autoRelease = p.autoRelease;
+        releaseFast = 1.0 - std::exp (-1.0 / (std::max (p.releaseMs * kAutoFast, 0.01) * 0.001 * sampleRate));
+        releaseSlow = 1.0 - std::exp (-1.0 / (std::max (p.releaseMs * kAutoSlow, 0.01) * 0.001 * sampleRate));
+        memoryCoef = 1.0 - std::exp (-1.0 / (kAutoMemorySeconds * sampleRate));
         floorSq = std::pow (10.0, (p.thresholdDb - kKneeDb * 0.5) / 10.0);
         upward = p.upward;
         ceilSq = std::pow (10.0, (p.thresholdDb + kKneeDb * 0.5) / 10.0);
         gateSq = std::pow (10.0, (p.thresholdDb - kUpwardGateDb - kUpwardFadeDb) / 10.0);
     }
 
-    // Steps the reduction `gr` (dB: positive takes off, negative lifts, which only an upward band does) for a sample at the squared level
-    // `levelSq`, and returns the gain to apply. The attack is the time the gain takes to give way to a louder level (a downward band turns
-    // down, an upward one stops lifting), the release the time it takes to come back.
-    inline double step (double& gr, double levelSq) const noexcept
+    // What the gain computer asks for at a squared level: dB to take off (negative: to add).
+    inline double wantedFor (double levelSq) const noexcept
     {
         double wanted = 0.0;
         if (on)
@@ -120,7 +132,15 @@ struct GainFollower
             else if (levelSq < ceilSq && levelSq > gateSq)
                 wanted = -boostDb (10.0 * std::log10 (levelSq), thresholdDb, slope);
         }
-        gr += (wanted > gr ? attack : release) * (wanted - gr);
+        return wanted;
+    }
+
+    // Moves the reduction `gr` (dB: positive takes off, negative lifts, which only an upward band does) towards `wanted` and returns the gain to apply.
+    // The attack is the time the gain takes to give way to a louder level (a downward band turns down, an upward one stops lifting), the release
+    // the time it takes to come back (`releaseCoef`).
+    inline double apply (double& gr, double wanted, double releaseCoef) const noexcept
+    {
+        gr += (wanted > gr ? attack : releaseCoef) * (wanted - gr);
         if (std::fabs (gr) < 1.0e-7)
         {
             if (upward ? wanted >= 0.0 : wanted <= 0.0)
@@ -128,6 +148,20 @@ struct GainFollower
             return 1.0;
         }
         return std::exp (gr * -0.11512925464970229); // 10 ^ (-gr / 20)
+    }
+
+    // The ordinary step, for a sample at the squared level `levelSq`.
+    inline double step (double& gr, double levelSq) const noexcept { return apply (gr, wantedFor (levelSq), release); }
+
+    // AUTO RELEASE. `memory` (0 to 1) is how far down the gain has been lately: it rises while the gain is down, over kAutoMemorySeconds, and falls
+    // when it is not. The release goes from RELEASE x kAutoFast (a hit that has just come on: no memory) to RELEASE x kAutoSlow (a held or dense
+    // stretch), so a single hit is let go quickly and a passage that keeps the gain down is let go slowly, and the gain does not pump between peaks.
+    inline double stepAuto (double& gr, double& memory, double levelSq) const noexcept
+    {
+        memory += memoryCoef * (std::min (std::fabs (gr) / kAutoFullDb, 1.0) - memory);
+        if (memory < 1.0e-9)
+            memory = 0.0; // no denormals
+        return apply (gr, wantedFor (levelSq), releaseFast + memory * (releaseSlow - releaseFast));
     }
 };
 } // namespace atlas

@@ -12,7 +12,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce
 cmake --build build --target AtlasTests -j 10 && ./build/AtlasTests_artefacts/Release/AtlasTests
 cmake --build build --target Atlas_VST3 -j 10
 cmake --build build --target AtlasUiCheck && ./build/AtlasUiCheck_artefacts/Release/AtlasUiCheck
-cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Release/AtlasSnapshot docs/screenshot.png solo=62 delta=8 os=1 upward=3
+cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Release/AtlasSnapshot docs/screenshot.png solo=62 delta=8 os=1 upward=3 autot=4 autor=2
 ```
 
 - Building the plugin targets does **not** install them (`ATLAS_INSTALL_AFTER_BUILD`, off by default).
@@ -27,6 +27,8 @@ cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Re
 Source/DSP/        no GUI dependencies; covered by Tests/Tests.cpp
   Compressor.h       Channels, BandParams, reductionDb() (the gain computer), Level (the detector), GainFollower (attack / release on the gain)
   LinearSplit.h      the linear-phase split: kernels from the crossovers, FFT overlap-save, the top band as the complement
+  Target.h           TARGET: the shifts of THRESH from a curve and the bands' typical levels; plain C++
+  Learn.h            BandProfile: what LEARN makes of a band's level over time (THRESH, RATIO, ATTACK, RELEASE); plain C++
   Engine.h           the whole signal path, the tick, oversampling, makeup and gain match, solo and delta, meters, latency
 Source/Advice.h      the notes of the strip under the bands and the GUIDE text; plain C++, no JUCE
 Source/Parameters.h  parameter layout, readParams(), layoutOf(), addSplit() / removeSplit()                 <- the single source of truth for parameters
@@ -80,7 +82,7 @@ The crossovers stop at 40 Hz because the kernels (+-2048 samples at 48 kHz) cann
 
 **Bypass.** `AtlasProcessor::processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay` (sized in `prepareToPlay` by `Engine::maxLatency()`, the largest any mode can report), or the track jumps early when the host bypasses the plugin. UiCheck pins it.
 
-**Learn and TO ALL.** `BandView::learnThreshold` (the JUMPS marker's listening and a strip's LEARN) and `copyDynamicsToAll` (Parameters.h). `addSplit` / `removeSplit` copy through `copyBands`, which reads every strip before writing any (a copy must not read a strip an earlier one wrote).
+**Learn and TO ALL.** `BandView::learnBand` (the JUMPS marker's listening and a strip's LEARN) and `copyDynamicsToAll` (Parameters.h). The listening is the engine's, in audio time: `Engine::learnStart` / `learnState` / `learnTake` (`BandView::learnAll` starts every band at once; a TARGET curve is compared in `Target.h` when all have answered; `Learned::typicalDb` is what it compares) (an atomic state per slot: idle, requested, listening, done, silent; the editor only asks and takes), fed once per tick in `control()` with the level `levelMeter` shows, into a `BandProfile` (`DSP/Learn.h`: a 1 dB histogram of the level for THRESH and RATIO, a zigzag with 6 dB hysteresis for the rise and fall times of ATTACK and RELEASE; the rules are in its header comment). It writes nothing to the audio and the editor sets the four parameters when the answer comes (a timeout of three listenings ends it when no audio runs). Test [15] pins it, including that the output is the same with it running. `addSplit` / `removeSplit` copy through `copyBands`, which reads every strip before writing any (a copy must not read a strip an earlier one wrote).
 
 **Latency** is `Engine::latencySamples` (linear split + oversampler + look-ahead), written on the audio thread in `configure()` when a tick sees a
 new mode, and reaches the host through `AtlasProcessor::handleAsyncUpdate` on the message thread; `prepareToPlay` passes the saved
@@ -98,7 +100,7 @@ anything that asks "which bands are there": never loop over `kBands` strips in t
 through the shared `pdsp::SpectrumAnalyzer` onto `pdsp::SpectrumGrid` (1/24 octave), one row per tick into `ui::Spectrogram` and
 into `pdsp::IssueFinder`. Nothing of it runs on the audio thread. The spectrogram's levels are per frequency and tilted, not a
 band's level: that is why a band made from a JUMPS marker gets its threshold from `Engine::levelMeter` (what the band's own
-detector read over `kLearnSeconds`), not from the marker.
+detector read over `BandProfile::kListenSeconds`), not from the marker.
 
 **Solo and delta are monitoring, not state.** They live in `Engine::monitor` (bit masks, atomics), not in parameters, and the
 editor ends them in its destructor. Do not make them parameters. They fade over 10 ms (`heard`, `dryHeard`).
@@ -108,8 +110,10 @@ editor ends them in its destructor. Do not make them parameters. They fade over 
 
 **Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`).
 
+**AUTO T and AUTO R.** `BandParams::autoThreshold` / `autoRelease` (`bN_autothr`, `bN_autorel`, version 5, off: the compressor as it was, bit for bit, which tests [2] and [6] pin). AUTO T: in `control()` the band's slow level (the power of the detector's loudest reading of each tick, averaged: `BandState::trackSq`, `kAutoThresholdSeconds`; a plain average until it is as long as that, gated by `kAutoSilenceDb`) plus THRESH is the threshold handed to `GainFollower::set` (`thresholdMeter` shows it); LEARN's answer is made relative to it (`learnStep`). AUTO R: `GainFollower::stepAuto` blends two release coefficients (`kAutoFast` / `kAutoSlow` x RELEASE) by a memory of how far down the gain has been (`BandState::memA` / `memB`, reset where the compressor is: idle, `configure`). Both live in the same per-tick / per-sample places as the rest: nothing is allocated. The histogram under a strip is `Engine::histogram` (counted per tick, taken out by the editor's timer).
+
 **Parameters.** Ids (`atlas::id`: `xo0` ... `xo4` and `xo0_on` ... `xo4_on` among them; `bandIds (i)`: `b1_on` ... `b6_match`) are stored in sessions and automation: never rename or
-remove one. All are `ParameterID` version 1 except `look` and each band's `listen` (version 2), each band's `dir` (version 3) and `mix` (version 4), all declared after everything else, so a host's list keeps its order; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+remove one. All are `ParameterID` version 1 except `look` and each band's `listen` (version 2), each band's `dir` (version 3), `mix` (version 4) and each band's `autothr` and `autorel` (version 5), all declared after everything else, so a host's list keeps its order; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `channelNames` is the order of `Channels`.
 
 ## DRY: where each thing lives

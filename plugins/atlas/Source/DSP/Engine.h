@@ -5,6 +5,7 @@
 
 #include "Compressor.h"
 #include "LinearSplit.h"
+#include "Learn.h"
 #include <atomic>
 
 namespace atlas
@@ -112,8 +113,31 @@ public:
     std::array<std::atomic<float>, kBands> reductionMeter {}; // dB taken off (negative: lifted), the largest change over the last tick
     std::array<std::atomic<float>, kBands> matchMeter {};     // dB gain match is adding
     std::array<std::atomic<float>, kBands> levelMeter {};     // the level the band's compressor read (dB), the most over the last tick
+    std::array<std::atomic<float>, kBands> thresholdMeter {}; // the threshold the band's compressor is using (dB): THRESH, or with AUTO THRESH the band's slow level plus THRESH
+    // How often each band's level was in each dB from kHistogramLowDb up (1 dB bins, the top one holds everything above), counted once per tick while the band is on.
+    // The editor takes the counts out (exchange with 0) on its timer and draws what it has gathered; the audio thread only adds.
+    static constexpr int kHistogramBins = 60;
+    static constexpr double kHistogramLowDb = -60.0;
+    std::array<std::array<std::atomic<unsigned>, kHistogramBins>, kBands> histogram {};
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     std::atomic<int> latencySamples { 0 };
+
+    // LEARN: a band listens to itself for BandProfile::kListenSeconds of audio and says how to set its compressor. The editor asks
+    // (learnStart), the audio thread listens and answers, the editor takes the answer (learnTake). Not state: nothing is saved.
+    enum class LearnState : int { idle, requested, listening, done, silent };
+    void learnStart (int slot) noexcept { learnSlot[(size_t) slot].state.store ((int) LearnState::requested); }
+    void learnCancel (int slot) noexcept { learnSlot[(size_t) slot].state.store ((int) LearnState::idle); }
+    LearnState learnState (int slot) const noexcept { return (LearnState) learnSlot[(size_t) slot].state.load(); }
+    // The answer, once the band is `done` (back to idle); false while it is not.
+    bool learnTake (int slot, Learned& out) noexcept
+    {
+        auto& l = learnSlot[(size_t) slot];
+        int expected = (int) LearnState::done;
+        if (! l.state.compare_exchange_strong (expected, (int) LearnState::idle))
+            return false;
+        out = { l.threshold.load(), l.ratio.load(), l.attack.load(), l.release.load(), l.typical.load() };
+        return true;
+    }
 
     void prepare (double sampleRate, PhaseMode initialPhase = PhaseMode::zeroLatency, int initialOs = 0, int initialLookahead = 0)
     {
@@ -154,9 +178,16 @@ public:
         outGain = outGainStep = 0.0;
         first = true;
         configure();
+        for (auto& l : learnSlot) // a listening does not outlive what it was listening to
+            if (const auto st = l.state.load(); st == (int) LearnState::requested || st == (int) LearnState::listening)
+                l.state.store ((int) LearnState::silent);
         for (auto& b : band)
         {
             b.grA = b.grB = b.msIn = b.msOut = 0.0;
+            b.memA = b.memB = 0.0;
+            b.trackSq = 0.0;
+            b.trackTicks = 0;
+            b.tracking = false;
             b.levelA.reset();
             b.levelB.reset();
             b.gain = b.gainTarget = 1.0;
@@ -202,6 +233,10 @@ private:
         Channels channels = Channels::stereo;
         Level levelA, levelB;
         double grA = 0.0, grB = 0.0;                 // dB taken off: left / mid (and both, when linked), right / side
+        double memA = 0.0, memB = 0.0;               // AUTO RELEASE: how far down the gain has been lately (GainFollower::stepAuto)
+        double trackSq = 0.0;                        // AUTO THRESH: the band's slow level (the power of the detector's reading, averaged), and whether it has started (it starts at the first sound)
+        int trackTicks = 0;                          // ... how many ticks it has averaged: it is a plain average until that is as long as its time constant, so it is right from the start
+        bool tracking = false;
         double gain = 1.0, gainTarget = 1.0, gainStep = 0.0; // makeup and gain match
         double msIn = 0.0, msOut = 0.0;              // the band's power before and after the compressor (before makeup)
         double heard = 1.0, heardTarget = 1.0, heardStep = 0.0;          // solo
@@ -230,6 +265,7 @@ private:
             for (auto& o : b.os)
                 if (o != nullptr) o->reset();
             b.grA = b.grB = 0.0;
+            b.memA = b.memB = 0.0;
             b.levelA.reset();
             b.levelB.reset();
         }
@@ -285,18 +321,46 @@ private:
                 // Part of the band below: nothing of its own runs, and it starts clean if it becomes a band again.
                 s.idle = true;
                 s.grA = s.grB = 0.0;
+                s.memA = s.memB = 0.0;
+                s.tracking = false;
+                s.trackTicks = 0;
                 s.maxReduction = 0.0f;
                 reductionMeter[(size_t) i].store (0.0f, std::memory_order_relaxed);
                 matchMeter[(size_t) i].store (0.0f, std::memory_order_relaxed);
                 levelMeter[(size_t) i].store (-120.0f, std::memory_order_relaxed);
+                learnStep (i, -120.0, false, 0.0, false); // no longer a band of its own: nothing to hear
                 continue;
             }
             const auto& t = p.bands[(size_t) i];
-            s.follower.set (t, rate, i == 0 ? pdsp::bands::kBands[0].loHz : appliedCrossover[(size_t) (i - 1)]);
+            const double levelDb = 10.0 * std::log10 (std::max (s.maxLevelSq, 1.0e-12)); // the last tick's
+
+            // AUTO THRESH: the band's slow level (the power of its detector's reading, the loudest of each tick, averaged over kAutoThresholdSeconds while it is not silent; the first sound starts it where it is)
+            // and the threshold THRESH under it. The detector reads the band's input, so the threshold moving with it is no feedback.
+            if (! t.autoThreshold)
+            {
+                s.tracking = false;
+                s.trackTicks = 0;
+            }
+            else if (levelDb > kAutoSilenceDb)
+            {
+                const double slow = 1.0 - std::exp (-(double) tick / (kAutoThresholdSeconds * fs));
+                s.trackSq += std::max (slow, 1.0 / (double) (s.trackTicks + 1)) * (s.maxLevelSq - s.trackSq); // the first sound sets it (the weight is 1)
+                s.trackTicks = std::min (s.trackTicks + 1, 1 << 20);
+                s.tracking = true;
+            }
+            const double trackDb = 10.0 * std::log10 (std::max (s.trackSq, 1.0e-12));
+            auto used = t;
+            if (t.autoThreshold)
+                used.thresholdDb = s.tracking ? trackDb + t.thresholdDb : t.thresholdDb - 120.0; // before the first sound nothing is over it
+            s.follower.set (used, rate, i == 0 ? pdsp::bands::kBands[0].loHz : appliedCrossover[(size_t) (i - 1)]);
             s.channels = t.channels;
+            thresholdMeter[(size_t) i].store ((float) used.thresholdDb, std::memory_order_relaxed);
 
             reductionMeter[(size_t) i].store (s.maxReduction, std::memory_order_relaxed);
-            levelMeter[(size_t) i].store ((float) (10.0 * std::log10 (std::max (s.maxLevelSq, 1.0e-12))), std::memory_order_relaxed);
+            levelMeter[(size_t) i].store ((float) levelDb, std::memory_order_relaxed);
+            if (t.on && levelDb >= kHistogramLowDb)
+                histogram[(size_t) i][(size_t) std::min ((int) (levelDb - kHistogramLowDb), kHistogramBins - 1)].fetch_add (1u, std::memory_order_relaxed);
+            learnStep (i, levelDb, t.upward, t.autoThreshold && s.tracking ? trackDb : 0.0, t.autoThreshold && s.tracking);
             s.maxReduction = 0.0f;
             s.maxLevelSq = 0.0;
 
@@ -327,6 +391,43 @@ private:
         mixTarget = std::clamp (p.mix, 0.0, 1.0);
         mixStep = (mixTarget - mixNow) / tick;
         first = false;
+    }
+
+    // One tick of LEARN for a band: starts a requested listening, feeds a running one, answers a finished one.
+    // `referenceDb` / `relative`: with AUTO THRESH the knob is the distance under the band's slow level, so the answer's THRESH is made relative to it.
+    void learnStep (int i, double levelDb, bool upward, double referenceDb, bool relative) noexcept
+    {
+        auto& l = learnSlot[(size_t) i];
+        int st = l.state.load();
+        if (st == (int) LearnState::requested)
+        {
+            if (! l.state.compare_exchange_strong (st, (int) LearnState::listening))
+                return;
+            l.profile.start (1000.0 * (double) tick / fs);
+            st = (int) LearnState::listening;
+        }
+        if (st != (int) LearnState::listening)
+            return;
+        if (owner[(size_t) i] != i) // a band that was joined to another
+        {
+            l.state.compare_exchange_strong (st, (int) LearnState::silent);
+            return;
+        }
+        if (! l.profile.push (levelDb))
+            return;
+        Learned out;
+        const bool heard = l.profile.result (upward, out);
+        if (heard)
+        {
+            if (relative)
+                out.thresholdDb = (float) std::clamp ((double) out.thresholdDb - referenceDb, -60.0, 0.0);
+            l.threshold.store (out.thresholdDb);
+            l.ratio.store (out.ratio);
+            l.attack.store (out.attackMs);
+            l.release.store (out.releaseMs);
+            l.typical.store (out.typicalDb);
+        }
+        l.state.compare_exchange_strong (st, (int) (heard ? LearnState::done : LearnState::silent)); // fails when the editor asked again meanwhile
     }
 
     // ---- up to one tick of samples -------------------------------------------------------------
@@ -412,6 +513,7 @@ private:
                 // Their memory is of before the band stopped.
                 s.levelA.reset();
                 s.levelB.reset();
+                s.memA = s.memB = 0.0;
                 for (auto& d : s.look) d.clear();
                 if (os != nullptr)
                     os->reset();
@@ -490,14 +592,15 @@ private:
     void compress (BandState& s, float* a, float* b, const float* detA, const float* detB, int n) noexcept
     {
         const auto& f = s.follower;
-        double grA = s.grA, grB = s.grB, most = 0.0, loudest = 0.0;
+        double grA = s.grA, grB = s.grB, memA = s.memA, memB = s.memB, most = 0.0, loudest = 0.0;
+        const bool autoRel = f.autoRelease;
         if (isLinked (s.channels))
         {
             for (int i = 0; i < n; ++i)
             {
                 const double level = std::max (s.levelA.push (detA[i], f.detector), s.levelB.push (detB[i], f.detector));
                 loudest = std::max (loudest, level);
-                const double g = f.step (grA, level) - 1.0;
+                const double g = (autoRel ? f.stepAuto (grA, memA, level) : f.step (grA, level)) - 1.0;
                 if (std::fabs (grA) > std::fabs (most)) most = grA;
                 const float xa = s.look[0].push (a[i]), xb = s.look[1].push (b[i]);
                 a[i] = (float) (xa * g);
@@ -515,14 +618,16 @@ private:
                 const double la = first_ ? s.levelA.push (detA[i], f.detector) : 0.0, lb = second ? s.levelB.push (detB[i], f.detector) : 0.0;
                 loudest = std::max (loudest, std::max (la, lb));
                 const float xa = s.look[0].push (a[i]), xb = s.look[1].push (b[i]);
-                a[i] = first_ ? (float) (xa * (f.step (grA, la) - 1.0)) : 0.0f;
-                b[i] = second ? (float) (xb * (f.step (grB, lb) - 1.0)) : 0.0f;
+                a[i] = first_ ? (float) (xa * ((autoRel ? f.stepAuto (grA, memA, la) : f.step (grA, la)) - 1.0)) : 0.0f;
+                b[i] = second ? (float) (xb * ((autoRel ? f.stepAuto (grB, memB, lb) : f.step (grB, lb)) - 1.0)) : 0.0f;
                 if (std::fabs (grA) > std::fabs (most)) most = grA;
                 if (std::fabs (grB) > std::fabs (most)) most = grB;
             }
         }
         s.grA = grA;
         s.grB = grB;
+        s.memA = memA;
+        s.memB = memB;
         if (std::fabs ((float) most) > std::fabs (s.maxReduction)) s.maxReduction = (float) most;
         s.maxLevelSq = std::max (s.maxLevelSq, loudest);
     }
@@ -541,6 +646,13 @@ private:
     pdsp::BandSplitter splitter, scSplitter; // the sidechain gets its own, so the main signal's filters never hear it
     LinearSplit linear, scLinear;
     std::array<BandState, kBands> band;
+    struct LearnSlot
+    {
+        std::atomic<int> state { (int) LearnState::idle };
+        std::atomic<float> threshold { 0.0f }, ratio { 2.0f }, attack { 10.0f }, release { 120.0f }, typical { -120.0f };
+        BandProfile profile; // the audio thread's while `listening`
+    };
+    std::array<LearnSlot, kBands> learnSlot;
     std::array<std::array<std::array<float, tick>, 2>, kBands> bandBuffer {}, scBuffer {};
     std::array<std::array<float, tick * (1 << (kNumOsModes - 1))>, 2> detBuffer {}; // the sidechain's piece of a band, at the oversampled rate
     std::array<std::array<float, tick>, 2> workBuffer {};

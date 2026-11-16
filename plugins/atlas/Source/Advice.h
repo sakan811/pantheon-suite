@@ -60,9 +60,12 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         const auto name = "Band " + std::to_string (b.number) + ": ";
 
         const bool up = b.params.upward;
-        if (! up && b.params.thresholdDb >= kThresholdAtTopDb)
+        const bool autoT = b.params.autoThreshold; // THRESH is then the distance under the band's own level, so 0 dB is not "the top"
+        if (autoT && ! up && b.params.thresholdDb >= kThresholdAtTopDb)
+            warn (name + "AUTO T with THRESH at 0 dB puts the threshold at the band's own level: it works most of the time. Try -6 dB.");
+        if (! autoT && ! up && b.params.thresholdDb >= kThresholdAtTopDb)
             warn (name + "THRESH is at the top, so it hardly compresses. Lower it until the meter moves.");
-        if (up && b.params.thresholdDb >= kThresholdAtTopDb)
+        if (! autoT && up && b.params.thresholdDb >= kThresholdAtTopDb)
             warn (name + "THRESH is at the top, so it lifts the whole band, up to 12 dB. Lower it to the quiet part.");
         if (b.params.ratio <= 1.05)
             warn (name + "RATIO is 1:1, which does nothing. Raise it.");
@@ -107,14 +110,17 @@ inline const char* guideText()
            "  - Lifting what goes quiet: set a band to UPWARD and it brings a part that dips (low-mids that go empty between sections, a top that "
            "falls away) up towards THRESH, by at most 12 dB, and leaves noise and silence alone.\n"
            "  - Making room: a band can listen to the SIDECHAIN input instead of itself (route the kick there and the bass bands duck when it hits).\n"
-           "  - Parallel compression: MIX blends the compressed bands with the untouched ones (already lined up, so it does not comb). LEARN on a strip sets THRESH from two seconds of what the band hears; TO ALL copies THRESH, RATIO, ATTACK and RELEASE to every band.\n"
+           "  - Parallel compression: MIX blends the compressed bands with the untouched ones (already lined up, so it does not comb). LEARN on a strip sets THRESH, RATIO, ATTACK and RELEASE from four seconds of what the band hears; TO ALL copies THRESH, RATIO, ATTACK and RELEASE to every band.\n"
+           "  - Setting up quickly: LEARN ALL does that for every band at once; TARGET also compares the bands with a spectrum shape copied from Themis and turns down the ones that stand out of it. "
+           "AUTO T keeps the amount of compression the same as a part gets louder or quieter (THRESH is then the distance under the band's own level), AUTO R lets a hit go quickly and a held stretch slowly. "
+           "The histogram under each meter shows where the band's level has been and where the threshold is.\n"
            "  - Gluing a sound that moves around: Stereo keeps the image still, M/S compresses the centre and the sides apart.\n"
            "\n"
            "IT IS NOT FOR:\n"
            "  - Limiting peaks: LOOK-AHEAD lets a fast peak be turned down as it arrives, but the level is not a true-peak reading and nothing is clipped. Use a limiter after it.\n"
            "  - Fixing the tonal balance: it turns a band down only while it is loud. For a constant cut or lift use an equaliser (Iris).\n"
            "  - Adding what is missing: UPWARD makes what is there louder; it cannot create energy that is not in the band. Use Hephaestus to add harmonics.\n"
-           "  - Doing the work by itself: PEAK and JUMPS are rules of thumb on the input, and a threshold from a marker is a starting point.\n"
+           "  - Doing the work by itself: PEAK and JUMPS are rules of thumb on the input, and what a marker sets on its band is a starting point.\n"
            "\n"
            "GOOD TO KNOW: the presets are starting points: their thresholds suit a master around -14 LUFS, so set THRESH where the meter first "
            "moves. Use a low RATIO (2:1) and slow-ish times, and DELTA to hear what a "

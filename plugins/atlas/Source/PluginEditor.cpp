@@ -9,7 +9,8 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int stripHeight = 570;
+constexpr int stripHeight = 640;
+constexpr int toolbarHeight = 26;
 constexpr int stripGap = 8;
 constexpr int stripWidth = 196;
 constexpr int viewHeight = 230;
@@ -23,6 +24,12 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
     : on (p.apvts, bandIds (band).on, "ON", "This band's compressor. Off: the band passes as it is."),
       match (p.apvts, bandIds (band).match, "MATCH", "Gain match: brings the band back to the loudness it had before its compressor, so the band is not judged by "
                                                       "being quieter. Slow, and never more than 12 dB. MAKEUP adds to it."),
+      autoThr (p.apvts, bandIds (band).autoThreshold, "AUTO T",
+               "Automatic threshold. On: THRESH is how far under the band's own slow level (its last few seconds) the threshold sits, so the same amount of "
+               "compression stays when the part gets louder or quieter. Set THRESH under 0 dB: -6 dB is a light touch. The histogram's line shows where the threshold is now."),
+      autoRel (p.apvts, bandIds (band).autoRelease, "AUTO R",
+               "Automatic release. On: RELEASE is the middle of a range. A hit is let go at a quarter of it, a stretch that keeps the gain down for long at two and a half "
+               "times it, so the gain does not pump between peaks. It does not change the attack."),
       channels (p.apvts, bandIds (band).channels,
                 "What the band's compressor works on.\nStereo: left and right with one gain, so the image does not move.\nL/R: left and right, each with its own gain.\n"
                 "M/S: the centre and the sides, each with its own gain.\nLeft / Right / Mid / Side: that one only; the rest of the band is untouched."),
@@ -45,7 +52,8 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
                                                 ui::Knob::Layout::below);
     solo.setTooltip ("Solo this band. Click more bands to hear them together; any combination adds up flat. Not saved with the session.");
     delta.setTooltip ("Listen to only what this band's compressor changes (its output minus its input). Not saved with the session.");
-    learn.setTooltip ("Listens to this band for two seconds and sets THRESH just under the loudest it hears (switches the band on). Play the loudest part you want it to work on.");
+    learn.setTooltip ("Listens to this band for four seconds of audio and sets THRESH, RATIO, ATTACK and RELEASE from what it hears (switches the band on): THRESH under the loud "
+                      "part, RATIO from how far the level swings, ATTACK and RELEASE from how fast it rises and dies away. Play a typical stretch, with its loudest part.");
     toAll.setTooltip ("Copies this band's THRESH, RATIO, ATTACK and RELEASE to every other band.");
     toAll.onClick = [&p, band] { copyDynamicsToAll (p.apvts, band); };
     auto& monitor = p.engine.monitor;
@@ -73,22 +81,28 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
         auto& s = *(strips[(size_t) b] = std::make_unique<Strip> (p, b));
         for (auto* c : s.components())
             addChildComponent (*c);
-        s.learn.onClick = [this, b] { view.learnThreshold (b, gui::BandView::kLearnSwingDb); };
+        s.learn.onClick = [this, b] { view.learnBand (b); };
     }
     addAndMakeVisible (view);
     view.onLayoutChanged = [this] { layoutStrips(); };
     clearButton.setTooltip ("End every solo and delta: all six bands, as they come out.");
     clearButton.onClick = [this] { proc.engine.monitor.solo = 0u; proc.engine.monitor.delta = 0u; };
+    learnAllButton.setTooltip ("Listens to every band at once for four seconds of audio and sets THRESH, RATIO, ATTACK and RELEASE of each from what it hears. "
+                               "Play a typical stretch, with its loudest part. A band that heard nothing is left as it was.");
+    targetButton.setTooltip ("Like LEARN ALL, and also compares the bands with a spectrum shape copied from Themis (Copy EQ; copy first, then press this): a band that stands out of the "
+                             "shape gets a lower THRESH, by how far, at most 12 dB. A starting point: a band's level and a curve are measured differently.");
+    learnAllButton.onClick = [this] { view.learnAll(); };
+    targetButton.onClick = [this] { useTarget (juce::SystemClipboard::getTextFromClipboard()); };
     for (int i = 0; i < (int) presets().size(); ++i)
         presetBox.addItem (presets()[(size_t) i].name, i + 1);
     presetBox.setSelectedId (p.getCurrentProgram() + 1, juce::dontSendNotification);
     presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); setPresetTooltip(); };
     setPresetTooltip();
-    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &lookaheadBox, &presetBox, &outKnob, &mixKnob, &clearButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &phaseBox, &oversamplingBox, &lookaheadBox, &presetBox, &outKnob, &mixKnob, &clearButton, &guideButton, &learnAllButton, &targetButton })
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
-    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 10 + stripHeight + 6 + ui::kNoteStripHeight + 12);
+    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 8 + toolbarHeight + 8 + stripHeight + 6 + ui::kNoteStripHeight + 12);
 }
 
 AtlasEditor::~AtlasEditor()
@@ -129,7 +143,13 @@ void AtlasEditor::resized()
 
     bounds.removeFromTop (10);
     view.setBounds (bounds.removeFromTop (viewHeight));
-    bounds.removeFromTop (10);
+    bounds.removeFromTop (8);
+    toolbar = bounds.removeFromTop (toolbarHeight);
+    learnAllButton.setBounds (toolbar.removeFromLeft (96));
+    toolbar.removeFromLeft (8);
+    targetButton.setBounds (toolbar.removeFromLeft (80));
+    toolbar.removeFromLeft (14);
+    bounds.removeFromTop (8);
     stripArea = bounds.removeFromTop (stripHeight);
     noteStrip = bounds.withTrimmedTop (6).withHeight (ui::kNoteStripHeight);
     layoutStrips();
@@ -203,6 +223,7 @@ void AtlasEditor::layoutStrips()
         pair (s.on, s.match);
         pair (s.solo, s.delta);
         pair (s.learn, s.toAll);
+        pair (s.autoThr, s.autoRel);
         s.channels.setBounds (r.removeFromTop (24));
         r.removeFromTop (6);
         s.listen.setBounds (r.removeFromTop (24));
@@ -210,6 +231,8 @@ void AtlasEditor::layoutStrips()
         s.direction.setBounds (r.removeFromTop (24));
         r.removeFromTop (8);
         s.meter = r.removeFromTop (24);
+        r.removeFromTop (6);
+        s.histogram = r.removeFromTop (36);
         r.removeFromTop (6);
         const int cell = r.getWidth() / 2;
         // The edge knob belongs to the strip only while the split above the band is the strip's own (the editor keeps it so).
@@ -239,6 +262,8 @@ void AtlasEditor::paint (juce::Graphics& g)
     hw::drawLabel (g, latency == 0 ? juce::String ("No delay") : "Delay " + juce::String (1000.0 * latency / std::max (proc.getSampleRate(), 1.0), 1) + " ms",
                    latencyLabel, juce::Justification::centredLeft, colours::dim, 9.5f);
 
+    hw::drawLabel (g, "Sets THRESH, RATIO, ATTACK and RELEASE of every band from four seconds of what plays. TARGET also compares with a curve copied from Themis.",
+                   toolbar, juce::Justification::centredLeft, colours::dim, 9.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
 
     const unsigned solo = proc.engine.monitor.solo.load(), delta = proc.engine.monitor.delta.load();
@@ -275,6 +300,28 @@ void AtlasEditor::paint (juce::Graphics& g)
             text << "   M " << (matched > 0.0f ? "+" : "") << juce::String (matched, 1);
         g.drawText (text, s.meter.reduced (8, 0), juce::Justification::centredLeft);
         hw::drawGlassOverlay (g, m, 3.0f, false);
+
+        // Where the band's level has been (1 dB bins, -60 to 0, the knob's own range) and where the threshold is: the line is teal when AUTO T moves it.
+        const auto h = s.histogram.toFloat();
+        hw::drawGlass (g, h, 3.0f, colours::amber);
+        const auto plot = h.reduced (3.0f);
+        float most = 1.0e-6f;
+        for (float v : s.shownLevels)
+            most = std::max (most, v);
+        const float binWidth = plot.getWidth() / (float) Engine::kHistogramBins;
+        g.setColour (colours::amber.withAlpha (0.55f));
+        for (int k = 0; k < Engine::kHistogramBins; ++k)
+        {
+            const float height = std::pow (s.shownLevels[(size_t) k] / most, 0.6f) * plot.getHeight();
+            if (height > 0.5f)
+                g.fillRect (plot.getX() + binWidth * (float) k, plot.getBottom() - height, std::max (binWidth - 0.5f, 1.0f), height);
+        }
+        const float thresholdDb = proc.engine.thresholdMeter[(size_t) b].load();
+        const float lineX = plot.getX() + plot.getWidth() * juce::jlimit (0.0f, 1.0f, (thresholdDb - (float) Engine::kHistogramLowDb) / (float) -Engine::kHistogramLowDb);
+        g.setColour ((readParams (proc.apvts).bands[(size_t) b].autoThreshold ? colours::accent : colours::text).withAlpha (0.95f));
+        g.fillRect (lineX - 0.75f, plot.getY(), 1.5f, plot.getHeight());
+        hw::drawLabel (g, "-60", { s.histogram.getX() + 4, s.histogram.getBottom() - 12, 24, 10 }, juce::Justification::left, colours::dim, 7.5f);
+        hw::drawLabel (g, "0 dB", { s.histogram.getRight() - 30, s.histogram.getBottom() - 12, 26, 10 }, juce::Justification::right, colours::dim, 7.5f);
     }
 }
 
@@ -286,7 +333,9 @@ void AtlasEditor::timerCallback()
         auto& s = *strips[(size_t) b];
         s.solo.setToggleState ((solo & (1u << b)) != 0u, juce::dontSendNotification);
         s.delta.setToggleState ((delta & (1u << b)) != 0u, juce::dontSendNotification);
-        s.learn.setToggleState (view.learningSlot() == b, juce::dontSendNotification);
+        s.learn.setToggleState (view.isLearning (b), juce::dontSendNotification);
+        for (int k = 0; k < Engine::kHistogramBins; ++k) // gathered over about ten seconds
+            s.shownLevels[(size_t) k] = s.shownLevels[(size_t) k] * 0.997f + (float) proc.engine.histogram[(size_t) b][(size_t) k].exchange (0u);
         // Up at once, down slowly, so a short reduction can be read.
         const float now = proc.engine.reductionMeter[(size_t) b].load();
         const float fall = gui::kMeterRangeDb / (float) kTimerHz;
@@ -304,4 +353,17 @@ void AtlasEditor::timerCallback()
     inLevel = proc.engine.inPeak.exchange (0.0f);
     proc.engine.outPeak.store (0.0f);
     repaint();
+}
+
+bool AtlasEditor::useTarget (const juce::String& clipboardText)
+{
+    std::vector<pdsp::LinkBand> ignored;
+    pdsp::LinkCurve curve;
+    if (pdsp::link::decode (clipboardText.toStdString(), ignored, &curve) && curve.valid())
+    {
+        view.learnAll (&curve);
+        return true;
+    }
+    view.say ("The clipboard holds no curve: copy one from Themis (Copy EQ), then press TARGET.");
+    return false;
 }

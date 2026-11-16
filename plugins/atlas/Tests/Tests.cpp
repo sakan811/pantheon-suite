@@ -5,6 +5,7 @@
 
 #include "Check.h"
 #include "DSP/Engine.h"
+#include "Target.h"
 #include <pantheon/dsp/SpectrumIssues.h>
 #include <limits>
 #include <random>
@@ -871,6 +872,245 @@ void testOutput()
         tail = std::max (tail, (double) std::fabs (a.l[(size_t) i] - (float) k12 * ref.l[(size_t) i]));
     check (tail < 1.0e-5, fmt ("and it ends on its target: the last quarter second is the sound 12 dB down (within %.1e)", tail));
 }
+
+// ----------------------------------------------------------------------------------------------
+// The level of a band over time, in dB: `hits` of `peakDb` over a `baseDb` floor, each rising linearly over `riseMs` and falling at `fallDbPerMs`
+// back to the floor, one every `periodMs`.
+std::vector<double> hitEnvelope (double baseDb, double peakDb, double riseMs, double fallDbPerMs, double periodMs, double seconds, double tickMs)
+{
+    std::vector<double> env;
+    for (double t = 0.0; t < seconds * 1000.0; t += tickMs)
+    {
+        const double u = std::fmod (t, periodMs);
+        double e = baseDb;
+        if (u < riseMs)
+            e = baseDb + (peakDb - baseDb) * u / riseMs;
+        else
+            e = std::max (baseDb, peakDb - fallDbPerMs * (u - riseMs));
+        env.push_back (e);
+    }
+    return env;
+}
+
+bool listen (BandProfile& profile, const std::vector<double>& env, bool upward, Learned& out, double tickMs)
+{
+    profile.start (tickMs);
+    for (double e : env)
+        if (profile.push (e))
+            break;
+    return profile.result (upward, out);
+}
+
+void testLearn()
+{
+    std::printf ("\n[15] LEARN: threshold, ratio, attack and release from the band\n");
+    const double tickMs = 1000.0 * Engine::tick / fs;
+    BandProfile profile;
+    Learned fast, slow, steady, lift;
+
+    // Hits that rise in 10 ms and fall 30 dB in 100 ms, against hits that rise in 60 ms and fall 30 dB in 600 ms: 6 dB of the rise takes 2 ms and 12 ms,
+    // the first 6 dB of the fall 20 ms and 120 ms, so ATTACK is that rise and RELEASE three times that fall (the level is read once per tick, 1.3 ms, so a rise is known to about that).
+    const auto percussive = hitEnvelope (-40.0, -10.0, 10.0, 0.3, 400.0, 6.0, tickMs), swelling = hitEnvelope (-40.0, -10.0, 60.0, 0.05, 800.0, 6.0, tickMs);
+    const bool ok = listen (profile, percussive, false, fast, tickMs) && listen (profile, swelling, false, slow, tickMs);
+    check (ok && std::fabs (fast.attackMs - 2.0) < 2.5 && std::fabs (fast.releaseMs - 60.0) < 10.0 && std::fabs (slow.attackMs - 12.0) < 2.5 && std::fabs (slow.releaseMs - 360.0) < 40.0,
+           fmt ("hits rising in 10 ms and falling in 100 ms: ATTACK %.1f ms (2) and RELEASE %.0f ms (60); rising in 60 ms and falling in 600 ms: ATTACK %.1f ms (12) and RELEASE %.0f ms (360)",
+                (double) fast.attackMs, (double) fast.releaseMs, (double) slow.attackMs, (double) slow.releaseMs));
+    check (fast.thresholdDb < -22.0f && fast.thresholdDb > -36.0f && fast.ratio > 3.0f && fast.ratio <= 4.01f,
+           fmt ("hits 30 dB over their floor: THRESH %.1f dB, well under the hits and over the floor, RATIO %.1f:1 (a wide spread takes off more)", (double) fast.thresholdDb, (double) fast.ratio));
+
+    // A steady band: no events, the slow safe times, THRESH 3 dB under it and the gentlest ratio.
+    std::vector<double> flat;
+    for (int i = 0; i < 4000; ++i)
+        flat.push_back (-20.0 + 0.5 * std::sin (0.3 * i));
+    const bool okSteady = listen (profile, flat, false, steady, tickMs);
+    check (okSteady && profile.events() == 0 && std::fabs (steady.attackMs - 20.0) < 0.01 && std::fabs (steady.releaseMs - 250.0) < 0.01 && std::fabs (steady.thresholdDb - (-23.0)) < 1.0
+               && steady.ratio < 1.45f,
+           fmt ("a steady band at -20 dB: no events, ATTACK %.0f ms and RELEASE %.0f ms (the steady times), THRESH %.1f dB, RATIO %.2f:1",
+               (double) steady.attackMs, (double) steady.releaseMs, (double) steady.thresholdDb, (double) steady.ratio));
+
+    // Upward: THRESH is the typical level, so what is under it is lifted.
+    const bool okUp = listen (profile, percussive, true, lift, tickMs);
+    check (okUp && std::fabs (lift.thresholdDb - (-40.0)) < 2.0 && lift.ratio > 1.0f,
+           fmt ("an upward band puts THRESH at the typical level (%.1f dB, the floor between the hits is -40) with RATIO %.1f:1", (double) lift.thresholdDb, (double) lift.ratio));
+
+    // Silence says nothing.
+    const std::vector<double> quiet (4000, -120.0);
+    Learned none;
+    check (! listen (profile, quiet, false, none, tickMs), "a silent band gives no answer");
+
+    // Through the engine: band 3 (500 Hz to 2 kHz) listens to 1 kHz hits that die away in 28 ms for 6 dB, and to a steady 1 kHz tone.
+    const auto engineLearns = [&] (const std::vector<float>& in, bool upward, Learned& out)
+    {
+        auto p = midrangeOnly (0.0, 1.0);
+        p.bands[3].upward = upward;
+        Engine e;
+        e.prepare (fs);
+        e.learnStart (3);
+        auto probe = in;
+        auto copy = in;
+        for (int start = 0; start < (int) in.size(); start += 512)
+            e.process (probe.data() + start, copy.data() + start, std::min (512, (int) in.size() - start), p);
+        const auto state = e.learnState (3);
+        return state == Engine::LearnState::done && e.learnTake (3, out) && e.learnState (3) == Engine::LearnState::idle;
+    };
+    const int n = (int) (5.0 * fs);
+    std::vector<float> hits ((size_t) n), tone = sine (1000.0, 0.25, n);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = (double) (i % (int) (0.5 * fs)) / fs;
+        hits[(size_t) i] = (float) (0.5 * std::exp (-t / 0.04) * std::sin (2.0 * pi * 1000.0 * i / fs));
+    }
+    Learned h, t;
+    const bool okHits = engineLearns (hits, false, h), okTone = engineLearns (tone, false, t);
+    check (okHits && okTone && h.attackMs < 10.0f && h.releaseMs > 40.0f && h.releaseMs < 200.0f && std::fabs (t.attackMs - 20.0) < 0.01 && std::fabs (t.releaseMs - 250.0) < 0.01,
+           fmt ("in the engine: 1 kHz hits give ATTACK %.1f ms and RELEASE %.0f ms; a steady tone the steady %.0f and %.0f ms", (double) h.attackMs, (double) h.releaseMs, (double) t.attackMs, (double) t.releaseMs));
+    // The tone is 3 dB down inside the band (the level is the peak of the equivalent sine: 0.25 is -12 dB, 1.1 dB less in the band).
+    check (okTone && t.thresholdDb < -14.0f && t.thresholdDb > -20.0f,
+           fmt ("... and THRESH for the tone is %.1f dB, 3 dB under what the band reads", (double) t.thresholdDb));
+    std::vector<float> silence ((size_t) n, 0.0f);
+    Learned s;
+    Engine silent;
+    silent.prepare (fs);
+    silent.learnStart (3);
+    auto z = silence, z2 = silence;
+    auto pm = midrangeOnly (0.0, 1.0);
+    for (int start = 0; start < n; start += 512)
+        silent.process (z.data() + start, z2.data() + start, std::min (512, n - start), pm);
+    check (silent.learnState (3) == Engine::LearnState::silent && ! silent.learnTake (3, s), "a band that heard nothing answers `silent`, not zeros");
+
+    // Listening changes nothing it hears: the output is the same with and without it, bit for bit.
+    auto pc = midrangeOnly (-30.0, 4.0);
+    Engine plain, learning;
+    plain.prepare (fs);
+    learning.prepare (fs);
+    learning.learnStart (3);
+    const auto a = run (plain, pc, hits, hits), b = run (learning, pc, hits, hits);
+    check (a.l == b.l && a.r == b.r, "listening does not change the sound: the same output with LEARN running, bit for bit");
+}
+
+// ----------------------------------------------------------------------------------------------
+// Runs `in` through the engine in blocks of 64 (one tick) and returns the reduction meter (dB) after each block.
+std::vector<float> reductionTrace (Engine& e, const EngineParams& p, const std::vector<float>& in)
+{
+    std::vector<float> trace;
+    auto l = in, r = in;
+    for (int start = 0; start + 64 <= (int) in.size(); start += 64)
+    {
+        e.process (l.data() + start, r.data() + start, 64, p);
+        trace.push_back (e.reductionMeter[3].load());
+    }
+    return trace;
+}
+
+void testAuto()
+{
+    std::printf ("\n[16] AUTO THRESH, AUTO RELEASE, the level histogram\n");
+
+    // AUTO THRESH: the same part at two levels 20 dB apart is turned down the same amount; with a fixed threshold the quiet one is not touched.
+    const auto stretch = [] (double loudDb, double quietDb)
+    {
+        std::vector<float> x = sine (1000.0, std::pow (10.0, loudDb / 20.0), 6 * second);
+        const auto q = sine (1000.0, std::pow (10.0, quietDb / 20.0), 30 * second);
+        x.insert (x.end(), q.begin(), q.end());
+        return x;
+    };
+    const auto in = stretch (-20.0, -40.0);
+    auto autoP = midrangeOnly (-6.0, 4.0);
+    autoP.bands[3].autoThreshold = true;
+    autoP.bands[3].attackMs = 5.0;
+    Engine e;
+    e.prepare (fs);
+    const auto trace = reductionTrace (e, autoP, in);
+    const auto at = [&] (double seconds) { return (double) trace[(size_t) (seconds * fs / 64.0)]; };
+    const double loudRed = at (5.9), quietRed = at (35.9);
+    auto fixedP = midrangeOnly (-27.0, 4.0);
+    fixedP.bands[3].attackMs = 5.0;
+    Engine f;
+    f.prepare (fs);
+    const auto fixedTrace = reductionTrace (f, fixedP, in);
+    const double fixedQuiet = (double) fixedTrace[(size_t) (35.9 * fs / 64.0)];
+    check (loudRed > 3.0 && std::fabs (quietRed - loudRed) < 0.5 && fixedQuiet < 0.05,
+           fmt ("AUTO T at -6 dB (4:1): a 1 kHz tone at -20 dB is turned down %.2f dB and, 20 dB quieter after 30 s, %.2f dB; a fixed threshold of -27 dB turns the quiet one down %.2f dB",
+                loudRed, quietRed, fixedQuiet));
+    check (std::fabs ((double) e.thresholdMeter[3].load() - (e.levelMeter[3].load() - 6.0)) < 1.5,
+           fmt ("... and the threshold in use is %.1f dB, 6 dB under the band's level (%.1f dB)", (double) e.thresholdMeter[3].load(), (double) e.levelMeter[3].load()));
+
+    // AUTO RELEASE: after a short hit the gain comes back faster than after a long held stretch; with it off the two are alike.
+    const auto burst = [] (double seconds)
+    {
+        auto x = sine (1000.0, 0.3, (int) (seconds * fs));
+        const auto tail = sine (1000.0, 0.0003, second);
+        x.insert (x.end(), tail.begin(), tail.end());
+        return x;
+    };
+    const auto halfTime = [&] (bool autoRel, double seconds)
+    {
+        auto p = midrangeOnly (-30.0, 10.0);
+        p.bands[3].attackMs = 1.0;
+        p.bands[3].releaseMs = 200.0;
+        p.bands[3].autoRelease = autoRel;
+        Engine eng;
+        eng.prepare (fs);
+        const auto tr = reductionTrace (eng, p, burst (seconds));
+        const int end = (int) (seconds * fs / 64.0);
+        float peak = 0.0f;
+        for (int i = 0; i < end; ++i) peak = std::max (peak, tr[(size_t) i]);
+        for (int i = end; i < (int) tr.size(); ++i)
+            if (tr[(size_t) i] < 0.5f * peak)
+                return (i - end) * 64.0 * 1000.0 / fs;
+        return 1000.0;
+    };
+    const double shortAuto = halfTime (true, 0.05), longAuto = halfTime (true, 2.0), shortFixed = halfTime (false, 0.05), longFixed = halfTime (false, 2.0);
+    check (longAuto > 2.0 * shortAuto && std::fabs (shortFixed - longFixed) < 0.15 * longFixed,
+           fmt ("AUTO R at RELEASE 200 ms: the gain is half way back %.0f ms after a 50 ms hit and %.0f ms after a 2 s stretch; with it off %.0f and %.0f ms", shortAuto, longAuto, shortFixed, longFixed));
+
+    // The histogram: a steady tone puts every tick in one dB of the level the band reads.
+    Engine h;
+    h.prepare (fs);
+    auto hp = midrangeOnly (0.0, 1.0);
+    const auto tone = sine (1000.0, 0.25, 2 * second);
+    run (h, hp, tone, tone);
+    unsigned total = 0, best = 0;
+    int bestBin = 0;
+    for (int k = 0; k < Engine::kHistogramBins; ++k)
+    {
+        const unsigned c = h.histogram[3][(size_t) k].load();
+        total += c;
+        if (c > best) { best = c; bestBin = k; }
+    }
+    const double binDb = Engine::kHistogramLowDb + bestBin + 0.5, readDb = h.levelMeter[3].load();
+    check (total > (unsigned) (0.9 * 2 * fs / Engine::tick) && best > (unsigned) (0.9 * (double) total) && std::fabs (binDb - readDb) < 1.0,
+           fmt ("the level histogram of a steady tone: %u ticks counted, %.0f %% of them in the dB %.1f (the band reads %.1f dB)", total, 100.0 * best / std::max (total, 1u), binDb, readDb));
+
+    // LEARN on an AUTO T band answers in its terms: THRESH is the distance under the band's own level, so a steady tone gets about -3 dB, not the absolute level.
+    {
+        auto lp = midrangeOnly (0.0, 1.0);
+        lp.bands[3].autoThreshold = true;
+        Engine le;
+        le.prepare (fs);
+        le.learnStart (3);
+        const auto steadyTone = sine (1000.0, 0.25, 6 * second);
+        run (le, lp, steadyTone, steadyTone);
+        Learned relative;
+        const bool took = le.learnTake (3, relative);
+        check (took && relative.thresholdDb < -1.5f && relative.thresholdDb > -4.5f,
+               fmt ("LEARN on an AUTO T band: a steady tone gets THRESH %.1f dB (3 dB under its own level, not the %.1f dB it reads)", (double) relative.thresholdDb, (double) le.levelMeter[3].load()));
+    }
+
+    // TARGET: a band that stands out of the shape is turned down more; the bands are compared once the whole is taken to the same loudness.
+    pdsp::LinkCurve flat;
+    flat.f0Hz = 100.0;
+    flat.perOctave = 6.0;
+    flat.db.assign (19, 0.0);
+    std::array<TargetBand, 3> three { { { 101.0, 199.0, -30.0, true }, { 202.0, 398.0, -30.0, true }, { 404.0, 796.0, -20.0, true } } };
+    const auto shifts = targetShifts (flat, three, 3);
+    three[2].typicalDb = 0.0;
+    const auto clamped = targetShifts (flat, three, 3);
+    const auto lone = targetShifts (flat, std::array<TargetBand, 3> { { { 101.0, 199.0, -30.0, false }, { 202.0, 398.0, -30.0, false }, { 404.0, 796.0, -20.0, true } } }, 3);
+    check (std::fabs (shifts[0]) < 0.01 && std::fabs (shifts[1]) < 0.01 && std::fabs (shifts[2] - 20.0 / 3.0) < 0.05 && clamped[2] <= kMaxShiftDb + 1.0e-9 && lone[2] == 0.0,
+           fmt ("TARGET: of three octave bands against a flat shape, the one 10 dB louder than the others is %.2f dB over once the mean is taken out (6.67); 30 dB over is held to %.0f dB; one band heard alone: %.0f dB",
+                shifts[2], clamped[2], lone[2]));
+}
 } // namespace
 
 int main()
@@ -889,6 +1129,8 @@ int main()
     testUpward();
     testMix();
     testOutput();
+    testLearn();
+    testAuto();
     testIssueFinder();
     return test::finish ("AtlasTests");
 }
