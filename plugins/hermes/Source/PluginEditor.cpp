@@ -3,17 +3,19 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace hermes;
 namespace hw = ui::hw;
 
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int displayHeight = 230;
 constexpr int cellWidth = 112;
 constexpr int cellHeight = 108;
 constexpr int kTimerHz = 10;
-constexpr int kWidth = 900;
+constexpr int kWidth = 904, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
+constexpr int displayHeight = kHeight - (headerHeight + 10 + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 
 juce::String readout (float v, const char* unit)
 {
@@ -61,7 +63,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &autoTrimButton, &autoReset, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
-    setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 HermesEditor::~HermesEditor() { setLookAndFeel (nullptr); }
