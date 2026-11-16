@@ -48,6 +48,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<HestiaEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.roleBox.getNumItems() == kNumRoles && editor.mixBox.getNumItems() == kMaxGroups + 1, "the role and mix selectors have the parameters' items");
         editor.roleBox.setSelectedItemIndex ((int) Role::bass, juce::sendNotificationSync);
@@ -237,6 +238,23 @@ int main()
         check (limits->getMinimumWidth() == juce::roundToInt ((float) drawn.getWidth() * ui::kMinEditorScale) && limits->getMaximumWidth() == juce::roundToInt ((float) drawn.getWidth() * ui::kMaxEditorScale)
                    && std::abs (limits->getFixedAspectRatio() - (double) drawn.getWidth() / (double) drawn.getHeight()) < 1e-6,
                "the corner scales it between half and one and a half times, and keeps its proportions");
+        // The four corner handles (ui::ResizeGrips, shared by every plugin): they answer the mouse in the corners only, and the window keeps 16:10 between its limits.
+        {
+            ui::ResizeGrips* grips = nullptr;
+            for (auto* child : first->getChildren())
+                if (auto* g = dynamic_cast<ui::ResizeGrips*> (child))
+                    grips = g;
+            check (grips != nullptr && grips->getBounds() == first->getLocalBounds(), "the window has corner handles over its whole area");
+            const int w = first->getWidth(), h = first->getHeight();
+            check (ui::ResizeGrips::cornerAt ({ 2, 2 }, w, h) == 0 && ui::ResizeGrips::cornerAt ({ w - 2, 2 }, w, h) == 1
+                       && ui::ResizeGrips::cornerAt ({ 2, h - 2 }, w, h) == 2 && ui::ResizeGrips::cornerAt ({ w - 2, h - 2 }, w, h) == 3
+                       && ui::ResizeGrips::cornerAt ({ w / 2, h / 2 }, w, h) == -1 && ui::ResizeGrips::cornerAt ({ w / 2, 2 }, w, h) == -1,
+                   "all four corners are handles and nothing else is: the middle and the edges are left to the editor");
+            check (grips != nullptr && grips->hitTest (3, 3) && grips->hitTest (w - 3, h - 3) && ! grips->hitTest (w / 2, h / 2), "a click in a corner goes to the handle, one in the middle to the editor");
+            check (first->getConstrainer()->getFixedAspectRatio() == ui::kEditorAspect, "the host's edge drag keeps 16:10 too");
+            check (ui::hasEditorAspect (limits->getMinimumWidth(), limits->getMinimumHeight()) && ui::hasEditorAspect (limits->getMaximumWidth(), limits->getMaximumHeight()),
+                   "the smallest and the largest size are both 16:10");
+        }
         first->setSize (juce::roundToInt ((float) drawn.getWidth() * 0.9f), juce::roundToInt ((float) drawn.getHeight() * 0.9f));
         juce::MemoryBlock state;
         q.getStateInformation (state);
