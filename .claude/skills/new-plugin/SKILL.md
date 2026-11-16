@@ -3,6 +3,7 @@ name: new-plugin
 description: Add a new plugin to this repository, start to finish (CMake, parameters, engine, editor, advice, tests, README, CLAUDE.md, workflow, root lists). Use when asked to create, add or scaffold a plugin.
 argument-hint: "[name] [what it does in one line]"
 allowed-tools: Bash(scripts/build.sh *)
+model: haiku
 ---
 
 Make plugin `$ARGUMENTS`. The seven newest plugins were all made this way; the rules are in the root CLAUDE.md, the steps are here.
