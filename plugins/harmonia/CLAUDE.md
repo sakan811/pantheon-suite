@@ -76,7 +76,7 @@ passes unless it persists.
 
 ## Gotchas already paid for
 
-- **Not a `ui::ScaledEditor`.** Harmonia's editor scales itself (`kDesignW` x `kDesignH` drawn in a `content` component and scaled by a transform, from 75% to 200%, fixed aspect), as `ScaledEditor` does for the other plugins; it is the one the kit's was modelled on. Do not wrap it in `ScaledEditor` and do not change its size without changing `kDesignW`/`kDesignH` and regenerating the screenshot.
+- **Not a `ui::ScaledEditor`.** Harmonia's editor scales itself (`kDesignW` x `kDesignH` drawn in a `content` component and scaled by a transform, from 75% to 200%, 16:10 like every plugin and app, with the kit's four corner handles `ui::ResizeGrips` in `grips`), as `ScaledEditor` does for the other plugins; it is the one the kit's was modelled on. Do not wrap it in `ScaledEditor` and do not change its size without changing `kDesignW`/`kDesignH` and regenerating the screenshot (`kDesignH` is `ui::editorHeightFor (kDesignW)`; the layout is absolute, drawn for 880 px and widened by `kWide`).
 - In an editor constructor call `setSize()` **last**.
 - The default `/usr/bin/clang` can link against a broken Command Line Tools SDK: that is why the scripts source `scripts/toolchain.sh` and point everything at Xcode's SDK (`DEVELOPER_DIR`, `SDKROOT`). A plain `cmake` on a fresh folder may need the same.
 - The build is a universal binary (arm64 and x86_64, deployment target 11.0) so the plug-in loads whether the host runs natively or under Rosetta.

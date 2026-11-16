@@ -11,6 +11,7 @@
 
 #include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Resize.h>
 #include <pantheon/ui/Undo.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -33,7 +34,7 @@ public:
     enum class NoteAction { all, none, invert, scale };
     void noteAction (NoteAction);
 
-    static constexpr int kDesignW = 880, kDesignH = 626; // the editor is drawn at this size and scaled; the foot strip is the notes' (or GUIDE's reminder)
+    static constexpr int kDesignW = 1000, kDesignH = ui::editorHeightFor (kDesignW); // 16:10; the editor is drawn at this size and scaled; the foot strip is the notes' (or GUIDE's reminder)
 
 private:
     static constexpr int kHeaderH = 84;
@@ -66,6 +67,7 @@ private:
     HarmoniaProcessor& proc;
     HardwareLookAndFeel laf;
     Content content;
+    std::unique_ptr<ui::ResizeGrips> grips; // the four corners, over everything (added last)
     juce::TooltipWindow tooltips { this, 500 };
 
     PitchGraph graph;

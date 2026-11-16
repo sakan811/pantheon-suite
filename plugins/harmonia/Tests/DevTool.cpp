@@ -260,6 +260,15 @@ static int selftest()
         p2.apvts.state.setProperty ("uiScale", 1.5, nullptr);
         HarmoniaEditor e (p2);
         check (std::abs (e.getWidth() - (int) std::lround (1.5 * HarmoniaEditor::kDesignW)) <= 1, "the editor opens at the saved size", e.getWidth());
+        check (ui::hasEditorAspect (HarmoniaEditor::kDesignW, HarmoniaEditor::kDesignH) && std::abs (e.getConstrainer()->getFixedAspectRatio() - ui::kEditorAspect) < 1e-9,
+               "the editor is drawn at 16:10, the shape of every plugin, and the window keeps it", (double) HarmoniaEditor::kDesignW / (double) HarmoniaEditor::kDesignH);
+        {
+            int corners = 0;
+            for (auto* child : e.getChildren())
+                if (dynamic_cast<ui::ResizeGrips*> (child) != nullptr)
+                    ++corners;
+            check (corners == 1, "the window has the kit's four corner handles", corners);
+        }
         e.setSize (HarmoniaEditor::kDesignW * 3 / 4, HarmoniaEditor::kDesignH * 3 / 4);
         check (std::fabs ((double) p2.apvts.state.getProperty ("uiScale") - 0.75) < 0.01, "resizing it is written to the state", (double) p2.apvts.state.getProperty ("uiScale"));
         juce::MemoryBlock mb;
