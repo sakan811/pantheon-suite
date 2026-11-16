@@ -62,7 +62,7 @@ needs a higher version, an entry in `readParams()` and a place in the editor. Th
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
   section, and at most `ui::kMaxNoteChars` characters
 - the plugin's name -> `CASTOR_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/CastorUi.h` (`UiCheck` checks they agree)
-- every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls (the goniometer is drawn on `ui::hw` glass)
+- every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls (the goniometer and the width bars are drawn on `ui::hw` glass; `drawWidthGlass` reads the six widths through `readParams`, a picture of the knobs and nothing measured)
 
 ## Gotchas already paid for
 

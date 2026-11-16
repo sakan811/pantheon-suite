@@ -3,6 +3,8 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace castor;
 namespace hw = ui::hw;
 
@@ -11,7 +13,10 @@ namespace
 constexpr int headerHeight = 84;
 constexpr int cellWidth = 104;
 constexpr int cellHeight = 112;
-constexpr int goniometerSize = 232;
+constexpr int goniometerSize = 330;
+constexpr int kWidth = 24 + 6 * cellWidth + 14 + goniometerSize + 8, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape (1000 x 625)
+constexpr int bodyHeight = kHeight - (headerHeight + 10 + 8 + ui::kNoteStripHeight + 12);
+constexpr int widthGlassHeight = bodyHeight - (2 * cellHeight + 40) - 6; // the glass over the band knobs takes what the rest leaves
 constexpr int kTimerHz = 30;
 
 juce::String hzName (double hz) { return hz < 1000.0 ? juce::String (juce::roundToInt (hz)) + " Hz" : juce::String (hz / 1000.0, hz < 10000.0 ? 1 : 0) + " kHz"; }
@@ -44,7 +49,7 @@ CastorEditor::CastorEditor (CastorProcessor& p)
     scratchL.resize (4096);
     scratchR.resize (4096);
     startTimerHz (kTimerHz);
-    setSize (24 + 6 * cellWidth + 14 + goniometerSize + 8, headerHeight + 10 + 2 * cellHeight + 40 + 8 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 CastorEditor::~CastorEditor() { setLookAndFeel (nullptr); }
@@ -61,10 +66,10 @@ void CastorEditor::resized()
     presetBox.setBounds (presetRow.removeFromLeft (190));
 
     bounds.removeFromTop (10);
-    auto body = bounds.removeFromTop (2 * cellHeight + 40);
+    auto body = bounds.removeFromTop (bodyHeight);
     auto right = body.removeFromRight (goniometerSize);
     body.removeFromRight (14);
-    gonio = right.removeFromTop (goniometerSize - 24);
+    gonio = right.removeFromTop (bodyHeight - 56); // the goniometer, then 8 + the correlation 16 + 6 + the check row 26
     right.removeFromTop (8);
     correlationBar = right.removeFromTop (16);
     right.removeFromTop (6);
@@ -74,6 +79,7 @@ void CastorEditor::resized()
     minButton.setBounds (checkRow.removeFromLeft (110));
 
     bandsLabel = body.removeFromTop (16).withTrimmedLeft (4);
+    widthGlass = body.removeFromTop (widthGlassHeight).withTrimmedBottom (6);
     auto row = body.removeFromTop (cellHeight);
     for (int b = 0; b < kBands; ++b)
         widths[(size_t) b]->setBounds (row.removeFromLeft (cellWidth));
@@ -93,6 +99,37 @@ AdviceInput CastorEditor::adviceInput() const
     return in;
 }
 
+// The width of the sides of each band as a bar over its knob (the knobs below set it; this shows the whole shape at once). 100% is the line: above it the band is wider than
+// the recording, below it narrower, and at the bottom it is mono.
+void CastorEditor::drawWidthGlass (juce::Graphics& g) const
+{
+    const auto glass = widthGlass.toFloat();
+    hw::drawGlass (g, glass, 4.0f, colours::accent);
+    const auto params = readParams (proc.apvts);
+    const auto plot = glass.reduced (0.0f, 14.0f);
+    const auto yOf = [&plot] (float width) { return plot.getBottom() - plot.getHeight() * juce::jlimit (0.0f, 1.0f, width / kMaxWidth); };
+    g.setColour (colours::glassGrid);
+    for (float mark : { 0.5f, 1.5f })
+        g.drawHorizontalLine ((int) yOf (mark), glass.getX() + 4.0f, glass.getRight() - 4.0f);
+    for (int b = 0; b < kBands; ++b)
+    {
+        const float width = params.width[(size_t) b];
+        const auto column = juce::Rectangle<float> (glass.getX() + (float) (b * cellWidth), plot.getY(), (float) cellWidth, plot.getHeight());
+        const auto bar = column.withSizeKeepingCentre (juce::jmin (44.0f, column.getWidth() - 24.0f), column.getHeight());
+        const float top = yOf (width);
+        g.setColour (colours::accent.withAlpha (0.55f));
+        g.fillRoundedRectangle (bar.getX(), top, bar.getWidth(), plot.getBottom() - top, 2.0f);
+        g.setColour (colours::accent);
+        g.fillRect (bar.getX(), top - 1.0f, bar.getWidth(), 2.0f);
+        g.setColour (colours::dim);
+        g.setFont (ui::lcdFont (10.0f));
+        g.drawText (juce::String (juce::roundToInt (width * 100.0f)) + "%", column.withHeight (12.0f).withY (juce::jmax (glass.getY() + 1.0f, top - 15.0f)), juce::Justification::centred);
+    }
+    g.setColour (colours::amber.withAlpha (0.8f)); // 100%: the sides as recorded
+    g.drawHorizontalLine ((int) yOf (1.0f), glass.getX() + 4.0f, glass.getRight() - 4.0f);
+    hw::drawGlassOverlay (g, glass, 4.0f, false);
+}
+
 void CastorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (colours::background);
@@ -102,6 +139,8 @@ void CastorEditor::paint (juce::Graphics& g)
     hw::drawLabel (g, "Width of the sides, by band", bandsLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Whole sound", otherLabel, juce::Justification::left, colours::dim, 9.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
+
+    drawWidthGlass (g);
 
     // The goniometer: left and right as a cloud turned a quarter: the middle is the vertical, the sides the horizontal.
     const auto glass = gonio.toFloat();

@@ -35,12 +35,13 @@ public:
 
 private:
     void timerCallback() override;
+    void drawWidthGlass (juce::Graphics&) const;
     castor::AdviceInput adviceInput() const;
 
     CastorProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, presetLabel, gonio, correlationBar, noteStrip, bandsLabel, otherLabel;
+    juce::Rectangle<int> nameplate, presetLabel, gonio, widthGlass, correlationBar, noteStrip, bandsLabel, otherLabel;
     std::array<float, kPoints> pointL {}, pointR {};
     std::vector<float> scratchL, scratchR;
     float correlation = 1.0f, minHold = 1.0f;

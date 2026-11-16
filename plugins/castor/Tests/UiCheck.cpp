@@ -61,6 +61,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<CastorEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.getWidth() > 800 && editor.widths[5]->getRight() < editor.getWidth() && editor.outKnob.getBottom() < editor.getHeight(), "the six width knobs and the five others fit the window");
         editor.widths[2]->setVisible (true);
