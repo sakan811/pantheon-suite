@@ -2,6 +2,8 @@
 // Copyright (C) 2026 The Pantheon authors
 
 #include "PluginEditor.h"
+
+#include <pantheon/ui/Aspect.h>
 #include <pantheon/ui/FreqAxis.h>
 
 using namespace nemesis;
@@ -10,11 +12,11 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int displayHeight = 180;
 constexpr int cellWidth = 112;
 constexpr int cellHeight = 108;
 constexpr int kTimerHz = 30;
-constexpr int kWidth = 860;
+constexpr int kWidth = 864, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
+constexpr int displayHeight = kHeight - (headerHeight + 10 + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 }
 
 NemesisEditor::NemesisEditor (NemesisProcessor& p)
@@ -45,7 +47,7 @@ NemesisEditor::NemesisEditor (NemesisProcessor& p)
         findButton.setButtonText ("FINDING");
     };
     startTimerHz (kTimerHz);
-    setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 NemesisEditor::~NemesisEditor() { setLookAndFeel (nullptr); }
