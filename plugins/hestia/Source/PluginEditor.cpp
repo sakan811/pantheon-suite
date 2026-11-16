@@ -3,15 +3,17 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace hestia;
 namespace hw = ui::hw;
 
 namespace
 {
-constexpr int kWidth = 1290;
+constexpr int kWidth = 1200, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
 constexpr int headerHeight = 84;
-constexpr int viewHeight = 300;
 constexpr int knobPanelHeight = 134;
+constexpr int viewHeight = kHeight - (headerHeight + 10 + 10 + knobPanelHeight + 8 + ui::kNoteStripHeight + 12); // the view takes what the rest leaves
 constexpr int cellHeight = 104;
 constexpr int kTimerHz = 30;
 }
@@ -53,7 +55,7 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
-    setSize (kWidth, headerHeight + 10 + viewHeight + 10 + knobPanelHeight + 8 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 HestiaEditor::~HestiaEditor()
