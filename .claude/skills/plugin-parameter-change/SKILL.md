@@ -3,6 +3,7 @@ name: plugin-parameter-change
 description: Add, change or remove a parameter of a plugin without breaking saved sessions, presets, tests or docs. Use when editing a plugin's Parameters.h, adding a control, or adding a setting such as a look-ahead or a mode.
 paths: plugins/*/Source/Parameters.h
 allowed-tools: Bash(scripts/build.sh *)
+model: haiku
 ---
 
 A parameter's id is stored in every saved session and every automation lane. Work through this in order; the plugin's own CLAUDE.md has the details of its engine.
