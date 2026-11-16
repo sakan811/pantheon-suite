@@ -3,6 +3,8 @@
 
 #include "UI/MainComponent.h"
 
+#include <pantheon/ui/Aspect.h>
+
 namespace
 {
 class MainWindow : public juce::DocumentWindow
@@ -15,7 +17,8 @@ public:
         setContentOwned (content, true);
         content->onTitleChanged = [this] { setName (content->windowTitle()); };
         setResizable (true, true);
-        setResizeLimits (1020, 620, 4000, 3000);
+        setResizeLimits (1024, ui::editorHeightFor (1024), 4000, ui::editorHeightFor (4000)); // every edge and corner of the window; the shape stays 16:10 (the native frame is left out of it)
+        getConstrainer()->setFixedAspectRatio (ui::kEditorAspect);
         centreWithSize (getWidth(), getHeight());
         setVisible (true);
     }

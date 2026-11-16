@@ -10,6 +10,7 @@
 #include <optional>
 
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Aspect.h>
 
 namespace orpheus::gui
 {
@@ -18,8 +19,8 @@ namespace orpheus::gui
 class MainComponent : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
-    // The window's design size: the notes strip at the foot is part of it, so the display keeps the height it had.
-    static constexpr int kDesignWidth = 1300, kDesignHeight = 796 + 6 + ui::kNoteStripHeight + 8;
+    // The window's design size, 16:10 like every plugin's (ui::kEditorAspect): the notes strip at the foot is part of it, and the pitch display takes what the rest leaves.
+    static constexpr int kDesignWidth = 1304, kDesignHeight = ui::editorHeightFor (kDesignWidth);
 
     explicit MainComponent (bool withAudioDevice = true);
     ~MainComponent() override;

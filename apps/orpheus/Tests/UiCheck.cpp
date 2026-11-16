@@ -109,6 +109,7 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
     std::printf ("Orpheus UI check\n");
+    test::check (ui::hasEditorAspect (MainComponent::kDesignWidth, MainComponent::kDesignHeight), "the window is drawn at 16:10, the shape of every plugin");
 
     // ---- [1] the session ----------------------------------------------------------------------------------------------
     std::printf ("\n[1] session\n");
