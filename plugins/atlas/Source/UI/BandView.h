@@ -5,6 +5,7 @@
 
 #include "../PluginProcessor.h"
 #include "AtlasUi.h"
+#include "../Target.h"
 #include <pantheon/dsp/SpectrumAnalyzer.h>
 #include <pantheon/dsp/SpectrumIssues.h>
 #include <pantheon/ui/FreqAxis.h>
@@ -15,7 +16,7 @@ namespace atlas::gui
 // The display: a spectrogram of the input (frequency across, time running down) with the bands laid over it. The bands are
 // made here: double-click to split one, drag an edge, double-click an edge to join two. It also points at trouble: PEAK marks a
 // narrow region that stands out and stays, JUMPS a region whose level keeps leaping over its own average, which is what a
-// compressor band is for; clicking a JUMPS marker makes that region a band and sets its threshold from what the band then reads.
+// compressor band is for; clicking a JUMPS marker makes that region a band and sets its compressor from what the band then hears.
 // Everything here runs on the editor's timer; nothing on the audio thread.
 class BandView : public juce::Component, public juce::SettableTooltipClient
 {
@@ -23,13 +24,14 @@ public:
     static constexpr int kRows = 180;               // six seconds at the editor's 30 Hz
     static constexpr float kFloorDb = -78.0f, kCeilingDb = 0.0f; // what the spectrogram draws as dark and as full light (the analyzer's tilted dB)
     static constexpr int kGrabPixels = 6;
-    static constexpr float kLearnSeconds = 2.0f;    // how long a new band is listened to before its threshold is set
+    static constexpr float kTimeoutSeconds = 3.0f * (float) BandProfile::kListenSeconds; // the engine listens in audio time: with nothing playing it never finishes
+    static constexpr float kNoticeSeconds = 4.0f;   // how long "heard nothing" stays on the display
 
     explicit BandView (AtlasProcessor& p) : proc (p)
     {
         setTooltip ("The input over the last six seconds, low to high across, newest at the bottom.\nDouble-click: split the band there (up to six bands). "
                     "Drag an edge: move it. Double-click an edge: join the two bands.\nPEAK: a narrow region that stands out and stays. "
-                    "JUMPS: a region whose level keeps leaping over its average; click the marker to make it a band with a threshold set to catch the leaps.");
+                    "JUMPS: a region whose level keeps leaping over its average; click the marker to make it a band with its compressor set to catch the leaps.");
         analyzer.setReleaseSeconds (0.15f);
     }
 
@@ -59,7 +61,7 @@ public:
     }
 
     // Makes the region of a JUMPS marker a band: splits at its edges where there is room, switches the band on, and sets its
-    // threshold once the band has been heard (the spectrogram's levels are per frequency, not the band's).
+    // compressor once the band has been heard (the spectrogram's levels are per frequency, not the band's).
     void makeBand (const pdsp::IssueFinder::Swing& s)
     {
         addSplit (proc.apvts, s.loHz);
@@ -69,19 +71,35 @@ public:
         int band = 0;
         while (band < l.numBands - 1 && l.edgeHz[(size_t) (band + 1)] <= centre)
             ++band;
-        learnThreshold (l.slot[(size_t) band], s.swingDb);
+        learnBand (l.slot[(size_t) band]);
         layoutChanged();
     }
 
-    // Listens to a band for kLearnSeconds and sets its threshold half of `swingDb` under the loudest level it read (also the LEARN button of a strip, with kLearnSwingDb).
-    // Switches the band on: an off band reads nothing.
-    static constexpr float kLearnSwingDb = 6.0f;
-    void learnThreshold (int slot, float swingDb)
+    // The LEARN button of a strip, and a band made from a JUMPS marker: the band listens to itself for BandProfile::kListenSeconds of
+    // audio and THRESH, RATIO, ATTACK and RELEASE are set from what it heard (DSP/Learn.h says how). Switches the band on: an off band
+    // reads nothing.
+    void learnBand (int slot) { listen ({ slot }, nullptr); }
+
+    // LEARN ALL: every band at once, from the same stretch of audio. With a `target` (a curve copied from another plugin: TARGET) the bands that
+    // stand out of its shape also get a lower THRESH (Target.h).
+    void learnAll (const pdsp::LinkCurve* target = nullptr)
     {
-        learning = { slot, swingDb, 0.0f, -120.0f };
-        setValue (proc.apvts, bandIds (slot).on, 1.0f);
+        const auto l = layoutOf (proc.apvts);
+        std::vector<int> slots;
+        for (int b = 0; b < l.numBands; ++b)
+            slots.push_back (l.slot[(size_t) b]);
+        listen (slots, target);
     }
-    int learningSlot() const noexcept { return learning.slot; }
+    void say (const juce::String& text) { notice = text; noticeSeconds = kNoticeSeconds; }
+    // The first band that is listening, or -1; isLearning says it for one.
+    int learningSlot() const noexcept
+    {
+        for (int i = 0; i < kBands; ++i)
+            if (learning.active[(size_t) i])
+                return i;
+        return -1;
+    }
+    bool isLearning (int slot) const noexcept { return learning.active[(size_t) slot]; }
 
     void paint (juce::Graphics& g) override
     {
@@ -146,9 +164,16 @@ public:
             hw::drawLabel (g, "Jumps " + juce::String (juce::roundToInt (swings[(size_t) i].swingDb)) + " dB", r.toNearestInt().withTrimmedBottom (5),
                            juce::Justification::centred, colours::warn, 8.5f);
         }
-        if (learning.slot >= 0)
-            hw::drawLabel (g, "Listening to the new band to set its threshold ...", area.toNearestInt().reduced (8, 18).removeFromTop (12),
-                           juce::Justification::right, colours::warn, 9.0f);
+        if (const int first = learningSlot(); first >= 0)
+        {
+            int n = 0;
+            for (bool a : learning.active)
+                n += a ? 1 : 0;
+            hw::drawLabel (g, n == 1 ? "Listening to band " + juce::String (first + 1) + " to set its compressor ..." : "Listening to " + juce::String (n) + " bands to set their compressors ...",
+                           area.toNearestInt().reduced (8, 18).removeFromTop (12), juce::Justification::right, colours::warn, 9.0f);
+        }
+        else if (noticeSeconds > 0.0f)
+            hw::drawLabel (g, notice, area.toNearestInt().reduced (8, 18).removeFromTop (12), juce::Justification::right, colours::warn, 9.0f);
         hw::drawGlassOverlay (g, frame, 4.0f, false);
     }
 
@@ -238,20 +263,99 @@ private:
         repaint();
     }
 
-    // A band made from a JUMPS marker: its threshold is set half the jump under the loudest level the band read.
+    void listen (const std::vector<int>& slots, const pdsp::LinkCurve* target)
+    {
+        for (int i = 0; i < kBands; ++i)
+            if (learning.active[(size_t) i])
+                proc.engine.learnCancel (i);
+        learning = {};
+        learning.hasTarget = target != nullptr;
+        if (target != nullptr)
+            learning.curve = *target;
+        noticeSeconds = 0.0f;
+        const auto layout = layoutOf (proc.apvts);
+        for (int slot : slots)
+        {
+            learning.active[(size_t) slot] = true;
+            for (int b = 0; b < layout.numBands; ++b)
+                if (layout.slot[(size_t) b] == slot)
+                    learning.edges[(size_t) slot] = { layout.edgeHz[(size_t) b], layout.edgeHz[(size_t) (b + 1)] };
+            setValue (proc.apvts, bandIds (slot).on, 1.0f);
+            proc.engine.learnStart (slot);
+        }
+    }
+
+    // The engine listens in audio time; this takes its answers, or gives up when no audio comes. The settings are written when every band
+    // that was listening has answered (with a target the bands are compared with each other first).
     void learn (float dt)
     {
-        if (learning.slot < 0)
+        noticeSeconds = std::max (0.0f, noticeSeconds - dt);
+        if (learningSlot() < 0)
             return;
         learning.seconds += dt;
-        if (learning.seconds > 0.3f) // the band has to start first
-            learning.loudestDb = std::max (learning.loudestDb, proc.engine.levelMeter[(size_t) learning.slot].load());
-        if (learning.seconds >= kLearnSeconds)
+        for (int i = 0; i < kBands; ++i)
         {
-            if (learning.loudestDb > -100.0f)
-                setValue (proc.apvts, bandIds (learning.slot).threshold, juce::jlimit (-60.0f, 0.0f, learning.loudestDb - 0.5f * learning.swingDb));
-            learning.slot = -1;
+            if (! learning.active[(size_t) i])
+                continue;
+            if (proc.engine.learnTake (i, learning.result[(size_t) i]))
+            {
+                learning.active[(size_t) i] = false;
+                learning.got[(size_t) i] = true;
+            }
+            else if (proc.engine.learnState (i) == Engine::LearnState::silent || learning.seconds >= kTimeoutSeconds)
+            {
+                proc.engine.learnCancel (i);
+                learning.active[(size_t) i] = false;
+                learning.silent = true;
+            }
         }
+        if (learningSlot() < 0)
+            finishLearning();
+    }
+
+    void finishLearning()
+    {
+        const auto l = layoutOf (proc.apvts);
+        std::array<double, kBands> shift {};
+        juce::String targetNote;
+        if (learning.hasTarget)
+        {
+            std::array<TargetBand, kBands> bands {};
+            int n = 0;
+            for (int slot = 0; slot < kBands; ++slot)
+                if (learning.edges[(size_t) slot][1] > 0.0) // the bands that listened, in the order of the spectrum (a slot is a band's strip)
+                    bands[(size_t) n++] = { learning.edges[(size_t) slot][0], learning.edges[(size_t) slot][1], (double) learning.result[(size_t) slot].typicalDb, learning.got[(size_t) slot] };
+            const auto s = targetShifts (learning.curve, bands, n);
+            int moved = 0, at = 0;
+            for (int slot = 0; slot < kBands; ++slot)
+                if (learning.edges[(size_t) slot][1] > 0.0)
+                {
+                    shift[(size_t) slot] = s[(size_t) at];
+                    moved += s[(size_t) at++] > 0.05 ? 1 : 0;
+                }
+            targetNote = moved > 0 ? "Target: " + juce::String (moved) + (moved == 1 ? " band stands" : " bands stand") + " out of the curve and got a lower THRESH."
+                                   : "Target: no band stands out of the curve.";
+        }
+        int set = 0;
+        for (int slot = 0; slot < kBands; ++slot)
+            if (learning.got[(size_t) slot])
+            {
+                const auto& ids = bandIds (slot);
+                const auto& r = learning.result[(size_t) slot];
+                setValue (proc.apvts, ids.threshold, (float) std::max (-60.0, (double) r.thresholdDb - shift[(size_t) slot]));
+                setValue (proc.apvts, ids.ratio, r.ratio);
+                setValue (proc.apvts, ids.attack, r.attackMs);
+                setValue (proc.apvts, ids.release, r.releaseMs);
+                ++set;
+            }
+        const bool someSilent = learning.silent;
+        learning = {};
+        if (set == 0)
+            say ("Heard nothing: play the part the band is for, then press LEARN again.");
+        else if (someSilent)
+            say ("Some bands heard nothing and were left as they were. " + targetNote);
+        else if (targetNote.isNotEmpty())
+            say (targetNote);
     }
 
     AtlasProcessor& proc;
@@ -263,6 +367,16 @@ private:
     int numPeaks = 0, numSwings = 0;
     int dragging = -1;
     juce::RangedAudioParameter* dragParam = nullptr;
-    struct Learning { int slot = -1; float swingDb = 0.0f, seconds = 0.0f, loudestDb = -120.0f; } learning;
+    struct Learning
+    {
+        std::array<bool, kBands> active {}, got {};
+        std::array<std::array<double, 2>, kBands> edges {}; // each listening band's lower and upper edge (Hz) when it started: a split moved meanwhile does not change what was heard
+        std::array<Learned, kBands> result {};
+        float seconds = 0.0f;
+        bool silent = false, hasTarget = false;
+        pdsp::LinkCurve curve;
+    } learning;
+    juce::String notice;
+    float noticeSeconds = 0.0f; // seconds left of the message
 };
 } // namespace atlas::gui

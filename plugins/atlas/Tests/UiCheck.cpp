@@ -6,6 +6,7 @@
 
 #include "Advice.h"
 #include "Check.h"
+#include <random>
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
 
@@ -22,8 +23,8 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 5 + 2 * kCrossovers + 10 * kBands,
-           fmt ("%d parameters: phase, oversampling, output, look-ahead, mix, the %d splits (frequency and on) and 10 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
+    check (proc.getParameters().size() == 5 + 2 * kCrossovers + 12 * kBands,
+           fmt ("%d parameters: phase, oversampling, output, look-ahead, mix, the %d splits (frequency and on) and 12 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
     check (channelNames.size() == kNumChannelModes && oversamplingNames.size() == kNumOsModes && lookaheadNames().size() == kNumLookahead && listenNames.size() == 2 && directionNames.size() == 2, "the choice lists match the engine's modes");
     for (int k = 0; k < kCrossovers; ++k)
         check (std::fabs (proc.apvts.getRawParameterValue (id::crossover[(size_t) k])->load() - (float) pdsp::bands::crossoverHz (k)) < 0.5f,
@@ -122,7 +123,7 @@ int main()
                "a JUMPS region of 70 to 160 Hz becomes a band with those edges, switched on");
         juce::AudioBuffer<float> audio (2, 512);
         juce::MidiBuffer noMidi;
-        for (int block = 0; block < 260; ++block)
+        for (int block = 0; block < 420; ++block)
         {
             for (int i = 0; i < 512; ++i)
             {
@@ -135,13 +136,19 @@ int main()
                 juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
         }
         const float learned = (float) readParams (proc.apvts).bands[1].thresholdDb;
+        const auto madeBand = readParams (proc.apvts).bands[1];
+        check (std::fabs (madeBand.attackMs - 20.0) < 0.5 && std::fabs (madeBand.releaseMs - 250.0) < 3.0 && madeBand.ratio > 1.2 && madeBand.ratio < 1.5,
+               fmt ("... and its RATIO, ATTACK and RELEASE are set too: %.2f:1, %.1f ms, %.0f ms", madeBand.ratio, madeBand.attackMs, madeBand.releaseMs));
         const float read = proc.engine.levelMeter[1].load(); // the tone is about 3 dB down inside a 70 to 160 Hz band
-        // The LEARN button of a strip: the same listening, with a 6 dB swing, so the threshold is 3 dB under the loudest the band read.
+        // The LEARN button of a strip: the same listening. A steady tone: THRESH 3 dB under it, the steady ATTACK and RELEASE, the gentlest RATIO.
         setValue (proc.apvts, bandIds (1).threshold, 0.0f);
+        setValue (proc.apvts, bandIds (1).attack, 1.0f);
+        setValue (proc.apvts, bandIds (1).release, 50.0f);
+        setValue (proc.apvts, bandIds (1).ratio, 10.0f);
         editor.strips[1]->learn.triggerClick();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
         check (view.learningSlot() == 1, "LEARN on a strip starts listening to that band");
-        for (int block = 0; block < 260; ++block)
+        for (int block = 0; block < 420; ++block)
         {
             for (int i = 0; i < 512; ++i)
             {
@@ -154,8 +161,11 @@ int main()
                 juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
         }
         const float learnedByButton = (float) readParams (proc.apvts).bands[1].thresholdDb;
-        check (view.learningSlot() < 0 && std::fabs (learnedByButton - (proc.engine.levelMeter[1].load() - 3.0f)) < 0.5f,
-               fmt ("... and two seconds later THRESH is %.1f dB, 3 dB under what the band reads (%.1f dB)", learnedByButton, (double) proc.engine.levelMeter[1].load()));
+        const auto learnedBand = readParams (proc.apvts).bands[1];
+        check (view.learningSlot() < 0 && std::fabs (learnedByButton - (proc.engine.levelMeter[1].load() - 3.0f)) < 1.0f,
+               fmt ("... and four seconds of audio later THRESH is %.1f dB, 3 dB under what the band reads (%.1f dB)", learnedByButton, (double) proc.engine.levelMeter[1].load()));
+        check (std::fabs (learnedBand.attackMs - 20.0) < 0.5 && std::fabs (learnedBand.releaseMs - 250.0) < 3.0 && learnedBand.ratio > 1.2 && learnedBand.ratio < 1.5,
+               fmt ("... and RATIO, ATTACK and RELEASE are set too: %.2f:1, %.1f ms, %.0f ms (a steady tone gets the steady times)", learnedBand.ratio, learnedBand.attackMs, learnedBand.releaseMs));
 
         // TO ALL: THRESH, RATIO, ATTACK and RELEASE go to every band, and nothing else does.
         setValue (proc.apvts, bandIds (1).ratio, 7.0f);
@@ -177,8 +187,78 @@ int main()
                 if (ranged->paramID.startsWith ("b") && ranged->paramID.contains ("_") && ranged->paramID != bandIds (0).channels) // band 1 keeps the M/S the next check reads
                     setValue (proc.apvts, ranged->paramID, ranged->convertFrom0to1 (ranged->getDefaultValue()));
 
-        check (read < -13.0f && read > -17.0f && std::fabs (learned - (read - 7.0f)) < 0.5f,
-               fmt ("... and after two seconds of a 100 Hz tone at -12 dB (%.1f dB in the band) its threshold is half the jump under that: %.1f dB", read, learned));
+        check (read < -13.0f && read > -17.0f && std::fabs (learned - (read - 3.0f)) < 1.0f,
+               fmt ("... and after four seconds of a 100 Hz tone at -12 dB (%.1f dB in the band) its threshold is 3 dB under that: %.1f dB", read, learned));
+
+        // AUTO T and AUTO R are switches of the strip, off in a fresh plugin.
+        check (! readParams (proc.apvts).bands[0].autoThreshold && ! readParams (proc.apvts).bands[0].autoRelease, "AUTO T and AUTO R start off: a session from before them sounds as it did");
+        editor.strips[0]->autoThr.triggerClick();
+        editor.strips[0]->autoRel.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        check (readParams (proc.apvts).bands[0].autoThreshold && readParams (proc.apvts).bands[0].autoRelease, "the strip's AUTO T and AUTO R switches set their parameters");
+        editor.strips[0]->autoThr.triggerClick();
+        editor.strips[0]->autoRel.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+
+        // LEARN ALL: every band listens at once, to the same noise, and each ends with its own THRESH. TARGET, with a flat shape, lowers the bands that stand out of it.
+        const auto playNoise = [&]
+        {
+            std::mt19937 gen (7);
+            std::uniform_real_distribution<float> d (-0.2f, 0.2f);
+            for (int block = 0; block < 420; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    audio.setSample (0, i, d (gen));
+                    audio.setSample (1, i, d (gen));
+                }
+                proc.processBlock (audio, noMidi);
+                if (block % 3 == 0)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+            }
+        };
+        const auto thresholds = [&]
+        {
+            std::array<double, kBands> t {};
+            for (int band = 0; band < layoutOf (proc.apvts).numBands; ++band)
+                t[(size_t) band] = readParams (proc.apvts).bands[(size_t) layoutOf (proc.apvts).slot[(size_t) band]].thresholdDb;
+            return t;
+        };
+        const auto clearThresholds = [&] { for (int slot = 0; slot < kBands; ++slot) setValue (proc.apvts, bandIds (slot).threshold, 0.0f); };
+        clearThresholds();
+        editor.learnAllButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        check (view.learningSlot() >= 0 && view.isLearning (0) && view.isLearning (5), "LEARN ALL starts every band listening");
+        playNoise();
+        const auto learnedAll = thresholds();
+        bool allSet = view.learningSlot() < 0;
+        for (int band = 0; band < layoutOf (proc.apvts).numBands; ++band)
+            allSet = allSet && learnedAll[(size_t) band] < -10.0;
+        check (allSet, fmt ("... and after four seconds every band has its own THRESH (%.1f, %.1f, %.1f, %.1f, %.1f, %.1f dB)", learnedAll[0], learnedAll[1], learnedAll[2], learnedAll[3], learnedAll[4], learnedAll[5]));
+        check (! editor.useTarget ("not a curve"), "TARGET with nothing on the clipboard says so and starts nothing");
+        pdsp::LinkCurve flatShape;
+        flatShape.f0Hz = 20.0;
+        flatShape.perOctave = 6.0;
+        flatShape.db.assign (61, 0.0);
+        clearThresholds();
+        check (editor.useTarget (juce::String (pdsp::link::encode ({}, &flatShape))), "TARGET with a curve on the clipboard starts the listening");
+        playNoise();
+        const auto targeted = thresholds();
+        double lowest = 0.0, highest = -100.0;
+        for (int band = 0; band < layoutOf (proc.apvts).numBands; ++band)
+        {
+            lowest = std::min (lowest, targeted[(size_t) band] - learnedAll[(size_t) band]);
+            highest = std::max (highest, targeted[(size_t) band] - learnedAll[(size_t) band]);
+        }
+        check (lowest < -2.0 && highest < 1.5, fmt ("... and a band that stands out of the flat shape gets a lower THRESH than LEARN ALL gave it (down to %.1f dB, none up by more than %.1f)", lowest, highest));
+        bool seen = false;
+        for (float v : editor.strips[1]->shownLevels)
+            seen = seen || v > 0.0f;
+        check (seen, "the strip's histogram has gathered the band's levels");
+        for (auto* param : proc.getParameters())
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+                if (ranged->paramID.startsWith ("b") && ranged->paramID.contains ("_") && ranged->paramID != bandIds (0).channels)
+                    setValue (proc.apvts, ranged->paramID, ranged->convertFrom0to1 (ranged->getDefaultValue()));
 
         editor.strips[2]->solo.triggerClick();
         editor.strips[2]->delta.triggerClick();
@@ -250,6 +330,11 @@ int main()
         check (has (adviceFor (in), "Every band is off", Severity::warning), "every band off: the plugin passes the sound");
         in = fine; in.bands[0].params.thresholdDb = 0.0;
         check (has (adviceFor (in), "THRESH is at the top", Severity::warning), "a threshold at the top: it hardly compresses");
+        in = fine; in.bands[0].params.thresholdDb = 0.0; in.bands[0].params.autoThreshold = true;
+        check (has (adviceFor (in), "AUTO T with THRESH at 0 dB", Severity::warning) && ! has (adviceFor (in), "THRESH is at the top", Severity::warning),
+               "AUTO T with THRESH at 0 dB: its own note, not 'at the top'");
+        in.bands[0].params.thresholdDb = -6.0;
+        check (adviceFor (in).empty(), "... and nothing at -6 dB");
         in = fine; in.bands[0].params.ratio = 1.0;
         check (has (adviceFor (in), "1:1", Severity::warning), "a ratio of 1:1 does nothing");
         in = fine; in.bands[0].params.ratio = 20.0;
