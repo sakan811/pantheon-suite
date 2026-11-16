@@ -284,6 +284,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> made (proc.createEditor());
         auto& editor = ui::innerOf<IrisEditor> (*made);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         made->setVisible (true);
         pump (150);
 
