@@ -73,6 +73,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<AtlasEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.getWidth() > 900 && editor.strips[5]->bounds.getRight() <= editor.getWidth() && editor.strips[5]->crossover == nullptr && editor.strips[0]->crossover != nullptr,
                "six strips fit the window; every band but the top one has the knob of its upper edge");
