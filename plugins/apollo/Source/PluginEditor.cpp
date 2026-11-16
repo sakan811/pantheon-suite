@@ -3,19 +3,22 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace apollo;
 namespace hw = ui::hw;
 
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int viewHeight = 262;
 constexpr int undoRowHeight = 22; // UNDO / REDO and CLEAR ALL, above the display
 constexpr int stripWidth = 156;
-constexpr int stripGap = 6;
+constexpr int stripGap = 8;
 constexpr int stripHeight = 332;
 constexpr int cellHeight = 104;
 constexpr int kTimerHz = 20;
+constexpr int kWidth = 24 + kBands * stripWidth + (kBands - 1) * stripGap, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape (1328 x 830)
+constexpr int viewHeight = kHeight - (headerHeight + 10 + undoRowHeight + 10 + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 constexpr int kPasteTicks = kTimerHz * 8; // eight seconds
 }
 
@@ -71,7 +74,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     showTypes();
-    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + undoRowHeight + 10 + viewHeight + 10 + stripHeight + 8 + ui::kNoteStripHeight + 12); // last: it lays everything out
+    setSize (kWidth, kHeight); // last: it lays everything out
 }
 
 ApolloEditor::~ApolloEditor()

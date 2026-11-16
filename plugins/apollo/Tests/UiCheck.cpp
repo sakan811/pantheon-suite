@@ -68,6 +68,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<ApolloEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.getWidth() > 900 && editor.strips[7]->bounds.getRight() <= editor.getWidth() && editor.strips[0]->type.getNumItems() == kNumTypes, "eight strips fit the window and have the parameters' items");
         check (editor.strips[3]->gain.isVisible() && editor.strips[3]->q.isVisible() && ! editor.strips[3]->slope.isVisible(), "a bell shows GAIN and Q");
