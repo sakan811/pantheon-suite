@@ -79,9 +79,9 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
 
     showIdleStatus();
 
-    setResizable (true, true);
-    setResizeLimits (kMinWidth, 780, 2200, 1300);
-    setSize (kMinWidth, 780); // opens at the smallest size it supports; the corner scales it up (setResizeLimits above)
+    grips = std::make_unique<ui::ResizeGrips> (*this, kMinWidth, kMinWidth, kMaxWidth); // drag any corner: the window keeps 16:10 between its smallest and largest size
+    addAndMakeVisible (*grips);
+    setSize (kMinWidth, kMinHeight); // opens at the smallest size it supports; the corners scale it up (the limits above)
     advicePanel.refresh();
     startTimerHz (30);
 }
@@ -282,6 +282,8 @@ void ThemisEditor::paint (juce::Graphics& g)
 
 void ThemisEditor::resized()
 {
+    if (grips != nullptr)
+        grips->setBounds (getLocalBounds());
     auto r = getLocalBounds().reduced (10, 8);
 
     auto head = r.removeFromTop (kHeaderHeight - 8);
