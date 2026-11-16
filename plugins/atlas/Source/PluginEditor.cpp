@@ -3,19 +3,22 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace atlas;
 namespace hw = ui::hw;
 
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int stripHeight = 640;
+constexpr int stripHeight = 536; // the six knobs are three across and two down
 constexpr int toolbarHeight = 26;
 constexpr int stripGap = 8;
-constexpr int stripWidth = 196;
-constexpr int viewHeight = 230;
+constexpr int stripWidth = 264;
 constexpr int cellHeight = 104; // a knob: name, knob, read-out
 constexpr int kTimerHz = 30;
+constexpr int kWidth = 24 + kBands * stripWidth + (kBands - 1) * stripGap, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape (1648 x 1030)
+constexpr int viewHeight = kHeight - (headerHeight + 10 + 8 + toolbarHeight + 8 + stripHeight + 6 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 
 juce::String hzName (double hz) { return hz < 1000.0 ? juce::String (juce::roundToInt (hz)) + " Hz" : juce::String (hz / 1000.0, hz < 10000.0 ? 1 : 0) + " kHz"; }
 }
@@ -102,7 +105,7 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
         addAndMakeVisible (*c);
 
     startTimerHz (kTimerHz);
-    setSize (24 + kBands * stripWidth + (kBands - 1) * stripGap, headerHeight + 10 + viewHeight + 8 + toolbarHeight + 8 + stripHeight + 6 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 AtlasEditor::~AtlasEditor()
@@ -234,7 +237,7 @@ void AtlasEditor::layoutStrips()
         r.removeFromTop (6);
         s.histogram = r.removeFromTop (36);
         r.removeFromTop (6);
-        const int cell = r.getWidth() / 2;
+        const int cell = r.getWidth() / 3;
         // The edge knob belongs to the strip only while the split above the band is the strip's own (the editor keeps it so).
         ui::Knob* knobs[] = { &s.threshold, &s.ratio, &s.attack, &s.release, &s.makeup, l.splitAbove[(size_t) b] == l.slot[(size_t) b] ? s.crossover.get() : nullptr };
         for (auto* c : s.components())
@@ -243,7 +246,7 @@ void AtlasEditor::layoutStrips()
             if (knobs[k] != nullptr)
             {
                 knobs[k]->setVisible (true);
-                knobs[k]->setBounds (r.getX() + cell * (k % 2), r.getY() + cellHeight * (k / 2), cell, cellHeight);
+                knobs[k]->setBounds (r.getX() + cell * (k % 3), r.getY() + cellHeight * (k / 3), cell, cellHeight);
             }
     }
     repaint();
