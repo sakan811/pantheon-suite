@@ -13,6 +13,7 @@
 #include "UsageNotes.h"
 
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Resize.h>
 
 #include <functional>
 #include <memory>
@@ -45,6 +46,7 @@ private:
 
     static constexpr const char* kCurveExtension = ".themiscurve";
     static constexpr int kMinWidth = 1400;     // the smallest (and opening) width: the header's two rows of controls need it
+    static constexpr int kMinHeight = ui::editorHeightFor (kMinWidth), kMaxWidth = 2080, kMaxHeight = ui::editorHeightFor (kMaxWidth); // 16:10 all the way (1400 x 875 to 2080 x 1300)
     static constexpr int kHistoryHeight = 240; // the two time graphs along the bottom
     static constexpr int kHeaderHeight = 84;   // the control panel along the top
     static constexpr int kTitleWidth = 196;    // the nameplate; the header rows start after it
@@ -73,6 +75,7 @@ private:
     juce::TooltipWindow tooltipWindow { this, 600 };
 
     std::unique_ptr<juce::FileChooser> chooser;
+    std::unique_ptr<ui::ResizeGrips> grips; // the four corners; added last, so it is on top
     juce::Rectangle<int> nameplate, statusWindow;
     int statusTicks = 0, planTicks = 0;
     float shownCeilingDb = 0.0f; // the true-peak ceiling the graphs were last judged against

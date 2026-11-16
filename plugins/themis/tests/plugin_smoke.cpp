@@ -865,8 +865,15 @@ int main (int argc, char** argv)
                         CHECK (writePng (picture, argv[3]));
                 }
             proc.releaseHeldCurve();
-            editor->setSize (1400, 780);
-            editor->setSize (2200, 1300);
+            editor->setSize (1400, 875);
+            CHECK (ui::hasEditorAspect (editor->getWidth(), editor->getHeight()), "the smallest window is 16:10");
+            editor->setSize (2080, 1300);
+            CHECK (ui::hasEditorAspect (editor->getWidth(), editor->getHeight()), "the largest window is 16:10");
+            int gripCount = 0;
+            for (auto* child : editor->getChildren())
+                if (dynamic_cast<ui::ResizeGrips*> (child) != nullptr)
+                    ++gripCount;
+            CHECK (gripCount == 1 && editor->getConstrainer()->getFixedAspectRatio() == ui::kEditorAspect, "the window has the kit's four corner handles and keeps 16:10");
             pump (100);
             // Closing the editor ends what only it shows and keeps current: the audition (its panel is the only place it is shown) and the listening aids.
             themis::Switches engaged;
