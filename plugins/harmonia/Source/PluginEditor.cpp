@@ -21,10 +21,11 @@ const Preset kPresets[3] = {
 };
 
 const juce::Identifier kScaleProperty { "uiScale" };
-constexpr int kKnobX = 190, kKnobW = 111, kKnobTop = 412, kKnobH = 140, kNumKnobs = 6;
+constexpr int kWide = 120; // what 16:10 adds to the width the layout was drawn for (880): the graph, the key module and the knobs take it
+constexpr int kKnobX = 190, kKnobW = 111 + kWide / 6, kKnobTop = 412, kKnobH = 140, kNumKnobs = 6;
 constexpr int kRowTop = 96, kRowH = 292;       // the graph and the key module
 constexpr int kStyleTop = 400, kStyleH = 168;  // the style and knob module
-const juce::Rectangle<int> kNoteStrip { 20, kStyleTop + kStyleH + 6, 840, ui::kNoteStripHeight }; // the notes, under it
+const juce::Rectangle<int> kNoteStrip { 20, kStyleTop + kStyleH + 6, 840 + kWide, ui::kNoteStripHeight }; // the notes, under it
 } // namespace
 
 HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
@@ -113,9 +114,8 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
     setupKnob (5, ids::tuning, "TUNING (A4)",
                "Reference pitch for A4. Change it if the song is not tuned to 440 Hz.");
 
-    setResizable (true, true);
-    setResizeLimits (kDesignW * 3 / 4, kDesignH * 3 / 4, kDesignW * 2, kDesignH * 2);
-    getConstrainer()->setFixedAspectRatio ((double) kDesignW / (double) kDesignH);
+    grips = std::make_unique<ui::ResizeGrips> (*this, kDesignW * 3 / 4, kDesignW, kDesignW * 2); // all four corners, 16:10, 75% to 200%
+    addAndMakeVisible (*grips);
     // The size is kept with the session (a property of the state, as the other plug-ins keep `uiScale`), so the window opens as it was left.
     // (read at the top of the constructor: setResizeLimits resizes the window and resized() writes the property)
     setSize (juce::roundToInt ((float) kDesignW * savedScale), juce::roundToInt ((float) kDesignH * savedScale));
@@ -139,29 +139,31 @@ void HarmoniaEditor::setupKnob (int index, const char* id, const juce::String& t
 void HarmoniaEditor::resized()
 {
     content.setBounds (0, 0, kDesignW, kDesignH);
+    if (grips != nullptr)
+        grips->setBounds (getLocalBounds());
     const float scale = (float) getWidth() / (float) kDesignW;
     content.setTransform (juce::AffineTransform::scale (scale));
     if (std::fabs (scale - (float) (double) proc.apvts.state.getProperty (kScaleProperty, -1.0)) > 0.002f)
         proc.apvts.state.setProperty (kScaleProperty, (double) scale, nullptr);
 
-    rangeBox.setBounds (580, 36, 190, 28);
-    bypassButton.setBounds (784, 36, 76, 28);
+    rangeBox.setBounds (580 + kWide, 36, 190, 28);
+    bypassButton.setBounds (784 + kWide, 36, 76, 28);
     resetButton.setBounds (kLatencyBounds.getRight() + 16, 36, 84, 28);
     guideButton.setBounds (resetButton.getRight() + 10, 36, 76, 28);
     undoButtons.setBounds (kLatencyBounds.getX(), 6, ui::UndoButtons::kWidth, 17); // in the strip above the controls, which the captions leave free
     abButtons.setBounds (kLatencyBounds.getX() + ui::UndoButtons::kWidth + 10, 6, ui::AbButtons::kWidth, 17);
 
-    graph.setBounds (20, kRowTop, 560, kRowH);
+    graph.setBounds (20, kRowTop, 560 + kWide, kRowH);
 
-    keyBox.setBounds (616, kRowTop + 38, 82, 28);
-    scaleBox.setBounds (706, kRowTop + 38, 138, 28);
-    detectButton.setBounds (616, kRowTop + 76, 146, 32);
-    autoKeyButton.setBounds (770, kRowTop + 76, 74, 32);
-    statusLabel.setBounds (616, kRowTop + 114, 228, 34);
-    keyboard.setBounds (616, kRowTop + 154, 228, 100);
+    keyBox.setBounds (616 + kWide, kRowTop + 38, 82, 28);
+    scaleBox.setBounds (706 + kWide, kRowTop + 38, 138, 28);
+    detectButton.setBounds (616 + kWide, kRowTop + 76, 146, 32);
+    autoKeyButton.setBounds (770 + kWide, kRowTop + 76, 74, 32);
+    statusLabel.setBounds (616 + kWide, kRowTop + 114, 228, 34);
+    keyboard.setBounds (616 + kWide, kRowTop + 154, 228, 100);
 
     for (int i = 0; i < 4; ++i)
-        noteButtons[i].setBounds (616 + i * 58, kRowTop + 260, 54, 24);
+        noteButtons[i].setBounds (616 + kWide + i * 58, kRowTop + 260, 54, 24);
 
     for (int i = 0; i < 3; ++i)
         presetButtons[i].setBounds (36, kStyleTop + 40 + i * 40, 130, 32);
@@ -188,19 +190,19 @@ void HarmoniaEditor::paintContent (juce::Graphics& g)
     hw::drawLabel (g, "Voice", { rangeBox.getX() + 2, rangeBox.getY() - 14, 90, 12 }, juce::Justification::left, colours::dim, 9.0f);
 
     // key and scale
-    hw::drawModule (g, juce::Rectangle<float> (600.0f, (float) kRowTop, 260.0f, (float) kRowH));
-    hw::drawLabel (g, "Key & scale", { 620, kRowTop + 12, 220, 16 }, juce::Justification::left, colours::text, 10.5f);
+    hw::drawModule (g, juce::Rectangle<float> ((float) (600 + kWide), (float) kRowTop, 260.0f, (float) kRowH));
+    hw::drawLabel (g, "Key & scale", { 620 + kWide, kRowTop + 12, 220, 16 }, juce::Justification::left, colours::text, 10.5f);
     if (keysLocked)
     {
         g.setColour (colours::dim);
         g.setFont (ui::font (11.0f));
-        g.drawText ("Follows your vocal", 716, kRowTop + 10, 128, 20, juce::Justification::centredRight);
+        g.drawText ("Follows your vocal", 716 + kWide, kRowTop + 10, 128, 20, juce::Justification::centredRight);
     }
 
     ui::drawNoteStrip (g, kNoteStrip, harmonia::adviceFor (adviceInput()));
 
     // style and the knobs
-    hw::drawModule (g, juce::Rectangle<float> (20.0f, (float) kStyleTop, 840.0f, (float) kStyleH));
+    hw::drawModule (g, juce::Rectangle<float> (20.0f, (float) kStyleTop, (float) (840 + kWide), (float) kStyleH));
     hw::drawLabel (g, "Style", { 40, kStyleTop + 14, 120, 16 }, juce::Justification::left, colours::text, 10.5f);
     g.setColour (juce::Colours::black.withAlpha (0.6f)); // a groove between the presets and the knobs
     g.fillRect (180.0f, (float) kStyleTop + 16.0f, 1.0f, 136.0f);
@@ -317,7 +319,7 @@ void HarmoniaEditor::timerCallback()
     if (following != keysLocked)
     {
         keysLocked = following;
-        content.repaint (716, kRowTop + 10, 128, 20);
+        content.repaint (716 + kWide, kRowTop + 10, 128, 20);
         for (auto& b : noteButtons)
             b.setEnabled (! keysLocked);
     }
