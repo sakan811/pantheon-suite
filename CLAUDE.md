@@ -75,7 +75,7 @@ code-checker ┘   (edits)   (the diff)      (completeness)     (only on request
   buttons. The namespaces (`colours`, `ui`, `ui::hw`) are kept short on purpose.
 - Everything is drawn from code: no image or font files, nothing random at run time.
 - **A change here changes every plugin that uses it.** Build all of them, and regenerate and look at each plugin's
-  screenshots (the command is in that plugin's README). A look change that should be only one plugin's belongs in that
+  screenshots (the command is in that plugin's README; a regenerated picture that is byte-identical to the committed one needs no look). A look change that should be only one plugin's belongs in that
   plugin, not in the kit.
 
 ## shared/dsp
