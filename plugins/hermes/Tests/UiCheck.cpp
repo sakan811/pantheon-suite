@@ -52,6 +52,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<HermesEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.getWidth() > 800 && editor.levelMatch.getRight() <= editor.getWidth() && editor.levelMatch.getBottom() < editor.getHeight(), "the controls fit the window");
         editor.loadFile (juce::File ("/nonexistent/nothing.wav"));
