@@ -108,6 +108,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<AegisEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.lookaheadBox.getNumItems() == kNumLookahead, "the look-ahead selector has the parameter's items");
         check (editor.getWidth() > 600 && editor.releaseKnob.getRight() < editor.lookaheadBox.getX() && editor.truePeakButton.getBottom() < editor.getHeight(), "the controls fit the window");

@@ -3,16 +3,18 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace aegis;
 namespace hw = ui::hw;
 
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int displayHeight = 190;
 constexpr int controlsHeight = 118;
 constexpr int kTimerHz = 30;
-constexpr int kWidth = 780;
+constexpr int kWidth = 784, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
+constexpr int displayHeight = kHeight - (headerHeight + 10 + 10 + controlsHeight + 8 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 constexpr float kReadoutWidth = 150.0f; // the right side of the glass: numbers, then the IN and OUT bars (paint() and the CLEAR button's place in resized())
 constexpr int kPasteTicks = 30 * 8; // eight seconds
 }
@@ -40,7 +42,7 @@ AegisEditor::AegisEditor (AegisProcessor& p)
     clearOutButton.setTooltip ("Clear the OUT PEAK hold and the MAX REDUCTION hold (clicking the MAX REDUCTION number clears that one alone). They also clear when CEILING or TRUE PEAK changes, because the old peaks were read against another limit.");
     clearOutButton.onClick = [this] { outHold = gui::kLevelFloorDb; reductionHold = 0.0f; };
     startTimerHz (kTimerHz);
-    setSize (kWidth, headerHeight + 10 + displayHeight + 10 + controlsHeight + 8 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 AegisEditor::~AegisEditor() { setLookAndFeel (nullptr); }
