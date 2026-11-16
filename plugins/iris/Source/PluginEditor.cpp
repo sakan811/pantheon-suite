@@ -3,13 +3,15 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace iris;
 using namespace iris::gui;
 
 namespace
 {
 constexpr int kTimerHz = 30;
-constexpr int editorWidth = 1180, editorHeight = 704 + ui::kNoteStripHeight + 6 + 12 - 18; // the foot strip: notes, or the reminder of GUIDE
+constexpr int editorWidth = 1184, editorHeight = ui::editorHeightFor (editorWidth); // 16:10, the kit's shape (the foot strip is in it: notes, or the reminder of GUIDE)
 constexpr int headerHeight = 84;   // the control panel along the top
 constexpr int viewHeight = 322;
 constexpr int cellHeight = 104;    // a knob: name, knob, read-out
