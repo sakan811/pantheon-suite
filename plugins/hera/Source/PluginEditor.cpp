@@ -3,18 +3,21 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace hera;
 namespace hw = ui::hw;
 
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int displayHeight = 230;
 constexpr int kKnobs = 9;
 constexpr int cellWidth = 96;
 constexpr int cellHeight = 108;
 constexpr int rowHeight = 34;
 constexpr int kTimerHz = 30;
+constexpr int kWidth = 24 + kKnobs * cellWidth, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
+constexpr int displayHeight = kHeight - (headerHeight + 10 + 8 + cellHeight + 8 + rowHeight + 10 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 }
 
 HeraEditor::HeraEditor (HeraProcessor& p)
@@ -49,7 +52,7 @@ HeraEditor::HeraEditor (HeraProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &levelMatch, &deltaButton, &listenButton, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
-    setSize (24 + kKnobs * cellWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + rowHeight + 10 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 HeraEditor::~HeraEditor()
