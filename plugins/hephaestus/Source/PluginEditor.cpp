@@ -3,12 +3,14 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace hep;
 using namespace hep::gui;
 
 namespace
 {
-constexpr int editorWidth = 1040, editorHeight = 652;
+constexpr int editorWidth = 1040, editorHeight = ui::editorHeightFor (editorWidth); // 16:10, the kit's shape; the spectrum takes what the panels leave
 constexpr int headerHeight = 84;   // the control panel along the top
 constexpr int cellHeight = 104;    // a knob: name, knob, read-out
 constexpr int panelRowHeight = 284;
@@ -531,7 +533,7 @@ void HephaestusEditor::resized()
     }
 
     bounds.removeFromTop (10);
-    spectrum.setBounds (bounds.removeFromTop (224));
+    spectrum.setBounds (bounds.removeFromTop (222)); // 224 less the 2 px the 16:10 height (editorHeight) takes
     bounds.removeFromTop (6);
     {
         // Each switch spans its band on the display's own axis (the plot is the display less 6 px each side).
