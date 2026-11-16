@@ -13,6 +13,7 @@
 #include "Advice.h"
 #include "PluginProcessor.h"
 #include "UI/SpectrumView.h"
+#include <pantheon/ui/Aspect.h>
 #include <pantheon/ui/Controls.h>
 
 using namespace hep;
@@ -337,6 +338,7 @@ int main()
         };
         {
             HephaestusEditor editor (host);
+            check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
             auto& m = host.engine.monitor;
             check (m.soloBand.load() == -1, "no solo to begin with");
             check (pressed (editor, "SOLO ADDS") && m.soloBand.load() == 0 && m.soloKind.load() == (int) SoloKind::adds,
