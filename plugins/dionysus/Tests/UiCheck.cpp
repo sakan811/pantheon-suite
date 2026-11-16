@@ -69,6 +69,7 @@ int main()
     {
         std::unique_ptr<juce::AudioProcessorEditor> holder (proc.createEditor());
         auto& editor = ui::innerOf<DionysusEditor> (*holder);
+        check (ui::hasEditorAspect (editor.getWidth(), editor.getHeight()), "the editor is drawn at 16:10, the shape of every plugin");
         editor.setVisible (true);
         check (editor.shape.getNumItems() == kNumShapes && editor.oversampling.getNumItems() == kNumOversampling, "the selectors have the parameters' items");
         check (editor.getWidth() > 700 && editor.out.getRight() < editor.shape.getX() && editor.autoGain.getRight() <= editor.getWidth() && editor.autoGain.getBottom() < editor.getHeight(), "the controls fit the window");

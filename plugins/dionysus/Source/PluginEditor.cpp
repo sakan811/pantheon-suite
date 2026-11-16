@@ -3,17 +3,19 @@
 
 #include "PluginEditor.h"
 
+#include <pantheon/ui/Aspect.h>
+
 using namespace dionysus;
 namespace hw = ui::hw;
 
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int displayHeight = 220;
 constexpr int cellWidth = 112;
 constexpr int cellHeight = 108;
 constexpr int kTimerHz = 20;
-constexpr int kWidth = 1000;
+constexpr int kWidth = 1000, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
+constexpr int displayHeight = kHeight - (headerHeight + 10 + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 constexpr int kMeterWidth = 92;
 constexpr float kMeterMinDb = -36.0f, kMeterMaxDb = 12.0f; // the drive meter's scale: 0 dB is where the curves turn over
 }
@@ -44,7 +46,7 @@ DionysusEditor::DionysusEditor (DionysusProcessor& p)
     deltaButton.setTooltip ("Listen to only what the saturator adds (output minus input, delayed like it). Not saved with the project, and it ends when the window closes.");
     deltaButton.onClick = [this] { proc.engine.delta = deltaButton.getToggleState(); };
     startTimerHz (kTimerHz);
-    setSize (kWidth, headerHeight + 10 + displayHeight + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12);
+    setSize (kWidth, kHeight);
 }
 
 DionysusEditor::~DionysusEditor()
