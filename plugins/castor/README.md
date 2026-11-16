@@ -10,7 +10,7 @@ namespaces and plugin codes use the short name "Castor".)
 
 ![Castor Pair](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz. The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. Under the correlation bar, LISTEN is on Stereo and MIN shows the lowest correlation the bar has read (0.88). Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz; the glass above the six knobs draws those widths as bars over their knobs (the amber line is 100%, the sides as recorded, and the top is 200%). The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. Under the correlation bar, LISTEN is on Stereo and MIN shows the lowest correlation the bar has read (0.88). Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -24,7 +24,7 @@ namespaces and plugin codes use the short name "Castor".)
 | **Listen** | A check on what you hear, after everything: *Stereo* (as it is; the default), *Mono* (`(L + R) / 2` in both channels: what a mono speaker plays; what is out of phase vanishes) or *Side* (`(L - R) / 2` in both: only what differs between the channels). The goniometer and the correlation still read the sound as it is. Presets set it back to Stereo, and a note reminds you before a bounce. |
 | **Presets** | Seven starting points (Init, Mono Bass, Club Safe, Widen Highs, Wide Master, Narrow Mix, Vocal Forward). A preset sets the widths, MID, SIDE and MONO BELOW; BALANCE and OUTPUT are kept. |
 
-The goniometer draws the last 1536 samples of the output as a cloud, left and right turned a quarter (a vertical line is mono, a horizontal one out of phase); the bar under it is the
+The glass above the band knobs shows the six widths at once as bars (a drawing of the knobs, nothing measured; its top is 200% and the amber line is 100%). The goniometer draws the last 1536 samples of the output as a cloud, left and right turned a quarter (a vertical line is mono, a horizontal one out of phase); the bar under it is the
 correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase. **MIN** (beside LISTEN) is the lowest it has read since you last clicked it, also drawn as a thin mark on the bar: a dip under 0 is a moment that cancels in mono, even if it is over when you look.
 
 ## How it works
