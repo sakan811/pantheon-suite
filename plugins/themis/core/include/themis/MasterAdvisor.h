@@ -6,6 +6,7 @@
 #include "EqMove.h"
 #include "Audition.h"
 #include "ClipMeter.h"
+#include "DeliveryTargets.h"
 #include "HistoryChecks.h"
 #include "Loudness.h"
 #include "LowCrestMeter.h"
@@ -35,12 +36,21 @@ inline constexpr double kMinSeconds = 20.0; // less audio than this and the long
 
 // Programme loudness against the chosen delivery target, in LU (= dB).
 inline constexpr float kLoudnessWarnLu = 2.0f, kLoudnessBadLu = 4.0f;
-inline constexpr float kStreamingLufs = -14.0f; // what the big streaming services normalise to: a louder master is turned down (some also lift a quieter one, but only as far as its true peak allows)
+
+// Squashed: the peak-to-loudness ratio (true peak minus integrated LUFS) is how far the peaks stand above the average. A
+// limiter held at its ceiling pins the peaks just above the average, so a small ratio is what hard limiting looks like.
+// Rule of thumb, not measured data: below 6 dB the peaks stand less than 6 dB above the average (warn); below 4 dB almost
+// nothing rises above the average, the level is nearly constant (bad). Some genres are squashed on purpose, hence the wording.
+inline constexpr float kPlrWarnDb = 6.0f, kPlrBadDb = 4.0f;
+
+// Peak-to-loudness ratio, dB: the true peak above the integrated loudness (the loudness readout and the plan use this one).
+inline float plrDb (float truePeakDb, float integratedLufs) { return truePeakDb - integratedLufs; }
+inline Level plrLevel (float plr) { return plr < kPlrBadDb ? Level::bad : plr < kPlrWarnDb ? Level::warn : Level::good; }
 
 } // namespace master
 
 // What an item is about; the order is the order of priority among items of the same severity.
-enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, swing, dcOffset };
+enum class Topic { clipping, loudness, squashed, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, swing, dcOffset };
 
 struct Advice
 {
@@ -61,10 +71,10 @@ struct MasterInputs
 
     bool haveLoudness = false;
     float integratedLufs = LoudnessMeter::kSilence;
-    float targetLufs = master::kStreamingLufs; // the delivery the master is for
+    float targetLufs = delivery::kStreamingLufs; // the delivery the master is for
     std::string deliveryName = "Streaming";
 
-    ClipTotals clip; // peaks and clips since the reset
+    ClipTotals clip; // peaks, clips and the mean square since the reset (its crest factor is a readout)
     float truePeakCeilingDb = history::clip::kTruePeakWarnDb; // the true-peak ceiling the master is held to (the user's setting)
 
     TranslationReport translation; // mono fold (the device part is not used: it is judged against the reference curve)
@@ -76,6 +86,11 @@ struct MasterInputs
     float lowCrestDb = 0.0f;
 
     std::vector<FrameStats> frames; // the history window, oldest first
+
+    // Readouts only (no item judges them): the loudest 3 s since the reset, and the silence before and after the sound.
+    float maxShortTermLufs = LoudnessMeter::kSilence;
+    bool haveSilence = false;
+    double leadingSilenceSeconds = 0.0, trailingSilenceSeconds = 0.0;
 };
 
 struct MasterAdvice
@@ -108,7 +123,7 @@ inline constexpr float kMinBoostDb = 0.5f; // the least: under it a suggested be
 
 inline Advice make (Level level, Topic topic, std::string headline, std::string why, Switches hear = {})
 {
-    return { level, topic, std::move (headline), std::move (why), hear, {} };
+    return { level, topic, std::move (headline), std::move (why), hear, {}, {} };
 }
 
 // What a check about one of the readouts' ranges (a column of kEnergyRanges) plays: every audition band that overlaps it.
@@ -211,16 +226,16 @@ inline MasterAdvice advise (const MasterInputs& in)
         check (level);
         if (level != Level::good)
         {
-            const float plr = in.clip.have ? in.clip.truePeakDb - in.integratedLufs : 0.0f;
+            const float plr = in.clip.have ? master::plrDb (in.clip.truePeakDb, in.integratedLufs) : 0.0f;
             const std::string plrText = in.clip.have ? format (" Peak-to-loudness ratio %.1f dB.", static_cast<double> (plr)) : std::string();
             if (deltaLu > 0.0f)
             {
-                const bool streaming = std::abs (in.targetLufs - master::kStreamingLufs) <= 0.5f; // the text below is about the -14 LUFS services
+                const bool streaming = std::abs (in.targetLufs - delivery::kStreamingLufs) <= 0.5f; // the text below is about the -14 LUFS services
                 out.items.push_back (make (level, Topic::loudness,
                                            format ("Take about %s dB off the limiter's gain: %.1f LUFS against a %.0f LUFS %s target", master::rounded (deltaLu).c_str(),
                                                    static_cast<double> (in.integratedLufs), static_cast<double> (in.targetLufs), in.deliveryName.c_str()),
                                            std::string (streaming ? format ("Streaming services turn a master louder than %.0f LUFS down, so the extra %.1f dB buys no loudness there and costs punch.",
-                                                                            static_cast<double> (master::kStreamingLufs), static_cast<double> (in.integratedLufs - master::kStreamingLufs))
+                                                                            static_cast<double> (delivery::kStreamingLufs), static_cast<double> (in.integratedLufs - delivery::kStreamingLufs))
                                                                   : format ("%.1f LU above the target.", static_cast<double> (deltaLu)))
                                                + plrText));
                 out.items.back().limiter = { false, true, 0.0f, -deltaLu };
@@ -245,6 +260,25 @@ inline MasterAdvice advise (const MasterInputs& in)
 
     if (out.measuring)
         return out; // everything below is a long-term average
+
+    // ---- squashed: how far the peaks stand above the average (a rule of thumb, see master::kPlrWarnDb) -----
+    if (in.haveLoudness && in.clip.have)
+    {
+        const float plr = master::plrDb (in.clip.truePeakDb, in.integratedLufs);
+        const Level level = master::plrLevel (plr);
+        check (level);
+        if (level != Level::good)
+        {
+            const std::string crest = in.clip.haveCrest() ? format (", crest factor %.1f dB across the full band", static_cast<double> (in.clip.crestDb())) : std::string();
+            out.items.push_back (make (level, Topic::squashed,
+                                       format ("Peaks sit only %.1f dB above the average: squashed, ease the limiting", static_cast<double> (plr)),
+                                       format ("Peak-to-loudness ratio %.1f dB (true peak %+.1f dBTP against %.1f LUFS integrated)%s. A limiter held hard "
+                                               "pins the peaks just above the average, so the level barely moves and the master loses punch on small speakers. "
+                                               "Rule of thumb, not a fault in itself: some genres are squashed on purpose. The warning is under %.0f dB, bad under %.0f dB.",
+                                               static_cast<double> (plr), static_cast<double> (in.clip.truePeakDb), static_cast<double> (in.integratedLufs), crest.c_str(),
+                                               static_cast<double> (master::kPlrWarnDb), static_cast<double> (master::kPlrBadDb))));
+        }
+    }
 
     // ---- stereo: phase, then bass, then the whole spectrum --------------------------------------
     if (in.havePhase && in.phase.have)
@@ -513,7 +547,7 @@ inline std::string planAsText (const MasterInputs& in, const MasterAdvice& advic
     if (in.clip.have)
         part (format ("true peak %+.1f dBTP", static_cast<double> (in.clip.truePeakDb)));
     if (in.haveLoudness && in.clip.have)
-        part (format ("PLR %.1f dB", static_cast<double> (in.clip.truePeakDb - in.integratedLufs)));
+        part (format ("PLR %.1f dB", static_cast<double> (master::plrDb (in.clip.truePeakDb, in.integratedLufs))));
     const int seconds = static_cast<int> (in.analysedSeconds);
     part (format ("%d:%02d analysed", seconds / 60, seconds % 60));
     out += "Measured: " + measured + "\n";

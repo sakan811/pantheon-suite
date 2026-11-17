@@ -11,6 +11,23 @@
 
 namespace themis
 {
+// How far the loudest 3 s since the reset sit above the integrated loudness, in LU: a readout (the loudest section of a
+// track against its average). Nothing is judged on it, so there is no limit here.
+struct LoudestSection
+{
+    bool have = false;
+    float aboveAverageLu = 0.0f;
+};
+
+inline LoudestSection loudestSection (float maxShortTermLufs, float integratedLufs)
+{
+    LoudestSection s;
+    const float cleared = LoudnessMeter::kSilence + 1.0f;
+    s.have = maxShortTermLufs > cleared && integratedLufs > cleared;
+    s.aboveAverageLu = s.have ? maxShortTermLufs - integratedLufs : 0.0f;
+    return s;
+}
+
 // Programme loudness (ITU-R BS.1770 / EBU R128) of the signal flowing through, for judging a master against streaming
 // normalisation and for the peak-to-loudness ratio: LoudnessMeter on the audio thread, the results published through
 // atomics. Monitoring only: the samples are read, never written.

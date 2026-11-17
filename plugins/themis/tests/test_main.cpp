@@ -3,6 +3,7 @@
 
 // Self-contained tests for the Themis DSP core (no framework dependency).
 #include <themis/Audition.h>
+#include <themis/DeliveryTargets.h>
 #include <themis/Compressor.h>
 #include <themis/Engine.h>
 #include <themis/Biquad.h>
@@ -3061,6 +3062,172 @@ TEST (plan_opens_its_why_in_plain_words)
     crest.lowCrestDb = 13.0f;
     const auto* spiky = pick (crest, Topic::lowCrest);
     CHECK (spiky != nullptr && spiky->why.rfind ("The bass has isolated peaks", 0) == 0);
+}
+
+// ---- delivery targets, crest factor, loudest section, tilt, sound edges, squashed peaks -------------------------------
+TEST (delivery_targets_are_one_list_with_the_offset_to_each)
+{
+    CHECK (delivery::kCount == 5 && delivery::kLufs[0] == -14.0f && delivery::kLufs[1] == -9.0f && delivery::kLufs[2] == -18.0f
+           && delivery::kLufs[3] == -16.0f && delivery::kLufs[4] == -23.0f);
+    CHECK (delivery::kStreamingLufs == -14.0f);
+    const auto o = delivery::offsetsOf (-16.3f);
+    CHECK (o[0].targetLufs == -14.0f && o[4].targetLufs == -23.0f);
+    CHECK_NEAR (o[0].offsetDb, -2.3, 1e-4); // -14: the master plays 2.3 dB quieter
+    CHECK_NEAR (o[1].offsetDb, -7.3, 1e-4); // -9
+    CHECK_NEAR (o[2].offsetDb, 1.7, 1e-4);  // -18: louder
+    CHECK_NEAR (o[3].offsetDb, -0.3, 1e-4); // -16
+    CHECK_NEAR (o[4].offsetDb, 6.7, 1e-4);  // -23
+}
+
+TEST (clip_meter_crest_factor_is_peak_over_rms)
+{
+    const double fs = 48000;
+    const int n = static_cast<int> (fs);
+    // A sine at half of full scale: peak 0.5, RMS 0.5 / sqrt 2, so 3 dB of crest.
+    auto tone = sine (fs, 997, 20.0 * std::log10 (0.5), 1.0);
+    ClipMeter m;
+    m.prepare();
+    m.process (tone.data(), tone.data(), n);
+    const auto t = m.totals();
+    CHECK (t.haveCrest());
+    CHECK_NEAR (t.crestDb(), 3.01, 0.05);
+
+    // A square wave at +/-0.5 has no crest at all: its RMS is its peak.
+    std::vector<float> square (static_cast<size_t> (n));
+    for (size_t i = 0; i < square.size(); ++i)
+        square[i] = (i / 100) % 2 ? 0.5f : -0.5f;
+    m.requestReset();
+    m.process (square.data(), square.data(), n);
+    CHECK_NEAR (m.totals().crestDb(), 0.0, 0.05);
+
+    // Silence has a mean square of zero: no crest to report.
+    std::vector<float> zeros (static_cast<size_t> (n), 0.0f);
+    m.requestReset();
+    m.process (zeros.data(), zeros.data(), n);
+    CHECK (!m.totals().haveCrest());
+}
+
+TEST (loudest_section_is_read_against_the_integrated_loudness)
+{
+    const auto a = loudestSection (-10.0f, -14.0f);
+    CHECK (a.have && std::abs (a.aboveAverageLu - 4.0f) < 1.0e-5f);
+    CHECK (!loudestSection (LoudnessMeter::kSilence, -14.0f).have);
+    CHECK (!loudestSection (-14.0f, LoudnessMeter::kSilence).have);
+
+    // A steady tone: its loudest 3 s is its average, so nothing sits above it.
+    const double fs = 48000;
+    auto tone = sine (fs, 1000, -20.0, 12.0);
+    LoudnessMonitor mon;
+    mon.prepare (fs);
+    mon.process (tone.data(), tone.data(), static_cast<int> (tone.size()));
+    const auto steady = loudestSection (mon.maxShortTerm(), mon.integrated());
+    CHECK (steady.have && std::abs (steady.aboveAverageLu) < 0.3f);
+    mon.requestReset();
+    CHECK (!loudestSection (mon.maxShortTerm(), mon.integrated()).have);
+}
+
+TEST (tilt_is_the_least_squares_slope_and_names_the_difference_to_the_target)
+{
+    BandArray line {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        line[static_cast<size_t> (i)] = static_cast<float> (-3.0 * i / BandGrid::kPerOctave); // -3 dB per octave
+    CHECK_NEAR (tilt::slopeDbPerOctave (line), -3.0, 1.0e-5);
+    BandArray lifted = line;
+    for (auto& v : lifted)
+        v += 7.0f; // a level offset is not a tilt
+    CHECK_NEAR (tilt::slopeDbPerOctave (lifted), -3.0, 1.0e-5);
+    CHECK_NEAR (tilt::slopeDbPerOctave (line, 30), -3.0, 1.0e-5); // over fewer bands, the same line
+
+    BandArray flat {}, dark {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        dark[static_cast<size_t> (i)] = static_cast<float> (-0.9 * i / BandGrid::kPerOctave);
+    const auto r = tilt::compare (dark, flat, 48000.0);
+    CHECK (r.have);
+    CHECK_NEAR (r.measuredDbPerOct, -0.9, 1.0e-4);
+    CHECK_NEAR (r.targetDbPerOct, 0.0, 1.0e-5);
+    CHECK_NEAR (r.differenceDbPerOct, -0.9, 1.0e-4);
+    CHECK (tilt::sideOf (r.differenceDbPerOct) == tilt::Side::darker);
+    CHECK (tilt::sideOf (0.2f) == tilt::Side::same && tilt::sideOf (-0.2f) == tilt::Side::same);
+    CHECK (tilt::sideOf (0.3f) == tilt::Side::brighter);
+    CHECK (tilt::sideOf (-0.3f) == tilt::Side::darker);
+
+    // The bands the sample rate carries: all of them at 48 kHz, fewer at 32 kHz (its analysis stops near 15 kHz).
+    CHECK (BandGrid::bandsUpTo (BandGrid::usableMaxHz (48000.0)) == BandGrid::kNum);
+    CHECK (BandGrid::bandsUpTo (BandGrid::usableMaxHz (32000.0)) < BandGrid::kNum);
+    CHECK_NEAR (tilt::compare (line, flat, 32000.0).measuredDbPerOct, -3.0, 1.0e-4);
+}
+
+TEST (sound_edges_count_silence_to_the_sample)
+{
+    // 5000 samples of digital silence, 9000 of sound, 6000 of dither under -80 dBFS (silence), scanned in blocks of 512.
+    std::vector<float> x (20000, 0.0f);
+    for (size_t i = 5000; i < 14000; ++i)
+        x[i] = 0.2f * static_cast<float> (std::sin (0.05 * static_cast<double> (i)));
+    for (size_t i = 14000; i < x.size(); ++i)
+        x[i] = 1.0e-5f;
+    SoundEdges e;
+    e.clear (0);
+    CHECK (!e.heard() && e.leadingSamples() == 0 && e.trailingSamples (20000) == 0);
+    for (size_t i = 0; i < x.size(); i += 512)
+        e.scan (x.data() + i, x.data() + i, static_cast<int> (std::min<size_t> (512, x.size() - i)), i);
+    CHECK (e.heard());
+    CHECK (e.leadingSamples() == 5000);
+    CHECK (e.trailingSamples (20000) == 6000);
+    CHECK (e.trailingSamples (20000) == 6000 && e.trailingSamples (14000) == 0); // silence since the sound ended, growing with time
+
+    // A clear counts from its own origin: silence before it does not count any more.
+    e.clear (20000);
+    CHECK (!e.heard());
+    const std::vector<float> late (100, 0.5f);
+    e.scan (late.data(), late.data(), 100, 20500);
+    CHECK (e.leadingSamples() == 500 && e.trailingSamples (20100) == 0);
+}
+
+TEST (analyser_reports_leading_and_trailing_silence_in_seconds)
+{
+    const double fs = 48000;
+    const auto tone = sine (fs, 440, -12.0, 2.0);
+    std::vector<float> x (static_cast<size_t> (fs), 0.0f);
+    x.insert (x.end(), tone.begin(), tone.end());
+    x.insert (x.end(), static_cast<size_t> (fs * 0.5), 0.0f);
+    TonalAnalyzer a;
+    a.prepare (fs);
+    for (size_t pos = 0; pos < x.size(); pos += 4096)
+        a.process (x.data() + pos, x.data() + pos, static_cast<int> (std::min<size_t> (4096, x.size() - pos)));
+    CHECK (a.soundHeard());
+    CHECK_NEAR (a.leadingSilenceSeconds(), 1.0, 1.0e-3);
+    CHECK_NEAR (a.trailingSilenceSeconds(), 0.5, 1.0e-3);
+    a.requestReset();
+    CHECK (!a.soundHeard());
+}
+
+TEST (advisor_flags_squashed_peaks_by_plr_as_a_rule_of_thumb)
+{
+    auto in = cleanMaster(); // -14 LUFS, true peak -1.5 dBTP: a 12.5 dB peak-to-loudness ratio
+    CHECK (pick (in, Topic::squashed) == nullptr);
+    in.integratedLufs = -8.0f; // 6.5 dB: still fine
+    CHECK (pick (in, Topic::squashed) == nullptr);
+
+    in.integratedLufs = -7.0f; // 5.5 dB: a warning, worded as a rule of thumb
+    in.clip.meanSquare = 0.1f; // full band: sample peak -1.8 dBFS over an RMS of -10 dB, a crest of 8.2 dB
+    const auto* warn = pick (in, Topic::squashed);
+    CHECK (warn != nullptr && warn->level == Level::warn);
+    CHECK (warn != nullptr && warn->headline == "Peaks sit only 5.5 dB above the average: squashed, ease the limiting");
+    CHECK (warn != nullptr && warn->why.find ("crest factor 8.2 dB") != std::string::npos && warn->why.find ("Rule of thumb, not a fault in itself") != std::string::npos);
+    CHECK (warn != nullptr && !warn->canCopy() && !warn->hear.active());
+
+    in.integratedLufs = -5.0f; // 3.5 dB: bad
+    const auto* bad = pick (in, Topic::squashed);
+    CHECK (bad != nullptr && bad->level == Level::bad);
+
+    // Nothing before the 20 s of the long-term checks, and the plan stays worst first.
+    in.analysedSeconds = 5.0;
+    CHECK (pick (in, Topic::squashed) == nullptr);
+    in.analysedSeconds = 120.0;
+    const auto plan = advise (in);
+    for (size_t i = 1; i < plan.items.size(); ++i)
+        CHECK (plan.items[i - 1].level >= plan.items[i].level);
+    CHECK (planAsText (in, plan).find ("PLR 3.5 dB") != std::string::npos);
 }
 
 int main()

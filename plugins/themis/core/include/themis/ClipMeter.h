@@ -40,6 +40,12 @@ struct ClipTotals
     float dcLeft = 0.0f, dcRight = 0.0f;
     // The larger of the two as a level, dBFS (the history floor for none).
     float dcOffsetDb() const { return peakToDbOrFloor (std::max (std::abs (dcLeft), std::abs (dcRight))); }
+    // The mean square of both channels' samples since the reset, linear (0 before any audio). Left out of the comparison too.
+    float meanSquare = 0.0f;
+    bool haveCrest() const { return have && meanSquare > 0.0f; }
+    // Full-band crest factor in dB: the sample peak over the RMS level of both channels (a full-scale sine reads 3 dB, a square
+    // wave 0 dB). Only meaningful when haveCrest().
+    float crestDb() const { return samplePeakDb - static_cast<float> (powerToDb (meanSquare, 1.0e-12)); }
 
     // Exact: only used to tell whether a readout has changed.
     bool operator== (const ClipTotals& o) const
@@ -97,14 +103,18 @@ public:
         for (int c = 0; c < 2; ++c)
         {
             auto& s = state[c];
-            double sum = 0.0;
+            double sum = 0.0, squares = 0.0;
             for (int i = 0; i < n; ++i)
             {
                 step (s, channels[c][i], w);
                 if (std::isfinite (channels[c][i]))
+                {
                     sum += static_cast<double> (channels[c][i]);
+                    squares += static_cast<double> (channels[c][i]) * channels[c][i];
+                }
             }
             s.sum += sum;
+            s.sumSquares += squares;
         }
         publish (w, static_cast<uint64_t> (n));
     }
@@ -136,6 +146,7 @@ public:
         const auto count = static_cast<double> (totalSamples.load (std::memory_order_relaxed));
         t.dcLeft = static_cast<float> (totalSum[0].load (std::memory_order_relaxed) / count);
         t.dcRight = static_cast<float> (totalSum[1].load (std::memory_order_relaxed) / count);
+        t.meanSquare = static_cast<float> ((totalSumSquares[0].load (std::memory_order_relaxed) + totalSumSquares[1].load (std::memory_order_relaxed)) / (2.0 * count));
         return t;
     }
 
@@ -147,6 +158,7 @@ private:
         int plateau = 0;       // length of the current run of equal, high samples
         float entryStep = 0.0f; // how far the run's first sample was from the one before it
         double sum = 0.0;       // of every sample since the reset (the DC offset is this over the count)
+        double sumSquares = 0.0; // of every sample squared since the reset (the mean square, for the crest factor)
     };
 
     static void endPlateau (Channel& s, ClipWindow& w)
@@ -207,6 +219,8 @@ private:
         totalOverSamples.store (totalOverSamples.load (std::memory_order_relaxed) + w.overSamples, std::memory_order_relaxed);
         totalSum[0].store (state[0].sum, std::memory_order_relaxed);
         totalSum[1].store (state[1].sum, std::memory_order_relaxed);
+        totalSumSquares[0].store (state[0].sumSquares, std::memory_order_relaxed);
+        totalSumSquares[1].store (state[1].sumSquares, std::memory_order_relaxed);
         totalSamples.store (totalSamples.load (std::memory_order_relaxed) + samples, std::memory_order_release);
     }
 
@@ -219,10 +233,13 @@ private:
             s.plateau = 0;
             s.entryStep = 0.0f;
             s.sum = 0.0;
+            s.sumSquares = 0.0;
         }
         take();
         totalSum[0].store (0.0, std::memory_order_relaxed);
         totalSum[1].store (0.0, std::memory_order_relaxed);
+        totalSumSquares[0].store (0.0, std::memory_order_relaxed);
+        totalSumSquares[1].store (0.0, std::memory_order_relaxed);
         totalSamples.store (0, std::memory_order_relaxed);
         totalSamplePeak.store (0.0f, std::memory_order_relaxed);
         totalTruePeak.store (0.0f, std::memory_order_relaxed);
@@ -244,5 +261,6 @@ private:
     std::atomic<uint64_t> totalClipEvents { 0 }, totalClipSamples { 0 }, totalOverSamples { 0 };
     std::atomic<uint64_t> totalSamples { 0 };
     std::atomic<double> totalSum[2] { { 0.0 }, { 0.0 } };
+    std::atomic<double> totalSumSquares[2] { { 0.0 }, { 0.0 } };
 };
 } // namespace themis

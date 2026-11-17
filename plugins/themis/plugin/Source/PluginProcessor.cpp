@@ -326,6 +326,10 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.truePeakCeilingDb = paramReader.truePeakCeilingDb();
     in.deliveryName = delivery.shortName;
     readClip (in.clip);
+    in.maxShortTermLufs = loudness.maxShortTerm();
+    in.haveSilence = analyzer.soundHeard();
+    in.leadingSilenceSeconds = analyzer.leadingSilenceSeconds();
+    in.trailingSilenceSeconds = analyzer.trailingSilenceSeconds();
 
     themis::BandArray measured {}, fold {};
     if (readSpectrum (measured) && readMonoFold (fold)) // the plan only uses the mono fold: the curve and the device are judged against the reference, which is taste

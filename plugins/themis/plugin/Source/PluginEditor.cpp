@@ -45,7 +45,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     deviceBox.setTooltip ("Preview how the balance would translate to a typical playback device (approximate response; "
                           "analysis only, the audio is never changed). \"Off\" hides the preview.");
     loudnessBox.setTooltip ("The loudness this master is for. The master plan judges the integrated loudness against it: "
-                            "streaming services turn anything louder than " + juce::String (static_cast<int> (-themis::master::kStreamingLufs))
+                            "streaming services turn anything louder than " + juce::String (static_cast<int> (-themis::delivery::kStreamingLufs))
                             + " LUFS down, so extra loudness there only costs dynamics.");
     for (auto* label : { &deviceLabel, &loudnessLabel })
     {
