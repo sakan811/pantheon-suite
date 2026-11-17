@@ -120,7 +120,7 @@ static std::vector<float> pinkNoise (size_t n, unsigned seed, float amp = 0.25f)
     return w;
 }
 
-// Brute-force 8x oversampled true peak using a long windowed sinc (independent of TruePeakDetector).
+// Brute-force 8x oversampled true peak using a long windowed sinc (independent of pdsp::TruePeakReader).
 static float referenceTruePeak (const std::vector<float>& x)
 {
     constexpr int up = 8, halfLen = 32;
@@ -315,14 +315,39 @@ TEST (true_peak_finds_intersample_peaks)
     // fs/4 sine at 45 degrees: every sample is +/-0.7071 but the waveform peaks at 1.0.
     auto s = sine (48000, 12000, 0.0, 0.1, kPi / 4.0);
     float samplePeak = 0, tp = 0;
-    TruePeakDetector d;
+    pdsp::TruePeakReader d;
     for (float x : s)
     {
         samplePeak = std::max (samplePeak, std::abs (x));
-        tp = std::max (tp, d.process (x));
+        tp = std::max (tp, static_cast<float> (d.push (x)));
     }
     CHECK_NEAR (samplePeak, 0.7071, 0.001);
     CHECK_NEAR (tp, 1.0, 0.03);
+}
+
+TEST (true_peak_reader_reads_pure_tones_within_0_15_db)
+{
+    // A pure tone's true peak is its amplitude. The reader samples the waveform on an 8x grid, so the worst phase
+    // of a tone can read low by up to half a grid step of the tone (measured: 0.11 dB, at 0.4 fs). Sweep the phase
+    // and the frequency from a quarter of the sample rate up to 0.49 fs, where a 4x reader reads 0.69 dB low.
+    double worst = 0.0;
+    for (double f : { 0.25, 0.333, 0.40, 0.45, 0.49 })
+        for (int ph = 0; ph < 16; ++ph)
+        {
+            const double phase = kPi * ph / 8.0;
+            pdsp::TruePeakReader d;
+            double tp = 0;
+            for (int i = 0; i < 1200; ++i)
+            {
+                const double x = std::sin (2.0 * kPi * f * i + phase);
+                const double v = d.push (x);
+                if (i >= 256) // the reader starts from silence: its first samples are a start-up transient, not the tone
+                    tp = std::max (tp, v);
+            }
+            worst = std::max (worst, -20.0 * std::log10 (tp));
+        }
+    std::printf ("  true-peak reader, worst low reading over 80 tone phases: %.3f dB\n", worst);
+    CHECK (worst < 0.15);
 }
 
 TEST (limiter_respects_ceiling_and_is_transparent_below_it)
@@ -374,7 +399,7 @@ TEST (limiter_respects_ceiling_and_is_transparent_below_it)
     CHECK (tpDb <= -1.0f + 0.1f);
     CHECK (lim.gainReductionDb() < -3.0f);
 
-    // Worst case: full-band white noise. Any 4x interpolator under-reads near Nyquist; stay within 1.5 dB.
+    // Worst case: full-band white noise. The true-peak reader under-reads near Nyquist; stay within 1.5 dB.
     {
         auto wl = whiteNoise (n, 17, 1.0f), wr = whiteNoise (n, 18, 1.0f);
         for (size_t i = 0; i < n; ++i)
@@ -843,6 +868,50 @@ TEST (low_crest_meter)
     run (d, sine);
     CHECK (d.hasData());
     CHECK_NEAR (d.crestDb(), 3.01, 0.15);
+}
+
+TEST (closest_built_in_is_the_one_whose_shape_the_curve_has)
+{
+    // Each built-in plus a level offset (either sign) is nearest to itself at distance ~0: the mean offset is removed.
+    const auto& built = TargetCurve::builtIns();
+    for (size_t k = 0; k < built.size(); ++k)
+        for (float offset : { -7.5f, 0.0f, 4.0f })
+        {
+            BandArray measured {};
+            for (int i = 0; i < BandGrid::kNum; ++i)
+                measured[static_cast<size_t> (i)] = built[k].medianDb[static_cast<size_t> (i)] + offset;
+            float distance = -1.0f;
+            const size_t picked = TargetCurve::nearestBuiltIn (measured, 48000.0, &distance);
+            CHECK (picked == k && distance < 1.0e-3f);
+        }
+
+    // A curve between two built-ins picks the nearer one (a tilt towards Hip-Hop, away from Acoustic).
+    BandArray between {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        between[static_cast<size_t> (i)] = built[2].medianDb[static_cast<size_t> (i)] * 0.9f + built[6].medianDb[static_cast<size_t> (i)] * 0.1f;
+    CHECK (TargetCurve::nearestBuiltIn (between, 48000.0) == 2);
+
+    // Ties are deterministic: the first curve in the list wins, whatever the others are.
+    const auto flat = TargetCurve::fromAnchors ("Flat", { { 20, 0 }, { 20000, 0 } }, { { 20, 3 }, { 20000, 3 } });
+    auto shifted = flat;
+    for (auto& v : shifted.medianDb)
+        v += 2.0f; // the same shape at another level: an exact tie
+    BandArray flatMeasured {};
+    for (auto& v : flatMeasured)
+        v = 1.0f;
+    const std::vector<TargetCurve> tied = { shifted, flat, flat };
+    float tieDistance = -1.0f;
+    CHECK (TargetCurve::nearest (flatMeasured, tied, 48000.0, &tieDistance) == 0 && tieDistance < 1.0e-3f);
+    CHECK (TargetCurve::nearest (flatMeasured, { flat, shifted }, 48000.0) == 0);
+
+    // Only the bands the sample rate carries count: at 22.05 kHz the bands above ~10 kHz are not measured, so a
+    // difference there must not move the answer.
+    BandArray lowRate = built[1].medianDb;
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        if (BandGrid::centreHz (i) > BandGrid::usableMaxHz (22050.0))
+            lowRate[static_cast<size_t> (i)] += 30.0f;
+    CHECK (TargetCurve::distanceDb (lowRate, built[1], 22050.0) < 1.0e-3f);
+    CHECK (TargetCurve::distanceDb (lowRate, built[1], 48000.0) > 3.0f);
 }
 
 TEST (target_curve_json_roundtrip_and_tracks)

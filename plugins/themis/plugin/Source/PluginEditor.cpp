@@ -38,7 +38,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     addAndMakeVisible (fundamentalView);
     addAndMakeVisible (advicePanel);
     addAndMakeVisible (auditionPanel);
-    for (auto* c : std::initializer_list<juce::Component*> { &targetBox, &avgKnob, &deviceBox, &deviceLabel, &loudnessBox, &loudnessLabel, &learnButton, &saveButton, &loadButton,
+    for (auto* c : std::initializer_list<juce::Component*> { &targetBox, &avgKnob, &deviceBox, &deviceLabel, &loudnessBox, &loudnessLabel, &learnButton, &closestButton, &saveButton, &loadButton,
                                                               &copyEqButton, &holdButton, &resetButton, &statusLabel, &toleranceKnob, &ceilingKnob, &resetOnPlayButton, &guideButton })
         addAndMakeVisible (c);
 
@@ -62,6 +62,10 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     statusLabel.setMinimumHorizontalScale (0.8f);
 
     learnButton.onClick = [this] { chooseReferenceTracks(); };
+    closestButton.setTooltip ("Pick the built-in target curve whose shape is nearest the measured curve (the RMS difference over the bands your sample rate "
+                              "carries, after removing the level offset). Needs " + juce::String (static_cast<int> (themis::master::kMinSeconds)) + " s of audio. "
+                              "A shape match, not a genre detection: it only tells you which starting point is closest.");
+    closestButton.onClick = [this] { chooseClosestTarget(); };
     saveButton.onClick = [this] { saveCurve(); };
     copyEqButton.setTooltip ("Copy EQ is for Iris (or Apollo): it copies the equaliser bands that bring the measured curve towards the target (a low shelf, up to "
                              "three bells and a high shelf, from the long-term average) and the target curve itself. In Iris, PASTE on the band panel or in its "
@@ -150,6 +154,25 @@ void ThemisEditor::copyTonalEq()
         return;
     }
     setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s) and the target curve: paste them in " + gui::linkDestination (moves) + " (PASTE on its band panel).", false);
+}
+
+// The built-in target whose shape is nearest the measured curve. It selects it the way the Target selector does (the host
+// is notified), and says how far off it is. Before enough audio, or with no signal, it changes nothing.
+void ThemisEditor::chooseClosestTarget()
+{
+    themis::BandArray measured {};
+    if (proc.loudnessMonitor().seconds() < themis::master::kMinSeconds || !proc.readSpectrum (measured))
+    {
+        setStatus ("Play at least " + juce::String (static_cast<int> (themis::master::kMinSeconds)) + " s first", true);
+        return;
+    }
+    const double sampleRate = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0;
+    float distance = 0.0f;
+    const size_t index = themis::TargetCurve::nearestBuiltIn (measured, sampleRate, &distance);
+    proc.selectTarget (static_cast<int> (index));
+    setStatus ("Closest built-in: " + juce::String (themis::TargetCurve::builtIns()[index].name) + " (" + juce::String (distance, 1)
+                   + " dB RMS). A shape match, not a genre detection.",
+               false);
 }
 
 void ThemisEditor::toggleHeldCurve()
@@ -287,6 +310,8 @@ void ThemisEditor::resized()
     targetBox.setBounds (row1.removeFromLeft (200).reduced (0, 2));
     row1.removeFromLeft (8);
     learnButton.setBounds (row1.removeFromLeft (150).reduced (0, 3));
+    row1.removeFromLeft (4);
+    closestButton.setBounds (row1.removeFromLeft (80).reduced (0, 3));
     row1.removeFromLeft (4);
     saveButton.setBounds (row1.removeFromLeft (84).reduced (0, 3));
     row1.removeFromLeft (4);

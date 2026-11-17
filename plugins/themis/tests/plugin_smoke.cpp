@@ -779,6 +779,27 @@ int main (int argc, char** argv)
             }
             CHECK (plan != nullptr && auditionPanel != nullptr);
             {
+                // CLOSEST before 20 s of audio, and with no signal at all: it says so and changes nothing.
+                ThemisProcessor early;
+                early.setRateAndBufferSizeDetails (fs, 512);
+                early.prepareToPlay (fs, 512);
+                std::unique_ptr<juce::AudioProcessorEditor> earlyEditor (early.createEditor());
+                auto* earlyThemis = dynamic_cast<ThemisEditor*> (earlyEditor.get());
+                CHECK (earlyThemis != nullptr);
+                if (earlyThemis != nullptr)
+                {
+                    const float before = early.paramReader.value (params::target);
+                    earlyThemis->closest().onClick();
+                    CHECK (earlyThemis->statusText() == "Play at least 20 s first", "no signal: \"%s\"", earlyThemis->statusText().toRawUTF8());
+                    CHECK (early.paramReader.value (params::target) == before, "no signal: the target is unchanged");
+                    runAudio (early, 10.0, fs, 512, 0.3f, 5);
+                    settle();
+                    earlyThemis->closest().onClick();
+                    CHECK (earlyThemis->statusText() == "Play at least 20 s first", "10 s: \"%s\"", earlyThemis->statusText().toRawUTF8());
+                    CHECK (early.paramReader.value (params::target) == before, "10 s: the target is unchanged");
+                }
+            }
+            {
                 // Usage notes: what the status window says about how the plugin is being used.
                 const auto has = [] (const std::vector<ui::Note>& n, const char* word, ui::Severity sev) { return ui::hasNote (n, word, sev); };
                 usage::Input fine;
@@ -815,6 +836,34 @@ int main (int argc, char** argv)
                         if (!proc.hasCustomCurve())
                             CHECK (has (themisEditor->notes(), "No learned curve yet: showing Flat", ui::Severity::warning), "Custom without a curve says Flat is shown");
                         targetParam->setValueNotifyingHost (targetParam->convertTo0to1 (static_cast<float> (params::kDefaultTarget)));
+                    }
+                    // CLOSEST last in this block, so the screenshot shows the target it selected.
+                    {
+                        // CLOSEST after the demo programme: the built-in whose shape the measured curve has, selected the way the Target
+                        // selector selects it (the host is told: a parameter listener counts the change).
+                        struct Notified : juce::AudioProcessorParameter::Listener
+                        {
+                            int changes = 0;
+                            void parameterValueChanged (int, float) override { ++changes; }
+                            void parameterGestureChanged (int, bool) override {}
+                        };
+                        Notified notified;
+                        auto* targetParam = proc.apvts.getParameter (params::target);
+                        targetParam->addListener (&notified);
+                        themis::BandArray measured {};
+                        CHECK (themisEditor != nullptr && proc.readSpectrum (measured));
+                        if (themisEditor != nullptr && proc.readSpectrum (measured))
+                        {
+                            const size_t expected = themis::TargetCurve::nearestBuiltIn (measured, fs);
+                            themisEditor->closest().onClick();
+                            const juce::String wanted = "Closest built-in: " + juce::String (std::string (themis::TargetCurve::builtIns()[expected].name));
+                            CHECK (proc.paramReader.value (params::target) == static_cast<float> (expected), "target %.0f, expected %zu", static_cast<double> (proc.paramReader.value (params::target)), expected);
+                            CHECK (notified.changes >= 1, "the host hears the change (%d)", notified.changes);
+                            CHECK (themisEditor->statusText().startsWith (wanted), "status \"%s\"", themisEditor->statusText().toRawUTF8());
+                            CHECK (themisEditor->statusText().endsWith ("A shape match, not a genre detection."), "status \"%s\"", themisEditor->statusText().toRawUTF8());
+                            std::printf ("    CLOSEST on the demo programme: %s\n", themisEditor->statusText().toRawUTF8());
+                        }
+                        targetParam->removeListener (&notified);
                     }
                     themis::Switches sw;
                     sw.solo = 1u;

@@ -28,6 +28,8 @@ public:
     void resized() override;
 
     juce::TextButton& guide() noexcept { return guideButton; }                       // for the smoke test
+    juce::TextButton& closest() noexcept { return closestButton; }                   // for the smoke test
+    juce::String statusText() const { return statusLabel.getText(); }                 // for the smoke test
     std::vector<ui::Note> notes() const { return usage::notesFor (proc.usageState()); }   // what the status window says when idle, for the smoke test
 
 private:
@@ -35,6 +37,7 @@ private:
     void setStatus (const juce::String& text, bool isError);
     void showIdleStatus();
     void copyTonalEq();
+    void chooseClosestTarget();
     void toggleHeldCurve();
 
     void launchChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int chooserFlags,
@@ -65,7 +68,7 @@ private:
 
     ui::Choice targetBox, deviceBox, loudnessBox;
     juce::Label deviceLabel, loudnessLabel;
-    juce::TextButton learnButton { "Learn from tracks..." }, saveButton { "Save curve" }, loadButton { "Load curve" },
+    juce::TextButton learnButton { "Learn from tracks..." }, closestButton { "Closest" }, saveButton { "Save curve" }, loadButton { "Load curve" },
         resetButton { "Reset" }, copyEqButton { "Copy EQ" }, holdButton { "Hold curve" };
     juce::Label statusLabel;
     ui::GuideButton guideButton { usage::guideTitle(), usage::guideText() };
