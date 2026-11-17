@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 
 namespace themis
@@ -64,6 +65,65 @@ struct FrameStats
         f (s.clipSamples);
         f (s.overSamples);
     }
+};
+
+// The first and the last sound since the reset, counted in samples: a sample is sound when it is at or above kSoundLevel on
+// either channel, and anything under it is silence or dither. Kept beside the frame history rather than read back from it,
+// because the history window (about 85 s) forgets a track's start long before the track ends. Written by the audio thread
+// (clear, scan); the readers are any thread and read atomics. Sample indices run from the same counter as the analyser's.
+class SoundEdges
+{
+public:
+    static constexpr float kSoundLevel = 1.0e-4f; // -80 dBFS
+
+    // Audio thread: forget what was heard and count silence from sample `at` on.
+    void clear (uint64_t at)
+    {
+        base.store (at, std::memory_order_relaxed);
+        first.store (0, std::memory_order_relaxed);
+        last.store (0, std::memory_order_relaxed);
+        heardFlag.store (false, std::memory_order_release);
+    }
+
+    // Audio thread: `l` and `r` hold samples `at`, `at` + 1, ... (n of them).
+    void scan (const float* l, const float* r, int n, uint64_t at)
+    {
+        bool heard = heardFlag.load (std::memory_order_relaxed);
+        uint64_t lastSound = last.load (std::memory_order_relaxed);
+        bool any = false;
+        for (int i = 0; i < n; ++i)
+        {
+            if (!(std::abs (l[i]) >= kSoundLevel || std::abs (r[i]) >= kSoundLevel))
+                continue;
+            const uint64_t at_i = at + static_cast<uint64_t> (i);
+            if (!heard)
+            {
+                first.store (at_i, std::memory_order_relaxed);
+                heard = true;
+            }
+            lastSound = at_i;
+            any = true;
+        }
+        if (any)
+        {
+            last.store (lastSound, std::memory_order_relaxed);
+            heardFlag.store (true, std::memory_order_release);
+        }
+    }
+
+    // Any thread. Samples of silence before the first sound since the clear, and after the last one up to `now` (the number of
+    // samples pushed so far); zero until something has been heard.
+    bool heard() const { return heardFlag.load (std::memory_order_acquire); }
+    uint64_t leadingSamples() const { return heard() ? first.load (std::memory_order_relaxed) - base.load (std::memory_order_relaxed) : 0; }
+    uint64_t trailingSamples (uint64_t now) const
+    {
+        const uint64_t lastSound = last.load (std::memory_order_relaxed);
+        return heard() && now > lastSound ? now - lastSound - 1 : 0;
+    }
+
+private:
+    std::atomic<uint64_t> base { 0 }, first { 0 }, last { 0 };
+    std::atomic<bool> heardFlag { false };
 };
 
 // Fixed-size ring of recent FrameStats. One writer (the analysis thread), any number of readers (UI). Every field

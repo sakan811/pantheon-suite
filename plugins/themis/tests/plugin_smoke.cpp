@@ -844,6 +844,14 @@ int main (int argc, char** argv)
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
                 CHECK (has (themis::Topic::width), "the demo programme has a widened top");
                 CHECK (advice.level() == themis::Level::bad && advice.items.front().level == themis::Level::bad);
+                // The loudness readout's hover: the offset to each of the five delivery targets (the chosen one marked), the
+                // loudest section, the crest factor and the silence at the edges, all from what has played.
+                const auto tip = plan->loudnessTooltipText().toStdString();
+                std::printf ("    loudness hover:\n%s\n", tip.c_str());
+                CHECK (tip.find ("At -14 LUFS (streaming)") != std::string::npos && tip.find ("At -23 LUFS (broadcast)") != std::string::npos
+                           && tip.find ("<- Deliver for") != std::string::npos, "the loudness hover names the offset to all five delivery targets");
+                CHECK (tip.find ("loudest 3 s since the Reset sit") != std::string::npos && tip.find ("Crest factor") != std::string::npos
+                           && tip.find ("Silence:") != std::string::npos, "the loudness hover has the loudest section, the crest factor and the silence");
 
                 // The HEAR chip of the first item that has one: click it, the buttons follow; click again, they release.
                 const auto hear = plan->firstHearable();
@@ -895,6 +903,7 @@ int main (int argc, char** argv)
                 if (auto* tonal = dynamic_cast<TonalBalanceView*> (child))
                 {
                     tonal->update();
+                CHECK (tonal->tiltReport().have && std::isfinite (tonal->tiltReport().differenceDbPerOct), "the tonal view has a tilt against its target");
                     const auto picture = tonal->createComponentSnapshot (tonal->getLocalBounds(), true, 1.0f);
                     CHECK (picture.isValid());
                     if (argc > 3 && picture.isValid())

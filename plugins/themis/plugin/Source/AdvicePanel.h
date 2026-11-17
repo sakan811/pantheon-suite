@@ -21,6 +21,7 @@ public:
     {
         inputs = proc.masterInputs();
         advice = themis::advise (inputs);
+        offsets = themis::delivery::offsetsOf (inputs.integratedLufs);
         firstRow = juce::jlimit (0, std::max (0, static_cast<int> (advice.items.size()) - 1), firstRow);
         repaint();
     }
@@ -45,6 +46,7 @@ public:
         return {};
     }
     const themis::MasterAdvice& currentAdvice() const { return advice; }
+    juce::String loudnessTooltipText() const { return loudnessTooltip(); } // (for the smoke test: the loudness readout's hover text)
 
     void paint (juce::Graphics& g) override
     {
@@ -212,9 +214,7 @@ public:
                    "then every item worst first with what to change and why. For a note to yourself, a message to the client or a session log. "
                    "(COPY on an item is different: it hands bands or a limiter setting to another plugin.)";
         if (hoverRow < 0 && readoutArea.contains (lastMouse))
-            return "Loudness since Reset: integrated LUFS (the Deliver for target in brackets), true peak and PLR. Second line: momentary (last 400 ms) "
-                   "and short-term (last 3 s) LUFS, and the loudness range LRA (EBU Tech 3342: the spread between the quieter and the louder "
-                   "sections, 10th to 95th percentile of the short-term values). A low LRA (under about 4 LU) means the sections all sit at one level.";
+            return loudnessTooltip();
         if (hoverRow < 0)
             return "The master plan turns every measurement into what to do next, worst first. The limits behind it are rules of thumb, not measured data, "
                    "and a plan is only as good as the audio that has played: press Reset, then play the whole track. Themis never changes the audio; "
@@ -338,7 +338,7 @@ private:
         if (inputs.clip.have)
             parts.add ("TP " + juce::String (inputs.clip.truePeakDb, 1) + " dBTP");
         if (inputs.haveLoudness && inputs.clip.have)
-            parts.add ("PLR " + juce::String (inputs.clip.truePeakDb - inputs.integratedLufs, 1) + " dB");
+            parts.add ("PLR " + juce::String (themis::master::plrDb (inputs.clip.truePeakDb, inputs.integratedLufs), 1) + " dB");
         const int secs = static_cast<int> (inputs.analysedSeconds);
         parts.add (juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2) + " analysed");
         return parts.joinIntoString ("   ");
@@ -352,6 +352,47 @@ private:
         const auto lufs = [] (float v) { return v <= themis::LoudnessMeter::kSilence + 1.0f ? juce::String ("--") : juce::String (v, 1); };
         return "M " + lufs (m.momentary()) + "   S " + lufs (m.shortTerm()) + "   LRA "
                + (m.hasData() ? juce::String (m.loudnessRange(), 1) + " LU" : juce::String ("--"));
+    }
+
+    // The loudness readout's tooltip: the terms first, then what only needs the audio measured so far: the offset to each
+    // delivery target, how far the loudest 3 s sit above the average, the crest factor, and the silence at either edge.
+    // Nothing here is judged (the plan judges the Deliver for target alone); each figure is shown once the plan has its 20 s.
+    juce::String loudnessTooltip() const
+    {
+        juce::String text = "Loudness since Reset: integrated LUFS (the Deliver for target in brackets), true peak and PLR (true peak minus integrated, "
+                            "the room between the peaks and the average). Second line: momentary (last 400 ms) and short-term (last 3 s) LUFS, "
+                            "and the loudness range LRA (EBU Tech 3342: the spread between the quieter and the louder sections, 10th to 95th percentile "
+                            "of the short-term values). A low LRA (under about 4 LU) means the sections all sit at one level.";
+        if (inputs.analysedSeconds < themis::master::kMinSeconds)
+            return text + "\n\nThe figures below (the delivery targets, the loudest section, the crest factor and the silence) follow once "
+                   + juce::String (juce::roundToInt (themis::master::kMinSeconds)) + " s of audio have played.";
+        if (inputs.haveLoudness)
+        {
+            text += "\n\nAgainst each delivery target (the integrated loudness minus the target; quieter than it is negative):";
+            for (size_t i = 0; i < offsets.size(); ++i)
+            {
+                const float off = offsets[i].offsetDb;
+                const bool chosen = std::abs (offsets[i].targetLufs - inputs.targetLufs) < 0.01f;
+                const juce::String amount = std::abs (off) < 0.05f ? juce::String ("level with it") : juce::String (std::abs (off), 1) + (off < 0.0f ? " dB quieter" : " dB louder");
+                text += "\n  At " + juce::String (offsets[i].targetLufs, 0) + " LUFS (" + juce::String (params::loudnessTargets[i].shortName) + "): " + amount
+                        + (chosen ? "   <- Deliver for" : "");
+            }
+        }
+        if (inputs.haveLoudness)
+        {
+            const auto loudest = themis::loudestSection (inputs.maxShortTermLufs, inputs.integratedLufs);
+            if (loudest.have)
+                text += "\n\nThe loudest 3 s since the Reset sit " + juce::String (loudest.aboveAverageLu, 1) + " LU above the integrated loudness. A wide gap means the loud "
+                        "sections stand out from the rest; a narrow one means the sections sit close together.";
+        }
+        if (inputs.clip.haveCrest())
+            text += "\n\nCrest factor (full band, the sample peak over the RMS level of both channels): " + juce::String (inputs.clip.crestDb(), 1)
+                    + " dB. A sine reads 3 dB and a square wave 0 dB. The plan's squashed check uses PLR, the true peak over the integrated loudness.";
+        if (inputs.haveSilence)
+            text += "\n\nSilence: " + juce::String (inputs.leadingSilenceSeconds, 1) + " s before the sound starts and "
+                    + juce::String (inputs.trailingSilenceSeconds, 1) + " s after it, measured to the sample since the Reset. Themis cannot trim it; "
+                      "it is for your edit.";
+        return text;
     }
 
     // While the plan measures: the first-run checklist, each line ticked from what the plugin has seen. Otherwise, when nothing is to
@@ -373,6 +414,7 @@ private:
     ThemisProcessor& proc;
     themis::MasterInputs inputs;
     themis::MasterAdvice advice;
+    std::array<themis::delivery::Offset, static_cast<size_t> (themis::delivery::kCount)> offsets {};
     themis::Switches audition;
     themis::PlanSnapshot snapshot;
     juce::Rectangle<int> listArea, snapChip, textChip, readoutArea;

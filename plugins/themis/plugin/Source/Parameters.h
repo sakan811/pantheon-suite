@@ -70,20 +70,22 @@ inline const themis::DeviceProfile* deviceForChoice (int choice)
     return idx >= 0 && idx < static_cast<int> (devices.size()) ? &devices[static_cast<size_t> (idx)] : nullptr;
 }
 
-// Loudness the master is delivered at: the integrated loudness is judged against this in the master plan. The first entry
-// is what the big streaming services normalise to. Append only: the index is saved in sessions.
+// Loudness the master is delivered at: the integrated loudness is judged against this in the master plan. The values are
+// themis::delivery::kLufs (core, the one list); the names are the plugin's words. The first entry is what the big streaming
+// services normalise to. Append only: the index is saved in sessions.
 struct LoudnessTarget
 {
     const char* name;      // the choice text is this plus the value: "Streaming  -14 LUFS"
     const char* shortName; // used in the advice text
     float lufs;
 };
-inline constexpr LoudnessTarget loudnessTargets[] = { { "Streaming", "streaming", themis::master::kStreamingLufs },
-                                                      { "Loud release", "loud release", -9.0f },
-                                                      { "Dynamic", "dynamic", -18.0f },
-                                                      { "Quiet streaming", "quiet streaming", -16.0f },
-                                                      { "Broadcast", "broadcast", -23.0f } };
+inline constexpr LoudnessTarget loudnessTargets[] = { { "Streaming", "streaming", themis::delivery::kLufs[0] },
+                                                      { "Loud release", "loud release", themis::delivery::kLufs[1] },
+                                                      { "Dynamic", "dynamic", themis::delivery::kLufs[2] },
+                                                      { "Quiet streaming", "quiet streaming", themis::delivery::kLufs[3] },
+                                                      { "Broadcast", "broadcast", themis::delivery::kLufs[4] } };
 inline constexpr int kNumLoudnessTargets = static_cast<int> (sizeof (loudnessTargets) / sizeof (loudnessTargets[0]));
+static_assert (kNumLoudnessTargets == themis::delivery::kCount, "one name per delivery target in the core list");
 inline constexpr int kDefaultLoudnessTarget = 0;
 
 inline juce::StringArray loudnessTargetNames()
