@@ -59,6 +59,9 @@ public:
         g.setColour (verdictColour);
         g.setFont (ui::lcdFont (11.5f, juce::Font::bold));
         g.drawText (verdict, titleRow.withTrimmedRight (16.0f).toNearestInt(), juce::Justification::right);
+        g.setFont (ui::labelFont (8.5f));
+        g.setColour (colours::dim);
+        g.drawFittedText (kLegend, area.removeFromTop (12.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.6f);
 
         auto readout = area.removeFromTop (snapshot.have ? 50.0f : 34.0f);
         auto chips = readout.removeFromRight (kChipWidth);
@@ -228,6 +231,8 @@ public:
 
 private:
     static constexpr int kRowHeight = 58, kMoreHeight = 14, kChipWidth = 40;
+    // What the chips of a row do, in one line under the title (COPY reaches Iris and Apollo for equaliser bands, Hephaestus for a fill band, Aegis for a limiter).
+    static constexpr const char* kLegend = "HEAR: solo only this problem. COPY: send the fix to Iris, Apollo, Hephaestus or Aegis. SNAP: remember the plan to compare later.";
 
     int visibleRows() const
     {
@@ -349,12 +354,20 @@ private:
                + (m.hasData() ? juce::String (m.loudnessRange(), 1) + " LU" : juce::String ("--"));
     }
 
+    // While the plan measures: the first-run checklist, each line ticked from what the plugin has seen. Otherwise, when nothing is to
+    // fix, the step after that (the plan's own rules are the limits; the next step is the reference and the export).
     juce::String emptyText() const
     {
         if (advice.measuring)
-            return "Press Reset, then play the whole track from the start. The plan appears after " + juce::String (juce::roundToInt (themis::master::kMinSeconds))
-                   + " s of audio and gets more reliable the more of the song has played (set Averaging to Infinite for a whole-track measurement). Clipping is judged at once.";
-        return "Nothing to fix: all " + juce::String (advice.checks) + " checks that have data are inside their limits. The limits are rules of thumb, so trust your ears for the last call.";
+        {
+            juce::StringArray lines { "Get started:" };
+            for (const auto& step : usage::checklist (proc.usageState()))
+                lines.add ((step.done ? "[x]  " : "[ ]  ") + juce::String (step.label));
+            lines.add ("Clipping is judged at once; the rest follows the audio that has played.");
+            return lines.joinIntoString ("\n");
+        }
+        return "Nothing to fix: all " + juce::String (advice.checks) + " checks that have data are inside their limits. The limits are rules of thumb, so trust your ears for the last call.\n\n"
+               "Next: compare with a reference (LOAD, then REF), then press CLEAR before you export.";
     }
 
     ThemisProcessor& proc;

@@ -252,7 +252,15 @@ void ThemisProcessor::setStateInformation (const void* data, int sizeInBytes)
     auto xml = getXmlFromBinary (data, sizeInBytes);
     if (xml == nullptr || !xml->hasTagName (apvts.state.getType()))
         return;
-    const auto tree = juce::ValueTree::fromXml (*xml);
+    auto tree = juce::ValueTree::fromXml (*xml);
+    // Auto reset is on by default now. A session saved before it existed stores no value for it: give it the old default (off).
+    if (! tree.getChildWithProperty ("id", params::resetOnPlay).isValid())
+    {
+        juce::ValueTree stored ("PARAM");
+        stored.setProperty ("id", params::resetOnPlay, nullptr);
+        stored.setProperty ("value", 0.0, nullptr);
+        tree.appendChild (stored, nullptr);
+    }
     apvts.replaceState (tree);
 
     // The loaded state replaces the custom curve; one without a (valid) curve must not keep the previous one.
@@ -354,6 +362,24 @@ bool ThemisProcessor::hasCustomCurve() const
 {
     const juce::ScopedLock sl (curveLock);
     return customCurveValid;
+}
+
+bool ThemisProcessor::customWithoutCurve() const
+{
+    return static_cast<int> (paramReader.value (params::target)) >= params::customTargetIndex() && !hasCustomCurve();
+}
+
+usage::Input ThemisProcessor::usageState() const
+{
+    usage::Input in;
+    in.signal = stereoScope().hasData();
+    in.auditionActive = auditionSwitches().active();
+    in.comparing = streamingPreview() || referenceOn();
+    in.analysedSeconds = loudnessMonitor().seconds();
+    in.measurementStarted = measurementStarted();
+    in.resetOnPlay = paramReader.resetsOnPlay();
+    in.customWithoutCurve = customWithoutCurve();
+    return in;
 }
 
 void ThemisProcessor::setParameterValue (const juce::String& id, float plainValue)

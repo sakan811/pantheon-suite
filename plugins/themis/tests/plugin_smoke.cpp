@@ -412,8 +412,10 @@ int main (int argc, char** argv)
         CHECK (proc.readMonoFold (fold));
         CHECK (std::abs (at (100)) < 0.5f && std::abs (at (4000)) < 0.5f);
 
-        CHECK (proc.activeDevice() != nullptr && proc.activeDevice()->name == "Phone speaker"); // default
         auto* dev = proc.apvts.getParameter (params::device);
+        CHECK (proc.activeDevice() == nullptr, "Translate to starts at Off"); // the default
+        dev->setValueNotifyingHost (dev->convertTo0to1 (1.0f));
+        CHECK (proc.activeDevice() != nullptr && proc.activeDevice()->name == "Phone speaker");
         dev->setValueNotifyingHost (dev->convertTo0to1 (0.0f));
         CHECK (proc.activeDevice() == nullptr);
         dev->setValueNotifyingHost (dev->convertTo0to1 (static_cast<float> (params::deviceNames().size() - 1)));
@@ -653,13 +655,20 @@ int main (int argc, char** argv)
         };
         const auto measured = [&] { return p2.loudnessMonitor().seconds(); };
 
-        CHECK (p2.paramReader.resetsOnPlay() == false, "off by default: a session saved before the setting keeps its behaviour");
+        CHECK (p2.paramReader.resetsOnPlay(), "on by default");
         play (22.0);
         CHECK (measured() > 20.0, "22 s played, read %.1f", measured());
         head.samples = 0;
-        play (0.1); // starts from the beginning again, the setting is off
-        CHECK (measured() > 20.0, "off: starting from the beginning keeps the measurement, read %.1f", measured());
+        play (0.1); // starts from the beginning again: measured afresh
+        CHECK (measured() < 1.0, "on by default: starting from the beginning measures afresh, read %.1f", measured());
 
+        if (auto* parameter = p2.apvts.getParameter (params::resetOnPlay))
+            parameter->setValueNotifyingHost (0.0f);
+        CHECK (!p2.paramReader.resetsOnPlay());
+        play (22.0);
+        head.samples = 0;
+        play (0.1); // the setting is off: the measurement keeps running
+        CHECK (measured() > 20.0, "off: starting from the beginning keeps the measurement, read %.1f", measured());
         if (auto* parameter = p2.apvts.getParameter (params::resetOnPlay))
             parameter->setValueNotifyingHost (1.0f);
         CHECK (p2.paramReader.resetsOnPlay());
@@ -670,6 +679,20 @@ int main (int argc, char** argv)
         play (3.0);
         CHECK (measured() > 2.5 && measured() < 4.0, "on: a start from the beginning measured afresh (3 s played), read %.1f", measured());
         p2.setPlayHead (nullptr);
+
+        // A session saved before the setting existed has no stored value for it: it opens with the old default (off).
+        {
+            auto state = p2.apvts.copyState();
+            for (int i = state.getNumChildren() - 1; i >= 0; --i)
+                if (state.getChild (i).getProperty ("id").toString() == params::resetOnPlay)
+                    state.removeChild (i, nullptr);
+            juce::MemoryBlock block;
+            juce::AudioProcessor::copyXmlToBinary (*state.createXml(), block);
+            ThemisProcessor older;
+            older.setStateInformation (block.getData(), static_cast<int> (block.getSize()));
+            CHECK (!older.paramReader.resetsOnPlay(), "a session without the setting opens with auto reset off");
+            CHECK (older.apvts.getParameter (params::resetOnPlay) != nullptr);
+        }
     }
 
     std::printf ("[5d] held curve, true-peak ceiling and the added loudness targets\n");
@@ -709,6 +732,8 @@ int main (int argc, char** argv)
         target->setValueNotifyingHost (target->convertTo0to1 (static_cast<float> (params::kDefaultTarget)));
         auto* avg = proc.apvts.getParameter (params::avgTime);
         avg->setValueNotifyingHost (avg->convertTo0to1 (static_cast<float> (params::kDefaultAvgTime)));
+        auto* deviceParam = proc.apvts.getParameter (params::device);
+        deviceParam->setValueNotifyingHost (deviceParam->convertTo0to1 (1.0f)); // Phone speaker: the screenshots show a device
         proc.resetAnalyzer();
         runAudio (proc, 0.1, fs, 512, 0.5f, 1);
         settle(); // the reset is applied by the worker; audio pushed before that would be discarded
@@ -757,14 +782,16 @@ int main (int argc, char** argv)
                 // Usage notes: what the status window says about how the plugin is being used.
                 const auto has = [] (const std::vector<ui::Note>& n, const char* word, ui::Severity sev) { return ui::hasNote (n, word, sev); };
                 usage::Input fine;
-                fine.signal = true; fine.analysedSeconds = 60.0;
+                fine.signal = true; fine.analysedSeconds = 60.0; fine.measurementStarted = true;
                 CHECK (usage::notesFor (fine).empty(), "a playing track measured for a minute: nothing to say");
                 auto in = fine; in.auditionActive = true;
                 CHECK (has (usage::notesFor (in), "AUDITION is engaged", ui::Severity::warning), "audition engaged: a warning");
                 in = fine; in.comparing = true;
                 CHECK (has (usage::notesFor (in), "COMPARE is on", ui::Severity::warning), "COMPARE on: a warning");
                 in = fine; in.signal = false;
-                CHECK (has (usage::notesFor (in), "No signal", ui::Severity::info), "no signal: say where to put the plugin");
+                CHECK (has (usage::notesFor (in), "Next: put Themis last in the chain", ui::Severity::info), "no signal: the next step is to put Themis last");
+                in = fine; in.measurementStarted = false; in.resetOnPlay = false;
+                CHECK (has (usage::notesFor (in), "PRESS RESET TO START", ui::Severity::warning), "signal, no Reset: press Reset to start");
                 in = fine; in.analysedSeconds = 5.0;
                 CHECK (has (usage::notesFor (in), "20 s", ui::Severity::info), "5 s measured: the plan needs 20 s");
                 in = fine; in.auditionActive = true; in.comparing = true; in.signal = false; in.analysedSeconds = 0.0;
@@ -780,6 +807,15 @@ int main (int argc, char** argv)
                 if (themisEditor != nullptr)
                 {
                     CHECK (! has (themisEditor->notes(), "AUDITION", ui::Severity::warning), "the editor shows no audition warning at first");
+                    {
+                        // Target Custom with nothing learned or loaded: the status window and the tonal view say Flat is shown.
+                        auto* targetParam = proc.apvts.getParameter (params::target);
+                        targetParam->setValueNotifyingHost (targetParam->convertTo0to1 (static_cast<float> (params::customTargetIndex())));
+                        CHECK (proc.customWithoutCurve() == !proc.hasCustomCurve());
+                        if (!proc.hasCustomCurve())
+                            CHECK (has (themisEditor->notes(), "No learned curve yet: showing Flat", ui::Severity::warning), "Custom without a curve says Flat is shown");
+                        targetParam->setValueNotifyingHost (targetParam->convertTo0to1 (static_cast<float> (params::kDefaultTarget)));
+                    }
                     themis::Switches sw;
                     sw.solo = 1u;
                     proc.setAudition (sw);

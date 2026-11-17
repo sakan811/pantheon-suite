@@ -162,18 +162,20 @@ inline MasterAdvice advise (const MasterInputs& in)
         const Level level = history::clip::level (in.clip.truePeakDb, in.clip.clipEvents, in.clip.overSamples, in.truePeakCeilingDb);
         check (level);
         const float overDb = in.clip.truePeakDb - in.truePeakCeilingDb; // how far above the ceiling
+        // Only an item that is over the ceiling hands its ceiling to a limiter (COPY for Aegis); the others name the DAW instead.
+        const bool limiterCopy = overDb >= 0.05f;
         if (in.clip.clipEvents > 0 || in.clip.overSamples > 0)
             out.items.push_back (make (level, Topic::clipping,
-                                       overDb >= 0.05f ? format ("Stop the clipping: ease the clipper or limiter drive and lower the ceiling %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
-                                                               static_cast<double> (in.truePeakCeilingDb))
-                                                     : std::string ("Stop the clipping: ease the clipper or limiter drive until the flat tops are gone"),
+                                       limiterCopy ? format ("Stop the clipping: ease the clipper or limiter drive and lower the ceiling %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
+                                                             static_cast<double> (in.truePeakCeilingDb))
+                                                   : std::string ("Stop the clipping: ease the clipper or limiter drive until the flat tops are gone") + (limiterCopy ? "" : " (any limiter or EQ in your DAW)"),
                                        format ("%llu flat-topped clips and %llu samples at 0 dBFS, true peak %+.1f dBTP. Clipping adds distortion that a lossy encode makes worse.",
                                                static_cast<unsigned long long> (in.clip.clipEvents), static_cast<unsigned long long> (in.clip.overSamples),
                                                static_cast<double> (in.clip.truePeakDb))));
         else if (level != Level::good)
             out.items.push_back (make (level, Topic::clipping,
                                        format ("Lower the limiter ceiling by %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
-                                               static_cast<double> (in.truePeakCeilingDb)),
+                                               static_cast<double> (in.truePeakCeilingDb)) + (limiterCopy ? "" : " (any limiter or EQ in your DAW)"),
                                        format ("True peak is %+.1f dBTP. AAC, MP3 and Ogg encodes overshoot the peaks they are fed, so a master above %.1f dBTP can clip after conversion.",
                                                static_cast<double> (in.clip.truePeakDb), static_cast<double> (in.truePeakCeilingDb))));
         // Aegis (or any limiter that takes the text) can set the ceiling it names; an item about flat tops alone has no ceiling to name.
@@ -257,11 +259,13 @@ inline MasterAdvice advise (const MasterInputs& in)
             {
                 case PhaseCause::polarity:
                     headline = "Flip the polarity of the inverted channel or source (" + where + ")";
-                    why = format ("The channels are in antiphase there; a mono sum loses up to %.1f dB (3 dB is what unrelated channels lose).", static_cast<double> (p.worstLossDb));
+                    why = format ("One channel is upside down (antiphase), so mono sums cancel there and lose up to %.1f dB (3 dB is what unrelated channels lose).",
+                                  static_cast<double> (p.worstLossDb));
                     break;
                 case PhaseCause::delay:
                     headline = format ("Remove the %.2f ms offset between the channels (%s)", static_cast<double> (p.delayMs), where.c_str());
-                    why = format ("The %s channel arrives late, which is a comb filter in mono: first notch at %s, up to %.1f dB lost. Look for a stereo delay, a widener or a spaced-mic recording.",
+                    why = format ("One side arrives late, so mono sums cancel: the %s channel is behind, with the first cancellation at %s and up to %.1f dB lost "
+                                  "(a comb filter). Look for a stereo delay, a widener or a spaced-mic recording.",
                                   p.leftLate ? "left" : "right", hzText (static_cast<double> (p.notchHz)).c_str(), static_cast<double> (p.worstLossDb));
                     break;
                 case PhaseCause::none: // (a level above good always has a cause; treated like "other")
@@ -289,7 +293,7 @@ inline MasterAdvice advise (const MasterInputs& in)
             out.items.back().moves = { { EqMove::Kind::lowCut, EqMove::Place::side, static_cast<float> (translation::kLowEndHz), 0.0f, 0.7071f, 0.0f, 0.0f } };
         check (t.monoLevel);
         if (t.monoLevel != Level::good)
-            out.items.push_back (make (t.monoLevel, Topic::monoFold, format ("Narrow the stereo image: a mono sum loses %.1f dB", static_cast<double> (t.monoLossDb)),
+            out.items.push_back (make (t.monoLevel, Topic::monoFold, format ("Narrow the stereo image: a mono sum loses %.1f dB", static_cast<double> (t.monoLossDb)) + " (any limiter or EQ in your DAW)",
                                        format ("Reduce widening on the master or on the widest buses.%s", t.worstBand >= 0
                                                    ? format (" The worst band is %s (%.1f dB lost).", hzText (BandGrid::centreHz (t.worstBand)).c_str(), static_cast<double> (t.worstBandLossDb)).c_str()
                                                    : ""),
@@ -304,12 +308,12 @@ inline MasterAdvice advise (const MasterInputs& in)
         const float outside = lowcrest::outsideZoneDb (in.lowCrestDb);
         if (outside < 0.0f)
             out.items.push_back (make (level, Topic::lowCrest, format ("Open up the low end: ease the compression or clipping on the bass by about %.0f dB", static_cast<double> (std::max (1.0f, -outside))),
-                                       format ("The 20 - 250 Hz crest factor is %.1f dB, %.1f dB under the typical %.0f - %.0f dB: a squashed low end sounds flat and loses punch.", static_cast<double> (in.lowCrestDb),
+                                       format ("The bass is squashed: its peaks barely stand above its average. The 20 - 250 Hz crest factor is %.1f dB, %.1f dB under the typical %.0f - %.0f dB, and a squashed low end sounds flat and loses punch.", static_cast<double> (in.lowCrestDb),
                                                static_cast<double> (-outside), static_cast<double> (lowcrest::kZoneLoDb), static_cast<double> (lowcrest::kZoneHiDb)),
                                        master::soloLow()));
         else if (outside > 0.0f)
             out.items.push_back (make (level, Topic::lowCrest, format ("Tame the low-end peaks: compress or saturate the kick and bass by about %.0f dB", static_cast<double> (std::max (1.0f, outside))),
-                                       format ("The 20 - 250 Hz crest factor is %.1f dB, %.1f dB over the typical %.0f - %.0f dB: isolated low peaks make the limiter work hard and pump the whole mix.", static_cast<double> (in.lowCrestDb),
+                                       format ("The bass has isolated peaks. The 20 - 250 Hz crest factor is %.1f dB, %.1f dB over the typical %.0f - %.0f dB, and they make the limiter work hard and pump the whole mix.", static_cast<double> (in.lowCrestDb),
                                                static_cast<double> (outside), static_cast<double> (lowcrest::kZoneLoDb), static_cast<double> (lowcrest::kZoneHiDb)),
                                        master::soloLow()));
     }

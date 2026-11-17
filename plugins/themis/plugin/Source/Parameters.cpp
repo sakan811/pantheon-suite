@@ -28,7 +28,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
                                                        FloatAttr()
                                                            .withStringFromValueFunction ([] (float v, int) { return juce::String (v, 1) + " dBTP"; })
                                                            .withValueFromStringFunction ([] (const juce::String& t) { return t.getFloatValue(); })));
-    layout.add (std::make_unique<juce::AudioParameterBool> (ParameterID { resetOnPlay, 2 }, "Reset On Play", false));
+    // Version 3 made it on by default. A session that stored a value keeps it; one saved before the setting existed is given
+    // the old default (off) by setStateInformation, so the version alone never changes a saved session.
+    layout.add (std::make_unique<juce::AudioParameterBool> (ParameterID { resetOnPlay, 3 }, "Reset On Play", true));
     return layout;
 }
 

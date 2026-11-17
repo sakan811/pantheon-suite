@@ -40,6 +40,10 @@ inline juce::String signedDb (float v) { return juce::String (themis::signedDbTe
 
 inline juce::String hzText (double hz) { return juce::String (themis::hzText (hz)); }
 
+// The DEVICE LOSS meter's title. While a device is chosen the meter is labelled as not part of the master plan (the plan never
+// judges the device, it is the track against the target).
+inline juce::String deviceLossTitle (bool deviceChosen) { return deviceChosen ? "DEVICE LOSS: NOT IN PLAN" : "DEVICE LOSS"; }
+
 // Suggested bands as the text the other plugins of the repository paste (pdsp::link): equaliser bands go to the equaliser,
 // a harmonic-fill band to the harmonic generator.
 // The band list for the other plugins, with the target curve the bands were fitted to when there is one (Iris and Apollo draw it as their reference).

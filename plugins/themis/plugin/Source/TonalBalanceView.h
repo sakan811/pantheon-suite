@@ -276,7 +276,9 @@ private:
 
         g.setColour (colours::accent);
         g.setFont (ui::font (12.0f));
-        g.drawText ("Target: " + juce::String (target.name), annotationRow (0, false), juce::Justification::left);
+        // "Custom" with nothing learned or loaded shows Flat: say so here, where the curve is, not only in the status window.
+        g.drawText (proc.customWithoutCurve() ? juce::String (usage::noCurveText()) : "Target: " + juce::String (target.name), annotationRow (0, false),
+                    juce::Justification::left);
     }
 
     // The held curve (HOLD CURVE): a pale, wide ghost behind the live trace (the device preview is the dashed line), with the live
@@ -471,10 +473,10 @@ private:
         }
 
         if (report.haveDevice)
-            drawMeter (g, cell (0), "DEVICE LOSS", report.extraLossDb, tr::kDeviceWarnDb, tr::kDeviceBadDb, report.deviceLevel,
+            drawMeter (g, cell (0), gui::deviceLossTitle (true), report.extraLossDb, tr::kDeviceWarnDb, tr::kDeviceBadDb, report.deviceLevel,
                        gui::signedDb (report.extraLossDb) + " vs target");
         else
-            cell (0).drawNote (g, "DEVICE LOSS", "choose a device", colours::dim);
+            cell (0).drawNote (g, gui::deviceLossTitle (false), "choose a device", colours::dim);
 
         if (report.haveFold)
         {
