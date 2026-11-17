@@ -147,6 +147,7 @@ public:
     // Target curves
     themis::TargetCurve activeTarget() const; // honours the "target" parameter
     void setCustomCurve (const themis::TargetCurve& c, bool selectIt);
+    void selectTarget (int index) { setParameterValue (params::target, static_cast<float> (index)); } // as the Target selector does: the host is notified
     bool hasCustomCurve() const;
 
     // Reads the given audio files in a background thread, averages their tonal balance and installs the

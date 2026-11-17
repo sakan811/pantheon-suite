@@ -5,7 +5,8 @@
 
 #include "Common.h"
 #include "FrameHistory.h"
-#include "TruePeak.h"
+
+#include <pantheon/dsp/TruePeak.h> // the true peak every Pantheon plugin reads (8x, 64 taps); plain C++
 
 #include <algorithm>
 #include <atomic>
@@ -19,7 +20,7 @@ namespace themis
 struct ClipWindow
 {
     float samplePeak = 0.0f; // linear, largest |sample| of either channel
-    float truePeak = 0.0f;   // linear, largest inter-sample (4x oversampled) peak of either channel
+    float truePeak = 0.0f;   // linear, largest inter-sample (8x oversampled, pdsp::TruePeakReader) peak of either channel
     uint32_t clipEvents = 0;  // flat-topped plateaus (see ClipMeter)
     uint32_t clipSamples = 0; // samples inside those plateaus
     uint32_t overSamples = 0; // samples at or above 0 dBFS
@@ -62,7 +63,9 @@ inline float peakToDb (float linear) { return linear > 1.0e-5f ? std::max (linTo
 
 // Clipping and peak detection on a stereo signal. Monitoring only: the samples are read, never written.
 //
-//   * Sample peak and true peak (4x oversampled, TruePeakDetector) in dB, per analysis frame and since the reset.
+//   * Sample peak and true peak (8x oversampled, pdsp::TruePeakReader) in dB, per analysis frame and since the reset. The
+//     reader reports kTruePeakDelay samples behind the input: the totals (the verdicts) are exact, but a peak can land in
+//     the analysis frame after the one it happened in (at most kTruePeakDelay samples, under a millisecond).
 //   * OVER: samples at or above 0 dBFS. A float stream carries them without harm, but the converter or a lossy encoder
 //     will clip them.
 //   * CLIP: a flat top, i.e. a plateau of at least kMinRun consecutive samples with the same value, at least
@@ -71,7 +74,7 @@ inline float peakToDb (float linear) { return linear > 1.0e-5f ? std::max (linTo
 //     source from counting. Limits: a synthesised square wave or a held DC level is a plateau too, and a clip that is
 //     smoothed afterwards (a soft clipper, a lowpass) leaves no plateau to find.
 //
-// Threading: process() runs on the audio thread (a few multiplies per sample for the oversampler, no allocation).
+// Threading: process() runs on the audio thread (448 multiplies per sample for the oversampler, no allocation).
 // Everything it publishes is an atomic: the per-frame accumulators are drained by take() on the analysis thread and the
 // totals are read by the UI. requestReset() is safe from any thread and is applied by the next process(); prepare() must
 // not overlap with process().
@@ -153,7 +156,7 @@ public:
 private:
     struct Channel
     {
-        TruePeakDetector oversampler;
+        pdsp::TruePeakReader oversampler;
         float previous = 0.0f;
         int plateau = 0;       // length of the current run of equal, high samples
         float entryStep = 0.0f; // how far the run's first sample was from the one before it
@@ -177,7 +180,7 @@ private:
         if (!std::isfinite (a)) // a glitched sample is not a peak: leave the detectors (and the totals) alone
             return;
         w.samplePeak = std::max (w.samplePeak, a);
-        w.truePeak = std::max ({ w.truePeak, a, s.oversampler.process (x) });
+        w.truePeak = std::max (w.truePeak, static_cast<float> (s.oversampler.push (x)));
         if (a >= kOverLevel)
             ++w.overSamples;
 

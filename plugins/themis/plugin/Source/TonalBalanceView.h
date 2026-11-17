@@ -550,7 +550,7 @@ private:
     juce::String clipTooltip() const
     {
         namespace clip = themis::history::clip;
-        juce::String text = "CLIPPING since the last reset: sample peak " + juce::String (clipTotals.samplePeakDb, 1) + " dBFS, true peak (the waveform between the samples, 4x oversampled) "
+        juce::String text = "CLIPPING since the last reset: sample peak " + juce::String (clipTotals.samplePeakDb, 1) + " dBFS, true peak (the waveform between the samples) "
                             + juce::String (clipTotals.truePeakDb, 1) + " dBTP. "
                             + juce::String (static_cast<juce::int64> (clipTotals.clipEvents)) + " flat-topped clips (" + juce::String (static_cast<juce::int64> (clipTotals.clipSamples))
                             + " samples) and " + juce::String (static_cast<juce::int64> (clipTotals.overSamples)) + " samples at or over 0 dBFS. ";

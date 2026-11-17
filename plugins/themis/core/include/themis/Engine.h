@@ -10,6 +10,8 @@
 #include "StereoTools.h"
 #include "TonalAnalyzer.h"
 
+#include <pantheon/dsp/TruePeak.h> // the true-peak reader of tpOut
+
 #include <array>
 #include <atomic>
 #include <vector>
@@ -230,7 +232,7 @@ private:
         float peak = 0.0f;
         for (int i = 0; i < n; ++i)
         {
-            peak = std::max ({ peak, tpOut[0].process (l[i]), tpOut[1].process (r[i]) });
+            peak = std::max ({ peak, static_cast<float> (tpOut[0].push (l[i])), static_cast<float> (tpOut[1].push (r[i])) });
             const double xl = l[i], xr = r[i];
             sumLL += (xl * xl - sumLL) * a;
             sumRR += (xr * xr - sumRR) * a;
@@ -262,7 +264,7 @@ private:
     Limiter limiter;
     LoudnessMeter loudIn, loudOut;
     TonalAnalyzer tonalIn, tonalOut;
-    TruePeakDetector tpOut[2];
+    pdsp::TruePeakReader tpOut[2];
 
     std::vector<float> dryDelay[2], dryScratch[2];
     size_t dryPos = 0;
