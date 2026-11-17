@@ -332,7 +332,11 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.trailingSilenceSeconds = analyzer.trailingSilenceSeconds();
 
     themis::BandArray measured {}, fold {};
-    if (readSpectrum (measured) && readMonoFold (fold)) // the plan only uses the mono fold: the curve and the device are judged against the reference, which is taste
+    in.haveCurve = readSpectrum (measured); // for narrow rings only: judged against each band's own neighbours, never the target
+    in.curveDb = measured;
+    const double fs = getSampleRate();
+    in.usableMaxHz = fs > 0.0 ? themis::BandGrid::usableMaxHz (fs) : themis::BandGrid::kMaxHz;
+    if (in.haveCurve && readMonoFold (fold)) // the plan only uses the mono fold: the device is judged against the reference, which is taste
         themis::addMonoFold (in.translation, measured, fold);
 
     themis::PhaseBands phase {};
@@ -343,6 +347,8 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
 
     in.frames.resize (themis::FrameHistory::kCapacity);
     in.frames.resize (static_cast<size_t> (frameHistory().copyRecent (in.frames.data(), themis::FrameHistory::kCapacity)));
+    in.spectrum.resize (themis::SpectrumHistory::kCapacity);
+    in.spectrum.resize (static_cast<size_t> (spectrumHistory().copyRecent (in.spectrum.data(), themis::SpectrumHistory::kCapacity)));
     return in;
 }
 

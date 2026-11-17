@@ -19,7 +19,9 @@
 #include <themis/Loudness.h>
 #include <themis/LoudnessMonitor.h>
 #include <themis/MasterAdvisor.h>
+#include <themis/Harshness.h>
 #include <themis/PhaseCancellation.h>
+#include <themis/Resonance.h>
 #include <themis/StereoScope.h>
 #include <themis/StereoTools.h>
 #include <themis/TargetCurve.h>
@@ -3297,6 +3299,211 @@ TEST (advisor_flags_squashed_peaks_by_plr_as_a_rule_of_thumb)
     for (size_t i = 1; i < plan.items.size(); ++i)
         CHECK (plan.items[i - 1].level >= plan.items[i].level);
     CHECK (planAsText (in, plan).find ("PLR 3.5 dB") != std::string::npos);
+}
+
+// ---- narrow rings in the long-term curve, and harshness in the band history ---------------------------------------
+namespace
+{
+BandArray flatCurve (float db = 0.0f)
+{
+    BandArray a {};
+    a.fill (db);
+    return a;
+}
+
+// `frames` band histories of `f(frame, band)` (mean-square dB), oldest first.
+template <typename F> std::vector<BandLevels> bandHistory (int frames, F&& f)
+{
+    std::vector<BandLevels> out (static_cast<size_t> (frames));
+    for (int i = 0; i < frames; ++i)
+        for (int b = 0; b < BandGrid::kNum; ++b)
+            out[static_cast<size_t> (i)][static_cast<size_t> (b)] = f (i, b);
+    return out;
+}
+
+// Bands 46 .. 53 are the region the harshness check reads (about 4.1 kHz to 9.1 kHz).
+bool inHarshRegion (int b) { return b >= 46 && b <= 53; }
+} // namespace
+
+TEST (resonance_finds_a_narrow_ring_at_the_right_frequency_and_size)
+{
+    auto db = flatCurve();
+    db[44] = 4.5f; // centre 3.2 kHz
+    const auto rings = resonance::find (db, BandGrid::kNum);
+    CHECK (rings.size() == 1);
+    if (rings.size() == 1)
+    {
+        CHECK (rings[0].band == 44);
+        CHECK_NEAR (rings[0].freqHz, BandGrid::centreHz (44), 1e-6);
+        CHECK (hzText (rings[0].freqHz) == "3.2 kHz");
+        CHECK_NEAR (rings[0].standOutDb, 4.5, 1e-4);
+    }
+    // Below 250 Hz a sustained bass note is not a ring: the same peak down there is not judged (the low end has its own checks).
+    db = flatCurve();
+    db[20] = 10.0f; // centre 202 Hz
+    CHECK (resonance::find (db, BandGrid::kNum).empty());
+    // A ring 3.5 dB high is under the limit; the same ring 4.5 dB high was found above.
+    db[44] = resonance::kMinStandOutDb - 0.5f;
+    CHECK (resonance::find (db, BandGrid::kNum).empty());
+    // A two-band ring (a third of an octave wide) is one ring, reported once, at its first band; its partner is not compared.
+    db = flatCurve();
+    db[44] = 6.0f;
+    db[45] = 6.0f;
+    const auto pair = resonance::find (db, BandGrid::kNum);
+    CHECK (pair.size() == 1 && pair[0].band == 44 && std::abs (pair[0].standOutDb - 6.0f) < 1e-4f);
+}
+
+TEST (resonance_ignores_flat_targets_smooth_shapes_and_broad_balance)
+{
+    CHECK (resonance::find (flatCurve(), BandGrid::kNum).empty());
+    // A target-shaped curve: a -3 dB per octave tilt with a broad 3 dB bump two octaves wide.
+    BandArray shape {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        const double oct = static_cast<double> (i) / BandGrid::kPerOctave;
+        shape[static_cast<size_t> (i)] = static_cast<float> (-3.0 * oct + 3.0 * std::exp (-0.5 * (oct - 6.0) * (oct - 6.0)));
+    }
+    CHECK (resonance::find (shape, BandGrid::kNum).empty());
+    // A broad tonal balance: a 6 dB hump two octaves wide, and a 10 dB step up at 2 kHz. Neither has a narrow ring.
+    BandArray hump = flatCurve(), step = flatCurve();
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        const double oct = static_cast<double> (i) / BandGrid::kPerOctave;
+        hump[static_cast<size_t> (i)] = static_cast<float> (6.0 * std::exp (-0.5 * (oct - 5.0) * (oct - 5.0)));
+        step[static_cast<size_t> (i)] = BandGrid::centreHz (i) >= 2000.0 ? 10.0f : 0.0f;
+    }
+    CHECK (resonance::find (hump, BandGrid::kNum).empty());
+    CHECK (resonance::find (step, BandGrid::kNum).empty());
+    // The outermost bands have no full neighbourhood and are never reported; nor are bands above the usable top.
+    auto edge = flatCurve();
+    edge[0] = edge[1] = 20.0f;
+    edge[BandGrid::kNum - 1] = 20.0f;
+    CHECK (resonance::find (edge, BandGrid::kNum).empty());
+    auto high = flatCurve();
+    high[56] = 8.0f; // centre 11.5 kHz: above the usable top of a 20 kHz sample rate (9.4 kHz), so it is not judged there
+    CHECK (resonance::find (high, BandGrid::bandsUpTo (BandGrid::usableMaxHz (20000.0))).empty());
+    CHECK (resonance::find (high, BandGrid::kNum).size() == 1);
+}
+
+TEST (resonance_reports_the_worst_three_rings_worst_first)
+{
+    auto db = flatCurve();
+    db[30] = 6.0f;
+    db[36] = 4.5f;
+    db[46] = 8.0f;
+    db[52] = 5.0f;
+    db[57] = 5.0f; // three bands above 52 would be inside its side (it would read as 2.5 dB); 57 stands alone
+    const auto rings = resonance::find (db, BandGrid::kNum);
+    CHECK (rings.size() == resonance::kMaxRings);
+    if (rings.size() == 3)
+    {
+        CHECK (rings[0].band == 46 && rings[1].band == 30 && rings[2].band == 52); // equal ones keep their band order
+    }
+}
+
+TEST (harshness_catches_a_region_that_keeps_jumping_and_not_a_steady_one)
+{
+    constexpr int n = 120;
+    // A quarter of the frames carry a 12 dB burst in the region: the average sits 9 dB under the loud tenth.
+    const auto bursts = bandHistory (n, [] (int i, int b) { return -40.0f + (i % 4 == 0 && inHarshRegion (b) ? 12.0f : 0.0f); });
+    const auto r = harshness::analyse (bursts.data(), n, 20000.0);
+    CHECK (r.have);
+    CHECK_NEAR (r.jumpDb(), 9.0, 0.1);
+    CHECK (r.jumpDb() >= harshness::kJumpDb);
+
+    // Steady noise in the region (about 0.5 dB of frame-to-frame wobble): nothing.
+    unsigned seed = 7;
+    const auto noise = bandHistory (n, [&] (int, int b) {
+        seed = seed * 1664525u + 1013904223u;
+        const float wobble = (static_cast<float> (seed >> 8) / 16777216.0f - 0.5f); // -0.5 .. 0.5
+        return -40.0f + (inHarshRegion (b) ? wobble : 0.0f);
+    });
+    const auto steady = harshness::analyse (noise.data(), n, 20000.0);
+    CHECK (steady.have && steady.jumpDb() < 2.0f);
+
+    // A section that is simply louder for its last 40 % is a step, not a jump: 8 dB up, but the average moves with it.
+    const auto section = bandHistory (n, [] (int i, int b) { return -40.0f + (i >= 72 && inHarshRegion (b) ? 8.0f : 0.0f); });
+    CHECK (harshness::analyse (section.data(), n, 20000.0).jumpDb() < harshness::kJumpDb);
+
+    // Too few frames, or a region 60 dB or more under the loudest band (the spectrogram's span: noise floor), give no verdict.
+    CHECK (!harshness::analyse (bursts.data(), spectro::kMinFrames - 1, 20000.0).have);
+    const auto floor = bandHistory (n, [] (int i, int b) { return (inHarshRegion (b) ? -115.0f : -40.0f) + (i % 4 == 0 ? 12.0f : 0.0f); });
+    CHECK (!harshness::analyse (floor.data(), n, 20000.0).have);
+    // A sample rate that cannot carry the region (its top below 4 kHz) gives none either.
+    CHECK (!harshness::analyse (bursts.data(), n, 3000.0).have);
+}
+
+TEST (advisor_names_narrow_rings_as_suggestions_with_a_bell_to_copy)
+{
+    auto in = cleanMaster();
+    in.haveCurve = true;
+    in.curveDb = flatCurve();
+    in.curveDb[30] = 6.0f;
+    in.curveDb[36] = 4.5f;
+    in.curveDb[46] = 8.0f;
+    in.curveDb[52] = 5.0f;
+    const auto a = advise (in);
+    int rings = 0;
+    for (const auto& item : a.items)
+        rings += item.topic == Topic::resonance ? 1 : 0;
+    CHECK (rings == 3); // the worst three
+    const auto* first = pick (in, Topic::resonance);
+    CHECK (first != nullptr);
+    if (first != nullptr)
+    {
+        CHECK (first->level == Level::warn);
+        CHECK (first->headline == "Check the narrow ring at " + hzText (BandGrid::centreHz (46)) + ": a narrow cut of about 6.0 dB may tame it");
+        CHECK (first->why.find ("8.0 dB above both of its sides") != std::string::npos);
+        CHECK (first->why.find ("suggestion to check by ear, not a fault") != std::string::npos);
+        CHECK (first->hear.active());
+        // The COPY path: one narrow bell at the ring, cut by the headline's amount.
+        CHECK (first->canCopy() && first->moves.size() == 1 && first->limiter.active() == false);
+        if (first->moves.size() == 1)
+        {
+            const auto& m = first->moves[0];
+            CHECK (m.kind == EqMove::Kind::bell && m.place == EqMove::Place::stereo);
+            CHECK_NEAR (m.freqHz, BandGrid::centreHz (46), 0.01);
+            CHECK_NEAR (m.gainDb, -6.0, 1e-6);
+            CHECK_NEAR (m.q, resonance::kCutQ, 1e-6);
+        }
+    }
+    CHECK (planAsText (in, a).find ("[CHECK] Check the narrow ring at") != std::string::npos);
+
+    // Gated like the other long-term items: nothing before 20 s of audio, and nothing without a curve.
+    auto early = in;
+    early.analysedSeconds = master::kMinSeconds - 0.5;
+    CHECK (!pick (early, Topic::resonance));
+    auto none = cleanMaster();
+    CHECK (!pick (none, Topic::resonance));
+    // A flat curve is a clean check.
+    auto flat = cleanMaster();
+    flat.haveCurve = true;
+    flat.curveDb = flatCurve();
+    CHECK (!pick (flat, Topic::resonance) && advise (flat).passed == advise (flat).checks);
+}
+
+TEST (advisor_suggests_a_check_for_sibilance_without_a_copy_path)
+{
+    constexpr int n = 120;
+    auto in = cleanMaster();
+    in.spectrum = bandHistory (n, [] (int i, int b) { return -40.0f + (i % 4 == 0 && inHarshRegion (b) ? 12.0f : 0.0f); });
+    const auto* item = pick (in, Topic::harshness);
+    CHECK (item != nullptr);
+    if (item != nullptr)
+    {
+        CHECK (item->level == Level::warn);
+        CHECK (item->headline == "The 4.0 kHz - 10 kHz range keeps jumping 9.0 dB above its average: possible harsh sibilance (use a de-esser or dynamic EQ in your DAW)");
+        CHECK (item->why.find ("suggestion to check by ear, not a fault") != std::string::npos);
+        CHECK (!item->canCopy());
+        CHECK (item->hear.active());
+    }
+    // Steady region: nothing. Too little audio: nothing.
+    auto steady = in;
+    steady.spectrum = bandHistory (n, [] (int, int) { return -40.0f; });
+    CHECK (!pick (steady, Topic::harshness));
+    auto early = in;
+    early.analysedSeconds = 5.0;
+    CHECK (!pick (early, Topic::harshness));
 }
 
 int main()

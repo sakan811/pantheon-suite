@@ -7,10 +7,13 @@
 #include "Audition.h"
 #include "ClipMeter.h"
 #include "DeliveryTargets.h"
+#include "Harshness.h"
 #include "HistoryChecks.h"
 #include "Loudness.h"
 #include "LowCrestMeter.h"
 #include "PhaseCancellation.h"
+#include "Resonance.h"
+#include "Spectrogram.h"
 #include "Translation.h"
 
 #include <algorithm>
@@ -50,7 +53,7 @@ inline Level plrLevel (float plr) { return plr < kPlrBadDb ? Level::bad : plr < 
 } // namespace master
 
 // What an item is about; the order is the order of priority among items of the same severity.
-enum class Topic { clipping, loudness, squashed, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, swing, dcOffset };
+enum class Topic { clipping, loudness, squashed, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, resonance, harshness, swing, dcOffset };
 
 struct Advice
 {
@@ -86,6 +89,13 @@ struct MasterInputs
     float lowCrestDb = 0.0f;
 
     std::vector<FrameStats> frames; // the history window, oldest first
+
+    // The long-term curve, for narrow rings only (resonance::find judges each band against its own neighbours, never against a
+    // target), and the spectrogram's band history, for the harshness check. Both are off until there is audio to read.
+    bool haveCurve = false;
+    BandArray curveDb {};            // anchor-normalised, like the tonal view
+    double usableMaxHz = BandGrid::kMaxHz; // the top the sample rate carries (BandGrid::usableMaxHz): the bands above it are left out
+    std::vector<BandLevels> spectrum; // the band history, oldest first
 
     // Readouts only (no item judges them): the loudest 3 s since the reset, and the silence before and after the sound.
     float maxShortTermLufs = LoudnessMeter::kSilence;
@@ -437,6 +447,44 @@ inline MasterAdvice advise (const MasterInputs& in)
                 out.items.push_back (make (level, Topic::swing, format ("Even out the low end between sections: it moves %.0f dB", static_cast<double> (low.swingDb())),
                                            "The level of 20 - 120 Hz differs a lot from moment to moment. If a section is meant to lose its bass that is fine; if not, match the bass level between verse and chorus.",
                                            master::soloLow()));
+        }
+    }
+
+    // ---- narrow rings in the long-term curve, and harshness in the band history: suggestions, not faults --------------
+    // Both are warnings with a why that says so. The ring is judged against the curve's own neighbours, never the target.
+    if (in.haveCurve)
+    {
+        const auto rings = resonance::find (in.curveDb, BandGrid::bandsUpTo (in.usableMaxHz));
+        check (rings.empty() ? Level::good : Level::warn);
+        for (const auto& r : rings)
+        {
+            const float cut = std::min (master::kMaxCutDb, std::ceil (r.standOutDb * 2.0f) / 2.0f); // to the next half dB
+            Advice item = make (Level::warn, Topic::resonance,
+                                format ("Check the narrow ring at %s: a narrow cut of about %s dB may tame it", hzText (r.freqHz).c_str(), master::rounded (cut).c_str()),
+                                format ("The long-term curve stands %.1f dB above both of its sides there, which is what a resonance or a harsh formant leaves behind. "
+                                        "A suggestion to check by ear, not a fault: a bright ring can also be the sound you chose. The curve is on 1/6-octave bands, "
+                                        "so a narrower ring reads smaller than it is, and the frequency is only about right.", static_cast<double> (r.standOutDb)),
+                                { auditionBitsOver (BandGrid::lowEdgeHz (r.band), BandGrid::highEdgeHz (r.band)), 0u });
+            item.moves = { { EqMove::Kind::bell, EqMove::Place::stereo, static_cast<float> (r.freqHz), -cut, static_cast<float> (resonance::kCutQ), 0.0f, 0.0f } };
+            out.items.push_back (item);
+        }
+    }
+
+    if (in.spectrum.size() >= static_cast<size_t> (spectro::kMinFrames))
+    {
+        const auto h = harshness::analyse (in.spectrum.data(), static_cast<int> (in.spectrum.size()), in.usableMaxHz);
+        if (h.have)
+        {
+            const bool harsh = h.jumpDb() >= harshness::kJumpDb;
+            check (harsh ? Level::warn : Level::good);
+            if (harsh)
+                out.items.push_back (make (Level::warn, Topic::harshness,
+                                           format ("The %s - %s range keeps jumping %.1f dB above its average: possible harsh sibilance (use a de-esser or dynamic EQ in your DAW)",
+                                                   hzText (harshness::kLoHz).c_str(), hzText (harshness::kHiHz).c_str(), static_cast<double> (h.jumpDb())),
+                                           format ("On its loud tenth of frames the level reaches %.1f dB, against an average of %.1f dB over the last stretch. Sibilance and a harsh top "
+                                                   "do that: a few loud consonants or cymbals jump out while the average hides them. A suggestion to check by ear, not a fault: "
+                                                   "a bright top can be the sound you want.", static_cast<double> (h.reachedDb), static_cast<double> (h.averageDb)),
+                                           { auditionBitsOver (harshness::kLoHz, harshness::kHiHz), 0u }));
         }
     }
 

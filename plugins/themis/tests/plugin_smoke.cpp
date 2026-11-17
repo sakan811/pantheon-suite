@@ -80,6 +80,10 @@ static void runAudio (ThemisProcessor& proc, double seconds, double fs, int bloc
 // clipper at -1 dBFS, so the phase check, the mono fold, the fundamental, the left/right balance, the clipping check
 // and the level graph all have something to show.
 static constexpr float kAirGain = 0.02f; // the widened top of the demo programme
+// Sibilance-like bursts for the harshness check: every second, a quarter of a second of the widened top swells (the same
+// signal, so it sits in 4 - 10 kHz and up).
+static constexpr double kSibilanceEverySeconds = 1.0, kSibilanceSeconds = 0.15;
+static constexpr float kSibilanceGain = 4.0f; // +12 dB while a burst lasts (more clips against the demo's ceiling)
 static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, int block, double delaySeconds)
 {
     const size_t total = static_cast<size_t> (seconds * fs), delay = static_cast<size_t> (delaySeconds * fs);
@@ -95,7 +99,8 @@ static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, 
         const bool sounding = std::fmod (t, kNoteSeconds) < kSoundingSeconds;
         const float bass = sounding ? static_cast<float> (0.30 * std::sin (phase) + 0.12 * std::sin (2.0 * phase) + 0.05 * std::sin (3.0 * phase)) : 0.0f;
         const float gain = t >= kChorusStart && t < kChorusEnd ? kChorusGain : 1.0f;
-        const float wide = i > 1 ? air[i] - 2.0f * air[i - 1] + air[i - 2] : 0.0f;
+        const bool sibilant = std::fmod (t, kSibilanceEverySeconds) < kSibilanceSeconds;
+        const float wide = (i > 1 ? air[i] - 2.0f * air[i - 1] + air[i - 2] : 0.0f) * (sibilant ? kSibilanceGain : 1.0f);
         l[i] = std::clamp (gain * (bass + noise[i] + wide), -kCeiling, kCeiling);
         r[i] = std::clamp (gain * kRightTrim * (bass + noise[i >= delay ? i - delay : 0] - wide), -kCeiling, kCeiling);
     }
@@ -327,6 +332,16 @@ int main (int argc, char** argv)
         CHECK (pdsp::link::decode (gui::linkText ({ cut }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut
                    && back[0].place == pdsp::LinkBand::Place::side && std::abs (back[0].freq - 150.0) < 0.5,
                "a copied side low cut reads back as one");
+        // A narrow ring's cut (the bell the plan hands over for a ring) reads back as one narrow bell at the ring.
+        themis::EqMove ring;
+        ring.kind = themis::EqMove::Kind::bell;
+        ring.freqHz = 3226.0f;
+        ring.gainDb = -4.0f;
+        ring.q = static_cast<float> (themis::resonance::kCutQ);
+        CHECK (pdsp::link::decode (gui::linkText ({ ring }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::bell
+                   && back[0].place == pdsp::LinkBand::Place::stereo && std::abs (back[0].freq - 3226.0) < 0.5 && std::abs (back[0].gainDb + 4.0) < 0.05
+                   && std::abs (back[0].q - themis::resonance::kCutQ) < 0.05,
+               "a copied narrow ring cut reads back as one bell");
         // A key from a newer writer is ignored whatever its value, so the band still arrives (the format's promise).
         CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=270 gain=-2.0 q=0.70 place=mid shape=tilt\nbell freq=500 gain=1 q=1", back)
                    && back.size() == 2 && std::abs (back[0].freq - 270.0) < 0.5 && back[0].place == pdsp::LinkBand::Place::mid,
@@ -892,6 +907,8 @@ int main (int argc, char** argv)
                 const auto has = [&] (themis::Topic t) { return std::any_of (advice.items.begin(), advice.items.end(), [t] (const themis::Advice& a) { return a.topic == t; }); };
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
                 CHECK (has (themis::Topic::width), "the demo programme has a widened top");
+                CHECK (has (themis::Topic::harshness), "the demo programme's sibilant bursts show as a harshness item");
+                CHECK (has (themis::Topic::resonance), "the demo programme's channel delay leaves a comb peak that reads as a ring");
                 CHECK (advice.level() == themis::Level::bad && advice.items.front().level == themis::Level::bad);
                 // The loudness readout's hover: the offset to each of the five delivery targets (the chosen one marked), the
                 // loudest section, the crest factor and the silence at the edges, all from what has played.
