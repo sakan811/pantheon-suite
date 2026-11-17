@@ -28,13 +28,12 @@ public:
     void resized() override;
 
     juce::TextButton& guide() noexcept { return guideButton; }                       // for the smoke test
-    std::vector<ui::Note> notes() const { return usage::notesFor (usageInput()); }   // what the status window says when idle, for the smoke test
+    std::vector<ui::Note> notes() const { return usage::notesFor (proc.usageState()); }   // what the status window says when idle, for the smoke test
 
 private:
     void timerCallback() override;
     void setStatus (const juce::String& text, bool isError);
     void showIdleStatus();
-    usage::Input usageInput() const;
     void copyTonalEq();
     void toggleHeldCurve();
 

@@ -25,6 +25,8 @@
 #include <themis/TonalAnalyzer.h>
 #include <themis/Translation.h>
 
+#include "../plugin/Source/UsageNotes.h"
+
 #include <chrono>
 #include <functional>
 #include <cstdio>
@@ -2887,6 +2889,178 @@ TEST (mono_fold_report_needs_no_target_or_device)
     CHECK (alone.haveFold && !alone.haveDevice);
     CHECK (alone.lowMonoLossDb > 3.0f && alone.lowMonoLevel != Level::good);
     CHECK (alone.monoLossDb == full.monoLossDb && alone.lowMonoLossDb == full.lowMonoLossDb && alone.worstBand == full.worstBand);
+}
+
+// ---- the usage notes and the first-run checklist (plugin/Source/UsageNotes.h, plain C++) ----
+
+TEST (first_run_checklist_ticks_come_from_what_the_plugin_has_seen)
+{
+    usage::Input in;
+    CHECK (usage::nextStep (in) == 0);
+    CHECK (!usage::checklist (in)[0].done && !usage::checklist (in)[3].done);
+    in.signal = true; // the first two steps are ticked by audio reaching the plugin
+    CHECK (usage::checklist (in)[0].done && usage::checklist (in)[1].done && !usage::checklist (in)[2].done);
+    CHECK (usage::nextStep (in) == 2);
+    in.measurementStarted = true;
+    CHECK (usage::nextStep (in) == 3);
+    CHECK (usage::checklist (in)[3].label.find ("20 s") != std::string::npos);
+    in.analysedSeconds = 19.9;
+    CHECK (usage::nextStep (in) == 3);
+    in.analysedSeconds = 20.0;
+    CHECK (usage::nextStep (in) == -1); // all ticked: no next step
+}
+
+TEST (next_step_says_how_auto_reset_starts_the_measurement)
+{
+    usage::Input in;
+    in.signal = true;
+    in.resetOnPlay = false;
+    CHECK (usage::checklist (in)[2].next.rfind ("press Reset", 0) == 0);
+    in.resetOnPlay = true;
+    CHECK (usage::checklist (in)[2].next.find ("Auto reset") != std::string::npos);
+}
+
+TEST (status_window_names_the_next_step)
+{
+    usage::Input in;
+    CHECK (ui::hasNote (usage::notesFor (in), "Next: put Themis last in the chain", ui::Severity::info));
+    in.signal = true;
+    in.measurementStarted = true;
+    in.analysedSeconds = 5.0;
+    CHECK (ui::hasNote (usage::notesFor (in), "Next: keep playing: the plan needs 20 s", ui::Severity::info));
+    in.analysedSeconds = 25.0;
+    CHECK (usage::notesFor (in).empty()); // everything ticked: the tip shows instead
+}
+
+TEST (press_reset_to_start_when_signal_has_no_measurement)
+{
+    usage::Input in;
+    in.signal = true;
+    in.resetOnPlay = false;
+    CHECK (ui::hasNote (usage::notesFor (in), "PRESS RESET TO START", ui::Severity::warning));
+    CHECK (usage::notesFor (in).front().severity == ui::Severity::warning); // a warning comes first
+    in.measurementStarted = true; // Reset was pressed
+    CHECK (!ui::hasNote (usage::notesFor (in), "PRESS RESET", ui::Severity::warning));
+    in.measurementStarted = false;
+    in.resetOnPlay = true; // auto reset starts it by itself when the host plays
+    CHECK (!ui::hasNote (usage::notesFor (in), "PRESS RESET", ui::Severity::warning));
+    in.resetOnPlay = false;
+    in.signal = false; // and nothing is said before any signal
+    CHECK (!ui::hasNote (usage::notesFor (in), "PRESS RESET", ui::Severity::warning));
+}
+
+TEST (custom_target_without_a_curve_says_flat_is_shown)
+{
+    usage::Input in;
+    in.customWithoutCurve = true;
+    CHECK (ui::hasNote (usage::notesFor (in), "No learned curve yet: showing Flat. Use Learn from tracks...", ui::Severity::warning));
+    in.customWithoutCurve = false;
+    CHECK (!ui::hasNote (usage::notesFor (in), "No learned curve", ui::Severity::warning));
+}
+
+TEST (status_window_notes_fit_the_status_line_in_every_state)
+{
+    // Every combination of the flags at three lengths of measurement: no note is longer than the status line holds.
+    size_t longest = 0;
+    for (int bits = 0; bits < 64; ++bits)
+        for (double seconds : { 0.0, 5.0, 25.0 })
+        {
+            usage::Input in;
+            in.signal = (bits & 1) != 0;
+            in.auditionActive = (bits & 2) != 0;
+            in.comparing = (bits & 4) != 0;
+            in.measurementStarted = (bits & 8) != 0;
+            in.resetOnPlay = (bits & 16) != 0;
+            in.customWithoutCurve = (bits & 32) != 0;
+            in.analysedSeconds = seconds;
+            for (const auto& n : usage::notesFor (in))
+                longest = std::max (longest, n.text.size());
+        }
+    CHECK (static_cast<int> (longest) <= usage::kMaxChars);
+}
+
+TEST (guide_glossary_explains_the_jargon_in_lines_that_fit)
+{
+    const std::string text = usage::guideText();
+    const auto at = text.find ("WORDS USED HERE:");
+    CHECK (at != std::string::npos);
+    if (at == std::string::npos)
+        return;
+    const std::string glossary = text.substr (at);
+    bool fits = true;
+    int lines = 0;
+    for (size_t start = 0; start < glossary.size(); ++lines)
+    {
+        size_t end = glossary.find ('\n', start);
+        if (end == std::string::npos)
+            end = glossary.size();
+        fits = fits && end - start <= static_cast<size_t> (usage::kMaxChars);
+        start = end + 1;
+    }
+    CHECK (fits);
+    CHECK (lines >= 10);
+    for (const char* term : { "  LUFS ", "  LU ", "  dBTP ", "  PLR ", "  LRA ", "  Crest factor", "  Mid / side", "  Mono fold", "  Tolerance" })
+        CHECK (glossary.find (term) != std::string::npos);
+}
+
+// ---- the plan's wording: a DAW suffix where COPY has no path, and plain openers for the jargon ----
+
+TEST (plan_names_the_daw_only_where_copy_has_no_path)
+{
+    auto in = cleanMaster();
+    in.clip.clipEvents = 5; // flat tops under the ceiling: no ceiling to hand a limiter
+    in.clip.truePeakDb = -1.2f;
+    auto* clip = pick (in, Topic::clipping);
+    CHECK (clip != nullptr && !clip->canCopy() && clip->headline.find ("(any limiter or EQ in your DAW)") != std::string::npos);
+    in.clip.clipEvents = 30; // over the ceiling: COPY hands it to Aegis, so the destination is named instead
+    in.clip.truePeakDb = 0.4f;
+    clip = pick (in, Topic::clipping);
+    CHECK (clip != nullptr && clip->canCopy() && clip->headline.find ("DAW") == std::string::npos);
+
+    auto fold = cleanMaster();
+    fold.translation.lowMonoLevel = Level::good;
+    fold.translation.monoLevel = Level::warn;
+    fold.translation.monoLossDb = 3.0f;
+    const auto* m = pick (fold, Topic::monoFold);
+    CHECK (m != nullptr && !m->canCopy() && m->headline.find ("(any limiter or EQ in your DAW)") != std::string::npos);
+
+    auto low = cleanMaster();
+    low.translation.lowMonoLevel = Level::bad;
+    low.translation.lowMonoLossDb = 2.0f;
+    const auto* lm = pick (low, Topic::lowEndMono);
+    CHECK (lm != nullptr && lm->canCopy() && lm->headline.find ("DAW") == std::string::npos); // COPY for Iris: the destination stays named
+
+    auto loud = cleanMaster();
+    loud.integratedLufs = -8.0f;
+    const auto* l = pick (loud, Topic::loudness);
+    CHECK (l != nullptr && l->canCopy() && l->headline.find ("DAW") == std::string::npos); // COPY for Aegis
+}
+
+TEST (plan_opens_its_why_in_plain_words)
+{
+    auto in = cleanMaster();
+    in.havePhase = true;
+    in.phase.have = true;
+    in.phase.level = Level::bad;
+    in.phase.cause = PhaseCause::delay;
+    in.phase.delayMs = 0.5f;
+    in.phase.notchHz = 1000.0f;
+    in.phase.worstLossDb = 19.0f;
+    in.phase.loHz = 500.0;
+    in.phase.hiHz = 1500.0;
+    const auto* phase = pick (in, Topic::phase);
+    CHECK (phase != nullptr && phase->why.rfind ("One side arrives late, so mono sums cancel", 0) == 0);
+    in.phase.cause = PhaseCause::polarity;
+    phase = pick (in, Topic::phase);
+    CHECK (phase != nullptr && phase->why.rfind ("One channel is upside down (antiphase)", 0) == 0);
+
+    auto crest = cleanMaster();
+    crest.lowCrestDb = 4.0f;
+    const auto* squashed = pick (crest, Topic::lowCrest);
+    CHECK (squashed != nullptr && squashed->why.rfind ("The bass is squashed", 0) == 0);
+    crest.lowCrestDb = 13.0f;
+    const auto* spiky = pick (crest, Topic::lowCrest);
+    CHECK (spiky != nullptr && spiky->why.rfind ("The bass has isolated peaks", 0) == 0);
 }
 
 int main()
