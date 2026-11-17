@@ -28,6 +28,8 @@ if(THEMIS_BUILD_TESTS)
     enable_testing()
     add_executable(themis_tests tests/test_main.cpp)
     target_link_libraries(themis_tests PRIVATE themis_core)
+    # UsageNotes.h (the status window's plain-C++ notes and the first-run checklist) is tested here; Note.h is plain C++ in shared/ui.
+    target_include_directories(themis_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/ui/include)
     add_test(NAME themis_dsp COMMAND themis_tests)
 endif()
 

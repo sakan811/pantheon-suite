@@ -151,6 +151,7 @@ public:
         history_.setFramePeriod (static_cast<double> (hop) / fs);
         spectrum_.setFramePeriod (static_cast<double> (hop) / fs);
         clip_.prepare();
+        soundResetFlag.store (true, std::memory_order_release);
         clipEnabled = true;
         writeCount.store (0, std::memory_order_relaxed);
         buildBandMap();
@@ -174,6 +175,7 @@ public:
     void requestReset()
     {
         clip_.requestReset(); // its detector state belongs to the audio thread, which applies the reset in push()
+        soundResetFlag.store (true, std::memory_order_release); // likewise the sound edges
         resetFlag.store (true, std::memory_order_release);
     }
 
@@ -183,6 +185,9 @@ public:
         if (clipEnabled)
             clip_.process (l, r, n);
         const uint64_t w = writeCount.load (std::memory_order_relaxed);
+        if (soundResetFlag.exchange (false, std::memory_order_acq_rel))
+            sound_.clear (w);
+        sound_.scan (l, r, n, w);
         const uint64_t mask = ringSize - 1;
         for (int i = 0; i < n; ++i)
         {
@@ -260,6 +265,12 @@ public:
 
     // Peaks and clipping of everything pushed since the last reset.
     ClipTotals clipTotals() const { return clip_.totals(); }
+
+    // Silence before the first sound and after the last one, seconds, measured sample by sample since the reset (see
+    // SoundEdges). Nothing is heard, and nothing is reported, while a reset is pending or before any sound.
+    bool soundHeard() const { return !soundResetFlag.load (std::memory_order_acquire) && sound_.heard(); }
+    double leadingSilenceSeconds() const { return fs > 0.0 ? static_cast<double> (sound_.leadingSamples()) / fs : 0.0; }
+    double trailingSilenceSeconds() const { return fs > 0.0 ? static_cast<double> (sound_.trailingSamples (writeCount.load (std::memory_order_acquire))) / fs : 0.0; }
 
     // Analyse an entire buffer offline (reference-track learning). Returns false if too short/quiet.
     static bool analyseOffline (const float* l, const float* r, size_t numSamples, double sampleRate, BandArray& out)
@@ -581,6 +592,8 @@ private:
     SpectrumHistory spectrum_;
     ClipMeter clip_;
     bool clipEnabled = true;
+    SoundEdges sound_;                      // written by push() (the audio thread)
+    std::atomic<bool> soundResetFlag { false };
     uint64_t ringSize = 0;
     std::atomic<uint64_t> writeCount { 0 }; // total samples pushed since prepare(); the ring index is count & (ringSize-1)
     uint64_t nextFrameEnd = 0;              // worker-side: absolute sample index where the next frame ends

@@ -17,14 +17,18 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
       targetBox (p.apvts, params::target),
       deviceBox (p.apvts, params::device),
       loudnessBox (p.apvts, params::loudnessTarget),
-      avgKnob (p.apvts, params::avgTime, "Averaging", "Averaging window for the long-term curve. Infinite measures the whole track since Reset."),
-      toleranceKnob (p.apvts, params::tolerance, "Tolerance", "How wide the target band is, as a multiple of the curve's own spread. Narrower is stricter; double-click for 1.00x."),
+      avgKnob (p.apvts, params::avgTime, "Averaging", "How much of the track the curve averages. Infinite (the default) is the whole track since Reset; "
+                                                      "10 s, 30 s or 2 min follow only the last part you played."),
+      toleranceKnob (p.apvts, params::tolerance, "Tolerance", "How wide the green band around the target curve is. 1.00x is the normal width; lower is stricter "
+                                                              "(more of the curve turns amber or red), higher is looser. Double-click for 1.00x."),
       ceilingKnob (p.apvts, params::truePeakCeiling, "True-peak ceiling",
-                   "The true peak the master is held to: above it is a warning in the CLIPPING readout, the PEAKS graph and the master plan (the plan's ceiling item and the COPY for Aegis name it). "
-                   "-1 dBTP is the usual streaming-delivery ceiling; double-click for it. Over 0 dBTP is always bad."),
+                   "The highest peak the master may reach, measured between the samples as an encode would see it. Above it Themis warns (CLIPPING, "
+                   "the PEAKS graph and the master plan, whose COPY for Aegis uses this value). -1 dBTP is the usual streaming limit; double-click for it. "
+                   "Over 0 dBTP is always bad."),
       resetOnPlayButton (p.apvts, params::resetOnPlay, "Auto reset",
-                         "When on, the measurement restarts by itself each time the host starts playing from the beginning of its timeline (as Reset does), so a fresh pass of the track "
-                         "is measured on its own. Off by default: the measurement runs on across stops and starts until you press Reset. Playing on from a stop part-way never resets.")
+                         "On by default: each time the host starts playing from the beginning of its timeline, the measurement restarts (as Reset does), "
+                         "so a fresh pass of the track is measured on its own. Turn it off to let the measurement run on across stops and starts until you "
+                         "press Reset. Playing on from a stop part-way never resets.")
 {
     setLookAndFeel (&laf);
 
@@ -34,14 +38,14 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     addAndMakeVisible (fundamentalView);
     addAndMakeVisible (advicePanel);
     addAndMakeVisible (auditionPanel);
-    for (auto* c : std::initializer_list<juce::Component*> { &targetBox, &avgKnob, &deviceBox, &deviceLabel, &loudnessBox, &loudnessLabel, &learnButton, &saveButton, &loadButton,
+    for (auto* c : std::initializer_list<juce::Component*> { &targetBox, &avgKnob, &deviceBox, &deviceLabel, &loudnessBox, &loudnessLabel, &learnButton, &closestButton, &saveButton, &loadButton,
                                                               &copyEqButton, &holdButton, &resetButton, &statusLabel, &toleranceKnob, &ceilingKnob, &resetOnPlayButton, &guideButton })
         addAndMakeVisible (c);
 
     deviceBox.setTooltip ("Preview how the balance would translate to a typical playback device (approximate response; "
                           "analysis only, the audio is never changed). \"Off\" hides the preview.");
     loudnessBox.setTooltip ("The loudness this master is for. The master plan judges the integrated loudness against it: "
-                            "streaming services turn anything louder than " + juce::String (static_cast<int> (-themis::master::kStreamingLufs))
+                            "streaming services turn anything louder than " + juce::String (static_cast<int> (-themis::delivery::kStreamingLufs))
                             + " LUFS down, so extra loudness there only costs dynamics.");
     for (auto* label : { &deviceLabel, &loudnessLabel })
     {
@@ -58,11 +62,15 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     statusLabel.setMinimumHorizontalScale (0.8f);
 
     learnButton.onClick = [this] { chooseReferenceTracks(); };
+    closestButton.setTooltip ("Pick the built-in target curve whose shape is nearest the measured curve (the RMS difference over the bands your sample rate "
+                              "carries, after removing the level offset). Needs " + juce::String (static_cast<int> (themis::master::kMinSeconds)) + " s of audio. "
+                              "A shape match, not a genre detection: it only tells you which starting point is closest.");
+    closestButton.onClick = [this] { chooseClosestTarget(); };
     saveButton.onClick = [this] { saveCurve(); };
-    copyEqButton.setTooltip ("Copy the equaliser moves that bring the measured curve towards the target (a low shelf, up to three bells and a high "
-                             "shelf, from the long-term average), and the target curve itself, to paste in Iris or Apollo (PASTE on its band panel or in its header; the curve "
-                             "becomes its reference, drawn behind the spectrum). A difference from the target is a "
-                             "matter of taste, so treat it as a starting point and judge it by ear.");
+    copyEqButton.setTooltip ("Copy EQ is for Iris (or Apollo): it copies the equaliser bands that bring the measured curve towards the target (a low shelf, up to "
+                             "three bells and a high shelf, from the long-term average) and the target curve itself. In Iris, PASTE on the band panel or in its "
+                             "header; the curve becomes its reference, drawn behind the spectrum. A difference from the target is taste, so treat it as a "
+                             "starting point and judge it by ear.");
     copyEqButton.onClick = [this] { copyTonalEq(); };
     holdButton.setClickingTogglesState (true);
     holdButton.setToggleState (proc.hasHeldCurve(), juce::dontSendNotification);
@@ -148,6 +156,25 @@ void ThemisEditor::copyTonalEq()
     setStatus ("Copied " + juce::String (static_cast<int> (moves.size())) + " band(s) and the target curve: paste them in " + gui::linkDestination (moves) + " (PASTE on its band panel).", false);
 }
 
+// The built-in target whose shape is nearest the measured curve. It selects it the way the Target selector does (the host
+// is notified), and says how far off it is. Before enough audio, or with no signal, it changes nothing.
+void ThemisEditor::chooseClosestTarget()
+{
+    themis::BandArray measured {};
+    if (proc.loudnessMonitor().seconds() < themis::master::kMinSeconds || !proc.readSpectrum (measured))
+    {
+        setStatus ("Play at least " + juce::String (static_cast<int> (themis::master::kMinSeconds)) + " s first", true);
+        return;
+    }
+    const double sampleRate = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0;
+    float distance = 0.0f;
+    const size_t index = themis::TargetCurve::nearestBuiltIn (measured, sampleRate, &distance);
+    proc.selectTarget (static_cast<int> (index));
+    setStatus ("Closest built-in: " + juce::String (themis::TargetCurve::builtIns()[index].name) + " (" + juce::String (distance, 1)
+                   + " dB RMS). A shape match, not a genre detection.",
+               false);
+}
+
 void ThemisEditor::toggleHeldCurve()
 {
     if (!holdButton.getToggleState())
@@ -167,20 +194,10 @@ void ThemisEditor::toggleHeldCurve()
     setStatus ("Holding the curve as it is now (the pale ghost). Change the master, press Reset, play the same part again and compare.", false);
 }
 
-usage::Input ThemisEditor::usageInput() const
-{
-    usage::Input in;
-    in.signal = proc.stereoScope().hasData();
-    in.auditionActive = proc.auditionSwitches().active();
-    in.comparing = proc.streamingPreview() || proc.referenceOn();
-    in.analysedSeconds = proc.loudnessMonitor().seconds();
-    return in;
-}
-
 // The status window between messages: the first note about how the plugin is being used (a warning in amber), else the tip.
 void ThemisEditor::showIdleStatus()
 {
-    const auto notes = usage::notesFor (usageInput());
+    const auto notes = usage::notesFor (proc.usageState());
     const juce::String text = notes.empty() ? juce::String (usage::idleTip()) : juce::String (notes.front().text);
     const auto colour = ! notes.empty() && notes.front().severity == ui::Severity::warning ? colours::warn : colours::amber.withAlpha (0.8f);
     if (statusLabel.getText() != text || statusLabel.findColour (juce::Label::textColourId) != colour)
@@ -293,6 +310,8 @@ void ThemisEditor::resized()
     targetBox.setBounds (row1.removeFromLeft (200).reduced (0, 2));
     row1.removeFromLeft (8);
     learnButton.setBounds (row1.removeFromLeft (150).reduced (0, 3));
+    row1.removeFromLeft (4);
+    closestButton.setBounds (row1.removeFromLeft (80).reduced (0, 3));
     row1.removeFromLeft (4);
     saveButton.setBounds (row1.removeFromLeft (84).reduced (0, 3));
     row1.removeFromLeft (4);

@@ -14,6 +14,7 @@
 #include <themis/MasterAdvisor.h>
 #include <themis/PhaseCancellation.h>
 #include <themis/StereoScope.h>
+#include "UsageNotes.h"
 
 #include <atomic>
 #include <functional>
@@ -60,7 +61,13 @@ public:
         lowCrest.requestReset();
         scope.requestReset();
         loudness.requestReset();
+        measureStarted.store (true); // the status window and the checklist: a measurement has been started by Reset (or auto reset)
     }
+    bool measurementStarted() const { return measureStarted.load(); }
+
+    // How the plugin is being used, for the status window and the first-run checklist (message thread).
+    usage::Input usageState() const;
+    bool customWithoutCurve() const; // target "Custom" is selected and no curve was learned or loaded (Flat is shown)
 
     // Solo / Mute audition: what is played instead of the input (nothing soloed or muted = the input, bit for bit). Not
     // saved with the session; ignored while the host renders offline so an export can never carry it.
@@ -140,6 +147,7 @@ public:
     // Target curves
     themis::TargetCurve activeTarget() const; // honours the "target" parameter
     void setCustomCurve (const themis::TargetCurve& c, bool selectIt);
+    void selectTarget (int index) { setParameterValue (params::target, static_cast<float> (index)); } // as the Target selector does: the host is notified
     bool hasCustomCurve() const;
 
     // Reads the given audio files in a background thread, averages their tonal balance and installs the
@@ -198,6 +206,7 @@ private:
     mutable juce::CriticalSection curveLock;
     themis::TargetCurve customCurve;
     bool customCurveValid = false;
+    std::atomic<bool> measureStarted { false }; // set by resetAnalyzer(), never saved: a fresh plugin says PRESS RESET TO START
 
     std::unique_ptr<juce::ThreadPool> pool; // created on first "Learn from tracks", so loading the plugin starts no threads
     std::atomic<bool> learning { false };

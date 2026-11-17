@@ -6,10 +6,14 @@
 #include "EqMove.h"
 #include "Audition.h"
 #include "ClipMeter.h"
+#include "DeliveryTargets.h"
+#include "Harshness.h"
 #include "HistoryChecks.h"
 #include "Loudness.h"
 #include "LowCrestMeter.h"
 #include "PhaseCancellation.h"
+#include "Resonance.h"
+#include "Spectrogram.h"
 #include "Translation.h"
 
 #include <algorithm>
@@ -35,12 +39,21 @@ inline constexpr double kMinSeconds = 20.0; // less audio than this and the long
 
 // Programme loudness against the chosen delivery target, in LU (= dB).
 inline constexpr float kLoudnessWarnLu = 2.0f, kLoudnessBadLu = 4.0f;
-inline constexpr float kStreamingLufs = -14.0f; // what the big streaming services normalise to: a louder master is turned down (some also lift a quieter one, but only as far as its true peak allows)
+
+// Squashed: the peak-to-loudness ratio (true peak minus integrated LUFS) is how far the peaks stand above the average. A
+// limiter held at its ceiling pins the peaks just above the average, so a small ratio is what hard limiting looks like.
+// Rule of thumb, not measured data: below 6 dB the peaks stand less than 6 dB above the average (warn); below 4 dB almost
+// nothing rises above the average, the level is nearly constant (bad). Some genres are squashed on purpose, hence the wording.
+inline constexpr float kPlrWarnDb = 6.0f, kPlrBadDb = 4.0f;
+
+// Peak-to-loudness ratio, dB: the true peak above the integrated loudness (the loudness readout and the plan use this one).
+inline float plrDb (float truePeakDb, float integratedLufs) { return truePeakDb - integratedLufs; }
+inline Level plrLevel (float plr) { return plr < kPlrBadDb ? Level::bad : plr < kPlrWarnDb ? Level::warn : Level::good; }
 
 } // namespace master
 
 // What an item is about; the order is the order of priority among items of the same severity.
-enum class Topic { clipping, loudness, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, swing, dcOffset };
+enum class Topic { clipping, loudness, squashed, phase, lowEndMono, monoFold, width, lowCrest, balance, bass, resonance, harshness, swing, dcOffset };
 
 struct Advice
 {
@@ -61,10 +74,10 @@ struct MasterInputs
 
     bool haveLoudness = false;
     float integratedLufs = LoudnessMeter::kSilence;
-    float targetLufs = master::kStreamingLufs; // the delivery the master is for
+    float targetLufs = delivery::kStreamingLufs; // the delivery the master is for
     std::string deliveryName = "Streaming";
 
-    ClipTotals clip; // peaks and clips since the reset
+    ClipTotals clip; // peaks, clips and the mean square since the reset (its crest factor is a readout)
     float truePeakCeilingDb = history::clip::kTruePeakWarnDb; // the true-peak ceiling the master is held to (the user's setting)
 
     TranslationReport translation; // mono fold (the device part is not used: it is judged against the reference curve)
@@ -76,6 +89,18 @@ struct MasterInputs
     float lowCrestDb = 0.0f;
 
     std::vector<FrameStats> frames; // the history window, oldest first
+
+    // The long-term curve, for narrow rings only (resonance::find judges each band against its own neighbours, never against a
+    // target), and the spectrogram's band history, for the harshness check. Both are off until there is audio to read.
+    bool haveCurve = false;
+    BandArray curveDb {};            // anchor-normalised, like the tonal view
+    double usableMaxHz = BandGrid::kMaxHz; // the top the sample rate carries (BandGrid::usableMaxHz): the bands above it are left out
+    std::vector<BandLevels> spectrum; // the band history, oldest first
+
+    // Readouts only (no item judges them): the loudest 3 s since the reset, and the silence before and after the sound.
+    float maxShortTermLufs = LoudnessMeter::kSilence;
+    bool haveSilence = false;
+    double leadingSilenceSeconds = 0.0, trailingSilenceSeconds = 0.0;
 };
 
 struct MasterAdvice
@@ -108,7 +133,7 @@ inline constexpr float kMinBoostDb = 0.5f; // the least: under it a suggested be
 
 inline Advice make (Level level, Topic topic, std::string headline, std::string why, Switches hear = {})
 {
-    return { level, topic, std::move (headline), std::move (why), hear, {} };
+    return { level, topic, std::move (headline), std::move (why), hear, {}, {} };
 }
 
 // What a check about one of the readouts' ranges (a column of kEnergyRanges) plays: every audition band that overlaps it.
@@ -162,18 +187,20 @@ inline MasterAdvice advise (const MasterInputs& in)
         const Level level = history::clip::level (in.clip.truePeakDb, in.clip.clipEvents, in.clip.overSamples, in.truePeakCeilingDb);
         check (level);
         const float overDb = in.clip.truePeakDb - in.truePeakCeilingDb; // how far above the ceiling
+        // Only an item that is over the ceiling hands its ceiling to a limiter (COPY for Aegis); the others name the DAW instead.
+        const bool limiterCopy = overDb >= 0.05f;
         if (in.clip.clipEvents > 0 || in.clip.overSamples > 0)
             out.items.push_back (make (level, Topic::clipping,
-                                       overDb >= 0.05f ? format ("Stop the clipping: ease the clipper or limiter drive and lower the ceiling %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
-                                                               static_cast<double> (in.truePeakCeilingDb))
-                                                     : std::string ("Stop the clipping: ease the clipper or limiter drive until the flat tops are gone"),
+                                       limiterCopy ? format ("Stop the clipping: ease the clipper or limiter drive and lower the ceiling %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
+                                                             static_cast<double> (in.truePeakCeilingDb))
+                                                   : std::string ("Stop the clipping: ease the clipper or limiter drive until the flat tops are gone") + (limiterCopy ? "" : " (any limiter or EQ in your DAW)"),
                                        format ("%llu flat-topped clips and %llu samples at 0 dBFS, true peak %+.1f dBTP. Clipping adds distortion that a lossy encode makes worse.",
                                                static_cast<unsigned long long> (in.clip.clipEvents), static_cast<unsigned long long> (in.clip.overSamples),
                                                static_cast<double> (in.clip.truePeakDb))));
         else if (level != Level::good)
             out.items.push_back (make (level, Topic::clipping,
                                        format ("Lower the limiter ceiling by %.1f dB, to %.1f dBTP", static_cast<double> (overDb),
-                                               static_cast<double> (in.truePeakCeilingDb)),
+                                               static_cast<double> (in.truePeakCeilingDb)) + (limiterCopy ? "" : " (any limiter or EQ in your DAW)"),
                                        format ("True peak is %+.1f dBTP. AAC, MP3 and Ogg encodes overshoot the peaks they are fed, so a master above %.1f dBTP can clip after conversion.",
                                                static_cast<double> (in.clip.truePeakDb), static_cast<double> (in.truePeakCeilingDb))));
         // Aegis (or any limiter that takes the text) can set the ceiling it names; an item about flat tops alone has no ceiling to name.
@@ -209,16 +236,16 @@ inline MasterAdvice advise (const MasterInputs& in)
         check (level);
         if (level != Level::good)
         {
-            const float plr = in.clip.have ? in.clip.truePeakDb - in.integratedLufs : 0.0f;
+            const float plr = in.clip.have ? master::plrDb (in.clip.truePeakDb, in.integratedLufs) : 0.0f;
             const std::string plrText = in.clip.have ? format (" Peak-to-loudness ratio %.1f dB.", static_cast<double> (plr)) : std::string();
             if (deltaLu > 0.0f)
             {
-                const bool streaming = std::abs (in.targetLufs - master::kStreamingLufs) <= 0.5f; // the text below is about the -14 LUFS services
+                const bool streaming = std::abs (in.targetLufs - delivery::kStreamingLufs) <= 0.5f; // the text below is about the -14 LUFS services
                 out.items.push_back (make (level, Topic::loudness,
                                            format ("Take about %s dB off the limiter's gain: %.1f LUFS against a %.0f LUFS %s target", master::rounded (deltaLu).c_str(),
                                                    static_cast<double> (in.integratedLufs), static_cast<double> (in.targetLufs), in.deliveryName.c_str()),
                                            std::string (streaming ? format ("Streaming services turn a master louder than %.0f LUFS down, so the extra %.1f dB buys no loudness there and costs punch.",
-                                                                            static_cast<double> (master::kStreamingLufs), static_cast<double> (in.integratedLufs - master::kStreamingLufs))
+                                                                            static_cast<double> (delivery::kStreamingLufs), static_cast<double> (in.integratedLufs - delivery::kStreamingLufs))
                                                                   : format ("%.1f LU above the target.", static_cast<double> (deltaLu)))
                                                + plrText));
                 out.items.back().limiter = { false, true, 0.0f, -deltaLu };
@@ -244,6 +271,25 @@ inline MasterAdvice advise (const MasterInputs& in)
     if (out.measuring)
         return out; // everything below is a long-term average
 
+    // ---- squashed: how far the peaks stand above the average (a rule of thumb, see master::kPlrWarnDb) -----
+    if (in.haveLoudness && in.clip.have)
+    {
+        const float plr = master::plrDb (in.clip.truePeakDb, in.integratedLufs);
+        const Level level = master::plrLevel (plr);
+        check (level);
+        if (level != Level::good)
+        {
+            const std::string crest = in.clip.haveCrest() ? format (", crest factor %.1f dB across the full band", static_cast<double> (in.clip.crestDb())) : std::string();
+            out.items.push_back (make (level, Topic::squashed,
+                                       format ("Peaks sit only %.1f dB above the average: squashed, ease the limiting", static_cast<double> (plr)),
+                                       format ("Peak-to-loudness ratio %.1f dB (true peak %+.1f dBTP against %.1f LUFS integrated)%s. A limiter held hard "
+                                               "pins the peaks just above the average, so the level barely moves and the master loses punch on small speakers. "
+                                               "Rule of thumb, not a fault in itself: some genres are squashed on purpose. The warning is under %.0f dB, bad under %.0f dB.",
+                                               static_cast<double> (plr), static_cast<double> (in.clip.truePeakDb), static_cast<double> (in.integratedLufs), crest.c_str(),
+                                               static_cast<double> (master::kPlrWarnDb), static_cast<double> (master::kPlrBadDb))));
+        }
+    }
+
     // ---- stereo: phase, then bass, then the whole spectrum --------------------------------------
     if (in.havePhase && in.phase.have)
     {
@@ -257,11 +303,13 @@ inline MasterAdvice advise (const MasterInputs& in)
             {
                 case PhaseCause::polarity:
                     headline = "Flip the polarity of the inverted channel or source (" + where + ")";
-                    why = format ("The channels are in antiphase there; a mono sum loses up to %.1f dB (3 dB is what unrelated channels lose).", static_cast<double> (p.worstLossDb));
+                    why = format ("One channel is upside down (antiphase), so mono sums cancel there and lose up to %.1f dB (3 dB is what unrelated channels lose).",
+                                  static_cast<double> (p.worstLossDb));
                     break;
                 case PhaseCause::delay:
                     headline = format ("Remove the %.2f ms offset between the channels (%s)", static_cast<double> (p.delayMs), where.c_str());
-                    why = format ("The %s channel arrives late, which is a comb filter in mono: first notch at %s, up to %.1f dB lost. Look for a stereo delay, a widener or a spaced-mic recording.",
+                    why = format ("One side arrives late, so mono sums cancel: the %s channel is behind, with the first cancellation at %s and up to %.1f dB lost "
+                                  "(a comb filter). Look for a stereo delay, a widener or a spaced-mic recording.",
                                   p.leftLate ? "left" : "right", hzText (static_cast<double> (p.notchHz)).c_str(), static_cast<double> (p.worstLossDb));
                     break;
                 case PhaseCause::none: // (a level above good always has a cause; treated like "other")
@@ -289,7 +337,7 @@ inline MasterAdvice advise (const MasterInputs& in)
             out.items.back().moves = { { EqMove::Kind::lowCut, EqMove::Place::side, static_cast<float> (translation::kLowEndHz), 0.0f, 0.7071f, 0.0f, 0.0f } };
         check (t.monoLevel);
         if (t.monoLevel != Level::good)
-            out.items.push_back (make (t.monoLevel, Topic::monoFold, format ("Narrow the stereo image: a mono sum loses %.1f dB", static_cast<double> (t.monoLossDb)),
+            out.items.push_back (make (t.monoLevel, Topic::monoFold, format ("Narrow the stereo image: a mono sum loses %.1f dB", static_cast<double> (t.monoLossDb)) + " (any limiter or EQ in your DAW)",
                                        format ("Reduce widening on the master or on the widest buses.%s", t.worstBand >= 0
                                                    ? format (" The worst band is %s (%.1f dB lost).", hzText (BandGrid::centreHz (t.worstBand)).c_str(), static_cast<double> (t.worstBandLossDb)).c_str()
                                                    : ""),
@@ -304,12 +352,12 @@ inline MasterAdvice advise (const MasterInputs& in)
         const float outside = lowcrest::outsideZoneDb (in.lowCrestDb);
         if (outside < 0.0f)
             out.items.push_back (make (level, Topic::lowCrest, format ("Open up the low end: ease the compression or clipping on the bass by about %.0f dB", static_cast<double> (std::max (1.0f, -outside))),
-                                       format ("The 20 - 250 Hz crest factor is %.1f dB, %.1f dB under the typical %.0f - %.0f dB: a squashed low end sounds flat and loses punch.", static_cast<double> (in.lowCrestDb),
+                                       format ("The bass is squashed: its peaks barely stand above its average. The 20 - 250 Hz crest factor is %.1f dB, %.1f dB under the typical %.0f - %.0f dB, and a squashed low end sounds flat and loses punch.", static_cast<double> (in.lowCrestDb),
                                                static_cast<double> (-outside), static_cast<double> (lowcrest::kZoneLoDb), static_cast<double> (lowcrest::kZoneHiDb)),
                                        master::soloLow()));
         else if (outside > 0.0f)
             out.items.push_back (make (level, Topic::lowCrest, format ("Tame the low-end peaks: compress or saturate the kick and bass by about %.0f dB", static_cast<double> (std::max (1.0f, outside))),
-                                       format ("The 20 - 250 Hz crest factor is %.1f dB, %.1f dB over the typical %.0f - %.0f dB: isolated low peaks make the limiter work hard and pump the whole mix.", static_cast<double> (in.lowCrestDb),
+                                       format ("The bass has isolated peaks. The 20 - 250 Hz crest factor is %.1f dB, %.1f dB over the typical %.0f - %.0f dB, and they make the limiter work hard and pump the whole mix.", static_cast<double> (in.lowCrestDb),
                                                static_cast<double> (outside), static_cast<double> (lowcrest::kZoneLoDb), static_cast<double> (lowcrest::kZoneHiDb)),
                                        master::soloLow()));
     }
@@ -399,6 +447,44 @@ inline MasterAdvice advise (const MasterInputs& in)
                 out.items.push_back (make (level, Topic::swing, format ("Even out the low end between sections: it moves %.0f dB", static_cast<double> (low.swingDb())),
                                            "The level of 20 - 120 Hz differs a lot from moment to moment. If a section is meant to lose its bass that is fine; if not, match the bass level between verse and chorus.",
                                            master::soloLow()));
+        }
+    }
+
+    // ---- narrow rings in the long-term curve, and harshness in the band history: suggestions, not faults --------------
+    // Both are warnings with a why that says so. The ring is judged against the curve's own neighbours, never the target.
+    if (in.haveCurve)
+    {
+        const auto rings = resonance::find (in.curveDb, BandGrid::bandsUpTo (in.usableMaxHz));
+        check (rings.empty() ? Level::good : Level::warn);
+        for (const auto& r : rings)
+        {
+            const float cut = std::min (master::kMaxCutDb, std::ceil (r.standOutDb * 2.0f) / 2.0f); // to the next half dB
+            Advice item = make (Level::warn, Topic::resonance,
+                                format ("Check the narrow ring at %s: a narrow cut of about %s dB may tame it", hzText (r.freqHz).c_str(), master::rounded (cut).c_str()),
+                                format ("The long-term curve stands %.1f dB above both of its sides there, which is what a resonance or a harsh formant leaves behind. "
+                                        "A suggestion to check by ear, not a fault: a bright ring can also be the sound you chose. The curve is on 1/6-octave bands, "
+                                        "so a narrower ring reads smaller than it is, and the frequency is only about right.", static_cast<double> (r.standOutDb)),
+                                { auditionBitsOver (BandGrid::lowEdgeHz (r.band), BandGrid::highEdgeHz (r.band)), 0u });
+            item.moves = { { EqMove::Kind::bell, EqMove::Place::stereo, static_cast<float> (r.freqHz), -cut, static_cast<float> (resonance::kCutQ), 0.0f, 0.0f } };
+            out.items.push_back (item);
+        }
+    }
+
+    if (in.spectrum.size() >= static_cast<size_t> (spectro::kMinFrames))
+    {
+        const auto h = harshness::analyse (in.spectrum.data(), static_cast<int> (in.spectrum.size()), in.usableMaxHz);
+        if (h.have)
+        {
+            const bool harsh = h.jumpDb() >= harshness::kJumpDb;
+            check (harsh ? Level::warn : Level::good);
+            if (harsh)
+                out.items.push_back (make (Level::warn, Topic::harshness,
+                                           format ("The %s - %s range keeps jumping %.1f dB above its average: possible harsh sibilance (use a de-esser or dynamic EQ in your DAW)",
+                                                   hzText (harshness::kLoHz).c_str(), hzText (harshness::kHiHz).c_str(), static_cast<double> (h.jumpDb())),
+                                           format ("On its loud tenth of frames the level reaches %.1f dB, against an average of %.1f dB over the last stretch. Sibilance and a harsh top "
+                                                   "do that: a few loud consonants or cymbals jump out while the average hides them. A suggestion to check by ear, not a fault: "
+                                                   "a bright top can be the sound you want.", static_cast<double> (h.reachedDb), static_cast<double> (h.averageDb)),
+                                           { auditionBitsOver (harshness::kLoHz, harshness::kHiHz), 0u }));
         }
     }
 
@@ -509,7 +595,7 @@ inline std::string planAsText (const MasterInputs& in, const MasterAdvice& advic
     if (in.clip.have)
         part (format ("true peak %+.1f dBTP", static_cast<double> (in.clip.truePeakDb)));
     if (in.haveLoudness && in.clip.have)
-        part (format ("PLR %.1f dB", static_cast<double> (in.clip.truePeakDb - in.integratedLufs)));
+        part (format ("PLR %.1f dB", static_cast<double> (master::plrDb (in.clip.truePeakDb, in.integratedLufs))));
     const int seconds = static_cast<int> (in.analysedSeconds);
     part (format ("%d:%02d analysed", seconds / 60, seconds % 60));
     out += "Measured: " + measured + "\n";

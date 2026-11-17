@@ -252,7 +252,15 @@ void ThemisProcessor::setStateInformation (const void* data, int sizeInBytes)
     auto xml = getXmlFromBinary (data, sizeInBytes);
     if (xml == nullptr || !xml->hasTagName (apvts.state.getType()))
         return;
-    const auto tree = juce::ValueTree::fromXml (*xml);
+    auto tree = juce::ValueTree::fromXml (*xml);
+    // Auto reset is on by default now. A session saved before it existed stores no value for it: give it the old default (off).
+    if (! tree.getChildWithProperty ("id", params::resetOnPlay).isValid())
+    {
+        juce::ValueTree stored ("PARAM");
+        stored.setProperty ("id", params::resetOnPlay, nullptr);
+        stored.setProperty ("value", 0.0, nullptr);
+        tree.appendChild (stored, nullptr);
+    }
     apvts.replaceState (tree);
 
     // The loaded state replaces the custom curve; one without a (valid) curve must not keep the previous one.
@@ -318,9 +326,17 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.truePeakCeilingDb = paramReader.truePeakCeilingDb();
     in.deliveryName = delivery.shortName;
     readClip (in.clip);
+    in.maxShortTermLufs = loudness.maxShortTerm();
+    in.haveSilence = analyzer.soundHeard();
+    in.leadingSilenceSeconds = analyzer.leadingSilenceSeconds();
+    in.trailingSilenceSeconds = analyzer.trailingSilenceSeconds();
 
     themis::BandArray measured {}, fold {};
-    if (readSpectrum (measured) && readMonoFold (fold)) // the plan only uses the mono fold: the curve and the device are judged against the reference, which is taste
+    in.haveCurve = readSpectrum (measured); // for narrow rings only: judged against each band's own neighbours, never the target
+    in.curveDb = measured;
+    const double fs = getSampleRate();
+    in.usableMaxHz = fs > 0.0 ? themis::BandGrid::usableMaxHz (fs) : themis::BandGrid::kMaxHz;
+    if (in.haveCurve && readMonoFold (fold)) // the plan only uses the mono fold: the device is judged against the reference, which is taste
         themis::addMonoFold (in.translation, measured, fold);
 
     themis::PhaseBands phase {};
@@ -331,6 +347,8 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
 
     in.frames.resize (themis::FrameHistory::kCapacity);
     in.frames.resize (static_cast<size_t> (frameHistory().copyRecent (in.frames.data(), themis::FrameHistory::kCapacity)));
+    in.spectrum.resize (themis::SpectrumHistory::kCapacity);
+    in.spectrum.resize (static_cast<size_t> (spectrumHistory().copyRecent (in.spectrum.data(), themis::SpectrumHistory::kCapacity)));
     return in;
 }
 
@@ -354,6 +372,24 @@ bool ThemisProcessor::hasCustomCurve() const
 {
     const juce::ScopedLock sl (curveLock);
     return customCurveValid;
+}
+
+bool ThemisProcessor::customWithoutCurve() const
+{
+    return static_cast<int> (paramReader.value (params::target)) >= params::customTargetIndex() && !hasCustomCurve();
+}
+
+usage::Input ThemisProcessor::usageState() const
+{
+    usage::Input in;
+    in.signal = stereoScope().hasData();
+    in.auditionActive = auditionSwitches().active();
+    in.comparing = streamingPreview() || referenceOn();
+    in.analysedSeconds = loudnessMonitor().seconds();
+    in.measurementStarted = measurementStarted();
+    in.resetOnPlay = paramReader.resetsOnPlay();
+    in.customWithoutCurve = customWithoutCurve();
+    return in;
 }
 
 void ThemisProcessor::setParameterValue (const juce::String& id, float plainValue)

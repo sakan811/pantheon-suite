@@ -17,6 +17,9 @@ class TonalBalanceView : public juce::Component, public juce::TooltipClient
 public:
     explicit TonalBalanceView (ThemisProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::CrosshairCursor); }
 
+    // The tilt of the measured curve against the target's (for the smoke test; valid once there is data).
+    const themis::tilt::Report& tiltReport() const { return spectralTilt; }
+
     // Pull fresh data from the processor (message thread, ~30 Hz). Repaints only if something changed.
     void update()
     {
@@ -76,6 +79,7 @@ public:
         target = std::move (t);
         tolerance = tol;
         fs = rate;
+        spectralTilt = haveData ? themis::tilt::compare (measured, target.medianDb, fs) : themis::tilt::Report {};
 
         device = proc.activeDevice();
         deviceResponse = device != nullptr ? device->responseDb() : themis::BandArray {};
@@ -109,6 +113,7 @@ public:
             drawMeasured (g);
             drawMeasuredThroughDevice (g);
             drawMonoFold (g);
+            drawTilt (g);
         }
         else
         {
@@ -276,7 +281,9 @@ private:
 
         g.setColour (colours::accent);
         g.setFont (ui::font (12.0f));
-        g.drawText ("Target: " + juce::String (target.name), annotationRow (0, false), juce::Justification::left);
+        // "Custom" with nothing learned or loaded shows Flat: say so here, where the curve is, not only in the status window.
+        g.drawText (proc.customWithoutCurve() ? juce::String (usage::noCurveText()) : "Target: " + juce::String (target.name), annotationRow (0, false),
+                    juce::Justification::left);
     }
 
     // The held curve (HOLD CURVE): a pale, wide ghost behind the live trace (the device preview is the dashed line), with the live
@@ -471,10 +478,10 @@ private:
         }
 
         if (report.haveDevice)
-            drawMeter (g, cell (0), "DEVICE LOSS", report.extraLossDb, tr::kDeviceWarnDb, tr::kDeviceBadDb, report.deviceLevel,
+            drawMeter (g, cell (0), gui::deviceLossTitle (true), report.extraLossDb, tr::kDeviceWarnDb, tr::kDeviceBadDb, report.deviceLevel,
                        gui::signedDb (report.extraLossDb) + " vs target");
         else
-            cell (0).drawNote (g, "DEVICE LOSS", "choose a device", colours::dim);
+            cell (0).drawNote (g, gui::deviceLossTitle (false), "choose a device", colours::dim);
 
         if (report.haveFold)
         {
@@ -493,6 +500,24 @@ private:
         {
             cell (1).drawNote (g, "MONO FOLD", "measuring...", colours::dim);
         }
+    }
+
+    // The tilt of the measured curve against the target's, as a line of text over the plot (informational: a difference from a
+    // reference is taste, so it is never a plan item). Rows 0 and 1 belong to the target and the device; the held curve takes the next.
+    void drawTilt (juce::Graphics& g) const
+    {
+        if (!spectralTilt.have)
+            return;
+        const auto r = spectralTilt;
+        const auto side = themis::tilt::sideOf (r.differenceDbPerOct);
+        const float gap = std::abs (r.differenceDbPerOct);
+        juce::String verdict = side == themis::tilt::Side::same ? juce::String ("the same tilt as the target")
+                               : juce::String (side == themis::tilt::Side::darker ? "darker" : "brighter") + " than the target by " + juce::String (gap, 1) + " dB/oct";
+        const juce::String text = "TILT " + juce::String (r.measuredDbPerOct, 1) + " dB/oct, target " + juce::String (r.targetDbPerOct, 1) + " dB/oct: " + verdict
+                                  + (side == themis::tilt::Side::same ? "" : " (taste, not a fault)");
+        g.setColour (colours::text);
+        g.setFont (ui::font (11.0f));
+        g.drawText (text, annotationRow (device != nullptr ? 3 : 2, false).withWidth (static_cast<int> (plot.getWidth()) - 12), juce::Justification::left);
     }
 
     // Peaks and clipping since the last reset: a true-peak meter whose zones are the verdict's limits, and the clip count.
@@ -525,7 +550,7 @@ private:
     juce::String clipTooltip() const
     {
         namespace clip = themis::history::clip;
-        juce::String text = "CLIPPING since the last reset: sample peak " + juce::String (clipTotals.samplePeakDb, 1) + " dBFS, true peak (the waveform between the samples, 4x oversampled) "
+        juce::String text = "CLIPPING since the last reset: sample peak " + juce::String (clipTotals.samplePeakDb, 1) + " dBFS, true peak (the waveform between the samples) "
                             + juce::String (clipTotals.truePeakDb, 1) + " dBTP. "
                             + juce::String (static_cast<juce::int64> (clipTotals.clipEvents)) + " flat-topped clips (" + juce::String (static_cast<juce::int64> (clipTotals.clipSamples))
                             + " samples) and " + juce::String (static_cast<juce::int64> (clipTotals.overSamples)) + " samples at or over 0 dBFS. ";
@@ -657,6 +682,7 @@ private:
     themis::BandArray held {};
     float ceilingDb = themis::history::clip::kTruePeakWarnDb; // the true-peak ceiling parameter
     themis::ClipTotals clipTotals;
+    themis::tilt::Report spectralTilt;                     // the measured curve's slope against the target's (haveData only)
     float fundamentalHz = 0.0f, fundamentalTiltDb = 0.0f; // newest tonal bass; 0 Hz when there is none
     bool noFundamentalHarmonics = false;
     bool overBroadbandStrip = false;

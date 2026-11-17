@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "TruePeak.h"
+#include <pantheon/dsp/TruePeak.h> // the true peak the Pantheon plugins read (8x, 64 taps); plain C++
 
 #include <vector>
 
@@ -20,12 +20,13 @@ struct LimiterParams
 //
 // Gain is computed as: required gain -> sliding-window minimum (W = N + 4) -> release envelope
 // -> N-sample boxcar. The window-min / boxcar pair guarantees the applied gain never exceeds the
-// required gain for the sample it is applied to. Audio is delayed by N + kDelay + 1 so the true-peak
-// detector's own delay is covered with +/- 2 samples of margin.
+// required gain for the sample it is applied to. Audio is delayed by N + kTruePeakDelay + 1 so the true-peak
+// reader's own delay is covered with +/- 2 samples of margin.
 class Limiter
 {
 public:
     static constexpr double kLookaheadMs = 1.5;
+    // The reader under-reads a pure tone near Nyquist by a fraction of a dB (README "Limitations"); the guard covers it.
     static constexpr float kDetectGuard = 1.02f; // +0.17 dB
 
     void prepare (double sampleRate)
@@ -33,7 +34,7 @@ public:
         fs = sampleRate;
         N = std::max (2, static_cast<int> (std::lround (kLookaheadMs * 0.001 * fs)));
         W = N + 4;
-        D = N + TruePeakDetector::kDelay + 1;
+        D = N + pdsp::kTruePeakDelay + 1;
         delay[0].assign (static_cast<size_t> (D + 1), 0.0f);
         delay[1].assign (static_cast<size_t> (D + 1), 0.0f);
         minVals.assign (static_cast<size_t> (W), 1.0f);
@@ -89,7 +90,7 @@ public:
             }
 
             // kDetectGuard covers the interpolator's small under-read on content near Nyquist
-            const float peak = std::max (tp[0].process (xl), tp[1].process (xr)) * kDetectGuard;
+            const float peak = static_cast<float> (std::max (tp[0].push (xl), tp[1].push (xr))) * kDetectGuard;
             const float required = peak > ceiling ? ceiling / peak : 1.0f;
 
             const float w = slidingMin (required);
@@ -136,7 +137,7 @@ private:
     double fs = 48000.0;
     int N = 72, W = 76, D = 85;
     std::vector<float> delay[2];
-    TruePeakDetector tp[2];
+    pdsp::TruePeakReader tp[2];
     int dPos = 0;
 
     std::vector<float> minVals;

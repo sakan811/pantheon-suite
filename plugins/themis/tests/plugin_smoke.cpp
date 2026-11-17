@@ -80,6 +80,10 @@ static void runAudio (ThemisProcessor& proc, double seconds, double fs, int bloc
 // clipper at -1 dBFS, so the phase check, the mono fold, the fundamental, the left/right balance, the clipping check
 // and the level graph all have something to show.
 static constexpr float kAirGain = 0.02f; // the widened top of the demo programme
+// Sibilance-like bursts for the harshness check: every second, a quarter of a second of the widened top swells (the same
+// signal, so it sits in 4 - 10 kHz and up).
+static constexpr double kSibilanceEverySeconds = 1.0, kSibilanceSeconds = 0.15;
+static constexpr float kSibilanceGain = 4.0f; // +12 dB while a burst lasts (more clips against the demo's ceiling)
 static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, int block, double delaySeconds)
 {
     const size_t total = static_cast<size_t> (seconds * fs), delay = static_cast<size_t> (delaySeconds * fs);
@@ -95,7 +99,8 @@ static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, 
         const bool sounding = std::fmod (t, kNoteSeconds) < kSoundingSeconds;
         const float bass = sounding ? static_cast<float> (0.30 * std::sin (phase) + 0.12 * std::sin (2.0 * phase) + 0.05 * std::sin (3.0 * phase)) : 0.0f;
         const float gain = t >= kChorusStart && t < kChorusEnd ? kChorusGain : 1.0f;
-        const float wide = i > 1 ? air[i] - 2.0f * air[i - 1] + air[i - 2] : 0.0f;
+        const bool sibilant = std::fmod (t, kSibilanceEverySeconds) < kSibilanceSeconds;
+        const float wide = (i > 1 ? air[i] - 2.0f * air[i - 1] + air[i - 2] : 0.0f) * (sibilant ? kSibilanceGain : 1.0f);
         l[i] = std::clamp (gain * (bass + noise[i] + wide), -kCeiling, kCeiling);
         r[i] = std::clamp (gain * kRightTrim * (bass + noise[i >= delay ? i - delay : 0] - wide), -kCeiling, kCeiling);
     }
@@ -327,6 +332,16 @@ int main (int argc, char** argv)
         CHECK (pdsp::link::decode (gui::linkText ({ cut }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut
                    && back[0].place == pdsp::LinkBand::Place::side && std::abs (back[0].freq - 150.0) < 0.5,
                "a copied side low cut reads back as one");
+        // A narrow ring's cut (the bell the plan hands over for a ring) reads back as one narrow bell at the ring.
+        themis::EqMove ring;
+        ring.kind = themis::EqMove::Kind::bell;
+        ring.freqHz = 3226.0f;
+        ring.gainDb = -4.0f;
+        ring.q = static_cast<float> (themis::resonance::kCutQ);
+        CHECK (pdsp::link::decode (gui::linkText ({ ring }).toStdString(), back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::bell
+                   && back[0].place == pdsp::LinkBand::Place::stereo && std::abs (back[0].freq - 3226.0) < 0.5 && std::abs (back[0].gainDb + 4.0) < 0.05
+                   && std::abs (back[0].q - themis::resonance::kCutQ) < 0.05,
+               "a copied narrow ring cut reads back as one bell");
         // A key from a newer writer is ignored whatever its value, so the band still arrives (the format's promise).
         CHECK (pdsp::link::decode ("pantheon-bands 1\nbell freq=270 gain=-2.0 q=0.70 place=mid shape=tilt\nbell freq=500 gain=1 q=1", back)
                    && back.size() == 2 && std::abs (back[0].freq - 270.0) < 0.5 && back[0].place == pdsp::LinkBand::Place::mid,
@@ -412,8 +427,10 @@ int main (int argc, char** argv)
         CHECK (proc.readMonoFold (fold));
         CHECK (std::abs (at (100)) < 0.5f && std::abs (at (4000)) < 0.5f);
 
-        CHECK (proc.activeDevice() != nullptr && proc.activeDevice()->name == "Phone speaker"); // default
         auto* dev = proc.apvts.getParameter (params::device);
+        CHECK (proc.activeDevice() == nullptr, "Translate to starts at Off"); // the default
+        dev->setValueNotifyingHost (dev->convertTo0to1 (1.0f));
+        CHECK (proc.activeDevice() != nullptr && proc.activeDevice()->name == "Phone speaker");
         dev->setValueNotifyingHost (dev->convertTo0to1 (0.0f));
         CHECK (proc.activeDevice() == nullptr);
         dev->setValueNotifyingHost (dev->convertTo0to1 (static_cast<float> (params::deviceNames().size() - 1)));
@@ -653,13 +670,20 @@ int main (int argc, char** argv)
         };
         const auto measured = [&] { return p2.loudnessMonitor().seconds(); };
 
-        CHECK (p2.paramReader.resetsOnPlay() == false, "off by default: a session saved before the setting keeps its behaviour");
+        CHECK (p2.paramReader.resetsOnPlay(), "on by default");
         play (22.0);
         CHECK (measured() > 20.0, "22 s played, read %.1f", measured());
         head.samples = 0;
-        play (0.1); // starts from the beginning again, the setting is off
-        CHECK (measured() > 20.0, "off: starting from the beginning keeps the measurement, read %.1f", measured());
+        play (0.1); // starts from the beginning again: measured afresh
+        CHECK (measured() < 1.0, "on by default: starting from the beginning measures afresh, read %.1f", measured());
 
+        if (auto* parameter = p2.apvts.getParameter (params::resetOnPlay))
+            parameter->setValueNotifyingHost (0.0f);
+        CHECK (!p2.paramReader.resetsOnPlay());
+        play (22.0);
+        head.samples = 0;
+        play (0.1); // the setting is off: the measurement keeps running
+        CHECK (measured() > 20.0, "off: starting from the beginning keeps the measurement, read %.1f", measured());
         if (auto* parameter = p2.apvts.getParameter (params::resetOnPlay))
             parameter->setValueNotifyingHost (1.0f);
         CHECK (p2.paramReader.resetsOnPlay());
@@ -670,6 +694,20 @@ int main (int argc, char** argv)
         play (3.0);
         CHECK (measured() > 2.5 && measured() < 4.0, "on: a start from the beginning measured afresh (3 s played), read %.1f", measured());
         p2.setPlayHead (nullptr);
+
+        // A session saved before the setting existed has no stored value for it: it opens with the old default (off).
+        {
+            auto state = p2.apvts.copyState();
+            for (int i = state.getNumChildren() - 1; i >= 0; --i)
+                if (state.getChild (i).getProperty ("id").toString() == params::resetOnPlay)
+                    state.removeChild (i, nullptr);
+            juce::MemoryBlock block;
+            juce::AudioProcessor::copyXmlToBinary (*state.createXml(), block);
+            ThemisProcessor older;
+            older.setStateInformation (block.getData(), static_cast<int> (block.getSize()));
+            CHECK (!older.paramReader.resetsOnPlay(), "a session without the setting opens with auto reset off");
+            CHECK (older.apvts.getParameter (params::resetOnPlay) != nullptr);
+        }
     }
 
     std::printf ("[5d] held curve, true-peak ceiling and the added loudness targets\n");
@@ -709,6 +747,8 @@ int main (int argc, char** argv)
         target->setValueNotifyingHost (target->convertTo0to1 (static_cast<float> (params::kDefaultTarget)));
         auto* avg = proc.apvts.getParameter (params::avgTime);
         avg->setValueNotifyingHost (avg->convertTo0to1 (static_cast<float> (params::kDefaultAvgTime)));
+        auto* deviceParam = proc.apvts.getParameter (params::device);
+        deviceParam->setValueNotifyingHost (deviceParam->convertTo0to1 (1.0f)); // Phone speaker: the screenshots show a device
         proc.resetAnalyzer();
         runAudio (proc, 0.1, fs, 512, 0.5f, 1);
         settle(); // the reset is applied by the worker; audio pushed before that would be discarded
@@ -754,17 +794,40 @@ int main (int argc, char** argv)
             }
             CHECK (plan != nullptr && auditionPanel != nullptr);
             {
+                // CLOSEST before 20 s of audio, and with no signal at all: it says so and changes nothing.
+                ThemisProcessor early;
+                early.setRateAndBufferSizeDetails (fs, 512);
+                early.prepareToPlay (fs, 512);
+                std::unique_ptr<juce::AudioProcessorEditor> earlyEditor (early.createEditor());
+                auto* earlyThemis = dynamic_cast<ThemisEditor*> (earlyEditor.get());
+                CHECK (earlyThemis != nullptr);
+                if (earlyThemis != nullptr)
+                {
+                    const float before = early.paramReader.value (params::target);
+                    earlyThemis->closest().onClick();
+                    CHECK (earlyThemis->statusText() == "Play at least 20 s first", "no signal: \"%s\"", earlyThemis->statusText().toRawUTF8());
+                    CHECK (early.paramReader.value (params::target) == before, "no signal: the target is unchanged");
+                    runAudio (early, 10.0, fs, 512, 0.3f, 5);
+                    settle();
+                    earlyThemis->closest().onClick();
+                    CHECK (earlyThemis->statusText() == "Play at least 20 s first", "10 s: \"%s\"", earlyThemis->statusText().toRawUTF8());
+                    CHECK (early.paramReader.value (params::target) == before, "10 s: the target is unchanged");
+                }
+            }
+            {
                 // Usage notes: what the status window says about how the plugin is being used.
                 const auto has = [] (const std::vector<ui::Note>& n, const char* word, ui::Severity sev) { return ui::hasNote (n, word, sev); };
                 usage::Input fine;
-                fine.signal = true; fine.analysedSeconds = 60.0;
+                fine.signal = true; fine.analysedSeconds = 60.0; fine.measurementStarted = true;
                 CHECK (usage::notesFor (fine).empty(), "a playing track measured for a minute: nothing to say");
                 auto in = fine; in.auditionActive = true;
                 CHECK (has (usage::notesFor (in), "AUDITION is engaged", ui::Severity::warning), "audition engaged: a warning");
                 in = fine; in.comparing = true;
                 CHECK (has (usage::notesFor (in), "COMPARE is on", ui::Severity::warning), "COMPARE on: a warning");
                 in = fine; in.signal = false;
-                CHECK (has (usage::notesFor (in), "No signal", ui::Severity::info), "no signal: say where to put the plugin");
+                CHECK (has (usage::notesFor (in), "Next: put Themis last in the chain", ui::Severity::info), "no signal: the next step is to put Themis last");
+                in = fine; in.measurementStarted = false; in.resetOnPlay = false;
+                CHECK (has (usage::notesFor (in), "PRESS RESET TO START", ui::Severity::warning), "signal, no Reset: press Reset to start");
                 in = fine; in.analysedSeconds = 5.0;
                 CHECK (has (usage::notesFor (in), "20 s", ui::Severity::info), "5 s measured: the plan needs 20 s");
                 in = fine; in.auditionActive = true; in.comparing = true; in.signal = false; in.analysedSeconds = 0.0;
@@ -780,6 +843,43 @@ int main (int argc, char** argv)
                 if (themisEditor != nullptr)
                 {
                     CHECK (! has (themisEditor->notes(), "AUDITION", ui::Severity::warning), "the editor shows no audition warning at first");
+                    {
+                        // Target Custom with nothing learned or loaded: the status window and the tonal view say Flat is shown.
+                        auto* targetParam = proc.apvts.getParameter (params::target);
+                        targetParam->setValueNotifyingHost (targetParam->convertTo0to1 (static_cast<float> (params::customTargetIndex())));
+                        CHECK (proc.customWithoutCurve() == !proc.hasCustomCurve());
+                        if (!proc.hasCustomCurve())
+                            CHECK (has (themisEditor->notes(), "No learned curve yet: showing Flat", ui::Severity::warning), "Custom without a curve says Flat is shown");
+                        targetParam->setValueNotifyingHost (targetParam->convertTo0to1 (static_cast<float> (params::kDefaultTarget)));
+                    }
+                    // CLOSEST last in this block, so the screenshot shows the target it selected.
+                    {
+                        // CLOSEST after the demo programme: the built-in whose shape the measured curve has, selected the way the Target
+                        // selector selects it (the host is told: a parameter listener counts the change).
+                        struct Notified : juce::AudioProcessorParameter::Listener
+                        {
+                            int changes = 0;
+                            void parameterValueChanged (int, float) override { ++changes; }
+                            void parameterGestureChanged (int, bool) override {}
+                        };
+                        Notified notified;
+                        auto* targetParam = proc.apvts.getParameter (params::target);
+                        targetParam->addListener (&notified);
+                        themis::BandArray measured {};
+                        CHECK (themisEditor != nullptr && proc.readSpectrum (measured));
+                        if (themisEditor != nullptr && proc.readSpectrum (measured))
+                        {
+                            const size_t expected = themis::TargetCurve::nearestBuiltIn (measured, fs);
+                            themisEditor->closest().onClick();
+                            const juce::String wanted = "Closest built-in: " + juce::String (std::string (themis::TargetCurve::builtIns()[expected].name));
+                            CHECK (proc.paramReader.value (params::target) == static_cast<float> (expected), "target %.0f, expected %zu", static_cast<double> (proc.paramReader.value (params::target)), expected);
+                            CHECK (notified.changes >= 1, "the host hears the change (%d)", notified.changes);
+                            CHECK (themisEditor->statusText().startsWith (wanted), "status \"%s\"", themisEditor->statusText().toRawUTF8());
+                            CHECK (themisEditor->statusText().endsWith ("A shape match, not a genre detection."), "status \"%s\"", themisEditor->statusText().toRawUTF8());
+                            std::printf ("    CLOSEST on the demo programme: %s\n", themisEditor->statusText().toRawUTF8());
+                        }
+                        targetParam->removeListener (&notified);
+                    }
                     themis::Switches sw;
                     sw.solo = 1u;
                     proc.setAudition (sw);
@@ -807,7 +907,17 @@ int main (int argc, char** argv)
                 const auto has = [&] (themis::Topic t) { return std::any_of (advice.items.begin(), advice.items.end(), [t] (const themis::Advice& a) { return a.topic == t; }); };
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
                 CHECK (has (themis::Topic::width), "the demo programme has a widened top");
+                CHECK (has (themis::Topic::harshness), "the demo programme's sibilant bursts show as a harshness item");
+                CHECK (has (themis::Topic::resonance), "the demo programme's channel delay leaves a comb peak that reads as a ring");
                 CHECK (advice.level() == themis::Level::bad && advice.items.front().level == themis::Level::bad);
+                // The loudness readout's hover: the offset to each of the five delivery targets (the chosen one marked), the
+                // loudest section, the crest factor and the silence at the edges, all from what has played.
+                const auto tip = plan->loudnessTooltipText().toStdString();
+                std::printf ("    loudness hover:\n%s\n", tip.c_str());
+                CHECK (tip.find ("At -14 LUFS (streaming)") != std::string::npos && tip.find ("At -23 LUFS (broadcast)") != std::string::npos
+                           && tip.find ("<- Deliver for") != std::string::npos, "the loudness hover names the offset to all five delivery targets");
+                CHECK (tip.find ("loudest 3 s since the Reset sit") != std::string::npos && tip.find ("Crest factor") != std::string::npos
+                           && tip.find ("Silence:") != std::string::npos, "the loudness hover has the loudest section, the crest factor and the silence");
 
                 // The HEAR chip of the first item that has one: click it, the buttons follow; click again, they release.
                 const auto hear = plan->firstHearable();
@@ -859,6 +969,7 @@ int main (int argc, char** argv)
                 if (auto* tonal = dynamic_cast<TonalBalanceView*> (child))
                 {
                     tonal->update();
+                CHECK (tonal->tiltReport().have && std::isfinite (tonal->tiltReport().differenceDbPerOct), "the tonal view has a tilt against its target");
                     const auto picture = tonal->createComponentSnapshot (tonal->getLocalBounds(), true, 1.0f);
                     CHECK (picture.isValid());
                     if (argc > 3 && picture.isValid())

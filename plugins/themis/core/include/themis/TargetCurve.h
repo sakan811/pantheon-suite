@@ -5,8 +5,10 @@
 
 #include "TonalAnalyzer.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <string>
@@ -119,6 +121,53 @@ struct TargetCurve
     {
         static const std::vector<TargetCurve> list = makeBuiltIns();
         return list;
+    }
+
+    // ---- the closest shape ---------------------------------------------------------------------
+    // RMS difference in dB between a measured curve and a target's median, over the bands the sample rate carries
+    // (BandGrid::bandsUpTo of usableMaxHz, as the tilt does), after removing the mean offset: a shape distance, so
+    // the level of the curve and the gain of the master do not count.
+    static float distanceDb (const BandArray& measured, const TargetCurve& target, double sampleRate)
+    {
+        const int bands = BandGrid::bandsUpTo (BandGrid::usableMaxHz (sampleRate));
+        double mean = 0.0;
+        for (int i = 0; i < bands; ++i)
+            mean += static_cast<double> (measured[static_cast<size_t> (i)]) - static_cast<double> (target.medianDb[static_cast<size_t> (i)]);
+        mean /= static_cast<double> (bands);
+        double squares = 0.0;
+        for (int i = 0; i < bands; ++i)
+        {
+            const auto s = static_cast<size_t> (i);
+            const double d = static_cast<double> (measured[s]) - static_cast<double> (target.medianDb[s]) - mean;
+            squares += d * d;
+        }
+        return static_cast<float> (std::sqrt (squares / static_cast<double> (bands)));
+    }
+
+    // Index of the curve in `list` nearest to the measured one (distance in *distance when given). A tie goes to the
+    // first curve in the list, so the answer does not depend on anything but the list's order.
+    static size_t nearest (const BandArray& measured, const std::vector<TargetCurve>& list, double sampleRate, float* distance = nullptr)
+    {
+        size_t best = 0;
+        float bestDb = std::numeric_limits<float>::infinity();
+        for (size_t k = 0; k < list.size(); ++k)
+        {
+            const float d = distanceDb (measured, list[k], sampleRate);
+            if (d < bestDb)
+            {
+                bestDb = d;
+                best = k;
+            }
+        }
+        if (distance != nullptr)
+            *distance = bestDb;
+        return best;
+    }
+
+    // The built-in curve whose shape is nearest the measured one ("Closest" in the header).
+    static size_t nearestBuiltIn (const BandArray& measured, double sampleRate, float* distance = nullptr)
+    {
+        return nearest (measured, builtIns(), sampleRate, distance);
     }
 
     // ---- (de)serialisation -------------------------------------------------------------------

@@ -3,6 +3,7 @@
 
 // Self-contained tests for the Themis DSP core (no framework dependency).
 #include <themis/Audition.h>
+#include <themis/DeliveryTargets.h>
 #include <themis/Compressor.h>
 #include <themis/Engine.h>
 #include <themis/Biquad.h>
@@ -18,12 +19,16 @@
 #include <themis/Loudness.h>
 #include <themis/LoudnessMonitor.h>
 #include <themis/MasterAdvisor.h>
+#include <themis/Harshness.h>
 #include <themis/PhaseCancellation.h>
+#include <themis/Resonance.h>
 #include <themis/StereoScope.h>
 #include <themis/StereoTools.h>
 #include <themis/TargetCurve.h>
 #include <themis/TonalAnalyzer.h>
 #include <themis/Translation.h>
+
+#include "../plugin/Source/UsageNotes.h"
 
 #include <chrono>
 #include <functional>
@@ -117,7 +122,7 @@ static std::vector<float> pinkNoise (size_t n, unsigned seed, float amp = 0.25f)
     return w;
 }
 
-// Brute-force 8x oversampled true peak using a long windowed sinc (independent of TruePeakDetector).
+// Brute-force 8x oversampled true peak using a long windowed sinc (independent of pdsp::TruePeakReader).
 static float referenceTruePeak (const std::vector<float>& x)
 {
     constexpr int up = 8, halfLen = 32;
@@ -312,14 +317,39 @@ TEST (true_peak_finds_intersample_peaks)
     // fs/4 sine at 45 degrees: every sample is +/-0.7071 but the waveform peaks at 1.0.
     auto s = sine (48000, 12000, 0.0, 0.1, kPi / 4.0);
     float samplePeak = 0, tp = 0;
-    TruePeakDetector d;
+    pdsp::TruePeakReader d;
     for (float x : s)
     {
         samplePeak = std::max (samplePeak, std::abs (x));
-        tp = std::max (tp, d.process (x));
+        tp = std::max (tp, static_cast<float> (d.push (x)));
     }
     CHECK_NEAR (samplePeak, 0.7071, 0.001);
     CHECK_NEAR (tp, 1.0, 0.03);
+}
+
+TEST (true_peak_reader_reads_pure_tones_within_0_15_db)
+{
+    // A pure tone's true peak is its amplitude. The reader samples the waveform on an 8x grid, so the worst phase
+    // of a tone can read low by up to half a grid step of the tone (measured: 0.11 dB, at 0.4 fs). Sweep the phase
+    // and the frequency from a quarter of the sample rate up to 0.49 fs, where a 4x reader reads 0.69 dB low.
+    double worst = 0.0;
+    for (double f : { 0.25, 0.333, 0.40, 0.45, 0.49 })
+        for (int ph = 0; ph < 16; ++ph)
+        {
+            const double phase = kPi * ph / 8.0;
+            pdsp::TruePeakReader d;
+            double tp = 0;
+            for (int i = 0; i < 1200; ++i)
+            {
+                const double x = std::sin (2.0 * kPi * f * i + phase);
+                const double v = d.push (x);
+                if (i >= 256) // the reader starts from silence: its first samples are a start-up transient, not the tone
+                    tp = std::max (tp, v);
+            }
+            worst = std::max (worst, -20.0 * std::log10 (tp));
+        }
+    std::printf ("  true-peak reader, worst low reading over 80 tone phases: %.3f dB\n", worst);
+    CHECK (worst < 0.15);
 }
 
 TEST (limiter_respects_ceiling_and_is_transparent_below_it)
@@ -371,7 +401,7 @@ TEST (limiter_respects_ceiling_and_is_transparent_below_it)
     CHECK (tpDb <= -1.0f + 0.1f);
     CHECK (lim.gainReductionDb() < -3.0f);
 
-    // Worst case: full-band white noise. Any 4x interpolator under-reads near Nyquist; stay within 1.5 dB.
+    // Worst case: full-band white noise. The true-peak reader under-reads near Nyquist; stay within 1.5 dB.
     {
         auto wl = whiteNoise (n, 17, 1.0f), wr = whiteNoise (n, 18, 1.0f);
         for (size_t i = 0; i < n; ++i)
@@ -840,6 +870,50 @@ TEST (low_crest_meter)
     run (d, sine);
     CHECK (d.hasData());
     CHECK_NEAR (d.crestDb(), 3.01, 0.15);
+}
+
+TEST (closest_built_in_is_the_one_whose_shape_the_curve_has)
+{
+    // Each built-in plus a level offset (either sign) is nearest to itself at distance ~0: the mean offset is removed.
+    const auto& built = TargetCurve::builtIns();
+    for (size_t k = 0; k < built.size(); ++k)
+        for (float offset : { -7.5f, 0.0f, 4.0f })
+        {
+            BandArray measured {};
+            for (int i = 0; i < BandGrid::kNum; ++i)
+                measured[static_cast<size_t> (i)] = built[k].medianDb[static_cast<size_t> (i)] + offset;
+            float distance = -1.0f;
+            const size_t picked = TargetCurve::nearestBuiltIn (measured, 48000.0, &distance);
+            CHECK (picked == k && distance < 1.0e-3f);
+        }
+
+    // A curve between two built-ins picks the nearer one (a tilt towards Hip-Hop, away from Acoustic).
+    BandArray between {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        between[static_cast<size_t> (i)] = built[2].medianDb[static_cast<size_t> (i)] * 0.9f + built[6].medianDb[static_cast<size_t> (i)] * 0.1f;
+    CHECK (TargetCurve::nearestBuiltIn (between, 48000.0) == 2);
+
+    // Ties are deterministic: the first curve in the list wins, whatever the others are.
+    const auto flat = TargetCurve::fromAnchors ("Flat", { { 20, 0 }, { 20000, 0 } }, { { 20, 3 }, { 20000, 3 } });
+    auto shifted = flat;
+    for (auto& v : shifted.medianDb)
+        v += 2.0f; // the same shape at another level: an exact tie
+    BandArray flatMeasured {};
+    for (auto& v : flatMeasured)
+        v = 1.0f;
+    const std::vector<TargetCurve> tied = { shifted, flat, flat };
+    float tieDistance = -1.0f;
+    CHECK (TargetCurve::nearest (flatMeasured, tied, 48000.0, &tieDistance) == 0 && tieDistance < 1.0e-3f);
+    CHECK (TargetCurve::nearest (flatMeasured, { flat, shifted }, 48000.0) == 0);
+
+    // Only the bands the sample rate carries count: at 22.05 kHz the bands above ~10 kHz are not measured, so a
+    // difference there must not move the answer.
+    BandArray lowRate = built[1].medianDb;
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        if (BandGrid::centreHz (i) > BandGrid::usableMaxHz (22050.0))
+            lowRate[static_cast<size_t> (i)] += 30.0f;
+    CHECK (TargetCurve::distanceDb (lowRate, built[1], 22050.0) < 1.0e-3f);
+    CHECK (TargetCurve::distanceDb (lowRate, built[1], 48000.0) > 3.0f);
 }
 
 TEST (target_curve_json_roundtrip_and_tracks)
@@ -2887,6 +2961,549 @@ TEST (mono_fold_report_needs_no_target_or_device)
     CHECK (alone.haveFold && !alone.haveDevice);
     CHECK (alone.lowMonoLossDb > 3.0f && alone.lowMonoLevel != Level::good);
     CHECK (alone.monoLossDb == full.monoLossDb && alone.lowMonoLossDb == full.lowMonoLossDb && alone.worstBand == full.worstBand);
+}
+
+// ---- the usage notes and the first-run checklist (plugin/Source/UsageNotes.h, plain C++) ----
+
+TEST (first_run_checklist_ticks_come_from_what_the_plugin_has_seen)
+{
+    usage::Input in;
+    CHECK (usage::nextStep (in) == 0);
+    CHECK (!usage::checklist (in)[0].done && !usage::checklist (in)[3].done);
+    in.signal = true; // the first two steps are ticked by audio reaching the plugin
+    CHECK (usage::checklist (in)[0].done && usage::checklist (in)[1].done && !usage::checklist (in)[2].done);
+    CHECK (usage::nextStep (in) == 2);
+    in.measurementStarted = true;
+    CHECK (usage::nextStep (in) == 3);
+    CHECK (usage::checklist (in)[3].label.find ("20 s") != std::string::npos);
+    in.analysedSeconds = 19.9;
+    CHECK (usage::nextStep (in) == 3);
+    in.analysedSeconds = 20.0;
+    CHECK (usage::nextStep (in) == -1); // all ticked: no next step
+}
+
+TEST (next_step_says_how_auto_reset_starts_the_measurement)
+{
+    usage::Input in;
+    in.signal = true;
+    in.resetOnPlay = false;
+    CHECK (usage::checklist (in)[2].next.rfind ("press Reset", 0) == 0);
+    in.resetOnPlay = true;
+    CHECK (usage::checklist (in)[2].next.find ("Auto reset") != std::string::npos);
+}
+
+TEST (status_window_names_the_next_step)
+{
+    usage::Input in;
+    CHECK (ui::hasNote (usage::notesFor (in), "Next: put Themis last in the chain", ui::Severity::info));
+    in.signal = true;
+    in.measurementStarted = true;
+    in.analysedSeconds = 5.0;
+    CHECK (ui::hasNote (usage::notesFor (in), "Next: keep playing: the plan needs 20 s", ui::Severity::info));
+    in.analysedSeconds = 25.0;
+    CHECK (usage::notesFor (in).empty()); // everything ticked: the tip shows instead
+}
+
+TEST (press_reset_to_start_when_signal_has_no_measurement)
+{
+    usage::Input in;
+    in.signal = true;
+    in.resetOnPlay = false;
+    CHECK (ui::hasNote (usage::notesFor (in), "PRESS RESET TO START", ui::Severity::warning));
+    CHECK (usage::notesFor (in).front().severity == ui::Severity::warning); // a warning comes first
+    in.measurementStarted = true; // Reset was pressed
+    CHECK (!ui::hasNote (usage::notesFor (in), "PRESS RESET", ui::Severity::warning));
+    in.measurementStarted = false;
+    in.resetOnPlay = true; // auto reset starts it by itself when the host plays
+    CHECK (!ui::hasNote (usage::notesFor (in), "PRESS RESET", ui::Severity::warning));
+    in.resetOnPlay = false;
+    in.signal = false; // and nothing is said before any signal
+    CHECK (!ui::hasNote (usage::notesFor (in), "PRESS RESET", ui::Severity::warning));
+}
+
+TEST (custom_target_without_a_curve_says_flat_is_shown)
+{
+    usage::Input in;
+    in.customWithoutCurve = true;
+    CHECK (ui::hasNote (usage::notesFor (in), "No learned curve yet: showing Flat. Use Learn from tracks...", ui::Severity::warning));
+    in.customWithoutCurve = false;
+    CHECK (!ui::hasNote (usage::notesFor (in), "No learned curve", ui::Severity::warning));
+}
+
+TEST (status_window_notes_fit_the_status_line_in_every_state)
+{
+    // Every combination of the flags at three lengths of measurement: no note is longer than the status line holds.
+    size_t longest = 0;
+    for (int bits = 0; bits < 64; ++bits)
+        for (double seconds : { 0.0, 5.0, 25.0 })
+        {
+            usage::Input in;
+            in.signal = (bits & 1) != 0;
+            in.auditionActive = (bits & 2) != 0;
+            in.comparing = (bits & 4) != 0;
+            in.measurementStarted = (bits & 8) != 0;
+            in.resetOnPlay = (bits & 16) != 0;
+            in.customWithoutCurve = (bits & 32) != 0;
+            in.analysedSeconds = seconds;
+            for (const auto& n : usage::notesFor (in))
+                longest = std::max (longest, n.text.size());
+        }
+    CHECK (static_cast<int> (longest) <= usage::kMaxChars);
+}
+
+TEST (guide_glossary_explains_the_jargon_in_lines_that_fit)
+{
+    const std::string text = usage::guideText();
+    const auto at = text.find ("WORDS USED HERE:");
+    CHECK (at != std::string::npos);
+    if (at == std::string::npos)
+        return;
+    const std::string glossary = text.substr (at);
+    bool fits = true;
+    int lines = 0;
+    for (size_t start = 0; start < glossary.size(); ++lines)
+    {
+        size_t end = glossary.find ('\n', start);
+        if (end == std::string::npos)
+            end = glossary.size();
+        fits = fits && end - start <= static_cast<size_t> (usage::kMaxChars);
+        start = end + 1;
+    }
+    CHECK (fits);
+    CHECK (lines >= 10);
+    for (const char* term : { "  LUFS ", "  LU ", "  dBTP ", "  PLR ", "  LRA ", "  Crest factor", "  Mid / side", "  Mono fold", "  Tolerance" })
+        CHECK (glossary.find (term) != std::string::npos);
+}
+
+// ---- the plan's wording: a DAW suffix where COPY has no path, and plain openers for the jargon ----
+
+TEST (plan_names_the_daw_only_where_copy_has_no_path)
+{
+    auto in = cleanMaster();
+    in.clip.clipEvents = 5; // flat tops under the ceiling: no ceiling to hand a limiter
+    in.clip.truePeakDb = -1.2f;
+    auto* clip = pick (in, Topic::clipping);
+    CHECK (clip != nullptr && !clip->canCopy() && clip->headline.find ("(any limiter or EQ in your DAW)") != std::string::npos);
+    in.clip.clipEvents = 30; // over the ceiling: COPY hands it to Aegis, so the destination is named instead
+    in.clip.truePeakDb = 0.4f;
+    clip = pick (in, Topic::clipping);
+    CHECK (clip != nullptr && clip->canCopy() && clip->headline.find ("DAW") == std::string::npos);
+
+    auto fold = cleanMaster();
+    fold.translation.lowMonoLevel = Level::good;
+    fold.translation.monoLevel = Level::warn;
+    fold.translation.monoLossDb = 3.0f;
+    const auto* m = pick (fold, Topic::monoFold);
+    CHECK (m != nullptr && !m->canCopy() && m->headline.find ("(any limiter or EQ in your DAW)") != std::string::npos);
+
+    auto low = cleanMaster();
+    low.translation.lowMonoLevel = Level::bad;
+    low.translation.lowMonoLossDb = 2.0f;
+    const auto* lm = pick (low, Topic::lowEndMono);
+    CHECK (lm != nullptr && lm->canCopy() && lm->headline.find ("DAW") == std::string::npos); // COPY for Iris: the destination stays named
+
+    auto loud = cleanMaster();
+    loud.integratedLufs = -8.0f;
+    const auto* l = pick (loud, Topic::loudness);
+    CHECK (l != nullptr && l->canCopy() && l->headline.find ("DAW") == std::string::npos); // COPY for Aegis
+}
+
+TEST (plan_opens_its_why_in_plain_words)
+{
+    auto in = cleanMaster();
+    in.havePhase = true;
+    in.phase.have = true;
+    in.phase.level = Level::bad;
+    in.phase.cause = PhaseCause::delay;
+    in.phase.delayMs = 0.5f;
+    in.phase.notchHz = 1000.0f;
+    in.phase.worstLossDb = 19.0f;
+    in.phase.loHz = 500.0;
+    in.phase.hiHz = 1500.0;
+    const auto* phase = pick (in, Topic::phase);
+    CHECK (phase != nullptr && phase->why.rfind ("One side arrives late, so mono sums cancel", 0) == 0);
+    in.phase.cause = PhaseCause::polarity;
+    phase = pick (in, Topic::phase);
+    CHECK (phase != nullptr && phase->why.rfind ("One channel is upside down (antiphase)", 0) == 0);
+
+    auto crest = cleanMaster();
+    crest.lowCrestDb = 4.0f;
+    const auto* squashed = pick (crest, Topic::lowCrest);
+    CHECK (squashed != nullptr && squashed->why.rfind ("The bass is squashed", 0) == 0);
+    crest.lowCrestDb = 13.0f;
+    const auto* spiky = pick (crest, Topic::lowCrest);
+    CHECK (spiky != nullptr && spiky->why.rfind ("The bass has isolated peaks", 0) == 0);
+}
+
+// ---- delivery targets, crest factor, loudest section, tilt, sound edges, squashed peaks -------------------------------
+TEST (delivery_targets_are_one_list_with_the_offset_to_each)
+{
+    CHECK (delivery::kCount == 5 && delivery::kLufs[0] == -14.0f && delivery::kLufs[1] == -9.0f && delivery::kLufs[2] == -18.0f
+           && delivery::kLufs[3] == -16.0f && delivery::kLufs[4] == -23.0f);
+    CHECK (delivery::kStreamingLufs == -14.0f);
+    const auto o = delivery::offsetsOf (-16.3f);
+    CHECK (o[0].targetLufs == -14.0f && o[4].targetLufs == -23.0f);
+    CHECK_NEAR (o[0].offsetDb, -2.3, 1e-4); // -14: the master plays 2.3 dB quieter
+    CHECK_NEAR (o[1].offsetDb, -7.3, 1e-4); // -9
+    CHECK_NEAR (o[2].offsetDb, 1.7, 1e-4);  // -18: louder
+    CHECK_NEAR (o[3].offsetDb, -0.3, 1e-4); // -16
+    CHECK_NEAR (o[4].offsetDb, 6.7, 1e-4);  // -23
+}
+
+TEST (clip_meter_crest_factor_is_peak_over_rms)
+{
+    const double fs = 48000;
+    const int n = static_cast<int> (fs);
+    // A sine at half of full scale: peak 0.5, RMS 0.5 / sqrt 2, so 3 dB of crest.
+    auto tone = sine (fs, 997, 20.0 * std::log10 (0.5), 1.0);
+    ClipMeter m;
+    m.prepare();
+    m.process (tone.data(), tone.data(), n);
+    const auto t = m.totals();
+    CHECK (t.haveCrest());
+    CHECK_NEAR (t.crestDb(), 3.01, 0.05);
+
+    // A square wave at +/-0.5 has no crest at all: its RMS is its peak.
+    std::vector<float> square (static_cast<size_t> (n));
+    for (size_t i = 0; i < square.size(); ++i)
+        square[i] = (i / 100) % 2 ? 0.5f : -0.5f;
+    m.requestReset();
+    m.process (square.data(), square.data(), n);
+    CHECK_NEAR (m.totals().crestDb(), 0.0, 0.05);
+
+    // Silence has a mean square of zero: no crest to report.
+    std::vector<float> zeros (static_cast<size_t> (n), 0.0f);
+    m.requestReset();
+    m.process (zeros.data(), zeros.data(), n);
+    CHECK (!m.totals().haveCrest());
+}
+
+TEST (loudest_section_is_read_against_the_integrated_loudness)
+{
+    const auto a = loudestSection (-10.0f, -14.0f);
+    CHECK (a.have && std::abs (a.aboveAverageLu - 4.0f) < 1.0e-5f);
+    CHECK (!loudestSection (LoudnessMeter::kSilence, -14.0f).have);
+    CHECK (!loudestSection (-14.0f, LoudnessMeter::kSilence).have);
+
+    // A steady tone: its loudest 3 s is its average, so nothing sits above it.
+    const double fs = 48000;
+    auto tone = sine (fs, 1000, -20.0, 12.0);
+    LoudnessMonitor mon;
+    mon.prepare (fs);
+    mon.process (tone.data(), tone.data(), static_cast<int> (tone.size()));
+    const auto steady = loudestSection (mon.maxShortTerm(), mon.integrated());
+    CHECK (steady.have && std::abs (steady.aboveAverageLu) < 0.3f);
+    mon.requestReset();
+    CHECK (!loudestSection (mon.maxShortTerm(), mon.integrated()).have);
+}
+
+TEST (tilt_is_the_least_squares_slope_and_names_the_difference_to_the_target)
+{
+    BandArray line {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        line[static_cast<size_t> (i)] = static_cast<float> (-3.0 * i / BandGrid::kPerOctave); // -3 dB per octave
+    CHECK_NEAR (tilt::slopeDbPerOctave (line), -3.0, 1.0e-5);
+    BandArray lifted = line;
+    for (auto& v : lifted)
+        v += 7.0f; // a level offset is not a tilt
+    CHECK_NEAR (tilt::slopeDbPerOctave (lifted), -3.0, 1.0e-5);
+    CHECK_NEAR (tilt::slopeDbPerOctave (line, 30), -3.0, 1.0e-5); // over fewer bands, the same line
+
+    BandArray flat {}, dark {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+        dark[static_cast<size_t> (i)] = static_cast<float> (-0.9 * i / BandGrid::kPerOctave);
+    const auto r = tilt::compare (dark, flat, 48000.0);
+    CHECK (r.have);
+    CHECK_NEAR (r.measuredDbPerOct, -0.9, 1.0e-4);
+    CHECK_NEAR (r.targetDbPerOct, 0.0, 1.0e-5);
+    CHECK_NEAR (r.differenceDbPerOct, -0.9, 1.0e-4);
+    CHECK (tilt::sideOf (r.differenceDbPerOct) == tilt::Side::darker);
+    CHECK (tilt::sideOf (0.2f) == tilt::Side::same && tilt::sideOf (-0.2f) == tilt::Side::same);
+    CHECK (tilt::sideOf (0.3f) == tilt::Side::brighter);
+    CHECK (tilt::sideOf (-0.3f) == tilt::Side::darker);
+
+    // The bands the sample rate carries: all of them at 48 kHz, fewer at 32 kHz (its analysis stops near 15 kHz).
+    CHECK (BandGrid::bandsUpTo (BandGrid::usableMaxHz (48000.0)) == BandGrid::kNum);
+    CHECK (BandGrid::bandsUpTo (BandGrid::usableMaxHz (32000.0)) < BandGrid::kNum);
+    CHECK_NEAR (tilt::compare (line, flat, 32000.0).measuredDbPerOct, -3.0, 1.0e-4);
+}
+
+TEST (sound_edges_count_silence_to_the_sample)
+{
+    // 5000 samples of digital silence, 9000 of sound, 6000 of dither under -80 dBFS (silence), scanned in blocks of 512.
+    std::vector<float> x (20000, 0.0f);
+    for (size_t i = 5000; i < 14000; ++i)
+        x[i] = 0.2f * static_cast<float> (std::sin (0.05 * static_cast<double> (i)));
+    for (size_t i = 14000; i < x.size(); ++i)
+        x[i] = 1.0e-5f;
+    SoundEdges e;
+    e.clear (0);
+    CHECK (!e.heard() && e.leadingSamples() == 0 && e.trailingSamples (20000) == 0);
+    for (size_t i = 0; i < x.size(); i += 512)
+        e.scan (x.data() + i, x.data() + i, static_cast<int> (std::min<size_t> (512, x.size() - i)), i);
+    CHECK (e.heard());
+    CHECK (e.leadingSamples() == 5000);
+    CHECK (e.trailingSamples (20000) == 6000);
+    CHECK (e.trailingSamples (20000) == 6000 && e.trailingSamples (14000) == 0); // silence since the sound ended, growing with time
+
+    // A clear counts from its own origin: silence before it does not count any more.
+    e.clear (20000);
+    CHECK (!e.heard());
+    const std::vector<float> late (100, 0.5f);
+    e.scan (late.data(), late.data(), 100, 20500);
+    CHECK (e.leadingSamples() == 500 && e.trailingSamples (20100) == 0);
+}
+
+TEST (analyser_reports_leading_and_trailing_silence_in_seconds)
+{
+    const double fs = 48000;
+    const auto tone = sine (fs, 440, -12.0, 2.0);
+    std::vector<float> x (static_cast<size_t> (fs), 0.0f);
+    x.insert (x.end(), tone.begin(), tone.end());
+    x.insert (x.end(), static_cast<size_t> (fs * 0.5), 0.0f);
+    TonalAnalyzer a;
+    a.prepare (fs);
+    for (size_t pos = 0; pos < x.size(); pos += 4096)
+        a.process (x.data() + pos, x.data() + pos, static_cast<int> (std::min<size_t> (4096, x.size() - pos)));
+    CHECK (a.soundHeard());
+    CHECK_NEAR (a.leadingSilenceSeconds(), 1.0, 1.0e-3);
+    CHECK_NEAR (a.trailingSilenceSeconds(), 0.5, 1.0e-3);
+    a.requestReset();
+    CHECK (!a.soundHeard());
+}
+
+TEST (advisor_flags_squashed_peaks_by_plr_as_a_rule_of_thumb)
+{
+    auto in = cleanMaster(); // -14 LUFS, true peak -1.5 dBTP: a 12.5 dB peak-to-loudness ratio
+    CHECK (pick (in, Topic::squashed) == nullptr);
+    in.integratedLufs = -8.0f; // 6.5 dB: still fine
+    CHECK (pick (in, Topic::squashed) == nullptr);
+
+    in.integratedLufs = -7.0f; // 5.5 dB: a warning, worded as a rule of thumb
+    in.clip.meanSquare = 0.1f; // full band: sample peak -1.8 dBFS over an RMS of -10 dB, a crest of 8.2 dB
+    const auto* warn = pick (in, Topic::squashed);
+    CHECK (warn != nullptr && warn->level == Level::warn);
+    CHECK (warn != nullptr && warn->headline == "Peaks sit only 5.5 dB above the average: squashed, ease the limiting");
+    CHECK (warn != nullptr && warn->why.find ("crest factor 8.2 dB") != std::string::npos && warn->why.find ("Rule of thumb, not a fault in itself") != std::string::npos);
+    CHECK (warn != nullptr && !warn->canCopy() && !warn->hear.active());
+
+    in.integratedLufs = -5.0f; // 3.5 dB: bad
+    const auto* bad = pick (in, Topic::squashed);
+    CHECK (bad != nullptr && bad->level == Level::bad);
+
+    // Nothing before the 20 s of the long-term checks, and the plan stays worst first.
+    in.analysedSeconds = 5.0;
+    CHECK (pick (in, Topic::squashed) == nullptr);
+    in.analysedSeconds = 120.0;
+    const auto plan = advise (in);
+    for (size_t i = 1; i < plan.items.size(); ++i)
+        CHECK (plan.items[i - 1].level >= plan.items[i].level);
+    CHECK (planAsText (in, plan).find ("PLR 3.5 dB") != std::string::npos);
+}
+
+// ---- narrow rings in the long-term curve, and harshness in the band history ---------------------------------------
+namespace
+{
+BandArray flatCurve (float db = 0.0f)
+{
+    BandArray a {};
+    a.fill (db);
+    return a;
+}
+
+// `frames` band histories of `f(frame, band)` (mean-square dB), oldest first.
+template <typename F> std::vector<BandLevels> bandHistory (int frames, F&& f)
+{
+    std::vector<BandLevels> out (static_cast<size_t> (frames));
+    for (int i = 0; i < frames; ++i)
+        for (int b = 0; b < BandGrid::kNum; ++b)
+            out[static_cast<size_t> (i)][static_cast<size_t> (b)] = f (i, b);
+    return out;
+}
+
+// Bands 46 .. 53 are the region the harshness check reads (about 4.1 kHz to 9.1 kHz).
+bool inHarshRegion (int b) { return b >= 46 && b <= 53; }
+} // namespace
+
+TEST (resonance_finds_a_narrow_ring_at_the_right_frequency_and_size)
+{
+    auto db = flatCurve();
+    db[44] = 4.5f; // centre 3.2 kHz
+    const auto rings = resonance::find (db, BandGrid::kNum);
+    CHECK (rings.size() == 1);
+    if (rings.size() == 1)
+    {
+        CHECK (rings[0].band == 44);
+        CHECK_NEAR (rings[0].freqHz, BandGrid::centreHz (44), 1e-6);
+        CHECK (hzText (rings[0].freqHz) == "3.2 kHz");
+        CHECK_NEAR (rings[0].standOutDb, 4.5, 1e-4);
+    }
+    // Below 250 Hz a sustained bass note is not a ring: the same peak down there is not judged (the low end has its own checks).
+    db = flatCurve();
+    db[20] = 10.0f; // centre 202 Hz
+    CHECK (resonance::find (db, BandGrid::kNum).empty());
+    // A ring 3.5 dB high is under the limit; the same ring 4.5 dB high was found above.
+    db[44] = resonance::kMinStandOutDb - 0.5f;
+    CHECK (resonance::find (db, BandGrid::kNum).empty());
+    // A two-band ring (a third of an octave wide) is one ring, reported once, at its first band; its partner is not compared.
+    db = flatCurve();
+    db[44] = 6.0f;
+    db[45] = 6.0f;
+    const auto pair = resonance::find (db, BandGrid::kNum);
+    CHECK (pair.size() == 1 && pair[0].band == 44 && std::abs (pair[0].standOutDb - 6.0f) < 1e-4f);
+}
+
+TEST (resonance_ignores_flat_targets_smooth_shapes_and_broad_balance)
+{
+    CHECK (resonance::find (flatCurve(), BandGrid::kNum).empty());
+    // A target-shaped curve: a -3 dB per octave tilt with a broad 3 dB bump two octaves wide.
+    BandArray shape {};
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        const double oct = static_cast<double> (i) / BandGrid::kPerOctave;
+        shape[static_cast<size_t> (i)] = static_cast<float> (-3.0 * oct + 3.0 * std::exp (-0.5 * (oct - 6.0) * (oct - 6.0)));
+    }
+    CHECK (resonance::find (shape, BandGrid::kNum).empty());
+    // A broad tonal balance: a 6 dB hump two octaves wide, and a 10 dB step up at 2 kHz. Neither has a narrow ring.
+    BandArray hump = flatCurve(), step = flatCurve();
+    for (int i = 0; i < BandGrid::kNum; ++i)
+    {
+        const double oct = static_cast<double> (i) / BandGrid::kPerOctave;
+        hump[static_cast<size_t> (i)] = static_cast<float> (6.0 * std::exp (-0.5 * (oct - 5.0) * (oct - 5.0)));
+        step[static_cast<size_t> (i)] = BandGrid::centreHz (i) >= 2000.0 ? 10.0f : 0.0f;
+    }
+    CHECK (resonance::find (hump, BandGrid::kNum).empty());
+    CHECK (resonance::find (step, BandGrid::kNum).empty());
+    // The outermost bands have no full neighbourhood and are never reported; nor are bands above the usable top.
+    auto edge = flatCurve();
+    edge[0] = edge[1] = 20.0f;
+    edge[BandGrid::kNum - 1] = 20.0f;
+    CHECK (resonance::find (edge, BandGrid::kNum).empty());
+    auto high = flatCurve();
+    high[56] = 8.0f; // centre 11.5 kHz: above the usable top of a 20 kHz sample rate (9.4 kHz), so it is not judged there
+    CHECK (resonance::find (high, BandGrid::bandsUpTo (BandGrid::usableMaxHz (20000.0))).empty());
+    CHECK (resonance::find (high, BandGrid::kNum).size() == 1);
+}
+
+TEST (resonance_reports_the_worst_three_rings_worst_first)
+{
+    auto db = flatCurve();
+    db[30] = 6.0f;
+    db[36] = 4.5f;
+    db[46] = 8.0f;
+    db[52] = 5.0f;
+    db[57] = 5.0f; // three bands above 52 would be inside its side (it would read as 2.5 dB); 57 stands alone
+    const auto rings = resonance::find (db, BandGrid::kNum);
+    CHECK (rings.size() == resonance::kMaxRings);
+    if (rings.size() == 3)
+    {
+        CHECK (rings[0].band == 46 && rings[1].band == 30 && rings[2].band == 52); // equal ones keep their band order
+    }
+}
+
+TEST (harshness_catches_a_region_that_keeps_jumping_and_not_a_steady_one)
+{
+    constexpr int n = 120;
+    // A quarter of the frames carry a 12 dB burst in the region: the average sits 9 dB under the loud tenth.
+    const auto bursts = bandHistory (n, [] (int i, int b) { return -40.0f + (i % 4 == 0 && inHarshRegion (b) ? 12.0f : 0.0f); });
+    const auto r = harshness::analyse (bursts.data(), n, 20000.0);
+    CHECK (r.have);
+    CHECK_NEAR (r.jumpDb(), 9.0, 0.1);
+    CHECK (r.jumpDb() >= harshness::kJumpDb);
+
+    // Steady noise in the region (about 0.5 dB of frame-to-frame wobble): nothing.
+    unsigned seed = 7;
+    const auto noise = bandHistory (n, [&] (int, int b) {
+        seed = seed * 1664525u + 1013904223u;
+        const float wobble = (static_cast<float> (seed >> 8) / 16777216.0f - 0.5f); // -0.5 .. 0.5
+        return -40.0f + (inHarshRegion (b) ? wobble : 0.0f);
+    });
+    const auto steady = harshness::analyse (noise.data(), n, 20000.0);
+    CHECK (steady.have && steady.jumpDb() < 2.0f);
+
+    // A section that is simply louder for its last 40 % is a step, not a jump: 8 dB up, but the average moves with it.
+    const auto section = bandHistory (n, [] (int i, int b) { return -40.0f + (i >= 72 && inHarshRegion (b) ? 8.0f : 0.0f); });
+    CHECK (harshness::analyse (section.data(), n, 20000.0).jumpDb() < harshness::kJumpDb);
+
+    // Too few frames, or a region 60 dB or more under the loudest band (the spectrogram's span: noise floor), give no verdict.
+    CHECK (!harshness::analyse (bursts.data(), spectro::kMinFrames - 1, 20000.0).have);
+    const auto floor = bandHistory (n, [] (int i, int b) { return (inHarshRegion (b) ? -115.0f : -40.0f) + (i % 4 == 0 ? 12.0f : 0.0f); });
+    CHECK (!harshness::analyse (floor.data(), n, 20000.0).have);
+    // A sample rate that cannot carry the region (its top below 4 kHz) gives none either.
+    CHECK (!harshness::analyse (bursts.data(), n, 3000.0).have);
+}
+
+TEST (advisor_names_narrow_rings_as_suggestions_with_a_bell_to_copy)
+{
+    auto in = cleanMaster();
+    in.haveCurve = true;
+    in.curveDb = flatCurve();
+    in.curveDb[30] = 6.0f;
+    in.curveDb[36] = 4.5f;
+    in.curveDb[46] = 8.0f;
+    in.curveDb[52] = 5.0f;
+    const auto a = advise (in);
+    int rings = 0;
+    for (const auto& item : a.items)
+        rings += item.topic == Topic::resonance ? 1 : 0;
+    CHECK (rings == 3); // the worst three
+    const auto* first = pick (in, Topic::resonance);
+    CHECK (first != nullptr);
+    if (first != nullptr)
+    {
+        CHECK (first->level == Level::warn);
+        CHECK (first->headline == "Check the narrow ring at " + hzText (BandGrid::centreHz (46)) + ": a narrow cut of about 6.0 dB may tame it");
+        CHECK (first->why.find ("8.0 dB above both of its sides") != std::string::npos);
+        CHECK (first->why.find ("suggestion to check by ear, not a fault") != std::string::npos);
+        CHECK (first->hear.active());
+        // The COPY path: one narrow bell at the ring, cut by the headline's amount.
+        CHECK (first->canCopy() && first->moves.size() == 1 && first->limiter.active() == false);
+        if (first->moves.size() == 1)
+        {
+            const auto& m = first->moves[0];
+            CHECK (m.kind == EqMove::Kind::bell && m.place == EqMove::Place::stereo);
+            CHECK_NEAR (m.freqHz, BandGrid::centreHz (46), 0.01);
+            CHECK_NEAR (m.gainDb, -6.0, 1e-6);
+            CHECK_NEAR (m.q, resonance::kCutQ, 1e-6);
+        }
+    }
+    CHECK (planAsText (in, a).find ("[CHECK] Check the narrow ring at") != std::string::npos);
+
+    // Gated like the other long-term items: nothing before 20 s of audio, and nothing without a curve.
+    auto early = in;
+    early.analysedSeconds = master::kMinSeconds - 0.5;
+    CHECK (!pick (early, Topic::resonance));
+    auto none = cleanMaster();
+    CHECK (!pick (none, Topic::resonance));
+    // A flat curve is a clean check.
+    auto flat = cleanMaster();
+    flat.haveCurve = true;
+    flat.curveDb = flatCurve();
+    CHECK (!pick (flat, Topic::resonance) && advise (flat).passed == advise (flat).checks);
+}
+
+TEST (advisor_suggests_a_check_for_sibilance_without_a_copy_path)
+{
+    constexpr int n = 120;
+    auto in = cleanMaster();
+    in.spectrum = bandHistory (n, [] (int i, int b) { return -40.0f + (i % 4 == 0 && inHarshRegion (b) ? 12.0f : 0.0f); });
+    const auto* item = pick (in, Topic::harshness);
+    CHECK (item != nullptr);
+    if (item != nullptr)
+    {
+        CHECK (item->level == Level::warn);
+        CHECK (item->headline == "The 4.0 kHz - 10 kHz range keeps jumping 9.0 dB above its average: possible harsh sibilance (use a de-esser or dynamic EQ in your DAW)");
+        CHECK (item->why.find ("suggestion to check by ear, not a fault") != std::string::npos);
+        CHECK (!item->canCopy());
+        CHECK (item->hear.active());
+    }
+    // Steady region: nothing. Too little audio: nothing.
+    auto steady = in;
+    steady.spectrum = bandHistory (n, [] (int, int) { return -40.0f; });
+    CHECK (!pick (steady, Topic::harshness));
+    auto early = in;
+    early.analysedSeconds = 5.0;
+    CHECK (!pick (early, Topic::harshness));
 }
 
 int main()

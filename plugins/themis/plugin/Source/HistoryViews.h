@@ -701,7 +701,7 @@ private:
     {
         namespace clip = themis::history::clip;
         Tab t { "PEAKS",
-                "The highest sample peak and true peak (inter-sample peak after 4x oversampling, in dBTP) in each analysed frame. A red column marks "
+                "The highest sample peak and true peak (inter-sample peak, read between the samples, in dBTP) in each analysed frame. A red column marks "
                 "a frame in which the audio clipped.\n\n"
                 "CLIPPED means a flat top: at least 4 equal samples in a row above -6 dBFS that the waveform ran into, which a hard clipper "
                 "or an overdriven limiter leaves at any ceiling. OVER means a sample at or above 0 dBFS. A synthesised square wave or a held "
