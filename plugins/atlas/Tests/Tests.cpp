@@ -1236,6 +1236,16 @@ void testBeginner()
     check (! says (saved), "a saved session with THRESH at the top is not told: its settings are the user's");
     check (atTop (saved), "... and its own 'at the top' warning stands");
 
+    auto ratioMoved = fresh();
+    ratioMoved.bands[0].params.ratio = 4.0;
+    check (! says (ratioMoved), "one RATIO moved off its init value, THRESH still at the top: the note is gone");
+    auto attackMoved = fresh();
+    attackMoved.bands[3].params.attackMs = 3.0;
+    check (! says (attackMoved), "one ATTACK moved off its init value: the note is gone");
+    auto releaseMoved = fresh();
+    releaseMoved.bands[5].params.releaseMs = 300.0;
+    check (! says (releaseMoved), "one RELEASE moved off its init value: the note is gone");
+
     auto none = fresh();
     none.bands.clear();
     check (! says (none), "no band, no note");
