@@ -5,6 +5,7 @@
 
 #include "DSP/Engine.h"
 #include <pantheon/ui/Note.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,17 @@ struct AdviceInput
     double lookaheadMs = 0.0;
     bool sidechainConnected = false;
     bool learnedAll = false; // LEARN ALL was pressed (the editor's, kept until the next press; not a parameter)
+    bool restored = false;   // a saved session was loaded: its settings are the user's, so the beginner's note does not apply to it
 };
+
+// The beginner's case: a fresh instance compresses nothing, because every band's THRESH sits at the top until LEARN sets it. That is said while no
+// band has been learned or touched (every THRESH at its init value, LEARN ALL not pressed) and the session was not loaded from a saved one.
+inline bool freshAndUntouched (const AdviceInput& in)
+{
+    if (in.restored || in.learnedAll || in.bands.empty())
+        return false;
+    return std::all_of (in.bands.begin(), in.bands.end(), [] (const BandAdvice& b) { return b.params.thresholdDb == BandParams().thresholdDb; });
+}
 
 constexpr double kBassTopHz = 250.0;     // the top of the Bass band: below it a fast attack follows single cycles
 constexpr double kFastAttackMs = 5.0;
@@ -53,6 +64,11 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     const bool anyOn = std::any_of (in.bands.begin(), in.bands.end(), [] (const BandAdvice& b) { return b.params.on; });
     if (! anyOn)
         warn ("Every band is off: Atlas passes the sound as it is. Switch a band ON.");
+    const bool fresh = freshAndUntouched (in);
+    // Said first among the infos, and the THRESH-at-top warnings below are left out while it is: the strip shows two lines, and this is the one that
+    // tells what to do about them.
+    if (fresh)
+        info ("Nothing compresses yet: play your track, then press LEARN ALL, which sets THRESH, RATIO, ATTACK and RELEASE.");
     if (in.learnedAll) // first among the infos: LEARN ALL sets every band, so the way back is the one control for all of them
         info ("After LEARN ALL, MIX backs the whole setting off: it blends the untouched bands back in.");
 
@@ -66,7 +82,7 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         const bool autoT = b.params.autoThreshold; // THRESH is then the distance under the band's own level, so 0 dB is not "the top"
         if (autoT && ! up && b.params.thresholdDb >= kThresholdAtTopDb)
             warn (name + "AUTO T with THRESH at 0 dB puts the threshold at the band's own level: it works most of the time. Try -6 dB.");
-        if (! autoT && ! up && b.params.thresholdDb >= kThresholdAtTopDb)
+        if (! autoT && ! up && ! fresh && b.params.thresholdDb >= kThresholdAtTopDb)
             warn (name + "THRESH is at the top, so it hardly compresses. Lower it until the meter moves.");
         if (! autoT && up && b.params.thresholdDb >= kThresholdAtTopDb)
             warn (name + "THRESH is at the top, so it lifts the whole band, up to 12 dB. Lower it to the quiet part.");

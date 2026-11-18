@@ -40,6 +40,8 @@ public:
 
     atlas::Engine engine;
     juce::AudioProcessorValueTreeState apvts;
+    // A saved session has been loaded (setStateInformation): the beginner's note in the editor does not apply to it (Advice.h freshAndUntouched).
+    bool restored = false;
     pdsp::StereoTap tapIn; // the input, for the display's spectrogram
     // Whether the host handed the last block a sidechain: the editor says so next to a band set to listen to it.
     std::atomic<bool> sidechainConnected { false };

@@ -4,6 +4,7 @@
 // DSP tests for Atlas: no plugin, no GUI. Every number the README quotes is printed here.
 
 #include "Check.h"
+#include "Advice.h"
 #include "DSP/Engine.h"
 #include "Target.h"
 #include <pantheon/dsp/SpectrumIssues.h>
@@ -1196,6 +1197,50 @@ void testLoudness()
     dropped.loudnessCancel();
     check (dropped.loudnessState() == Engine::LoudState::idle, "a cancelled window is idle");
 }
+// ---- [17] the beginner's note: a fresh, untouched instance says what to do about a compressor that does nothing -------------------------
+void testBeginner()
+{
+    std::printf ("\n[17] Beginner's note: a fresh, untouched instance says to press LEARN ALL; a touched, learned or saved session does not\n");
+    // Six bands as a fresh instance has them: on, THRESH at its init value (the top), RATIO 2.
+    const auto fresh = [] {
+        atlas::AdviceInput in;
+        for (int i = 0; i < 6; ++i)
+        {
+            atlas::BandAdvice b;
+            b.number = i + 1;
+            in.bands.push_back (b);
+        }
+        return in;
+    };
+    const char* note = "Nothing compresses yet: play your track, then press LEARN ALL";
+    const auto says = [&] (const atlas::AdviceInput& in) { return ui::hasNote (atlas::adviceFor (in), note, ui::Severity::info); };
+    const auto atTop = [] (const atlas::AdviceInput& in) { return ui::hasNote (atlas::adviceFor (in), "THRESH is at the top", ui::Severity::warning); };
+
+    auto in = fresh();
+    check (says (in), "a fresh instance (every THRESH at the top, nothing learned) is told to press LEARN ALL");
+    check (! atTop (in), "... and the six 'THRESH is at the top' warnings give way to it (the strip shows two lines)");
+    for (const auto& n : atlas::adviceFor (in))
+        check ((int) n.text.size() <= ui::kMaxNoteChars, "the beginner's note fits a line");
+
+    auto moved = fresh();
+    moved.bands[2].params.thresholdDb = -20.0;
+    check (! says (moved), "one THRESH moved off its init value: the note is gone");
+    check (atTop (moved), "... and a band still at the top is warned about again");
+
+    auto learned = fresh();
+    learned.learnedAll = true;
+    check (! says (learned), "LEARN ALL pressed: the note is gone, even if no band changed (a silent input)");
+
+    auto saved = fresh();
+    saved.restored = true;
+    check (! says (saved), "a saved session with THRESH at the top is not told: its settings are the user's");
+    check (atTop (saved), "... and its own 'at the top' warning stands");
+
+    auto none = fresh();
+    none.bands.clear();
+    check (! says (none), "no band, no note");
+}
+
 } // namespace
 
 int main()
@@ -1218,5 +1263,6 @@ int main()
     testLoudness();
     testAuto();
     testIssueFinder();
+    testBeginner();
     return test::finish ("AtlasTests");
 }

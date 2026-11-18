@@ -77,6 +77,8 @@ input -> split into six bands -> per band:  level (the band's, or the sidechain'
 
 ## Measured (`AtlasTests`, 48 kHz)
 
+- Beginner's note: a fresh instance (all six THRESH at 0 dB, nothing learned, not a saved session) says "Nothing compresses yet: play your track, then press LEARN ALL, which sets THRESH, RATIO, ATTACK and RELEASE." and its six THRESH-at-the-top warnings give way to it; one THRESH moved, LEARN ALL pressed, or a saved session, and the note is gone (`AtlasTests` [17]; the editor is checked in `AtlasUiCheck`).
+
 - **Split.** Zero latency, every band off: flat within 0.0000 dB from 30 Hz to 12 kHz. Linear, every band off: the input
   3072 samples (64 ms) later, within -135 dB. Both modes cut at the same places: the Midrange soloed gives -1.08 dB at 1 kHz,
   -6.06 dB at its 2 kHz edge, and less than -50 dB at 8 kHz and 125 Hz. A click through a linear band comes out symmetric.

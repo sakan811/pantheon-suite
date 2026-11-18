@@ -394,7 +394,7 @@ int main()
         check (has (adviceFor (in), "SOLO", Severity::warning), "a solo on: a warning");
         in = fine; in.bands[0].params.on = false;
         check (has (adviceFor (in), "Every band is off", Severity::warning), "every band off: the plugin passes the sound");
-        in = fine; in.bands[0].params.thresholdDb = 0.0;
+        in = fine; in.restored = true; in.bands[0].params.thresholdDb = 0.0; // a saved session: the beginner's note does not replace the warning
         check (has (adviceFor (in), "THRESH is at the top", Severity::warning), "a threshold at the top: it hardly compresses");
         in = fine; in.bands[0].params.thresholdDb = 0.0; in.bands[0].params.autoThreshold = true;
         check (has (adviceFor (in), "AUTO T with THRESH at 0 dB", Severity::warning) && ! has (adviceFor (in), "THRESH is at the top", Severity::warning),
@@ -450,7 +450,9 @@ int main()
         check ((int) longest <= ui::kMaxNoteChars, fmt ("the longest note is %d characters (a line holds %d)", (int) longest, ui::kMaxNoteChars));
 
         AtlasEditor editor (proc);
-        check (has (editor.notes(), "THRESH is at the top", Severity::warning), "the editor reads the real bands: a fresh plugin has thresholds at the top");
+        check (has (editor.notes(), "Nothing compresses yet: play your track, then press LEARN ALL", Severity::info),
+               "the editor reads the real bands: a fresh plugin has thresholds at the top, so it says to press LEARN ALL");
+        check (! has (editor.notes(), "THRESH is at the top", Severity::warning), "... and it does not also warn about each THRESH at the top");
         proc.engine.monitor.delta = 1u;
         check (has (editor.notes(), "DELTA", Severity::warning), "DELTA in the engine reaches the editor's notes");
         proc.engine.monitor.delta = 0u;
