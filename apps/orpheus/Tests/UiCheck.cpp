@@ -380,6 +380,101 @@ int main()
     }
 
     {
+        // AMOUNT after CORRECT ALL: live, re-applied from the notes before it, one undo step per drag, ended by a hand edit
+        auto targets = [] (const std::vector<Note>& notes)
+        {
+            std::vector<float> t;
+            for (const auto& n : notes)
+                t.push_back (n.target);
+            return t;
+        };
+        const auto sameTargets = [&] (const std::vector<Note>& a, const std::vector<Note>& b)
+        {
+            if (a.size() != b.size())
+                return false;
+            for (size_t i = 0; i < a.size(); ++i)
+                if (std::fabs (a[i].target - b[i].target) > 1e-6f)
+                    return false;
+            return true;
+        };
+        const auto freshAt = [] (float amount)
+        {
+            auto r = makeWindow();
+            r->session.key.scale = kMajor;
+            r->session.key.root = 0;
+            r->refreshScalePanel();
+            r->session.correct (amount);
+            return r;
+        };
+        auto w = makeWindow();
+        auto& s = w->session;
+        s.key.scale = kMajor;
+        s.key.root = 0;
+        w->refreshScalePanel();
+        const auto sung = s.notes;
+        test::check (! s.correctLive(), "before CORRECT ALL there is nothing for AMOUNT to re-apply");
+        w->amountKnob.onGestureStart();
+        w->amountKnob.onChange (50.0);
+        w->amountKnob.onGestureEnd();
+        test::check (sameTargets (s.notes, sung), "AMOUNT does nothing before CORRECT ALL (and leaves the notes alone)");
+
+        w->correctAllButton.onClick();
+        const auto at100 = s.notes;
+        test::check (s.correctLive(), "after CORRECT ALL the AMOUNT is live");
+        bool said = false, fits = true;
+        for (const auto& n : w->notes())
+        {
+            said = said || n.text.find ("AMOUNT is live") != std::string::npos;
+            fits = fits && n.text.size() <= 108;
+        }
+        test::check (said && fits, "and the strip says so, in a line that fits");
+
+        w->amountKnob.onGestureStart();
+        w->amountKnob.onChange (80.0);
+        w->amountKnob.onChange (60.0);
+        w->amountKnob.onChange (30.0);
+        w->amountKnob.onGestureEnd();
+        const auto at30 = s.notes;
+        auto ref30 = freshAt (0.3f);
+        test::check (sameTargets (at30, ref30->session.notes) && sameAudio (s.output, ref30->session.output),
+                     "a drag of AMOUNT to 30 % gives exactly what CORRECT ALL at 30 % gives on the same notes");
+        test::check (s.correctLive() && ! sameTargets (at30, at100), "and it stays live");
+
+        w->undo();
+        test::check (sameTargets (s.notes, at100) && s.correctLive(), "the whole drag is one undo step: undo goes back to the CORRECT ALL result");
+        w->undo();
+        test::check (sameTargets (s.notes, sung), "the next undo takes CORRECT ALL back");
+        w->redo();
+        w->redo();
+        test::check (sameTargets (s.notes, at30) && sameAudio (s.output, ref30->session.output), "redo brings the drag back");
+
+        w->correctAllButton.onClick();
+        auto ref50 = freshAt (0.5f);
+        w->amountKnob.onChange (50.0);
+        test::check (sameTargets (s.notes, ref50->session.notes), "pressing CORRECT ALL again does not pull the corrected notes further: AMOUNT works from the notes before");
+        w->correctAllButton.onClick();
+        test::check (sameTargets (s.notes, ref50->session.notes), "and a second CORRECT ALL at the same amount gives the same result");
+
+        // a hand edit ends it: AMOUNT no longer overwrites the note
+        s.pushUndo();
+        s.notes[3].target += 0.35f;
+        s.changed (s.notes[3].start, s.notes[3].end);
+        const auto edited = s.notes;
+        test::check (! s.correctLive(), "a hand edit ends the live CORRECT ALL");
+        w->amountKnob.onGestureStart();
+        w->amountKnob.onChange (20.0);
+        w->amountKnob.onGestureEnd();
+        test::check (sameTargets (s.notes, edited), "after that AMOUNT leaves the hand edit alone");
+        w->undo();
+        test::check (s.correctLive(), "undoing the hand edit makes it live again");
+
+        s.key.root = 2;
+        test::check (! s.correctLive(), "a change of key ends it too");
+        s.key.root = 0;
+        w->refreshScalePanel();
+    }
+
+    {
         // navigation: the bar, the zoom buttons, the wheel, the pitch scrollbar
         auto w = makeWindow();
         auto& roll = w->roll;

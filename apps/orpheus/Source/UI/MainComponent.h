@@ -125,6 +125,7 @@ private:
     juce::String infoLine, audioError, notice;
     juce::uint32 noticeUntil = 0;
     double correctAmount = 100.0;
+    std::optional<EditState> amountUndo; // the state before the AMOUNT drag in progress, taken on its first change
     bool glidePending = false, audioOn = false, reanalysing = false;
     int lastVersion = -1, analysisSerial = 0;
     juce::Rectangle<int> headerArea, scalePanel, notePanel, timeBox, nameplate, noteStrip, offLabelArea, peakBox;

@@ -20,6 +20,7 @@ struct AdviceInput
     bool hasAudio = false;         // a recording is open and analysed
     bool playingOriginal = false;  // ORIGINAL is lit
     bool unsaved = false;          // the notes, key or glide differ from the saved project (or there is none and something was done)
+    bool amountLive = false;       // the notes are still the last CORRECT ALL: AMOUNT re-applies it
     double outputPeakDb = -120.0;  // the loudest sample of the corrected audio, dBFS (what EXPORT would write)
     double largestShiftSemitones = 0.0; // the biggest move of any note, absolute
     double shortestNoteMs = 1.0e9;      // the shortest note there is
@@ -60,6 +61,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         warn ("The result peaks at +" + oneDecimal (in.outputPeakDb) + " dB: it will clip in the WAV. Turn GAIN down on the loud notes.");
     if (in.unsaved)
         warn ("The edits are not saved. SAVE (Cmd-S) keeps them as a project; EXPORT writes the corrected WAV.");
+    if (in.amountLive)
+        info ("AMOUNT is live: moving it re-applies CORRECT ALL from the notes before. A hand edit ends that.");
     if (in.largestShiftSemitones > kTransparentShiftSemitones)
         warn ("A note is moved " + std::to_string (static_cast<int> (in.largestShiftSemitones + 0.5)) + " semitones: past about 5 the voice changes character. Try FORMANT.");
     if (in.notes > 0 && in.shortestNoteMs < kShortNoteMs)

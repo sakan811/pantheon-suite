@@ -12,6 +12,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include <cstdint>
+#include <memory>
 #include <functional>
 
 // One recording and everything done to it. No interface in here: the editor, the tests and the player all talk to this.
@@ -24,11 +25,21 @@
 // Everything is used from the message thread except `output`, which the player reads on the audio thread under `outputLock`.
 namespace orpheus
 {
+// The last Correct all, kept so that AMOUNT can re-apply it: the notes before it (`source`), the notes it made (`result`), and the key it was made with.
+// It is part of the state, so undo and redo carry it: after an AMOUNT drag is undone, the amount it went back to is live again.
+struct CorrectAll
+{
+    std::vector<Note> source, result;
+    Key key;
+    float amount = 1.0f;
+};
+
 struct EditState
 {
     std::vector<Note> notes;
     Key key;
     double glideMs = 30.0;
+    std::shared_ptr<const CorrectAll> correction; // null, or the last Correct all: live while the notes are still its result
 
     // The same notes, key and glide (what "unsaved" means: undoing back to the saved state is clean again).
     bool operator== (const EditState& o) const noexcept
@@ -201,6 +212,7 @@ public:
         redoStack.clear();
         key = {};
         glideMs = 30.0;
+        correction.reset();
         markSaved();
         mono = std::move (mixed);
         peakMin = std::move (lows);
@@ -237,6 +249,7 @@ public:
         key = a.key;
         glideMs = 30.0;
         analysedRange = a.range;
+        correction.reset();
         undoStack.clear();
         redoStack.clear();
         changedAll();
@@ -244,12 +257,28 @@ public:
     }
 
     // ---- editing ----------------------------------------------------------------------------------------------------
-    EditState state() const { return { notes, key, glideMs }; }
+    EditState state() const { return { notes, key, glideMs, correction }; }
+
+    // The last Correct all is live while the notes are still exactly what it made and the key is still the one it was made with. A hand
+    // edit (any change to a note, a split, a key or tuning change) ends it, and undoing that edit brings it back.
+    bool correctLive() const
+    {
+        if (correction == nullptr || correction->result.size() != notes.size() || correction->key.root != key.root || correction->key.scale != key.scale
+            || correction->key.a4Hz != key.a4Hz)
+            return false;
+        for (size_t i = 0; i < notes.size(); ++i)
+            if (! notes[i].identicalTo (correction->result[i]))
+                return false;
+        return true;
+    }
 
     // Call before changing anything: what undo returns to. A change in several steps (a drag) calls it once, at the start.
-    void pushUndo()
+    void pushUndo() { recordUndo (state()); }
+
+    // Puts `before` on the undo stack (and clears redo): for a change that is made in steps, where the state before it is taken first.
+    void recordUndo (const EditState& before)
     {
-        undoStack.push_back (state());
+        undoStack.push_back (before);
         if (undoStack.size() > 200)
             undoStack.erase (undoStack.begin());
         redoStack.clear();
@@ -284,17 +313,56 @@ public:
     // Frames touched by notes[i], for `changed`.
     void changedNote (size_t i) { changed (notes[i].start, notes[i].end); }
 
-    // Applies amount (0..1) of the pull towards the scale to every note (or the given ones), keeping the rest of what was done to them.
+    static std::vector<Note> snappedTo (const std::vector<Note>& source, const Key& key, float amount)
+    {
+        auto out = source;
+        for (auto& n : out)
+            edit::snap (n, key, amount);
+        return out;
+    }
+
+    // Applies amount (0..1) of the pull towards the scale to every note, keeping the rest of what was done to them; or, given notes, to those.
+    // Correct all (no notes given) is kept as a CorrectAll so that AMOUNT can re-apply it. While the last one is still live, it works from the
+    // notes before that one, so pressing it again replaces the result rather than pulling the already-corrected notes further.
     void correct (float amount, const std::vector<size_t>& which = {})
     {
         pushUndo();
         if (which.empty())
-            for (auto& n : notes)
-                edit::snap (n, key, amount);
-        else
-            for (const auto i : which)
-                edit::snap (notes[i], key, amount);
+        {
+            auto c = std::make_shared<CorrectAll>();
+            c->source = correctLive() ? correction->source : notes;
+            c->key = key;
+            c->amount = amount;
+            c->result = snappedTo (c->source, key, amount);
+            notes = c->result;
+            correction = std::move (c);
+            changedAll();
+            return;
+        }
+        correction.reset();
+        for (const auto i : which)
+            edit::snap (notes[i], key, amount);
         changedAll();
+    }
+
+    // AMOUNT moved while the last Correct all is live: it is applied again from the notes before it. Each call is one change of the notes; the
+    // caller takes one undo step for a drag (recordUndo, with the state from before the first call). False, and nothing changes, when not live.
+    bool recorrect (float amount)
+    {
+        if (! correctLive())
+            return false;
+        auto c = std::make_shared<CorrectAll> (*correction);
+        c->amount = amount;
+        c->result = snappedTo (c->source, key, amount);
+        int first = 0, last = 0;
+        const bool differ = differingFrames (notes, c->result, first, last);
+        notes = c->result;
+        correction = std::move (c);
+        if (differ)
+            changed (first, last);
+        else
+            ++version;
+        return true;
     }
 
     void resetNotes (const std::vector<size_t>& which = {})
@@ -489,6 +557,7 @@ public:
         key.scale = juce::jlimit (0, kNumScales - 1, xml.getIntAttribute ("scale"));
         key.a4Hz = number (xml, "a4", 440.0, kMinA4Hz, kMaxA4Hz);
         glideMs = number (xml, "glide", 30.0, 0.0, 200.0);
+        correction.reset();
         undoStack.clear();
         redoStack.clear();
         changedAll();
@@ -508,6 +577,7 @@ private:
         const bool differ = differingFrames (notes, target.notes, first, last);
         notes = target.notes;
         key = target.key;
+        correction = target.correction;
         const bool glideMoved = std::fabs (glideMs - target.glideMs) > 1.0e-9;
         glideMs = target.glideMs;
         if (differ || glideMoved)
@@ -523,6 +593,7 @@ private:
     }
 
     std::vector<EditState> undoStack, redoStack;
+    std::shared_ptr<const CorrectAll> correction; // the last Correct all; see EditState::correction
     EditState saved;                    // what the notes were when last saved or loaded
     mutable float peakCache = 0.0f;
     mutable int peakVersion = -1;
