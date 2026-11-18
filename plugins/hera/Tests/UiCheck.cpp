@@ -351,5 +351,103 @@ int main()
         check (! tooLong, "every note fits a line of the strip");
     }
 
+    // AUTO THRESH: the button sits in the header inside the editor; a press sets THRESH once from the sound, as one undo step, and nothing else moves.
+    {
+        HeraProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HeraEditor> (*holder);
+
+        const auto autoR = editor.autoThresh().getBounds();
+        check (editor.autoThresh().isVisible() && editor.getLocalBounds().contains (autoR), "AUTO THRESH is on screen, inside the editor");
+        check (! autoR.intersects (editor.presetBox.getBounds()) && ! autoR.intersects (editor.lookahead.getBounds()) && ! autoR.intersects (editor.guideButton.getBounds())
+                   && ! autoR.intersects (editor.undoControls().getBounds()) && ! autoR.intersects (editor.abControls().getBounds()),
+               "AUTO THRESH overlaps neither the preset box, LOOK-AHEAD, GUIDE, UNDO / REDO nor A / B");
+
+        // Feeds `blocks` blocks of the sample `at (index)` to the processor, as a host would (512 samples a block).
+        const auto feed = [&q] (int blocks, auto&& at)
+        {
+            juce::AudioBuffer<float> b (2, 512);
+            juce::MidiBuffer midi;
+            for (int blk = 0; blk < blocks; ++blk)
+            {
+                for (int i = 0; i < 512; ++i)
+                    for (int c = 0; c < 2; ++c)
+                        b.setSample (c, i, at (blk * 512 + i));
+                q.processBlock (b, midi);
+            }
+        };
+        // Runs the message loop until the condition holds (the editor's timer takes the answer), or two seconds pass.
+        const auto pumpUntil = [] (auto&& done)
+        {
+            for (int waited = 0; ! done() && waited < 2000; waited += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            return done();
+        };
+        const auto thresholdInTree = [&q] (float plain)
+        {
+            for (int i = 0; i < q.apvts.state.getNumChildren(); ++i)
+            {
+                const auto child = q.apvts.state.getChild (i);
+                if (child.getProperty ("id").toString() == id::threshold)
+                    return std::fabs ((float) child.getProperty ("value") - plain) < 1e-3f;
+            }
+            return false;
+        };
+        const auto waiting = [&editor] { return editor.autoThresh().getButtonText() == "LISTENING"; };
+
+        // Silence for four seconds: nothing audible, THRESH stays where it is, and the strip says so.
+        setValue (q.apvts, id::threshold, -18.0f);
+        editor.autoThresh().onClick();
+        check (waiting(), "a press starts the listening: the button says LISTENING");
+        feed (430, [] (int) { return 0.0f; }); // about 4.6 s
+        pumpUntil ([&] { return ! waiting(); });
+        check (editor.autoThresh().getButtonText() == "NO AUDIO" && std::fabs (readParams (q.apvts).thresholdDb + 18.0f) < 1e-3f,
+               "four seconds of silence: THRESH stays at -18 dB and the button says NO AUDIO");
+        check (ui::hasNote (editor.notes(), "AUTO THRESH heard no sound", ui::Severity::info), "... and the strip says that nothing was heard");
+
+        // A programme of loud bursts over a quiet tone (0 dB for 100 ms of each second, -30 dB for the rest), with MIX, MAKEUP and the rest set.
+        setValue (q.apvts, id::ratio, 4.0f);
+        setValue (q.apvts, id::knee, 6.0f);
+        setValue (q.apvts, id::mix, 50.0f);
+        setValue (q.apvts, id::makeup, 3.0f);
+        setValue (q.apvts, id::autoMakeup, 1.0f);
+        std::vector<float> before;
+        for (auto* p : q.getParameters())
+            before.push_back (p->getValue());
+        // The state follows the parameters through the message loop: let it take these changes first, so they are not in the press's step.
+        for (int waited = 0; waited < 200; waited += 10)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+        q.undo.clearUndoHistory();
+
+        editor.autoThresh().onClick();
+        feed (430, [] (int i) {
+            const double level = (i % 48000) < 4800 ? 0.0 : -30.0;
+            return (float) (std::pow (10.0, level / 20.0) * std::sin (2.0 * 3.14159265358979 * 1000.0 * i / 48000.0));
+        });
+        pumpUntil ([&] { return ! waiting(); });
+        pumpUntil ([&] { return thresholdInTree (readParams (q.apvts).thresholdDb); });
+        const float set = readParams (q.apvts).thresholdDb;
+        check (editor.autoThresh().getButtonText() == "THRESH SET" && set < -10.0f && set > -40.0f, fmt ("loud bursts: one press sets THRESH to %.1f dB", set));
+        check (ui::hasNote (editor.notes(), "AUTO THRESH set THRESH to", ui::Severity::info), "the strip says what it set");
+
+        bool othersSame = true;
+        std::size_t i = 0;
+        for (auto* p : q.getParameters())
+        {
+            if (p != q.apvts.getParameter (id::threshold) && p->getValue() != before[i])
+                othersSame = false;
+            ++i;
+        }
+        check (othersSame && std::fabs (readParams (q.apvts).mix - 0.5f) < 1e-3f, "every other control is as it was: MIX stays at 50%, MAKEUP, AUTO MAKEUP, RATIO and KNEE too");
+
+        // One UNDO takes THRESH back, and nothing else was an undo step.
+        q.undo.undo();
+        pumpUntil ([&] { return thresholdInTree (-18.0f); });
+        check (std::fabs (readParams (q.apvts).thresholdDb + 18.0f) < 1e-3f && std::fabs (readParams (q.apvts).mix - 0.5f) < 1e-3f && ! q.undo.canUndo(),
+               "one UNDO takes THRESH back to -18 dB and leaves MIX at 50%: the press was one step");
+    }
+
     return test::finish ("HeraUiCheck");
 }

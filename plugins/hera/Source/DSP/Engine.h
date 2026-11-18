@@ -63,6 +63,90 @@ inline double reductionDb (double levelDb, double thresholdDb, double ratio, dou
 // What AUTO makeup adds: what the transfer curve takes from a signal at 0 dBFS, so full scale in is full scale out.
 inline double autoMakeupDb (double thresholdDb, double ratio, double kneeDb) noexcept { return std::fmin (kMaxMakeupDb, reductionDb (0.0, thresholdDb, ratio, kneeDb)); }
 
+// AUTO THRESH: the THRESH that turns the sound down by kAutoThreshTargetDb on average while it plays, at the RATIO and KNEE set.
+// Why an average over the level distribution and not a peak or a single percentile: the user hears the average reduction, so the
+// answer is the threshold whose law, applied to every audible moment of the listening, gives that average. A burst is then one bin of
+// the histogram weighted by its time, so it cannot set the answer alone. (A published way to match levels places THRESH at a
+// percentile of the level histogram; a percentile says where to start, not how much the sound is turned down, so it is not used here.)
+inline constexpr double kAutoThreshTargetDb = 3.5;   // the average reduction aimed at: the middle of 3 to 4 dB, a gentle start
+inline constexpr double kAutoSilenceDb = -70.0;      // a detector level under this is silence and is not counted
+inline constexpr double kAutoListenSeconds = 4.0;    // how long the sound is listened to
+inline constexpr double kAutoMinSeconds = 0.5;       // less audible sound than this in the listening and there is nothing to set THRESH from
+
+// The detector's level (dB) over the listening, one count per audible channel sample, in 1 dB bins. Fixed size: nothing is allocated.
+struct LevelHistogram
+{
+    static constexpr double kLowestDb = -90.0; // the bottom of the first bin (silence is never counted, so this is only a clamp)
+    static constexpr int kBins = 100;          // 1 dB each, up to +10 dB
+    std::array<double, kBins> count {};
+    double total = 0.0;                        // the audible channel samples counted
+
+    void clear() noexcept
+    {
+        count.fill (0.0);
+        total = 0.0;
+    }
+
+    void add (double levelDb) noexcept
+    {
+        if (levelDb < kAutoSilenceDb)
+            return;
+        const int bin = (int) std::clamp (std::floor (levelDb - kLowestDb), 0.0, (double) (kBins - 1));
+        count[(size_t) bin] += 1.0;
+        total += 1.0;
+    }
+};
+
+// What AUTO THRESH concludes. Only `set` changes THRESH: `silent` (nothing audible), `flat` (a RATIO of 1:1 reduces nothing) and `quiet`
+// (the target is not reached even at -60 dB) leave it as it was.
+struct AutoThresh
+{
+    enum class Result { silent, flat, quiet, set };
+    Result result = Result::silent;
+    float thresholdDb = 0.0f; // the THRESH to set (Result::set only)
+};
+
+// The law's reduction (dB) averaged over the audible histogram at this THRESH, RATIO and KNEE: the reduction at the centre of each bin, weighted by its count.
+inline double reductionAverageDb (const LevelHistogram& h, double thresholdDb, double ratio, double kneeDb) noexcept
+{
+    if (h.total <= 0.0)
+        return 0.0;
+    double sum = 0.0;
+    for (int b = 0; b < LevelHistogram::kBins; ++b)
+        if (h.count[(size_t) b] > 0.0)
+            sum += h.count[(size_t) b] * reductionDb (LevelHistogram::kLowestDb + b + 0.5, thresholdDb, ratio, kneeDb);
+    return sum / h.total;
+}
+
+// The highest THRESH, in the knob's 0.1 dB steps from 0 dB down to -60 dB, at which the law's average reduction over the histogram reaches the
+// target at this RATIO and KNEE. `ballisticsDb` is what the real follower adds on top of the law's average (the release tail after a burst holds
+// the quiet sound down too): the listening measures it, so the target the law must reach is kAutoThreshTargetDb less that. `minTotal`: the audible
+// channel samples the listening needs before it says anything.
+inline AutoThresh autoThresholdFor (const LevelHistogram& h, double ratio, double kneeDb, double minTotal, double ballisticsDb) noexcept
+{
+    AutoThresh r;
+    if (h.total < minTotal)
+        return r;
+    if (ratio <= 1.05)
+    {
+        r.result = AutoThresh::Result::flat;
+        return r;
+    }
+    const double lawTarget = std::fmax (kAutoThreshTargetDb - ballisticsDb, 0.0);
+    for (int step = 0; step <= 600; ++step)
+    {
+        const double t = step == 0 ? 0.0 : -0.1 * step; // not -0.0: the value is shown
+        if (reductionAverageDb (h, t, ratio, kneeDb) >= lawTarget)
+        {
+            r.result = AutoThresh::Result::set;
+            r.thresholdDb = (float) t;
+            return r;
+        }
+    }
+    r.result = AutoThresh::Result::quiet;
+    return r;
+}
+
 class Engine
 {
 public:
@@ -132,6 +216,24 @@ public:
             mix = mixTarget;
             started = true;
         }
+        // AUTO THRESH: a requested listening starts with this block. Only the frames of a listening are counted into the histogram, and it
+        // ends (done) after kAutoListenSeconds of frames, silent ones too, so that a stopped transport cannot keep it open.
+        const int autoLimit = (int) std::lround (kAutoListenSeconds * fs);
+        int wasRequested = (int) AutoState::requested;
+        if (autoState.compare_exchange_strong (wasRequested, (int) AutoState::listening, std::memory_order_acq_rel))
+        {
+            autoHist.clear();
+            autoListened = 0;
+            autoGrSum = 0.0;
+        }
+        const bool listening = autoState.load (std::memory_order_acquire) == (int) AutoState::listening;
+        if (listening) // the settings the listening runs with: the follower's ballistics depend on them
+        {
+            autoListenThr = p.thresholdDb;
+            autoListenRatio = ratio;
+            autoListenKnee = p.kneeDb;
+        }
+        const int listenFor = listening ? std::min (n, std::max (autoLimit - autoListened, 0)) : 0;
         const double sqrt2 = std::sqrt (2.0);
         const bool deltaOn = delta.load (std::memory_order_relaxed), keyOn = scListen.load (std::memory_order_relaxed);
         float peakIn = 0.0f;
@@ -178,6 +280,8 @@ public:
                 auto& s = ch[(size_t) c];
                 const double seen = level[c] + (double) p.link * (loud - level[c]);
                 const double levelDb = seen > 1e-6 ? 20.0 * std::log10 (seen) : kFloorDb;
+                if (i < listenFor) // AUTO THRESH: the level THRESH is compared with, as the law sees it
+                    autoHist.add (levelDb);
                 const double wanted = reductionDb (levelDb, p.thresholdDb, ratio, p.kneeDb);
                 double gr;
                 if (p.autoRelease)
@@ -195,6 +299,8 @@ public:
                     gr = s.fast;
                 }
                 deepest = std::fmax (deepest, gr);
+                if (i < listenFor && levelDb >= kAutoSilenceDb) // AUTO THRESH: what the follower really took off, over the same audible frames as the histogram
+                    autoGrSum += gr;
                 const double gain = gr == 0.0 ? 1.0 : std::exp (-gr * 0.11512925464970229);
                 wet[c] = dry[c] * gain * makeup;
             }
@@ -228,6 +334,32 @@ public:
             reductionMeter.store ((float) deepest, std::memory_order_relaxed);
         if (peakIn > inPeak.load (std::memory_order_relaxed))
             inPeak.store (peakIn, std::memory_order_relaxed);
+        if (listening)
+        {
+            autoListened += n;
+            if (autoListened >= autoLimit)
+            {
+                int stillListening = (int) AutoState::listening;
+                autoState.compare_exchange_strong (stillListening, (int) AutoState::done, std::memory_order_acq_rel); // fails when the editor cancelled meanwhile
+            }
+        }
+    }
+
+    // AUTO THRESH, a one-shot measure as LEARN is in Atlas: the editor requests a listening, the audio thread listens to kAutoListenSeconds of
+    // frames and says `done`, the editor takes the answer (autoThreshAnswer) and cancels. The histogram is written only while listening, and
+    // the editor reads it only once `done` is seen, so the two never touch it at once. Monitoring state: not saved, not a parameter.
+    enum class AutoState : int { idle, requested, listening, done };
+    void autoThreshStart() noexcept { autoState.store ((int) AutoState::requested, std::memory_order_release); }
+    void autoThreshCancel() noexcept { autoState.store ((int) AutoState::idle, std::memory_order_release); }
+    AutoState autoThreshState() const noexcept { return (AutoState) autoState.load (std::memory_order_acquire); }
+    // The answer for the RATIO and KNEE now. Call it when the state is `done`. The ballistics the listening really had (the follower's average
+    // reduction minus the law's average for the same settings) are taken off the target first.
+    AutoThresh autoThreshAnswer (double ratio, double kneeDb) const noexcept
+    {
+        double ballistics = 0.0;
+        if (autoHist.total > 0.0)
+            ballistics = autoGrSum / autoHist.total - reductionAverageDb (autoHist, autoListenThr, autoListenRatio, autoListenKnee);
+        return autoThresholdFor (autoHist, ratio, kneeDb, 2.0 * kAutoMinSeconds * fs, ballistics);
     }
 
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB
@@ -257,6 +389,11 @@ private:
     double matchEnergyK = 0.001, matchGainK = 0.01, matchNow = 1.0, msDry = 1.0e-6, msWet = 1.0e-6;
     double fs = 48000.0, rmsCoef = 0.002, peakFall = 0.99, makeup = 1.0, mix = 1.0, hpfFor = -1.0;
     bool started = false;
+    std::atomic<int> autoState { (int) AutoState::idle }; // AUTO THRESH, see autoThreshStart()
+    LevelHistogram autoHist;                              // what the listening heard
+    int autoListened = 0;                                 // frames listened to so far in it
+    double autoGrSum = 0.0;                               // the follower's reduction summed over the audible frames of it
+    double autoListenThr = -18.0, autoListenRatio = 2.0, autoListenKnee = 6.0; // the settings it ran with (the last block's)
     std::array<Channel, 2> ch;
 };
 } // namespace hera

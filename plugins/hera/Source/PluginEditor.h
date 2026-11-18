@@ -36,10 +36,21 @@ public:
     ui::AbButtons& abControls() noexcept { return abButtons; }
     std::vector<ui::Note> notes() const { return hera::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     float heldReductionDb() const noexcept { return *std::max_element (history.begin(), history.end()); }
+    juce::TextButton& autoThresh() noexcept { return autoThreshButton; } // for UiCheck
+
+    // AUTO THRESH: one press listens to four seconds of the sound and sets THRESH once (one undo step); see Engine.h.
+    juce::TextButton autoThreshButton { "AUTO THRESH" };
 
 private:
     void timerCallback() override;
     hera::AdviceInput adviceInput() const;
+    void startAutoThresh();
+    void finishAutoThresh();
+
+    hera::AutoThresh autoAnswer;           // the last answer, shown in the strip until the next press
+    bool autoAsked = false;                // whether there is an answer to show
+    int autoTicks = 0;                     // timer ticks left in the listening (a timeout when no sound plays, as with a stopped transport)
+    int autoStatusTicks = 0;               // ticks left before the button's result text goes back to its name
 
     HeraProcessor& proc;
     HardwareLookAndFeel look;

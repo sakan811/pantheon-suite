@@ -58,6 +58,8 @@ its order is the order of `lookaheadNames`, the parameter's choice.
 
 **Undo and A/B.** The processor declares `juce::UndoManager undo` before `apvts` and hands it over (`&undo`), so every control change is one undo step; `setCurrentProgram` begins a step first, so a preset is one. `ab` (`ui::AbCompare`) is declared after `apvts`; its active slot is saved in the state as `abSlot`, and a session without it opens on slot 0. The two slots are not saved (a session opens with both empty). Both are the kit's (`Undo.h`, `AbCompare.h`).
 
+**AUTO THRESH** is a one-shot measure, like LEARN in Atlas: the editor requests it (`autoThreshStart`), the audio thread listens to `kAutoListenSeconds` of frames and says `done`, the editor takes the answer and cancels. The histogram (`LevelHistogram`) is written only while listening, and read only once `done` is seen. The answer is the highest THRESH at which the law's reduction, averaged over the audible histogram, reaches the target, corrected by the ballistics the listening measured (the follower's mean reduction minus the law's mean at the same settings: a release tail is not the law). Only the answer `set` moves THRESH, through one gesture inside one undo step. It is monitoring state: not a parameter, never saved.
+
 **Smoothing.** Makeup and mix are smoothed per sample (5 ms); everything else is per sample by nature, so the output does not depend on the host's block size (test [8], bit for bit). The first block starts them at their targets.
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
@@ -67,7 +69,7 @@ The order of `detectorNames` is the order of `Detector`.
 
 ## DRY: where each thing lives
 
-- the law -> `reductionDb()` in `Engine.h` (the engine, the editor's transfer curve, the tests); what AUTO makeup adds -> `autoMakeupDb()`
+- the law -> `reductionDb()` in `Engine.h` (the engine, the editor's transfer curve, the tests); what AUTO makeup adds -> `autoMakeupDb()`; what AUTO THRESH answers -> `autoThresholdFor()` and `reductionAverageDb()` in `Engine.h`
 - parameter ranges, defaults, choice lists -> `Parameters.h` (the editor reads the items from the parameters)
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
   section, and at most `ui::kMaxNoteChars` characters

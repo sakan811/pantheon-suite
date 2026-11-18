@@ -4,6 +4,7 @@
 #pragma once
 
 #include "DSP/Engine.h"
+#include <cstdio>
 #include <pantheon/ui/Note.h>
 #include <string>
 #include <vector>
@@ -20,6 +21,8 @@ struct AdviceInput
     bool sidechainConnected = false;
     bool delta = false;    // DELTA is on (the editor's monitor, not a parameter)
     bool scListen = false; // SC LISTEN is on (the same kind of monitor)
+    bool autoThreshAsked = false;     // AUTO THRESH was pressed and answered (the editor's, kept until the next press)
+    AutoThresh autoThresh;            // its answer
 };
 
 constexpr float kHeavyDb = 10.0f;
@@ -45,6 +48,26 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         warn ("KEY is on, but no sidechain is connected, so it listens to itself. Route a track to the sidechain.");
     if (in.heldDb >= kHeavyDb)
         warn ("Taking off " + std::to_string ((int) (in.heldDb + 0.5f)) + " dB or more: it will pump. Raise THRESH or lower RATIO.");
+    if (in.autoThreshAsked) // first among the infos: the answer to the last press is what the user looks for
+    {
+        char db[16];
+        std::snprintf (db, sizeof db, "%.1f", (double) in.autoThresh.thresholdDb);
+        switch (in.autoThresh.result)
+        {
+            case AutoThresh::Result::set:
+                info (std::string ("AUTO THRESH set THRESH to ") + db + " dB: about 3.5 dB of reduction on average while the sound played.");
+                break;
+            case AutoThresh::Result::silent:
+                info ("AUTO THRESH heard no sound in four seconds: THRESH is unchanged. Play the track, then press it again.");
+                break;
+            case AutoThresh::Result::flat:
+                info ("AUTO THRESH needs RATIO above 1:1 to set anything: THRESH is unchanged.");
+                break;
+            case AutoThresh::Result::quiet:
+                info ("AUTO THRESH: the sound is too quiet to reach 3.5 dB of reduction, even at -60 dB: THRESH is unchanged.");
+                break;
+        }
+    }
     if (p.ratio >= 10.0f && p.attackMs <= kFastAttackMs)
         info ("A high RATIO with a fast ATTACK is limiting, but Hera reads no true peak. Use a limiter after it.");
     if (p.attackMs <= kFastAttackMs && p.detector == Detector::peak)
