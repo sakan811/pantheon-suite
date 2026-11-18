@@ -40,7 +40,15 @@ inline bool freshAndUntouched (const AdviceInput& in)
 {
     if (in.restored || in.learnedAll || in.bands.empty())
         return false;
-    return std::all_of (in.bands.begin(), in.bands.end(), [] (const BandAdvice& b) { return b.params.thresholdDb == BandParams().thresholdDb; });
+    // A parameter's value comes back through its skewed range, so a default can read as 9.99999 rather than 10: compare within a
+    // tenth of the smallest step any of the four takes (0.1 dB, 0.1 :1, 0.1 ms).
+    const BandParams init;
+    const auto same = [] (double a, double b) { return std::abs (a - b) < 1e-3; };
+    return std::all_of (in.bands.begin(), in.bands.end(), [&init, &same] (const BandAdvice& b)
+    {
+        return same (b.params.thresholdDb, init.thresholdDb) && same (b.params.ratio, init.ratio) && same (b.params.attackMs, init.attackMs)
+            && same (b.params.releaseMs, init.releaseMs);
+    });
 }
 
 constexpr double kBassTopHz = 250.0;     // the top of the Bass band: below it a fast attack follows single cycles

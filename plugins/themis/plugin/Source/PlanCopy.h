@@ -19,8 +19,9 @@
 // tests/test_main.cpp, and the master plan's panel only copies the text and shows the status line.
 //
 // The rules, all about one clipboard text that is pasted once in each plugin:
-//  - every copyable item contributes what its own COPY would: its bands, its limiter setting (the ceiling and the gain change of
-//    the plan's items are merged into one `limiter` line) and its width line;
+//  - every copyable item contributes what its own COPY would: its bands, its limiter setting and its width line; the `limiter` line
+//    takes the ceiling and the gain change of the first copyable item that has each one, and later items' values are left out
+//    (a doubled setting would be wrong: two items that both take 2.5 dB off must not take 5);
 //  - a width line is never written in the same text as a band that touches the side signal (placed side or stereo): both would
 //    cut the same side. The per-item COPY of a width item hands both and says so; COPY ALL cannot ask which one to paste, so when
 //    such a band is in the text the width lines are left out and counted. The band carries the cut the item's headline states;
@@ -101,10 +102,10 @@ inline Result copyAll (const MasterAdvice& advice, const TargetCurve* target = n
             limiter.hasCeiling = true;
             limiter.ceilingDb = item.limiter.ceilingDb;
         }
-        if (item.limiter.changesGain)
+        if (item.limiter.changesGain && !limiter.hasGainChange)
         {
             limiter.hasGainChange = true;
-            limiter.gainChangeDb += item.limiter.gainChangeDb;
+            limiter.gainChangeDb = item.limiter.gainChangeDb;
         }
         if (item.width.active())
         {

@@ -4238,6 +4238,23 @@ TEST (copy_all_takes_the_ceiling_alone_when_the_plan_has_only_one)
     CHECK (pdsp::link::decode (c.text, bands, &curve) && bands.empty() && !curve.valid());
 }
 
+TEST (copy_all_takes_the_first_gain_change_and_never_sums_them)
+{
+    using L = themis::Level;
+    using T = themis::Topic;
+    themis::MasterAdvice plan;
+    auto first = planItem (L::bad, T::loudness, "Take about 2.5 dB off the limiter's gain");
+    first.limiter = { false, true, 0.0f, -2.5f };
+    auto second = planItem (L::bad, T::loudness, "Take about 1.0 dB off the limiter's gain");
+    second.limiter = { false, true, 0.0f, -1.0f };
+    plan.items = std::vector<themis::Advice> { first, second };
+    const auto c = themis::plancopy::copyAll (plan);
+    pdsp::LinkLimiter got;
+    CHECK (c.limiters == 1 && c.gain && !c.ceiling && pdsp::link::decodeLimiter (c.text, got) && got.hasGainChange);
+    CHECK_NEAR (got.gainChangeDb, -2.5, 0.01); // the first item's change only: -3.5 would be the sum
+    CHECK_NEAR (c.gainDb, -2.5, 0.01);
+}
+
 int main()
 {
     for (const auto& t : tests())
