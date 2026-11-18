@@ -11,7 +11,7 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int undoRowHeight = 22; // UNDO / REDO and CLEAR ALL, above the display
+constexpr int undoRowHeight = 22; // UNDO / REDO, A / B and CLEAR ALL, above the display
 constexpr int stripWidth = 156;
 constexpr int stripGap = 8;
 constexpr int stripHeight = 332;
@@ -47,6 +47,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
       matchButton (p.apvts, id::match, "GAIN MATCH", "Takes the level the bands add or take away off again, slowly (about 0.6 s, within 12 dB), so a boost that is merely louder is not mistaken for better. "
                                                       "OUTPUT is applied after it."),
       undoButtons (p.undo, *this),
+      abButtons (p.ab),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -70,7 +71,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
         clearBands (proc.apvts);
         view.setListen (false); // LISTEN follows a band; a band that is off is not heard alone
     };
-    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &matchButton, &undoButtons, &clearAllButton, &deltaButton, &pasteButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &matchButton, &undoButtons, &abButtons, &clearAllButton, &deltaButton, &pasteButton, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     showTypes();
@@ -113,6 +114,8 @@ void ApolloEditor::resized()
     undoButtons.setBounds (undoRow.removeFromLeft (ui::UndoButtons::kWidth));
     undoRow.removeFromLeft (8);
     clearAllButton.setBounds (undoRow.removeFromLeft (96));
+    undoRow.removeFromLeft (8);
+    abButtons.setBounds (undoRow.removeFromLeft (ui::AbButtons::kWidth));
     bounds.removeFromTop (10);
     view.setBounds (bounds.removeFromTop (viewHeight));
     bounds.removeFromTop (10);

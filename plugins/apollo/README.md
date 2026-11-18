@@ -13,7 +13,7 @@ by loudness, and **PASTE** takes the bands and the target curve that [Themis](..
 
 *Headless render of the editor (the hardware-style interface shared with the other plugins) over a programme of a low note with its harmonics on noise that
 falls with frequency. Band 1 is a 36 dB/oct high-pass, band 2 a low shelf of -4 dB, band 4 (selected, ringed) a bell of +3.5 dB at 1.8 kHz, band 5 a narrow dip at 3.4 kHz
-and band 6 a bell on the **Side** only, whose response is the teal curve; the amber curve is the response of the settings, and the cream and dim traces are the analyser after
+and band 6 a bell on the **Side** only, whose response is the teal curve; above the display the row holds UNDO / REDO, CLEAR ALL and the **A / B** pair (A lit, as on opening); the amber curve is the response of the settings, and the cream and dim traces are the analyser after
 and before the bands. **GAIN MATCH** is on and says what it is applying in the header (a fraction of a dB here: the cuts and the boosts nearly cancel). **LISTEN** (off) and ANALYZER are the two buttons in the display's corner. Regenerate with the commands
 under "Development".*
 
@@ -34,7 +34,7 @@ Themis writes (see [BandLink.h](../../shared/dsp/include/pantheon/dsp/BandLink.h
 | | |
 |---|---|
 | **Bands** | Eight, always there. A new instance opens with a high-pass and a low-pass at the ends (off), two shelves and four bells, all at 0 dB, so dragging a node does something at once. A band is taken out of the sound by switching its ON off (its settings stay): Delete or Backspace on the selected band, or **CLEAR ALL** (above the display) for every band at once, one undo step. |
-| **Undo** | **UNDO / REDO** (above the display; Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus, Ctrl on other systems) take back and redo changes to the controls, a dragged node, a wheel step on a Q, a band switched on or off, a pasted set of bands, a preset and CLEAR ALL, each as one step; they are not kept with the session. The shared kit does it (`Undo.h`); the processor owns the undo history. |
+| **Undo** | **UNDO / REDO** (above the display; Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus, Ctrl on other systems) take back and redo changes to the controls, a dragged node, a wheel step on a Q, a band switched on or off, a pasted set of bands, a preset and CLEAR ALL, each as one step; they are not kept with the session. The shared kit does it (`Undo.h`); the processor owns the undo history. **A / B** (beside them) holds two settings with one live: switching keeps what you have set in the one you leave, while OUTPUT, PHASE and GAIN MATCH stay as they are; a switch is one undo step, and only the active slot is kept with the session (`AbCompare.h`). |
 | **Type** | Bell (raises or cuts around a frequency), Low shelf, High shelf, High-pass, Low-pass, Notch. |
 | **Freq / Gain / Q** | 20 Hz to 20 kHz; -18 to +18 dB (bells and shelves); Q 0.1 to 10 (the width of a bell or notch, the turn of a shelf). |
 | **Slope** | For a high-pass or low-pass: 12, 24, 36 or 48 dB per octave (Butterworth; -3 dB at the corner). |

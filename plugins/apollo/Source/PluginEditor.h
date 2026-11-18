@@ -7,6 +7,7 @@
 #include "PluginProcessor.h"
 #include "UI/ApolloUi.h"
 #include "UI/CurveView.h"
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
 #include <pantheon/ui/Undo.h>
 
@@ -37,8 +38,10 @@ public:
     ui::PresetBox presetBox;
     ui::Toggle matchButton;
     ui::UndoButtons undoButtons; // UNDO / REDO (Cmd+Z); the processor's UndoManager
+    ui::AbButtons abButtons;     // A / B, beside them (shared/ui AbCompare.h)
     juce::TextButton deltaButton { "DELTA" }, pasteButton { "PASTE" };
     juce::TextButton clearAllButton { "CLEAR ALL" }; // every band off in one step; enabled only while one is on
+    ui::AbButtons& abControls() noexcept { return abButtons; }
     ui::GuideButton guideButton { apollo::guideTitle(), apollo::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
     std::vector<ui::Note> notes() const { return apollo::adviceFor (adviceInput()); } // what the strip under the bands says, for the checks

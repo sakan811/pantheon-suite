@@ -76,6 +76,7 @@ void ApolloProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, ju
 void ApolloProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     programs.saveTo (apvts.state);
+    ab.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -85,7 +86,9 @@ void ApolloProcessor::setStateInformation (const void* data, int size)
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
         {
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            auto tree = juce::ValueTree::fromXml (*xml);
+            ab.loadFrom (tree); // a session from before A / B has no abSlot: it opens on slot 0
+            apvts.replaceState (tree);
             programs.loadFrom (apvts.state);
         }
 }

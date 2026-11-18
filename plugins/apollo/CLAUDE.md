@@ -80,6 +80,8 @@ curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCh
 
 **Undo.** The processor owns `juce::UndoManager undo`, declared before `apvts` and handed to it (`shared/ui` `Undo.h`, opt-in). A gesture that moves several parameters opens its step first with `ui::beginUndoStep`: a preset (`setCurrentProgram`), PASTE, `clearBands`, a node drag (`CurveView::mouseDown`), a double-click on empty glass (`addBandAt`), a wheel step, Delete. A new gesture that changes more than one parameter needs one too, or it merges into the step before it.
 
+**A / B** is `ui::AbCompare` `ab`, declared after `apvts` with `apollo::keepsParameter`, so PHASE, OUTPUT and GAIN MATCH stay as they are across a switch (as across a preset). A switch to a slot that has settings is one undo step; the active slot is saved as `abSlot` (a session without it opens on A), the two slots are not. The buttons are `ui::AbButtons` in the row above the display, after CLEAR ALL.
+
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 

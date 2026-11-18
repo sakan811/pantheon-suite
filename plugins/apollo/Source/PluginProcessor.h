@@ -8,6 +8,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <pantheon/dsp/AnalyzerTap.h>
 #include <pantheon/dsp/BypassDelay.h>
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Undo.h>
 
 class ApolloProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
@@ -45,6 +46,7 @@ public:
     juce::UndoManager undo; // UNDO / REDO of the parameters (shared/ui Undo.h); declared before the state that records into it
     juce::AudioProcessorValueTreeState apvts;
     ui::Programs programs { apvts, apollo::presets(), apollo::keepsParameter }; // after apvts
+    ui::AbCompare ab { apvts, apollo::keepsParameter };                         // A / B (shared/ui AbCompare.h): two settings, one live; after apvts
 
 private:
     // The latency can move with a setting; setLatencySamples belongs to the message thread, so the audio thread only asks for it.
