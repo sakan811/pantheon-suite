@@ -22,6 +22,7 @@ public:
     ui::Choice shape, oversampling;
     ui::Toggle autoGain;
     juce::TextButton deltaButton { "DELTA" };
+    juce::TextButton setDriveButton { "SET DRIVE" }; // one second of programme, then DRIVE is set from it (one parameter change)
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { dionysus::guideTitle(), dionysus::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -29,6 +30,7 @@ public:
 
 private:
     void timerCallback() override;
+    void finishSetDrive();
     dionysus::AdviceInput adviceInput() const;
 
     DionysusProcessor& proc;
@@ -38,6 +40,9 @@ private:
     float level = 0.0f;           // the output's peak since the last tick
     float drivenDb = -60.0f;      // the level that reached the curve, dB re the curve's turning point, falling slowly
     int clipTicks = 0;            // timer ticks left to hold the CLIP lamp
+    int measureTicks = 0;         // SET DRIVE: timer ticks left in its one-second measurement (0 = not measuring)
+    int statusTicks = 0;          // SET DRIVE: ticks left before its button text goes back to "SET DRIVE"
+    float measuredPeak = 0.0f;    // SET DRIVE: the largest level before DRIVE (linear, 1.0 = the curves' turning point) in the measurement
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DionysusEditor)
 };

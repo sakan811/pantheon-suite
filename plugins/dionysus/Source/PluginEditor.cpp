@@ -40,11 +40,20 @@ DionysusEditor::DionysusEditor (DionysusProcessor& p)
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &drive, &bias, &tone, &lowCut, &mix, &out, &shape, &oversampling, &autoGain, &deltaButton, &presetBox, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &drive, &bias, &tone, &lowCut, &mix, &out, &shape, &oversampling, &autoGain, &deltaButton, &setDriveButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     deltaButton.setClickingTogglesState (true);
     deltaButton.setTooltip ("Listen to only what the saturator adds (output minus input, delayed like it). Not saved with the project, and it ends when the window closes.");
     deltaButton.onClick = [this] { proc.engine.delta = deltaButton.getToggleState(); };
+    setDriveButton.setTooltip ("Play your track: for one second this measures its loudest level before DRIVE, then sets DRIVE so that level reaches the curves' turning point (0 dB on the drive meter). "
+                               "MIX stays as it is: back it off to keep more of the clean sound. No sound in that second: DRIVE is left alone. DRIVE is still an ordinary knob afterwards.");
+    setDriveButton.onClick = [this]
+    {
+        measuredPeak = 0.0f;
+        measureTicks = kTimerHz;
+        statusTicks = 0;
+        setDriveButton.setButtonText ("LISTENING");
+    };
     startTimerHz (kTimerHz);
     setSize (kWidth, kHeight);
 }
@@ -90,8 +99,9 @@ void DionysusEditor::resized()
     column.removeFromTop (12);
     oversampling.setBounds (column.removeFromTop (26).removeFromLeft (140));
     auto toggles = knobs.removeFromLeft (120);
-    autoGain.setBounds (toggles.withTrimmedTop (14).withHeight (28));
-    deltaButton.setBounds (toggles.withTrimmedTop (50).withHeight (28).withTrimmedRight (30));
+    autoGain.setBounds (toggles.withTrimmedTop (4).withHeight (26));
+    deltaButton.setBounds (toggles.withTrimmedTop (36).withHeight (26).withTrimmedRight (30));
+    setDriveButton.setBounds (toggles.withTrimmedTop (68).withHeight (26).withTrimmedRight (30));
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
 }
 
@@ -208,6 +218,22 @@ void DionysusEditor::paint (juce::Graphics& g)
     }
 }
 
+// The end of SET DRIVE's second: one parameter change, through the host's gesture so it is one step for automation and undo.
+void DionysusEditor::finishSetDrive()
+{
+    float next = readParams (proc.apvts).driveDb;
+    const bool heard = driveForPeak (measuredPeak, next);
+    if (heard)
+    {
+        auto* p = proc.apvts.getParameter (id::drive);
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (p->convertTo0to1 (next));
+        p->endChangeGesture();
+    }
+    setDriveButton.setButtonText (heard ? "DRIVE SET" : "NO AUDIO");
+    statusTicks = 2 * kTimerHz; // two seconds of the result, then the name again
+}
+
 void DionysusEditor::timerCallback()
 {
     level = proc.engine.outPeak.exchange (0.0f);
@@ -219,6 +245,16 @@ void DionysusEditor::timerCallback()
     const float driven = proc.engine.drivePeak.exchange (0.0f);
     const float nowDb = driven > 1e-4f ? 20.0f * std::log10 (driven) : -60.0f;
     drivenDb = nowDb >= drivenDb ? nowDb : std::max (nowDb, drivenDb - 24.0f / (float) kTimerHz);
+    if (measureTicks > 0)
+    {
+        // Back to before DRIVE: the peak at the curve divided by the DRIVE it was measured at (the editor reads DRIVE now; a move during the second is read as it is).
+        const double gain = std::pow (10.0, (double) readParams (proc.apvts).driveDb / 20.0);
+        measuredPeak = std::max (measuredPeak, (float) (driven / gain));
+        if (--measureTicks == 0)
+            finishSetDrive();
+    }
+    else if (statusTicks > 0 && --statusTicks == 0)
+        setDriveButton.setButtonText ("SET DRIVE");
     deltaButton.setToggleState (proc.engine.delta.load(), juce::dontSendNotification);
     presetBox.sync();
     repaint();

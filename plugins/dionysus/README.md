@@ -22,6 +22,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 | **Tone** | -100 to +100%: after the curve, a low shelf and a high shelf at 1 kHz turning opposite ways, 6 dB each: a tilt of 12 dB at the ends. + is brighter. |
 | **Low cut** | 20 to 500 Hz, off at 20: a high-pass (2nd order) on the saturated path only, before the curve, so the bass is not saturated and stays clean. The dry sound is not filtered: under 100% MIX the lows come back through it, and at 100% the whole sound loses them. |
 | **Mix** | 0 to 100%: the saturated sound blended with the dry one. The dry sound is delayed to match the oversampler, so nothing combs. 100% is the saturated sound itself. |
+| **Set drive** | A one-shot for beginners: press it while the track plays and for one second it measures the loudest level before DRIVE, then sets DRIVE so that level reaches the curves' turning point (0 dB on the drive meter). MIX stays as it is: back it off to keep more of the clean sound. With no sound in that second DRIVE is left alone and the button says NO AUDIO. It is one parameter change, and DRIVE is an ordinary knob afterwards. |
 | **Delta** | Plays only what the saturator adds (the output minus the input, delayed like the output). Not saved, not automatable, off when the window closes. |
 | **Drive level** | A meter at the right of the display: the largest level that reaches the curve (the sound after LOW CUT times DRIVE), 0 dB where the curves turn over, red above it, and a CLIP lamp for an output at 0 dBFS (held one second). |
 | **Output** | -24 to +12 dB, after everything. |
@@ -58,6 +59,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 - TONE +100%: 100 Hz -6.0 dB, 8 kHz +6.0 dB (a tilt of 12.0 dB); at 0 it is flat.
 - LOW CUT 500 Hz: a 50 Hz tone through the saturated path is -40.0 dB; at MIX 0% it is untouched (+0.00 dB), at 50% -6.1 dB (half of it is the dry sound); at 20 Hz (Off) the sound is as it was, bit for bit.
 - DELTA plus the input delayed by 32 samples is the output (largest difference 7.5e-09); the 3rd harmonic of a hard-clipped tone is as loud in DELTA as in the output (0.000 dB); at MIX 0% it is silence, exactly.
+- SET DRIVE on a -12 dBFS sine measured at +6 dB of drive sets DRIVE to 12.0 dB, and the peak then reaches the curve at +0.00 dB (test [9]); with no sound it leaves DRIVE alone, and a very quiet or very loud programme is kept inside the knob's 0 to +36 dB.
 - The drive meter reads 1.000 for a -12 dBFS sine at +12 dB of drive. Bypassed by the host at 8x, an impulse comes out exactly the reported 44 samples late (`DionysusUiCheck`).
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
 

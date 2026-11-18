@@ -344,5 +344,37 @@ int main()
                fmt ("the level that reaches the curve: %.3f for a -12 dBFS sine at +12 dB (1.00), and a 500 Hz low cut keeps a 50 Hz tone down to %.3f", reaches, m2.drivePeak.load()));
     }
 
+    // [9] SET DRIVE: the peak measured at one DRIVE gives the DRIVE that lands it on the target, silence and bad numbers leave DRIVE alone, and the knob's range holds.
+    std::printf ("\n[9] Set drive\n");
+    {
+        Engine m;
+        m.prepare (kFs, 1);
+        EngineParams p;
+        p.driveDb = 6.0f;
+        run (m, sine (1000.0, -12.0, 9600), p);
+        const double measured = m.drivePeak.exchange (0.0f) / std::pow (10.0, p.driveDb / 20.0); // what SET DRIVE measures: the peak before DRIVE
+        float next = 6.0f;
+        const bool heard = driveForPeak (measured, next);
+        check (heard && std::fabs (next - 12.0f) < 0.05f, fmt ("a -12 dBFS sine measured at +6 dB of drive: SET DRIVE sets %.1f dB (12.0: the sine peaks at 0.25)", next));
+        p.driveDb = next;
+        Engine after;
+        after.prepare (kFs, 1);
+        run (after, sine (1000.0, -12.0, 9600), p);
+        const double landed = db (after.drivePeak.exchange (0.0f));
+        check (std::fabs (landed - kSetDriveTargetDb) < 0.1, fmt ("... and the peak then reaches the curve at %+.2f dB (the target, %+.1f)", landed, kSetDriveTargetDb));
+
+        float unchanged = 7.3f;
+        check (! driveForPeak (0.0, unchanged) && unchanged == 7.3f, "silence: SET DRIVE leaves DRIVE alone");
+        check (! driveForPeak (std::nan (""), unchanged) && unchanged == 7.3f, "a programme that is not a number leaves DRIVE alone");
+        Engine quiet;
+        quiet.prepare (kFs, 1);
+        run (quiet, Stereo { std::vector<float> (4800, 0.0f), std::vector<float> (4800, 0.0f) }, p);
+        check (! driveForPeak (quiet.drivePeak.load() / std::pow (10.0, p.driveDb / 20.0), unchanged) && unchanged == 7.3f, "a silent programme measures nothing: DRIVE stays where it is");
+        float faint = 0.0f;
+        check (driveForPeak (1e-4, faint) && faint == (float) kMaxDriveDb, fmt ("a very quiet programme (-80 dBFS) asks for more than the knob has: DRIVE is at its top, %.1f dB", faint));
+        float hot = 0.0f;
+        check (driveForPeak (4.0, hot) && hot == 0.0f, "a loud programme (+12 dB before DRIVE) asks for less than the knob has: DRIVE is at 0 dB");
+    }
+
     return test::finish ("DionysusTests");
 }
