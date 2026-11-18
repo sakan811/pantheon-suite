@@ -49,7 +49,12 @@ void HestiaProcessor::updateTrackProperties (const TrackProperties& properties)
     p->endChangeGesture();
     autoRoleSet = true;
     autoRoleTo = *role;
-    autoRoleFrom = name.substr (0, (std::size_t) hestia::kNameChars);
+    // Cut at a character, not in the middle of one (as Bus::setName does): the strip note shows this text.
+    std::size_t len = std::min (name.size(), (std::size_t) hestia::kNameChars);
+    if (len < name.size())
+        while (len > 0 && (static_cast<unsigned char> (name[len]) & 0xC0) == 0x80)
+            --len;
+    autoRoleFrom = name.substr (0, len);
 }
 
 int HestiaProcessor::copyToMix()
