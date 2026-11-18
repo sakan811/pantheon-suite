@@ -290,6 +290,56 @@ inline CrestReport analyseCrest (const FrameStats* frames, int n)
     return r;
 }
 
+// ---- loudness over time (LOUDNESS) -----------------------------------------------------------
+// Rules of thumb. The zone is a band of +/- kLoudnessZoneLu around the delivery target: 1 LU is a suggested width for "on
+// target", not a standard. A master spends time outside it on purpose sometimes, so the verdict only warns when most of the
+// window is outside, or when the sections spread widely (the same spread as the BANDS swing).
+inline constexpr float kLoudnessZoneLu = 1.0f;
+inline constexpr float kLoudnessOutsideWarnShare = 0.5f; // warn when more than this share of the time is outside the zone
+inline constexpr float kLoudnessSpreadWarnLu = kSwingWarnDb;
+
+struct LoudnessReport
+{
+    bool have = false;
+    float withinShare = 0.0f, aboveShare = 0.0f, belowShare = 0.0f; // shares of the measured frames; they sum to 1
+    float spreadLu = 0.0f;                                          // 90th minus 10th percentile of the short-term values
+    Level level = Level::good;
+};
+
+// The share of the window that the short-term loudness spends within the zone around targetLufs, above it and below it.
+// Frames with no short-term value (the first 3 s, digital silence) are left out.
+inline LoudnessReport analyseLoudness (const FrameStats* frames, int n, float targetLufs)
+{
+    LoudnessReport r;
+    if (n < kMinFrames)
+        return r;
+    int within = 0, above = 0, below = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        const float v = frames[i].shortTermLufs;
+        if (!hasLevel (v))
+            continue;
+        if (v > targetLufs + kLoudnessZoneLu)
+            ++above;
+        else if (v < targetLufs - kLoudnessZoneLu)
+            ++below;
+        else
+            ++within;
+    }
+    const int measured = within + above + below;
+    if (measured < kMinFrames)
+        return r;
+    const auto spread = summarise (frames, n, [] (const FrameStats& f) { return f.shortTermLufs; });
+    r.have = true;
+    r.withinShare = static_cast<float> (within) / static_cast<float> (measured);
+    r.aboveShare = static_cast<float> (above) / static_cast<float> (measured);
+    r.belowShare = static_cast<float> (below) / static_cast<float> (measured);
+    r.spreadLu = spread.swingDb();
+    const bool mostlyOutside = r.aboveShare + r.belowShare > kLoudnessOutsideWarnShare;
+    r.level = mostlyOutside || r.spreadLu > kLoudnessSpreadWarnLu ? Level::warn : Level::good;
+    return r;
+}
+
 // ---- bass fundamental ------------------------------------------------------------------------
 struct BassReport
 {

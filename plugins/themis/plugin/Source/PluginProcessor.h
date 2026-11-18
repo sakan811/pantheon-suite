@@ -89,6 +89,7 @@ public:
     themis::listen::ReferenceGain referenceGain() const { return refGain; }
     juce::String deliveryName() const { return deliveryTarget().shortName; }
     float deliveryLufs() const { return deliveryTarget().lufs; }
+    juce::String deliveryChoiceText() const; // the Deliver for choice as the menu shows it: the name and its value
     float previewGainDb() const { return previewDb; }
     void loadReference (const juce::File& file, std::function<void (const juce::String& error)> onDone);
     void updateListen();
@@ -162,11 +163,12 @@ private:
     class AnalysisThread : public juce::Thread
     {
     public:
-        explicit AnalysisThread (themis::TonalAnalyzer& a) : juce::Thread ("Themis analysis"), analyzer (a) {}
+        AnalysisThread (themis::TonalAnalyzer& a, const themis::LoudnessMonitor& m) : juce::Thread ("Themis analysis"), analyzer (a), loudness (m) {}
         void run() override
         {
             while (!threadShouldExit())
             {
+                analyzer.setShortTermLufs (loudness.shortTermForHistory()); // the frames this pump pushes carry the loudness
                 analyzer.pump();
                 wait (15);
             }
@@ -174,9 +176,11 @@ private:
 
     private:
         themis::TonalAnalyzer& analyzer;
+        const themis::LoudnessMonitor& loudness;
     };
 
     void setParameterValue (const juce::String& id, float plainValue);
+    int deliveryIndex() const;
     const params::LoudnessTarget& deliveryTarget() const;
     void stopAnalysis();
     void syncReferenceRate();

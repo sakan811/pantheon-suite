@@ -38,6 +38,7 @@ struct FrameStats
     float samplePeakDb = kHistoryFloorDb, truePeakDb = kHistoryFloorDb; // highest peaks of the audio since the previous frame
     float peakWindowRmsDb = kHistoryFloorDb; // RMS of both channels over those same samples (the crest factor's level, see CREST)
     float clipEvents = 0.0f, clipSamples = 0.0f, overSamples = 0.0f;    // counts since the previous frame (see ClipMeter)
+    float shortTermLufs = kHistoryFloorDb; // short-term loudness (3 s, LUFS) when the meter has a full window; the floor otherwise
 
     float& energy (Signal s, int column) { return energyDb[static_cast<size_t> (s)][static_cast<size_t> (column)]; }
     float energy (Signal s, int column) const { return energyDb[static_cast<size_t> (s)][static_cast<size_t> (column)]; }
@@ -48,7 +49,7 @@ struct FrameStats
     float harmonicsLevelDb() const { return hasFundamental() ? harmonicsDb : kHistoryFloorDb; }
     bool clipped() const { return clipEvents > 0.0f || overSamples > 0.0f; }
 
-    static constexpr size_t kFields = kNumSignals * kNumEnergyColumns + 9;
+    static constexpr size_t kFields = kNumSignals * kNumEnergyColumns + 10;
 
     // Calls f(value) for every field in storage order; the one place that lists them (push and copy both use it).
     template <typename Self, typename F> // Self: FrameStats or const FrameStats
@@ -66,6 +67,7 @@ struct FrameStats
         f (s.clipEvents);
         f (s.clipSamples);
         f (s.overSamples);
+        f (s.shortTermLufs);
     }
 };
 

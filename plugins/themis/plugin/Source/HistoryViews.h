@@ -55,6 +55,11 @@ public:
         juce::Colour colour;
         juce::String label;
     };
+    struct Reference // a dashed line across the plot at a value (the delivery target), read when drawn, with its label
+    {
+        float value;
+        juce::String label;
+    };
     struct Verdict
     {
         juce::String text; // empty: nothing to say yet
@@ -70,6 +75,7 @@ public:
         Axis axis;
         std::vector<Zone> zones;
         std::function<std::vector<Zone>()> liveZones; // zones that follow a setting (the true-peak ceiling): read when drawn, instead of `zones`
+        std::function<Reference()> reference;         // a line that follows a setting (the delivery target): read when drawn
         std::vector<Series> series;
         bool chooseRange = false;   // shows the range chips; `column` is passed to the series and the verdict
         bool marksClips = false;    // flags the frames in which the audio clipped
@@ -156,6 +162,7 @@ public:
             g.drawImageAt (specImage, juce::roundToInt (plot.getX()), juce::roundToInt (plot.getY()));
         drawZones (g, t);
         drawGrid (g, t);
+        drawReference (g, t);
         if (t.marksClips)
             drawClipMarks (g);
         for (size_t i = 0; i < t.series.size(); ++i)
@@ -354,6 +361,24 @@ private:
             g.drawText (s == 0 ? juce::String ("now") : "-" + juce::String (s) + " s",
                         juce::Rectangle<float> (x - 22.0f, plot.getBottom() + 3.0f, 44.0f, 12.0f).toNearestInt(), juce::Justification::centred);
         }
+    }
+
+    void drawReference (juce::Graphics& g, const Tab& t) const
+    {
+        if (!t.reference)
+            return;
+        const auto ref = t.reference();
+        const float y = yFor (t.axis, ref.value);
+        juce::Path line;
+        line.startNewSubPath (plot.getX(), y);
+        line.lineTo (plot.getRight(), y);
+        juce::Path dashed;
+        const float dashes[] = { 5.0f, 4.0f };
+        juce::PathStrokeType (1.2f).createDashedStroke (dashed, line, dashes, 2);
+        g.setColour (colours::text.withAlpha (0.6f));
+        g.fillPath (dashed);
+        g.setFont (ui::font (10.5f));
+        g.drawText (ref.label, juce::Rectangle<float> (plot.getRight() - 180.0f, y - 13.0f, 176.0f, 12.0f).toNearestInt(), juce::Justification::right);
     }
 
     // A red column through the plot at every frame in which the audio clipped.
@@ -589,7 +614,7 @@ inline juce::String percentText (float share) { return juce::String (juce::round
 class LevelView : public HistoryPanel
 {
 public:
-    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks (p), crest(), spectrogram() }) {}
+    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks (p), crest(), loudness (p), spectrogram() }) {}
 
 private:
     using Verdict = HistoryPanel::Verdict;
@@ -666,6 +691,41 @@ private:
             const juce::String text = d < 0.05f ? juce::String (": left and right match.")
                                                 : ": " + juce::String (r.leftMinusRightDb > 0.0f ? "left" : "right") + " is " + juce::String (d, 1) + " dB louder.";
             return Verdict { rangeText (c) + text, r.level };
+        };
+        return t;
+    }
+
+    // The short-term loudness over the window against the Deliver for target (read from the processor when drawn, so a change
+    // of the target moves the line and the band at once).
+    static Tab loudness (ThemisProcessor& proc)
+    {
+        namespace hist = themis::history;
+        constexpr float kTop = 0.0f, kBottom = -40.0f; // the range the window covers: a little above the loudest target, quieter than the quietest
+        Tab t { "LOUDNESS",
+                "The short-term loudness (3 s, BS.1770, in LUFS) of the audio over the last minute, frame by frame, against the Deliver for "
+                "target: the dashed line is the target and the shaded band is " + juce::String (hist::kLoudnessZoneLu, 0) + " LU either side of it. "
+                "Values under " + juce::String (kBottom, 0) + " LUFS sit on the bottom edge. The line breaks until "
+                + juce::String (themis::LoudnessMonitor::kMinSeconds, 0) + " s have played and in digital silence.\n\n"
+                "The verdict is how the time splits between within the band, above it and below it, and the spread between the quieter and the louder "
+                "sections (10th to 90th percentile). It warns when more than half the time is outside the band or the spread is over "
+                + juce::String (hist::kLoudnessSpreadWarnLu, 0) + " LU. Rules of thumb: a master can sit outside the band on purpose.",
+                { kTop, kBottom, 10.0f, {} } };
+        t.liveZones = [&proc] {
+            const float target = proc.deliveryLufs();
+            return std::vector<Zone> { { target - hist::kLoudnessZoneLu, target + hist::kLoudnessZoneLu, colours::good, "on target" } };
+        };
+        t.reference = [&proc] { return Reference { proc.deliveryLufs(), proc.deliveryChoiceText() }; };
+        t.series = { { "SHORT-TERM", palette::blue, [] (const themis::FrameStats& f, int) { return f.shortTermLufs; } } };
+        t.format = [] (float v) { return juce::String (v, 1) + " LUFS"; };
+        t.verdict = [&proc] (const themis::FrameStats* f, int n, int) -> Verdict {
+            const float target = proc.deliveryLufs();
+            const auto r = hist::analyseLoudness (f, n, target);
+            if (!r.have)
+                return Verdict {};
+            return Verdict { percentText (r.withinShare) + " of the time within " + juce::String (hist::kLoudnessZoneLu, 0) + " LU of "
+                                 + juce::String (target, 0) + " LUFS; " + percentText (r.aboveShare) + " above; " + percentText (r.belowShare)
+                                 + " below. Spread between sections " + juce::String (r.spreadLu, 1) + " LU.",
+                             r.level };
         };
         return t;
     }
