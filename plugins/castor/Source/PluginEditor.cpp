@@ -47,8 +47,8 @@ CastorEditor::CastorEditor (CastorProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &listen, &minButton, &presetBox, &guideButton, &pasteButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
-    pasteButton.setTooltip ("Take the width Themis copied from its master plan (COPY on a width item): the side width of each band it names, the others stay as they are. "
-                            "UNDO takes it back.");
+    pasteButton.setTooltip ("Take what Themis copied from its master plan: the side width of each band a width item names (COPY on a width item; the others stay as they are), "
+                            "or MONO BELOW from the low-end mono item (COPY on it). UNDO takes it back.");
     pasteButton.onClick = [this] { pasteFromClipboard (juce::SystemClipboard::getTextFromClipboard()); };
     minButton.setTooltip ("The lowest the correlation has read since the last click (the bar's thin mark shows it too): a dip under 0 is a moment that cancels in mono. Click to start again.");
     minButton.onClick = [this] { minHold = 1.0f; proc.engine.correlationMin.store (1.0f); repaint(); };
@@ -235,7 +235,7 @@ std::vector<ui::Note> CastorEditor::shownNotes() const
 
 void CastorEditor::pasteFromClipboard (const juce::String& text)
 {
-    setStripNote (pasteWidth (proc.apvts, text), kNoteTicks); // one UNDO step when the text has a width line (Parameters.h)
+    setStripNote (pasteFromThemis (proc.apvts, text), kNoteTicks); // one UNDO step for what the text sets (Parameters.h)
     repaint();
 }
 
