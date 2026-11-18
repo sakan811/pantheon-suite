@@ -2,6 +2,7 @@
 // Copyright (C) 2026 The Pantheon authors
 
 #include "PluginEditor.h"
+#include "RoleGuess.h"
 
 #include <pantheon/ui/Aspect.h>
 
@@ -52,8 +53,11 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
     copyButton.setTooltip ("Hand this stem's CARVE, REACH, ATTACK and RELEASE to every other Hestia in the same mix (they must be playing, and in this host process). "
                            "Each of them takes the values as if you had turned its knobs.");
     copyButton.onClick = [this] { copyToMix(); };
+    autoRoleControl.setTooltip ("Set ROLE from the track's name: a word such as kick, bass, vox, gtr, keys, hat or snare. It sets ROLE and nothing else; "
+                                "everything stays editable, and one UNDO takes it back. If the name has no such word, it says so and ROLE stays as it is.");
+    autoRoleControl.onClick = [this] { autoRole(); };
     for (auto* c : std::initializer_list<juce::Component*> { &view, &roleBox, &mixBox, &scRoleBox, &importance, &distance, &carve, &reach, &attack, &release, &outKnob, &scImportance,
-                                                              &holdButton, &deltaButton, &copyButton, &presetBox, &guideButton })
+                                                              &holdButton, &deltaButton, &copyButton, &autoRoleControl, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
@@ -74,6 +78,21 @@ void HestiaEditor::copyToMix()
     sentTicks = 4 * kTimerHz;
 }
 
+void HestiaEditor::autoRole()
+{
+    char name[kNameChars + 1];
+    proc.engine.busRef().nameOf (proc.engine.slotIndex(), name);
+    const auto role = roleFromName (name);
+    autoRoleMissed = ! role.has_value();
+    if (! role)
+        return;
+    ui::beginUndoStep (proc.apvts, "AUTO ROLE"); // ROLE is the one change, and one UNDO step
+    auto* p = proc.apvts.getParameter (id::role);
+    p->beginChangeGesture();
+    p->setValueNotifyingHost (p->convertTo0to1 ((float) (int) *role));
+    p->endChangeGesture();
+}
+
 void HestiaEditor::resized()
 {
     auto bounds = getLocalBounds().reduced (12, 0);
@@ -89,6 +108,8 @@ void HestiaEditor::resized()
     auto row = header.withTrimmedTop (28).withHeight (28);
     roleLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
     roleBox.setBounds (row.removeFromLeft (140));
+    // AUTO ROLE sits on the Role label's line, at the right of the label: the row of controls is full.
+    autoRoleControl.setBounds (roleBox.getRight() - 84, roleLabel.getY() - 1, 84, 14);
     row.removeFromLeft (12);
     mixLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
     mixBox.setBounds (row.removeFromLeft (72));
@@ -136,6 +157,10 @@ AdviceInput HestiaEditor::adviceInput() const
     in.delta = proc.engine.deltaOn.load();
     in.sidechain = proc.sidechainConnected.load (std::memory_order_relaxed);
     in.sentTo = sentTicks > 0 ? sentTo : -1;
+    char name[kNameChars + 1];
+    proc.engine.busRef().nameOf (proc.engine.slotIndex(), name);
+    in.trackName = name;
+    in.autoRoleMissed = autoRoleMissed;
     return in;
 }
 

@@ -34,6 +34,7 @@ Source/DSP/        no GUI dependencies, no JUCE; covered by Tests/Tests.cpp
   Engine.h           the signal path and the rule (pressureOn()), the tick, the sidechain stem, the monitor, the output gain
 Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the knobs and the GUIDE text; plain C++, no JUCE
+Source/RoleGuess.h   AUTO ROLE: the role a track name suggests (its keyword list and priorities); plain C++, the roles are `DSP/Roles.h`'s
 Source/Parameters.h  parameter layout, readParams()                                                     <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/SpaceView.h` is the display
 ../../shared/dsp/    Biquad.h (the bells and the band-passes are `pdsp::Biquad`)
