@@ -30,6 +30,7 @@
 #include <themis/Translation.h>
 
 #include "../plugin/Source/UsageNotes.h"
+#include "../plugin/Source/PlanCopy.h"
 
 #include <chrono>
 #include <functional>
@@ -4086,6 +4087,155 @@ TEST (advisor_suggests_a_check_for_sibilance_without_a_copy_path)
     auto early = in;
     early.analysedSeconds = 5.0;
     CHECK (!pick (early, Topic::harshness));
+}
+
+// ---- COPY ALL: the whole plan as one clipboard text (plugin/Source/PlanCopy.h, plain C++) ----
+
+namespace
+{
+themis::Advice planItem (themis::Level level, themis::Topic topic, const char* headline)
+{
+    themis::Advice a;
+    a.level = level;
+    a.topic = topic;
+    a.headline = headline;
+    return a;
+}
+
+themis::EqMove bellAt (themis::EqMove::Place place, float hz, float gainDb)
+{
+    themis::EqMove m;
+    m.kind = themis::EqMove::Kind::bell;
+    m.place = place;
+    m.freqHz = hz;
+    m.gainDb = gainDb;
+    m.q = 2.0f;
+    return m;
+}
+} // namespace
+
+TEST (copy_all_of_an_empty_plan_is_nothing)
+{
+    // An empty plan, a measuring plan and a plan whose items name only the DAW all give nothing to copy, and say why.
+    themis::MasterAdvice none;
+    const auto empty = themis::plancopy::copyAll (none);
+    CHECK (empty.empty() && !empty.reason.empty());
+    CHECK (themis::plancopy::statusText (empty).find ("Nothing to copy") == 0);
+    themis::MasterAdvice measuring;
+    measuring.measuring = true;
+    CHECK (themis::plancopy::copyAll (measuring).reason.find ("still measuring") != std::string::npos);
+    themis::MasterAdvice dawOnly;
+    dawOnly.items.push_back (planItem (themis::Level::warn, themis::Topic::clipping, "Stop the clipping (any limiter or EQ in your DAW)"));
+    CHECK (themis::plancopy::copyAll (dawOnly).empty());
+    // A curve alone is not copied: the plan has nothing to fix with it.
+    CHECK (themis::plancopy::copyAll (dawOnly, &themis::TargetCurve::builtIns()[1]).empty());
+}
+
+TEST (copy_all_writes_every_kind_the_plan_has_in_one_text)
+{
+    using L = themis::Level;
+    using T = themis::Topic;
+    themis::MasterAdvice plan;
+    auto ring = planItem (L::warn, T::resonance, "Check the narrow ring");
+    ring.moves = { bellAt (themis::EqMove::Place::mid, 400.0f, -3.0f) };
+    auto fill = planItem (L::warn, T::bass, "Fill the bass");
+    fill.moves = { themis::EqMove { themis::EqMove::Kind::harmonicFill, themis::EqMove::Place::mid, 60.0f, 0.0f, 0.7071f, 40.0f, 90.0f } };
+    auto ceiling = planItem (L::bad, T::clipping, "Lower the limiter ceiling");
+    ceiling.limiter = { true, false, -1.0f, 0.0f };
+    auto loud = planItem (L::bad, T::loudness, "Take about 2.5 dB off the limiter's gain");
+    loud.limiter = { false, true, 0.0f, -2.5f };
+    auto width = planItem (L::warn, T::width, "Narrow LOW-MID");
+    width.width = themis::master::widthOver (1, 9.0, 3.0); // bass 0, low-mid 60, mid 80 %: no band on the side, so it is written
+    plan.items = std::vector<themis::Advice> { ceiling, loud, ring, fill, width };
+
+    const auto& target = themis::TargetCurve::builtIns()[1];
+    const auto copy = themis::plancopy::copyAll (plan, &target);
+    CHECK (!copy.empty() && copy.items == 5);
+    CHECK (copy.bands == 2 && copy.fillBands == 1); // two bands, one of them a fill
+    CHECK (copy.curves == 1 && copy.limiters == 1 && copy.ceiling && copy.gain); // one curve, one limiter line with a ceiling and a gain change
+    CHECK (copy.widthBands == 3 && copy.widthItemsLeftOut == 0); // the width line sets the three bands the range covers
+
+    std::vector<pdsp::LinkBand> bands;
+    pdsp::LinkCurve curve;
+    CHECK (pdsp::link::decode (copy.text, bands, &curve) && bands.size() == 2);
+    if (bands.size() == 2)
+    {
+        CHECK (bands[0].kind == pdsp::LinkBand::Kind::bell && bands[0].place == pdsp::LinkBand::Place::mid);
+        CHECK_NEAR (bands[0].freq, 400.0, 0.5);
+        CHECK_NEAR (bands[0].gainDb, -3.0, 0.05);
+        CHECK (bands[1].kind == pdsp::LinkBand::Kind::fill && bands[1].place == pdsp::LinkBand::Place::mid);
+        CHECK_NEAR (bands[1].loHz, 40.0, 0.5);
+        CHECK_NEAR (bands[1].hiHz, 90.0, 0.5);
+    }
+    CHECK (curve.valid() && curve.name == target.name); // the curve line travels when a target is given
+    pdsp::LinkLimiter limiter;
+    CHECK (pdsp::link::decodeLimiter (copy.text, limiter) && limiter.hasCeiling && limiter.hasGainChange);
+    CHECK_NEAR (limiter.ceilingDb, -1.0, 0.01);
+    CHECK_NEAR (limiter.gainChangeDb, -2.5, 0.01);
+    pdsp::LinkWidth wide;
+    CHECK (pdsp::link::decodeWidth (copy.text, wide) && wide.percent[1].has_value() && *wide.percent[1] == 0.0
+               && *wide.percent[2] == 60.0 && *wide.percent[3] == 80.0 && !wide.percent[0].has_value());
+    CHECK (copy.text.find ("amount") == std::string::npos); // no amount key: every band and setting takes all of its change
+    const auto status = themis::plancopy::statusText (copy);
+    CHECK (status.find ("bands 2 (1 fill)") != std::string::npos && status.find ("curve 1") != std::string::npos
+               && status.find ("limiter 1") != std::string::npos && status.find ("width 3 band(s)") != std::string::npos);
+    CHECK (status.find ("Paste it once in each plugin") != std::string::npos);
+}
+
+TEST (copy_all_never_writes_a_width_line_with_a_band_on_the_side)
+{
+    using L = themis::Level;
+    using T = themis::Topic;
+    const auto width = themis::master::widthOver (1, 9.0, 3.0);
+    pdsp::LinkWidth none;
+
+    // A width item carries its side bell too: the bell is the change the headline states, so the width line is left out.
+    themis::MasterAdvice own;
+    auto item = planItem (L::warn, T::width, "Narrow LOW-MID: take about 3.0 dB off its side signal");
+    item.moves = { themis::master::sideCutOver (1, 3.0f) };
+    item.width = width;
+    own.items.push_back (item);
+    const auto a = themis::plancopy::copyAll (own);
+    CHECK (!a.empty() && a.bands == 1 && a.widthBands == 0 && a.widthItemsLeftOut == 1);
+    CHECK (!pdsp::link::decodeWidth (a.text, none)); // no width line next to the side bell
+    CHECK (themis::plancopy::statusText (a).find ("left out") != std::string::npos);
+
+    // A width-only item must not join a band that touches the side (a stereo bell here): one of the two cuts is kept.
+    themis::MasterAdvice stereo;
+    auto ring = planItem (L::warn, T::resonance, "Check the narrow ring");
+    ring.moves = { bellAt (themis::EqMove::Place::stereo, 3200.0f, -4.0f) };
+    auto widthOnly = planItem (L::warn, T::width, "Narrow LOW-MID");
+    widthOnly.width = width;
+    stereo.items = std::vector<themis::Advice> { ring, widthOnly };
+    const auto b = themis::plancopy::copyAll (stereo);
+    CHECK (b.widthBands == 0 && b.widthItemsLeftOut == 1 && !pdsp::link::decodeWidth (b.text, none));
+
+    // With no band on the side the width line is written: a mid bell does not cut the side.
+    themis::MasterAdvice mid;
+    auto midRing = planItem (L::warn, T::resonance, "Check the narrow ring");
+    midRing.moves = { bellAt (themis::EqMove::Place::mid, 3200.0f, -4.0f) };
+    mid.items = std::vector<themis::Advice> { midRing, widthOnly };
+    const auto c = themis::plancopy::copyAll (mid);
+    CHECK (c.widthBands == 3 && c.widthItemsLeftOut == 0 && pdsp::link::decodeWidth (c.text, none));
+    CHECK (c.bands == 1);
+}
+
+TEST (copy_all_takes_the_ceiling_alone_when_the_plan_has_only_one)
+{
+    using L = themis::Level;
+    using T = themis::Topic;
+    themis::MasterAdvice plan;
+    auto ceiling = planItem (L::bad, T::clipping, "Lower the limiter ceiling by 0.6 dB");
+    ceiling.limiter = { true, false, -1.0f, 0.0f };
+    plan.items.push_back (ceiling);
+    const auto c = themis::plancopy::copyAll (plan);
+    pdsp::LinkLimiter got;
+    CHECK (c.limiters == 1 && c.ceiling && !c.gain && pdsp::link::decodeLimiter (c.text, got) && got.hasCeiling && !got.hasGainChange);
+    CHECK (c.text.find ("gainchange") == std::string::npos); // a ceiling alone writes no gain change
+    CHECK (c.curves == 0); // no target given: no curve line, as the per-item COPY
+    std::vector<pdsp::LinkBand> bands;
+    pdsp::LinkCurve curve;
+    CHECK (pdsp::link::decode (c.text, bands, &curve) && bands.empty() && !curve.valid());
 }
 
 int main()
