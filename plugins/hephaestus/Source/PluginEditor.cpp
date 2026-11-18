@@ -142,11 +142,15 @@ HephaestusEditor::HephaestusEditor (HephaestusProcessor& p)
         int skipped = 0;
         const auto slots = pasteBands (proc.apvts, juce::SystemClipboard::getTextFromClipboard(), skipped);
         if (! slots.empty())
+        {
             spectrum.setSelectedBand (slots.front());
+            pasteSaid = "PASTE: added " + std::to_string (slots.size()) + " harmonic-fill band(s) from Themis.";
+        }
         else
-            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Paste",
-                                                    skipped > 0 ? "No free slot, or no harmonic-fill band to add (equaliser bands go to Iris)."
-                                                                : "The clipboard holds no bands. Copy them in Themis first (COPY on a plan item).");
+            pasteSaid = skipped > 0 ? "PASTE: no free slot, or no harmonic-fill band to add (equaliser bands go to Iris)."
+                                    : "PASTE: the clipboard holds no bands. Copy them in Themis first (COPY on a plan item).";
+        pasteTicks = 8 * 30; // eight seconds at the timer's 30 Hz
+        repaint (panelBounds[(size_t) Panel::band]);
     };
     addAndMakeVisible (pasteButton);
     soloBandButton.setTooltip ("Listen to this band's region: the signal through a filter over the band's range, what the band works on. "
@@ -445,9 +449,17 @@ hep::AdviceInput HephaestusEditor::adviceInput() const
 juce::String HephaestusEditor::notesSignature() const
 {
     juce::String all;
-    for (auto& n : adviceFor (adviceInput()))
+    for (auto& n : panelNotes())
         all << n.text << '\n';
     return all;
+}
+
+std::vector<ui::Note> HephaestusEditor::panelNotes() const
+{
+    auto list = hep::adviceFor (adviceInput());
+    if (pasteTicks > 0 && ! pasteSaid.empty())
+        list.insert (list.begin(), { ui::Severity::info, pasteSaid });
+    return list;
 }
 
 void HephaestusEditor::layoutBandPanel()
@@ -654,7 +666,7 @@ void HephaestusEditor::paint (juce::Graphics& g)
     // What to watch for with this band and this session: warnings in amber, information dim.
     {
         const auto bandPanel = panelBounds[(size_t) Panel::band];
-        ui::drawNotes (g, { bandPanel.getX() + 18, bandPanel.getY() + 236, bandPanel.getWidth() - 36, 42 }, adviceFor (adviceInput()));
+        ui::drawNotes (g, { bandPanel.getX() + 18, bandPanel.getY() + 236, bandPanel.getWidth() - 36, 42 }, panelNotes());
     }
 
     // A solo on another band than the one shown would otherwise be easy to forget.
@@ -718,6 +730,9 @@ void HephaestusEditor::timerCallback()
 
     if (juce::String (proc.getCurrentProgram()) + "|" + proc.getCurrentUserPreset() != lastPresetKey)
         fillPresetBox();
+
+    if (pasteTicks > 0 && --pasteTicks == 0)
+        repaint (panelBounds[(size_t) Panel::band]); // the PASTE line goes away
 
     // The notes depend on the parameters and the solos, which change without the editor's help.
     if (const auto text = notesSignature(); text != shownNotes)

@@ -29,6 +29,7 @@ struct AdviceInput
     double latencyMs = 0.0;
     double lookaheadMs = 0.0;
     bool sidechainConnected = false;
+    bool learnedAll = false; // LEARN ALL was pressed (the editor's, kept until the next press; not a parameter)
 };
 
 constexpr double kBassTopHz = 250.0;     // the top of the Bass band: below it a fast attack follows single cycles
@@ -52,6 +53,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     const bool anyOn = std::any_of (in.bands.begin(), in.bands.end(), [] (const BandAdvice& b) { return b.params.on; });
     if (! anyOn)
         warn ("Every band is off: Atlas passes the sound as it is. Switch a band ON.");
+    if (in.learnedAll) // first among the infos: LEARN ALL sets every band, so the way back is the one control for all of them
+        info ("After LEARN ALL, MIX backs the whole setting off: it blends the untouched bands back in.");
 
     for (const auto& b : in.bands)
     {

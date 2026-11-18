@@ -255,7 +255,7 @@ void NemesisEditor::timerCallback()
             ui::beginUndoStep (proc.apvts, "SET THRESH");
             setValue (proc.apvts, id::threshold, value);
             setNoteText = "SET THRESH: " + juce::String (value, 1).toStdString() + (relative ? " dB under the sound" : " dBFS") +
-                          ". Only the loudest few percent of the s is over it. DELTA shows what is cut.";
+                          ": the loudest few percent of the s is over it. RANGE caps the cut.";
         }
     }
     setThreshButton.setButtonText (setAwaiting ? "SETTING" : "SET THRESH");

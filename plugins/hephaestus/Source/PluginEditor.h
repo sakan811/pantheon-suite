@@ -46,6 +46,9 @@ private:
     void presetBoxChanged();
     void askUserPresetName();
     juce::String notesSignature() const;
+    std::vector<ui::Note> panelNotes() const; // the band panel's notes, with PASTE's result first while it is fresh
+    std::string pasteSaid;                    // what the last PASTE did (a note, not a modal alert)
+    int pasteTicks = 0;                       // timer ticks left to show pasteSaid
     void timerCallback() override;
 
     HephaestusProcessor& proc;

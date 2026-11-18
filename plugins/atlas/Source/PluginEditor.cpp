@@ -95,7 +95,7 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
                                "Play a typical stretch, with its loudest part. A band that heard nothing is left as it was.");
     targetButton.setTooltip ("Like LEARN ALL, and also compares the bands with a spectrum shape copied from Themis (Copy EQ; copy first, then press this): a band that stands out of the "
                              "shape gets a lower THRESH, by how far, at most 12 dB. A starting point: a band's level and a curve are measured differently.");
-    learnAllButton.onClick = [this] { view.learnAll(); };
+    learnAllButton.onClick = [this] { learnedAll = true; repaint(); view.learnAll(); };
     targetButton.onClick = [this] { useTarget (juce::SystemClipboard::getTextFromClipboard()); };
     for (int i = 0; i < (int) presets().size(); ++i)
         presetBox.addItem (presets()[(size_t) i].name, i + 1);
@@ -187,6 +187,7 @@ AdviceInput AtlasEditor::adviceInput() const
     in.latencyMs = 1000.0 * proc.engine.latencySamples.load() / std::max (proc.getSampleRate(), 1.0);
     in.lookaheadMs = kLookaheadMs[(size_t) params.lookahead];
     in.sidechainConnected = proc.sidechainConnected.load (std::memory_order_relaxed);
+    in.learnedAll = learnedAll;
     return in;
 }
 
