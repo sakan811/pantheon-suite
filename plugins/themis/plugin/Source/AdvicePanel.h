@@ -21,6 +21,7 @@ public:
     {
         inputs = proc.masterInputs();
         advice = themis::advise (inputs);
+        eventLog = proc.eventLogCopy();
         offsets = themis::delivery::offsetsOf (inputs.integratedLufs);
         firstRow = juce::jlimit (0, std::max (0, static_cast<int> (advice.items.size()) - 1), firstRow);
         repaint();
@@ -153,14 +154,16 @@ public:
     }
     bool hasSnapshot() const { return snapshot.have; }
 
-    // TEXT puts the whole plan on the clipboard as plain text (the target, the numbers, every item and its why): for a note, a message, a session log.
+    // TEXT puts the check report on the clipboard as plain text: the plan, the readings and the event log. Shift-TEXT puts only the plan.
     juce::String planText() const { return juce::String (themis::planAsText (inputs, advice)); }
-    void copyPlanText()
+    juce::String reportText() const { return juce::String (themis::reportAsText (inputs, advice, eventLog)); }
+    void copyText (bool planOnly)
     {
         refresh();
-        juce::SystemClipboard::copyTextToClipboard (planText());
+        juce::SystemClipboard::copyTextToClipboard (planOnly ? planText() : reportText());
         if (onCopied)
-            onCopied ("Copied the master plan as text (" + juce::String (static_cast<int> (advice.items.size())) + " item(s)): paste it in a note, a message or a session log.");
+            onCopied (juce::String (planOnly ? "Copied the master plan as text (" : "Copied the check report as text (")
+                      + juce::String (static_cast<int> (advice.items.size())) + " item(s)): paste it in a note, a message or a session log.");
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -172,7 +175,7 @@ public:
         }
         if (textChip.contains (e.position.toInt()))
         {
-            copyPlanText();
+            copyText (e.mods.isShiftDown());
             return;
         }
         const int row = rowAt (e.position.toInt());
@@ -210,8 +213,10 @@ public:
                    "and the plan says how many items were fixed, got better, got worse or are new, and how far the loudness and the true peak moved. "
                    "It works once the plan has finished measuring.";
         if (hoverText)
-            return "TEXT puts the whole master plan on the clipboard as plain text: the delivery target and the true-peak ceiling, the measured loudness and peak, "
-                   "then every item worst first with what to change and why. For a note to yourself, a message to the client or a session log. "
+            return "TEXT puts the check report on the clipboard as plain text: the master plan (the target, the ceiling, every item worst first with what to change and why), "
+                   "then the readings (loudness, LRA, true peaks, PLR, clips, mono sum, phase and mono-fold worst bands) and the event log: the first clip, "
+                   "each new true-peak maximum above the ceiling and each loudness excursion, with the time in the audio since the Reset. "
+                   "Shift-TEXT copies only the plan. For a note to yourself, a message to the client or a session log. "
                    "(COPY on an item is different: it hands bands or a limiter setting to another plugin.)";
         if (hoverRow < 0 && readoutArea.contains (lastMouse))
             return loudnessTooltip();
@@ -438,6 +443,7 @@ private:
     themis::Switches audition;
     themis::PlanSnapshot snapshot;
     juce::Rectangle<int> listArea, snapChip, textChip, readoutArea;
+    themis::events::EventLog eventLog; // the event log since the reset, copied at each refresh
     juce::Point<int> lastMouse;
     int firstRow = 0, hoverRow = -1;
     bool hoverSnap = false, hoverCopy = false, hoverText = false;

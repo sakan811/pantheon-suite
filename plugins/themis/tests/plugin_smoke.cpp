@@ -913,6 +913,15 @@ int main (int argc, char** argv)
                         allThere = allThere && text.find (std::to_string (++number) + ". [" + (item.level == themis::Level::bad ? "FIX" : "CHECK") + "] " + item.headline) != std::string::npos;
                     CHECK (allThere, "every item is in the plan text, worst first");
                 }
+                {
+                    // TEXT copies the report: the plan, the readings and the event log. The demo programme clips and has a loud chorus.
+                    plan->refresh();
+                    const auto report = plan->reportText().toStdString();
+                    std::printf ("    check report of the demo programme:\n%s\n", report.c_str());
+                    CHECK (report.rfind ("Themis master plan", 0) == 0 && report.find ("\nReadings\n") != std::string::npos, "the report starts with the plan and has the readings");
+                    CHECK (report.find ("  CLIP  ") != std::string::npos, "the demo programme's first clip is in the event log");
+                    CHECK (report.find ("  LOUD  ") != std::string::npos, "the demo programme's loud chorus is in the event log");
+                }
                 const auto has = [&] (themis::Topic t) { return std::any_of (advice.items.begin(), advice.items.end(), [t] (const themis::Advice& a) { return a.topic == t; }); };
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
                 CHECK (has (themis::Topic::width), "the demo programme has a widened top");
