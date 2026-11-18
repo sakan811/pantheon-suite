@@ -154,6 +154,13 @@ inline Verdict verdictOf (Counts c, bool measuring, double analysedSeconds)
     return Verdict::clear;
 }
 
+// The word a level is written as wherever it is shown next to its colour (the plan text, the readouts' level words): a colour alone
+// does not tell red from green for about 8 % of men.
+inline const char* levelWord (Level l)
+{
+    return l == Level::good ? "OK" : l == Level::warn ? "CHECK" : "FIX";
+}
+
 inline const char* verdictWord (Verdict v)
 {
     switch (v)
@@ -685,7 +692,7 @@ inline std::string planAsText (const MasterInputs& in, const MasterAdvice& advic
     int number = 0;
     for (const auto& item : advice.items)
     {
-        out += format ("\n%d. [%s] %s\n", ++number, item.level == Level::bad ? "FIX" : "CHECK", item.headline.c_str());
+        out += format ("\n%d. [%s] %s\n", ++number, plan::levelWord (item.level), item.headline.c_str());
         if (!item.why.empty())
             out += "   " + item.why + "\n";
     }

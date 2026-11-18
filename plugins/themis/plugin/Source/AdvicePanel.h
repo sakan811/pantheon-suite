@@ -58,6 +58,22 @@ public:
         return {};
     }
     const themis::MasterAdvice& currentAdvice() const { return advice; }
+
+    // The painted chips at the panel's current size (SNAP, TEXT, and each shown row's HEAR and COPY), for the smoke test's control audit.
+    std::vector<juce::Rectangle<int>> chipAreas() const
+    {
+        std::vector<juce::Rectangle<int>> chips { snapChip, textChip };
+        for (int r = 0; r < visibleRows() && firstRow + r < static_cast<int> (advice.items.size()); ++r)
+        {
+            const auto& item = advice.items[static_cast<size_t> (firstRow + r)];
+            const auto column = chipColumn (rowBounds (r));
+            if (item.hear.active())
+                chips.push_back (hearChip (column));
+            if (item.canCopy())
+                chips.push_back (copyChip (column));
+        }
+        return chips;
+    }
     juce::String loudnessTooltipText() const { return loudnessTooltip(); } // (for the smoke test: the loudness readout's hover text)
 
     void paint (juce::Graphics& g) override
@@ -249,6 +265,7 @@ private:
     themis::plan::Counts countsNow;
     themis::plan::Verdict verdictNow = themis::plan::Verdict::measuring;
     static constexpr int kRowHeight = 58, kMoreHeight = 14, kChipWidth = 40;
+    static constexpr int kLevelWordWidth = 40; // the level word at the end of a headline's first line (gui::levelMark)
     // What the chips of a row do, in one line under the title (COPY reaches Iris and Apollo for equaliser bands, Hephaestus for a fill band, Aegis for a limiter).
     static constexpr const char* kLegend = "HEAR: solo only this problem. COPY: send the fix to Iris, Apollo, Hephaestus or Aegis. SNAP: remember the plan to compare later.";
 
@@ -317,10 +334,15 @@ private:
         const auto headlineFont = ui::font (12.0f, juce::Font::bold);
         juce::GlyphArrangement glyphs;
         glyphs.addLineOfText (headlineFont, item.headline, 0.0f, 0.0f);
-        const int headlineLines = glyphs.getBoundingBox (0, -1, false).getWidth() > static_cast<float> (row.getWidth()) ? 2 : 1;
+        const int headlineLines = glyphs.getBoundingBox (0, -1, false).getWidth() > static_cast<float> (row.getWidth() - kLevelWordWidth) ? 2 : 1;
+        auto headlineRow = row.removeFromTop (headlineLines * 15);
         g.setColour (colours::text);
         g.setFont (headlineFont);
-        g.drawFittedText (item.headline, row.removeFromTop (headlineLines * 15), juce::Justification::topLeft, headlineLines, 0.9f);
+        g.drawFittedText (item.headline, headlineRow.withTrimmedRight (kLevelWordWidth), juce::Justification::topLeft, headlineLines, 0.9f);
+        // The level word, so the lamp's colour is not the only coding (the plan's fix and check items look alike to a colour-blind reader).
+        g.setColour (colours::forLevelText (item.level));
+        g.setFont (ui::labelFont (gui::kLevelWordFontHeight));
+        g.drawText (gui::levelMark (item.level), headlineRow.removeFromRight (kLevelWordWidth).removeFromTop (15), juce::Justification::centredRight);
         g.setColour (colours::dim);
         g.setFont (ui::font (10.5f));
         g.drawFittedText (item.why, row.removeFromTop (14 * (3 - headlineLines)), juce::Justification::topLeft, 3 - headlineLines, 1.0f);
