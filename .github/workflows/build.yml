@@ -24,10 +24,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The three jobs are independent and run in parallel: a failing unit test does not need the builds to wait for it.
 jobs:
   dsp-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,7 +40,6 @@ jobs:
     # Universal (arm64 + x86_64) VST3 + AU, the plugin formats for macOS.
     runs-on: macos-15
     timeout-minutes: 45
-    needs: dsp-tests
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,7 +51,7 @@ jobs:
           -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
           -DTHEMIS_INSTALL_AFTER_BUILD=ON
       - name: Build
-        run: cmake --build build --config Release --target Themis_VST3 Themis_AU -j 4
+        run: cmake --build build --config Release --target Themis_VST3 Themis_AU -j "$(sysctl -n hw.ncpu)"
       - name: Check architectures
         run: |
           lipo -info "$HOME/Library/Audio/Plug-Ins/VST3/Themis Verdict.vst3/Contents/MacOS/Themis Verdict"
@@ -67,10 +67,11 @@ jobs:
           auval -v aufx Thms Thmi
 
   linux-plugin-compile:
-    # Catches plugin-layer compile errors on every push without needing a Mac.
+    # Catches plugin-layer compile errors on every push without needing a Mac, and runs the headless smoke test.
+    # The VST3 and ThemisSmoke targets share one configure and one build: each target compiles its own JUCE, so the
+    # two cost the same compiles either way, but one job saves a second checkout, apt install and JUCE fetch.
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: dsp-tests
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,9 +79,18 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev \
-            libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
-      - name: Build VST3
+          sudo apt-get install -y ninja-build xvfb libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev \
+            libxcursor-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DTHEMIS_BUILD_TESTS=OFF -DTHEMIS_BUILD_SMOKE=ON -DTHEMIS_INSTALL_AFTER_BUILD=OFF
+      - name: Build VST3 and smoke test
+        run: cmake --build build --target Themis_VST3 ThemisSmoke -j "$(nproc)"
+      # ThemisSmoke returns non-zero when any of its checks fails, which fails the job. Its PNGs go to a temporary folder
+      # and are not uploaded: CI does not publish anything. Xvfb gives the editor a display on a runner without one.
+      - name: Smoke test (headless processor and editor)
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTHEMIS_BUILD_TESTS=OFF
-          cmake --build build --target Themis_VST3 -j 4
+          mkdir -p "$RUNNER_TEMP/smoke"
+          xvfb-run -a build/ThemisSmoke_artefacts/Release/ThemisSmoke \
+            "$RUNNER_TEMP/smoke/screenshot.png" "$RUNNER_TEMP/smoke/graphs.png" "$RUNNER_TEMP/smoke/hold.png"
