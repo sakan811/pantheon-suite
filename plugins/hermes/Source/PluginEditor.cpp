@@ -35,6 +35,8 @@ HermesEditor::HermesEditor (HermesProcessor& p)
       levelMatch (p.apvts, id::levelMatch, "LEVEL MATCH", "Brings the reference to the integrated loudness of your sound, so you compare the tone and not the level. Let the meter run first: until it has read a few seconds there is nothing to match."),
       autoReset (p.apvts, id::resetOnPlay, "AUTO RESET", "Clears the integrated loudness, the range and the peaks each time the host starts playing, so every pass is measured from its start. Off by default; it is kept with the session."),
       presetBox (p, presets(), "LISTEN and the reference are set; TRIM, POLARITY and REF TRIM are kept."),
+      undoButtons (p.undo, *this),
+      abButtons (p.ab),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -56,12 +58,15 @@ HermesEditor::HermesEditor (HermesProcessor& p)
     autoTrimButton.onClick = [this]
     {
         const auto measured = proc.engine.integrated.load();
+        ui::beginUndoStep (proc.apvts, "AUTO TRIM");
         setValue (proc.apvts, id::trim, autoTrimDb (readParams (proc.apvts).trimDb, measured));
     };
     restartButton.onClick = [this] { proc.engine.restartReference(); };
     resetButton.onClick = [this] { proc.engine.resetMeters(); };
     for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &autoTrimButton, &autoReset, &presetBox, &guideButton })
         addAndMakeVisible (*c);
+    addAndMakeVisible (undoButtons);
+    addAndMakeVisible (abButtons);
     startTimerHz (kTimerHz);
     setSize (kWidth, kHeight);
 }
@@ -81,6 +86,10 @@ void HermesEditor::resized()
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
     header.removeFromLeft (24);
+    // UNDO / REDO and A / B in the top strip of the header, which the label of the preset leaves free.
+    const auto strip = header.withHeight (16).translated (0, -6);
+    undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
+    abButtons.setBounds (strip.getX() + ui::UndoButtons::kWidth + 10, strip.getY(), ui::AbButtons::kWidth, strip.getHeight());
     auto presetRow = header.withTrimmedTop (28).withHeight (28);
     presetLabel = { presetRow.getX() + 2, presetRow.getY() - 15, 120, 12 };
     presetBox.setBounds (presetRow.removeFromLeft (190));

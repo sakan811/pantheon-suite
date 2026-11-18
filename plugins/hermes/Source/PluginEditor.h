@@ -7,7 +7,9 @@
 #include "PluginProcessor.h"
 #include "UI/HermesUi.h"
 #include <array>
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 
 // The loudness readings and a graph of the last minute on glass, the trim, the listening mode, and the reference (load, A/B, level match, restart).
 // Everything drawn is the shared kit's (shared/ui).
@@ -31,6 +33,10 @@ public:
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { hermes::guideTitle(), hermes::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
+    ui::UndoButtons undoButtons; // UNDO / REDO, in the header strip (shared/ui Undo.h)
+    ui::AbButtons abButtons;     // A / B, beside them (shared/ui AbCompare.h)
+    ui::UndoButtons& undoControls() noexcept { return undoButtons; } // for UiCheck
+    ui::AbButtons& abControls() noexcept { return abButtons; }
     std::vector<ui::Note> notes() const { return hermes::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     void loadFile (const juce::File&);                                              // what LOAD does with the file that was picked (the checks call it too)
     void seekTo (juce::Point<int>);                                                 // a click on the reference's bar (the checks call it too)

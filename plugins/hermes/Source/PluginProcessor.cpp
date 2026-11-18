@@ -9,7 +9,7 @@ HermesProcessor::HermesProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "STATE", hermes::createLayout())
+      apvts (*this, &undo, "STATE", hermes::createLayout())
 {
     formats.registerBasicFormats();
 }
@@ -66,6 +66,7 @@ void HermesProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 void HermesProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     programs.saveTo (apvts.state);
+    ab.saveTo (apvts.state);
     auto state = apvts.copyState();
     state.setProperty ("refPath", referencePath, nullptr);
     if (auto xml = state.createXml())
@@ -79,6 +80,7 @@ void HermesProcessor::setStateInformation (const void* data, int size)
         {
             auto tree = juce::ValueTree::fromXml (*xml);
             const auto path = tree.getProperty ("refPath").toString();
+            ab.loadFrom (tree); // a session from before A / B has no abSlot: it opens on slot 0
             apvts.replaceState (tree);
             programs.loadFrom (apvts.state);
             if (path.isEmpty() || ! juce::File (path).existsAsFile())
