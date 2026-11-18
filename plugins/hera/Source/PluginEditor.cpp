@@ -55,6 +55,10 @@ HeraEditor::HeraEditor (HeraProcessor& p)
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
+    autoThreshButton.setTooltip ("Play the track: for four seconds this listens to the sound and sets THRESH once, so that at the current RATIO and KNEE the sound is turned down by about "
+                                 "3.5 dB on average while it plays (silence is not counted). Only THRESH changes, as one undo step. Press it again to measure another passage.");
+    autoThreshButton.onClick = [this] { startAutoThresh(); };
+    addAndMakeVisible (autoThreshButton);
     startTimerHz (kTimerHz);
     setSize (kWidth, kHeight);
 }
@@ -63,6 +67,7 @@ HeraEditor::~HeraEditor()
 {
     proc.engine.delta = false; // monitoring never outlives the window that asked for it
     proc.engine.scListen = false;
+    proc.engine.autoThreshCancel(); // a listening that was going on ends with the window
     setLookAndFeel (nullptr);
 }
 
@@ -79,12 +84,14 @@ void HeraEditor::resized()
     abButtons.setBounds (strip.getX() + ui::UndoButtons::kWidth + 10, strip.getY(), ui::AbButtons::kWidth, strip.getHeight());
     auto headerRow = header.withTrimmedTop (28).withHeight (28);
     presetLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
-    presetBox.setBounds (headerRow.removeFromLeft (190));
+    presetBox.setBounds (headerRow.removeFromLeft (176));
     headerRow.removeFromLeft (14);
     lookaheadLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
-    lookahead.setBounds (headerRow.removeFromLeft (110));
+    lookahead.setBounds (headerRow.removeFromLeft (100));
     headerRow.removeFromLeft (14);
-    latencyLabel = headerRow.removeFromLeft (120);
+    latencyLabel = headerRow.removeFromLeft (100);
+    headerRow.removeFromLeft (14);
+    autoThreshButton.setBounds (headerRow.removeFromLeft (104).reduced (0, 3)); // AUTO THRESH: the header row has the room the latency label gave up
 
     bounds.removeFromTop (10);
     auto display = bounds.removeFromTop (displayHeight);
@@ -123,6 +130,8 @@ AdviceInput HeraEditor::adviceInput() const
     in.sidechainConnected = proc.sidechainConnected.load (std::memory_order_relaxed);
     in.delta = proc.engine.delta.load();
     in.scListen = proc.engine.scListen.load();
+    in.autoThreshAsked = autoAsked;
+    in.autoThresh = autoAnswer;
     return in;
 }
 
@@ -238,5 +247,62 @@ void HeraEditor::timerCallback()
     presetBox.sync();
     deltaButton.setToggleState (proc.engine.delta.load(), juce::dontSendNotification);
     listenButton.setToggleState (proc.engine.scListen.load(), juce::dontSendNotification);
+    if (autoTicks > 0) // a listening: its answer when the engine says it is done, a timeout when no sound comes at all
+    {
+        if (proc.engine.autoThreshState() == Engine::AutoState::done)
+            finishAutoThresh();
+        else if (--autoTicks == 0)
+        {
+            proc.engine.autoThreshCancel();
+            autoAnswer = hera::AutoThresh(); // silent: no audio arrived in the time the listening allows
+            autoAsked = true;
+            autoThreshButton.setButtonText ("NO AUDIO");
+            autoStatusTicks = 3 * kTimerHz;
+        }
+    }
+    else if (autoStatusTicks > 0 && --autoStatusTicks == 0)
+        autoThreshButton.setButtonText ("AUTO THRESH");
     repaint();
+}
+
+// Listens to the sound: the engine collects its level for kAutoListenSeconds, and the timer takes the answer. The timeout is generous, since
+// the sound may start a few seconds after the press.
+void HeraEditor::startAutoThresh()
+{
+    if (autoTicks > 0)
+        return; // already listening
+    proc.engine.autoThreshStart();
+    autoTicks = 20 * kTimerHz;
+    autoStatusTicks = 0;
+    autoAsked = false;
+    autoThreshButton.setButtonText ("LISTENING");
+}
+
+// The answer: THRESH is set once through the host's gesture, inside one undo step. Only the answer `set` moves it; the rest leave it as it was.
+void HeraEditor::finishAutoThresh()
+{
+    autoTicks = 0;
+    const auto p = readParams (proc.apvts);
+    autoAnswer = proc.engine.autoThreshAnswer (p.ratio, p.kneeDb);
+    proc.engine.autoThreshCancel();
+    autoAsked = true;
+    const char* text = "AUTO THRESH";
+    switch (autoAnswer.result)
+    {
+        case hera::AutoThresh::Result::set:
+        {
+            ui::beginUndoStep (proc.apvts, "AUTO THRESH");
+            auto* t = proc.apvts.getParameter (id::threshold);
+            t->beginChangeGesture();
+            t->setValueNotifyingHost (t->convertTo0to1 (autoAnswer.thresholdDb));
+            t->endChangeGesture();
+            text = "THRESH SET";
+            break;
+        }
+        case hera::AutoThresh::Result::silent: text = "NO AUDIO"; break;
+        case hera::AutoThresh::Result::flat: text = "NO RATIO"; break;
+        case hera::AutoThresh::Result::quiet: text = "TOO QUIET"; break;
+    }
+    autoThreshButton.setButtonText (text);
+    autoStatusTicks = 3 * kTimerHz;
 }

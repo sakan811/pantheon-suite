@@ -476,5 +476,110 @@ int main()
         check (run (un, noise, EngineParams()).l == o1.l, "with SC LISTEN off the sound is as it was");
     }
 
+    // [11] AUTO THRESH: four seconds of sound, then the THRESH that turns it down by 3.5 dB on average at the RATIO and KNEE set.
+    std::printf ("\n[11] AUTO THRESH\n");
+    {
+        // A listening as the editor starts it: the request, the audio thread, the answer. Returns the answer and whether it is done.
+        const auto listenTo = [] (const Stereo& in, const EngineParams& p, int block = 512)
+        {
+            Engine e;
+            e.prepare (kFs);
+            e.autoThreshStart();
+            run (e, in, p, block);
+            return std::make_pair (e.autoThreshAnswer (p.ratio, p.kneeDb), e.autoThreshState() == Engine::AutoState::done);
+        };
+        // The reduction the compressor really gives: the RMS ratio of input to output over each 10 ms of audible sound (left channel).
+        const auto averageReduction = [] (const Stereo& in, const EngineParams& p)
+        {
+            Engine e;
+            e.prepare (kFs);
+            const auto out = run (e, in, p);
+            const auto rmsOf10ms = [] (const std::vector<float>& x, size_t from)
+            {
+                double acc = 0.0;
+                for (size_t i = from; i < from + 480; ++i)
+                    acc += (double) x[i] * (double) x[i];
+                return std::sqrt (acc / 480.0);
+            };
+            double sum = 0.0;
+            int count = 0;
+            for (size_t s = 0; s + 480 <= in.l.size(); s += 480)
+            {
+                const double inDb = db (rmsOf10ms (in.l, s));
+                if (inDb < -70.0)
+                    continue;
+                sum += inDb - db (rmsOf10ms (out.l, s));
+                ++count;
+            }
+            return count > 0 ? sum / count : 0.0;
+        };
+
+        EngineParams p;
+        p.ratio = 4.0f;
+        p.kneeDb = 6.0f;
+        p.thresholdDb = -18.0f;
+
+        // A steady tone at -20 dB (peak): the reduction is 0.75 x (level - THRESH) past the knee, so 3.5 dB is 4.67 dB over: THRESH -24.7.
+        const Stereo steady = sine (1000.0, -20.0, 48000 * 5);
+        const auto [steadyAnswer, steadyDone] = listenTo (steady, p);
+        check (steadyDone, "a listening of four seconds ends by itself: the state is done after a five-second tone");
+        check (steadyAnswer.result == AutoThresh::Result::set, "a steady tone at -20 dB: THRESH is set");
+        check (std::fabs (steadyAnswer.thresholdDb - (-24.67)) < 0.3, fmt ("... to %.1f dB (the law: -24.7 for 3.5 dB at 4:1, 6 dB knee)", steadyAnswer.thresholdDb));
+        EngineParams set = p;
+        set.thresholdDb = steadyAnswer.thresholdDb;
+        const double steadyRed = averageReduction (steady, set);
+        check (std::fabs (steadyRed - 3.5) < 0.3, fmt ("... and the sound is then turned down %.2f dB on average (aimed at 3.5)", steadyRed));
+
+        // Loud bursts: 0 dB for 100 ms of every second, -30 dB for the other 900 ms. A peak rule would put THRESH near -4.7 dB (3.5 dB under 0 dB);
+        // the average over time, as the sound is heard, is turned down 3.5 dB at a THRESH well under that. The answer is corrected for the
+        // release tail the listening measured (the follower is not the law), so it is not the law's own -31 dB either.
+        Stereo bursty;
+        bursty.l.resize (48000 * 5);
+        bursty.r = bursty.l;
+        for (size_t i = 0; i < bursty.l.size(); ++i)
+        {
+            const double level = (i % 48000) < 4800 ? 0.0 : -30.0;
+            bursty.l[i] = bursty.r[i] = (float) (std::pow (10.0, level / 20.0) * std::sin (2.0 * M_PI * 1000.0 * (double) i / kFs));
+        }
+        const auto [burstAnswer, burstDone] = listenTo (bursty, p);
+        check (burstDone && burstAnswer.result == AutoThresh::Result::set, "loud bursts over a quiet tone: THRESH is set");
+        check (burstAnswer.thresholdDb < -10.0f, fmt ("... to %.1f dB: well under the peak rule's -4.7 dB, because the bursts are 10%% of the time", burstAnswer.thresholdDb));
+        set.thresholdDb = burstAnswer.thresholdDb;
+        const double burstRed = averageReduction (bursty, set);
+        check (std::fabs (burstRed - 3.5) < 0.5, fmt ("... and the sound is turned down %.2f dB on average, bursts and release tail included (aimed at 3.5)", burstRed));
+
+        // Its answer does not depend on how the host cuts the sound into blocks.
+        const auto [burstTiny, tinyDone] = listenTo (bursty, p, 1);
+        check (tinyDone && burstTiny.thresholdDb == burstAnswer.thresholdDb, "blocks of 1 sample give the same THRESH as blocks of 512, bit for bit");
+
+        // Silence, and a tone under the silence gate: nothing audible, THRESH stays where it is.
+        const auto [silentAnswer, silentDone] = listenTo (sine (1000.0, -120.0, 48000 * 5), p);
+        check (silentDone && silentAnswer.result == AutoThresh::Result::silent, "silence for four seconds: nothing audible, so THRESH is left alone");
+        const auto [quietAnswer, quietDone] = listenTo (sine (1000.0, -80.0, 48000 * 5), p);
+        check (quietDone && quietAnswer.result == AutoThresh::Result::silent, "a tone at -80 dB (under the -70 dB gate) is silence too");
+
+        // RATIO 1:1 reduces nothing, so there is nothing to set THRESH from.
+        EngineParams flat = p;
+        flat.ratio = 1.0f;
+        const auto [flatAnswer, flatDone] = listenTo (steady, flat);
+        check (flatDone && flatAnswer.result == AutoThresh::Result::flat, "RATIO 1:1: nothing to set, THRESH is left alone");
+
+        // A tone that is audible but cannot be reduced by 3.5 dB even at -60 dB THRESH (2:1, no knee: 1 dB at most there).
+        EngineParams gentle = p;
+        gentle.ratio = 2.0f;
+        gentle.kneeDb = 0.0f;
+        const auto [quietTone, quietToneDone] = listenTo (sine (1000.0, -58.0, 48000 * 5), gentle);
+        check (quietToneDone && quietTone.result == AutoThresh::Result::quiet, "a tone at -58 dB at 2:1 cannot reach 3.5 dB even at -60 dB THRESH: THRESH is left alone");
+
+        // The listening ends after its four seconds whatever it hears: a cancel puts it back to idle.
+        Engine idle;
+        idle.prepare (kFs);
+        idle.autoThreshStart();
+        run (idle, sine (1000.0, -20.0, 48000 * 2), p);
+        check (idle.autoThreshState() == Engine::AutoState::listening, "two seconds in, the listening is still going");
+        idle.autoThreshCancel();
+        check (idle.autoThreshState() == Engine::AutoState::idle, "a cancel puts it back to idle");
+    }
+
     return test::finish ("HeraTests");
 }

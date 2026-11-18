@@ -11,13 +11,14 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 
 ![Hera Bond](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, an 8 dB knee, AUTO REL, AUTO MAKEUP and LEVEL MATCH on. On the left, the transfer curve (input across, output up) with the dot where the level is now, the shaded band of the knee (THRESH -22 dB, 8 dB knee: -26 to -18 dB on the input) and the thin lines at THRESH; at the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit, as on opening); on the right, the reduction over the last seconds (-9.3 dB now), with **LEVEL MATCH** on and its gain read out under the reduction (-9.4 dB: the compression takes about that much level, and the match gives it back). The strip warns that taking off 11 dB or more will pump. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, an 8 dB knee, AUTO REL, AUTO MAKEUP and LEVEL MATCH on. On the left, the transfer curve (input across, output up) with the dot where the level is now, the shaded band of the knee (THRESH -22 dB, 8 dB knee: -26 to -18 dB on the input) and the thin lines at THRESH; at the top, UNDO / REDO (UNDO lit, REDO not), the A / B pair (A lit, as on opening) and AUTO THRESH (idle, not pressed) beside the presets; on the right, the reduction over the last seconds (-9.3 dB now), with **LEVEL MATCH** on and its gain read out under the reduction (-9.4 dB: the compression takes about that much level, and the match gives it back). The strip warns that taking off 11 dB or more will pump. Regenerate with the command under "Development".*
 
 ## What it does
 
 | | |
 |---|---|
 | **Threshold** | -60 to 0 dB, -18 by default: the level (the peak of a sine) above which the sound is turned down. |
+| **Auto thresh** | One press (AUTO THRESH, beside the presets): listens to four seconds of the sound and sets THRESH once, so that at the current RATIO and KNEE the sound is turned down by about 3.5 dB on average while it plays. Silence is not counted; the answer is the average over the time, so a few loud bursts do not set it alone, and the reduction the follower really takes (its release tail included) is allowed for. Only THRESH moves, as one undo step; a silent passage, RATIO 1:1 or a sound too quiet to reach 3.5 dB leave it as it was, and the strip says which. |
 | **Ratio** | 1:1 to 20:1, 2:1 by default: how many dB it takes past the threshold for 1 dB more to come out. |
 | **Attack / Release** | 0.1 to 200 ms (10) and 10 ms to 2 s (150): the time the gain takes to go 63% of the way down and of the way back. |
 | **Knee** | 0 to 24 dB, 6 by default: how gradually it starts, around the threshold. |
@@ -33,7 +34,7 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 | **Delta** | Plays only what the compressor changes (output minus the input, delayed like the output). Not saved, not automatable, off when the window closes. |
 | **SC listen** | Plays what the detector hears: the key (this track, or the sidechain with KEY on) after SC HPF, instead of the track. Not saved, not automatable, off when the window closes. |
 | **Undo and A/B** | **UNDO / REDO** (Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus; Ctrl on other systems) take back and redo changes to the controls, a preset included (as one step each). They are not kept with the session. **A / B** holds two settings of every control except LEVEL MATCH (which stays as it is, as with a preset): choosing B the first time copies A; after that each switch keeps what you have set in the one you leave and loads the other, so the plugin can be set up two ways and compared while listening. A later switch is one undo step (the first, which only copies A into B, is not). The slots are not saved with the session, only which one is active. Both come from the shared kit (`Undo.h`, `AbCompare.h`). |
-| **Presets** | Eight starting points (Init, Vocal Level, Drum Punch, Bus Glue, Bass Control, Parallel Smash, Peak Catcher, Sidechain Duck). A preset sets every control; what it does not list goes back to its default (LEVEL MATCH is kept). The thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves. |
+| **Presets** | Eight starting points (Init, Vocal Level, Drum Punch, Bus Glue, Bass Control, Parallel Smash, Peak Catcher, Sidechain Duck). A preset sets every control; what it does not list goes back to its default (LEVEL MATCH is kept). The thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves, or press AUTO THRESH to set it from the sound. |
 
 The display is the transfer curve (input level across, output up; the diagonal is "no compression", the dot is the level now; the shaded band is the knee, THRESH plus or minus half the KNEE, and the thin lines mark THRESH) and the reduction of the last ten seconds.
 
@@ -59,6 +60,7 @@ The display is the transfer curve (input level across, output up; the diagonal i
 - A train of clicks: the peak detector turns it down by 15.7 dB, the RMS one by 0.0 dB.
 - LOOK-AHEAD 5 ms: with nothing to compress the output is the input 240 samples later, bit for bit; at a step from -40 to 0 dBFS (20:1, ATTACK 5 ms) the first millisecond of the output is at -0.6 dBFS without it and -11.0 dBFS with it; a change of the setting while running moves the latency (96 samples for 2 ms).
 - LEVEL MATCH: noise at 4:1 over -30 dB comes out 10.83 dB quieter; with it on it is -0.01 dB after 5 s (applying +10.83 dB); off, 0.00 dB; blocks of 1, 7, 333 and 4096 samples give the same output, bit for bit. DELTA of +6 dB makeup is -0.04 dB of the input (the wanted -0.04), and silence exactly with nothing to compress (with look-ahead too). SC LISTEN with the high-pass at 1 kHz: 5 kHz passes (-0.01 dB), 100 Hz is -40.0 dB; with KEY on it is the key. Bypassed by the host with 10 ms of look-ahead, an impulse comes out exactly the reported 480 samples late (`HeraUiCheck`).
+- AUTO THRESH: four seconds of a steady tone at -20 dB set THRESH to -24.7 dB (the law: -24.7), and the sound is then turned down 3.53 dB on average (aimed at 3.5). Four seconds of 0 dB bursts (100 ms of each second) over -30 dB set THRESH to -18.4 dB, and the sound is then turned down 3.54 dB on average, bursts and release tail included. Silence, a tone under -70 dB, RATIO 1:1 and a -58 dB tone at 2:1 leave THRESH alone; blocks of 1 and of 512 samples give the same THRESH, and in the editor one press sets only THRESH, as one undo step (`HeraUiCheck`).
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit (with look-ahead too). NaN and infinity in the input are silence.
 
 ## Limits
@@ -70,6 +72,7 @@ The display is the transfer curve (input level across, output up; the diagonal i
 - **LEVEL MATCH is slow and is not a loudness meter.** It equals the RMS of the whole sound (about 0.6 s to settle, so it follows a section, not a note), stops at 12 dB, and does not weigh frequencies as an ear does; judge by ear, and with DELTA.
 - **The RMS detector's 10 ms** means a very short peak (a click) is hardly seen: use the peak detector for them.
 - **KEY with nothing connected listens to itself**, so a session saved with it still works without a sidechain.
+- **AUTO THRESH measures once.** It sets THRESH for the four seconds it heard, at the RATIO and KNEE set when it is done: a passage that is louder later is not followed, and changing RATIO or KNEE afterwards does not re-measure. It needs the sound to be playing while it listens (a stopped transport gives "NO AUDIO" after 20 s).
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
