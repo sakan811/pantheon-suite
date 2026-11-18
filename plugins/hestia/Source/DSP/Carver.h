@@ -107,8 +107,6 @@ public:
         return 20.0 * std::log10 (m);
     }
 
-    const std::array<double, kBands>& bellGains() const noexcept { return gainDb; }
-
 private:
     bool reachable (int k) const noexcept { return bandCentreHz (k) < 0.49 * fs; }
 

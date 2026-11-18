@@ -759,8 +759,8 @@ int main()
                "the sender, a stem of another mix and an instance made after the copy are not");
     }
 
-    // ---- [14] AUTO ROLE: the role a track's name suggests ----------------------------------------------------------------------------------------
-    std::printf ("[14] AUTO ROLE: the role the track's name suggests\n");
+    // ---- [16] AUTO ROLE: the role a track's name suggests ----------------------------------------------------------------------------------------
+    std::printf ("[16] AUTO ROLE: the role the track's name suggests\n");
     {
         // The rule the processor runs by itself on the first name: only on an untouched ROLE, and only for a confident word.
         const auto autoExpect = [] (const char* name, bool untouched, std::optional<Role> want) {
