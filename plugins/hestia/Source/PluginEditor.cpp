@@ -161,6 +161,9 @@ AdviceInput HestiaEditor::adviceInput() const
     proc.engine.busRef().nameOf (proc.engine.slotIndex(), name);
     in.trackName = name;
     in.autoRoleMissed = autoRoleMissed;
+    in.autoRoleApplied = proc.autoRoleSet;
+    in.autoRole = proc.autoRoleTo;
+    in.autoRoleName = proc.autoRoleFrom;
     return in;
 }
 

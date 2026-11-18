@@ -762,6 +762,23 @@ int main()
     // ---- [14] AUTO ROLE: the role a track's name suggests ----------------------------------------------------------------------------------------
     std::printf ("[14] AUTO ROLE: the role the track's name suggests\n");
     {
+        // The rule the processor runs by itself on the first name: only on an untouched ROLE, and only for a confident word.
+        const auto autoExpect = [] (const char* name, bool untouched, std::optional<Role> want) {
+            const auto got = autoRoleOnName (name, untouched);
+            const bool same = got.has_value() == want.has_value() && (! got || *got == *want);
+            check (same, fmt ("auto \"%s\" (%s) -> %s", name, untouched ? "untouched" : "touched", got ? roleName (*got) : "no role"));
+        };
+        autoExpect ("Bass DI", true, Role::bass);
+        autoExpect ("Kick_01", true, Role::kick);
+        autoExpect ("Lead Vox", true, Role::leadVocal);
+        autoExpect ("Synth Pad", true, Role::pad);
+        autoExpect ("Bass DI", false, std::nullopt);      // a saved or touched ROLE is never overwritten
+        autoExpect ("Kick_01", false, std::nullopt);
+        autoExpect ("Track 1", true, std::nullopt);        // no word: not confident, nothing to set
+        autoExpect ("Synth", true, std::nullopt);          // the weakest word alone is a hint, not a name
+        autoExpect ("Master", true, std::nullopt);
+        autoExpect ("", true, std::nullopt);
+
         const auto expect = [] (const char* name, std::optional<Role> want) {
             const auto got = roleFromName (name);
             const bool same = got.has_value() == want.has_value() && (! got || *got == *want);

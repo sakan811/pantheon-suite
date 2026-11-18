@@ -579,5 +579,100 @@ int main()
         check (ui::hasNote (editor.notes(), "the host gave this track no name", ui::Severity::info), "a track with no name is said to have none");
     }
 
+    std::printf ("\nAUTO ROLE by itself: once, on a fresh instance's first clear name; a saved session is never changed; the strip says what it did\n");
+    {
+        const auto pumpFor = [] (int ms) {
+            for (int t = 0; t < ms; t += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+        };
+        const auto giveName = [] (HestiaProcessor& p, const char* s) {
+            juce::AudioProcessor::TrackProperties props;
+            props.name = s;
+            p.updateTrackProperties (props);
+        };
+
+        // A fresh instance given a clear name sets ROLE by itself, as one UNDO step, and the strip says so until ROLE is changed.
+        HestiaProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HestiaEditor> (*holder);
+        editor.setVisible (true);
+        giveName (q, "Bass DI");
+        pumpFor (300);
+        check (readParams (q.apvts).role == Role::bass, "a fresh instance given 'Bass DI' sets ROLE to Bass by itself");
+        check (ui::hasNote (editor.notes(), "Role set to Bass from the track name 'Bass DI'; change it any time.", ui::Severity::info),
+               "the strip says what it did, with the name it read");
+        check (readParams (q.apvts).carveDb == EngineParams().carveDb && readParams (q.apvts).group == EngineParams().group,
+               "... and nothing else is changed");
+        pumpFor (300);
+        q.undo.undo();
+        pumpFor (300);
+        check (readParams (q.apvts).role == Role::fullRange, "one UNDO takes the automatic ROLE back (Full Range again)");
+        check (! ui::hasNote (editor.notes(), "Role set to", ui::Severity::info), "... and the strip stops saying it");
+        q.undo.redo();
+        pumpFor (300);
+        check (readParams (q.apvts).role == Role::bass, "REDO brings it back");
+        setValue (q.apvts, id::role, (float) (int) Role::kick);
+        pumpFor (100);
+        check (! ui::hasNote (editor.notes(), "Role set to", ui::Severity::info), "once the user changes ROLE, the strip no longer says what was set");
+
+        // It runs once: a second name does not set anything, and a name with no confident word sets nothing at all.
+        HestiaProcessor r;
+        r.setPlayConfigDetails (2, 2, 48000.0, 512);
+        r.prepareToPlay (48000.0, 512);
+        giveName (r, "Track 1");
+        giveName (r, "Bass DI");
+        pumpFor (300);
+        check (readParams (r.apvts).role == Role::fullRange, "a name with no word is not a name to act on, and the first one ends the try");
+        HestiaProcessor w;
+        w.setPlayConfigDetails (2, 2, 48000.0, 512);
+        w.prepareToPlay (48000.0, 512);
+        giveName (w, "Synth");
+        pumpFor (300);
+        check (readParams (w.apvts).role == Role::fullRange, "the weakest word alone ('Synth') sets nothing");
+
+        // A saved session is never changed: a saved ROLE stays, whatever the track is called, and the default saved ROLE stays too.
+        HestiaProcessor saved;
+        saved.setPlayConfigDetails (2, 2, 48000.0, 512);
+        saved.prepareToPlay (48000.0, 512);
+        setValue (saved.apvts, id::role, (float) (int) Role::kick);
+        pumpFor (100);
+        juce::MemoryBlock kickState;
+        saved.getStateInformation (kickState);
+        setValue (saved.apvts, id::role, (float) (int) Role::fullRange);
+        pumpFor (100);
+        juce::MemoryBlock fullState;
+        saved.getStateInformation (fullState);
+
+        HestiaProcessor reopened;
+        reopened.setPlayConfigDetails (2, 2, 48000.0, 512);
+        reopened.prepareToPlay (48000.0, 512);
+        reopened.setStateInformation (kickState.getData(), (int) kickState.getSize());
+        giveName (reopened, "Bass DI");
+        pumpFor (300);
+        check (readParams (reopened.apvts).role == Role::kick, "a saved session with ROLE Kick is not overwritten by 'Bass DI'");
+        check (! reopened.autoRoleSet, "... and nothing is said about it");
+
+        HestiaProcessor reopenedDefault;
+        reopenedDefault.setPlayConfigDetails (2, 2, 48000.0, 512);
+        reopenedDefault.prepareToPlay (48000.0, 512);
+        reopenedDefault.setStateInformation (fullState.getData(), (int) fullState.getSize());
+        giveName (reopenedDefault, "Bass DI");
+        pumpFor (300);
+        check (readParams (reopenedDefault.apvts).role == Role::fullRange, "a saved session whose ROLE is still the default is not treated as fresh");
+
+        // A name given before the saved session is loaded is overwritten by the saved state, which wins.
+        HestiaProcessor late;
+        late.setPlayConfigDetails (2, 2, 48000.0, 512);
+        late.prepareToPlay (48000.0, 512);
+        giveName (late, "Bass DI");
+        pumpFor (300);
+        check (readParams (late.apvts).role == Role::bass, "(a name first, then a saved session) the name sets Bass");
+        late.setStateInformation (fullState.getData(), (int) fullState.getSize());
+        pumpFor (300);
+        check (readParams (late.apvts).role == Role::fullRange && ! late.autoRoleSet, "... and the saved session's ROLE then wins, with no note");
+    }
+
     return test::finish ("UI CHECK");
 }
