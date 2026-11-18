@@ -71,7 +71,7 @@ private:
     juce::TextButton learnButton { "Learn from tracks..." }, closestButton { "Closest" }, saveButton { "Save curve" }, loadButton { "Load curve" },
         resetButton { "Reset" }, copyEqButton { "Copy EQ" }, holdButton { "Hold curve" };
     juce::Label statusLabel;
-    ui::GuideButton guideButton { usage::guideTitle(), usage::guideText() };
+    ui::GuideButton guideButton { usage::guideTitle(), juce::String (usage::guideText()) };
     ui::Knob avgKnob, toleranceKnob, ceilingKnob;
     ui::Toggle resetOnPlayButton;
     juce::TooltipWindow tooltipWindow { this, 600 };

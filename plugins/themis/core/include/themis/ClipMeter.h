@@ -24,6 +24,7 @@ struct ClipWindow
     uint32_t clipEvents = 0;  // flat-topped plateaus (see ClipMeter)
     uint32_t clipSamples = 0; // samples inside those plateaus
     uint32_t overSamples = 0; // samples at or above 0 dBFS
+    float meanSquare = 0.0f;  // linear mean square of both channels over the same samples as the peaks (0 for none)
 };
 
 // A linear level as dBFS, down to the history floor (no -5 digit cut-off: a DC offset far under a peak still counts).
@@ -35,6 +36,8 @@ struct ClipTotals
     bool have = false;
     float samplePeakDb = kHistoryFloorDb;
     float truePeakDb = kHistoryFloorDb;
+    // The true peak of each channel on its own (the larger of the two is truePeakDb).
+    float truePeakLeftDb = kHistoryFloorDb, truePeakRightDb = kHistoryFloorDb;
     uint64_t clipEvents = 0, clipSamples = 0, overSamples = 0;
     // The mean of each channel's samples since the reset, linear and signed (0 for a healthy signal): a DC offset. Not part of
     // the comparison below, because it moves in its last digits with every block.
@@ -52,7 +55,8 @@ struct ClipTotals
     bool operator== (const ClipTotals& o) const
     {
         const std::equal_to<float> same;
-        return have == o.have && same (samplePeakDb, o.samplePeakDb) && same (truePeakDb, o.truePeakDb) && clipEvents == o.clipEvents
+        return have == o.have && same (samplePeakDb, o.samplePeakDb) && same (truePeakDb, o.truePeakDb)
+               && same (truePeakLeftDb, o.truePeakLeftDb) && same (truePeakRightDb, o.truePeakRightDb) && clipEvents == o.clipEvents
                && clipSamples == o.clipSamples && overSamples == o.overSamples;
     }
     bool operator!= (const ClipTotals& o) const { return !(*this == o); }
@@ -143,6 +147,8 @@ public:
             return t;
         t.samplePeakDb = peakToDb (totalSamplePeak.load (std::memory_order_relaxed));
         t.truePeakDb = peakToDb (totalTruePeak.load (std::memory_order_relaxed));
+        t.truePeakLeftDb = peakToDb (totalTruePeakLr[0].load (std::memory_order_relaxed));
+        t.truePeakRightDb = peakToDb (totalTruePeakLr[1].load (std::memory_order_relaxed));
         t.clipEvents = totalClipEvents.load (std::memory_order_relaxed);
         t.clipSamples = totalClipSamples.load (std::memory_order_relaxed);
         t.overSamples = totalOverSamples.load (std::memory_order_relaxed);
@@ -160,6 +166,7 @@ private:
         float previous = 0.0f;
         int plateau = 0;       // length of the current run of equal, high samples
         float entryStep = 0.0f; // how far the run's first sample was from the one before it
+        float truePeak = 0.0f;  // linear, the largest true peak of this channel since the reset
         double sum = 0.0;       // of every sample since the reset (the DC offset is this over the count)
         double sumSquares = 0.0; // of every sample squared since the reset (the mean square, for the crest factor)
     };
@@ -180,7 +187,9 @@ private:
         if (!std::isfinite (a)) // a glitched sample is not a peak: leave the detectors (and the totals) alone
             return;
         w.samplePeak = std::max (w.samplePeak, a);
-        w.truePeak = std::max (w.truePeak, static_cast<float> (s.oversampler.push (x)));
+        const float truePeak = static_cast<float> (s.oversampler.push (x));
+        s.truePeak = std::max (s.truePeak, truePeak);
+        w.truePeak = std::max (w.truePeak, truePeak);
         if (a >= kOverLevel)
             ++w.overSamples;
 
@@ -217,6 +226,8 @@ private:
         // The totals have this thread as their only writer, so a load + store is enough.
         totalSamplePeak.store (std::max (totalSamplePeak.load (std::memory_order_relaxed), w.samplePeak), std::memory_order_relaxed);
         totalTruePeak.store (std::max (totalTruePeak.load (std::memory_order_relaxed), w.truePeak), std::memory_order_relaxed);
+        totalTruePeakLr[0].store (state[0].truePeak, std::memory_order_relaxed);
+        totalTruePeakLr[1].store (state[1].truePeak, std::memory_order_relaxed);
         totalClipEvents.store (totalClipEvents.load (std::memory_order_relaxed) + w.clipEvents, std::memory_order_relaxed);
         totalClipSamples.store (totalClipSamples.load (std::memory_order_relaxed) + w.clipSamples, std::memory_order_relaxed);
         totalOverSamples.store (totalOverSamples.load (std::memory_order_relaxed) + w.overSamples, std::memory_order_relaxed);
@@ -235,6 +246,7 @@ private:
             s.previous = 0.0f;
             s.plateau = 0;
             s.entryStep = 0.0f;
+            s.truePeak = 0.0f;
             s.sum = 0.0;
             s.sumSquares = 0.0;
         }
@@ -246,6 +258,8 @@ private:
         totalSamples.store (0, std::memory_order_relaxed);
         totalSamplePeak.store (0.0f, std::memory_order_relaxed);
         totalTruePeak.store (0.0f, std::memory_order_relaxed);
+        totalTruePeakLr[0].store (0.0f, std::memory_order_relaxed);
+        totalTruePeakLr[1].store (0.0f, std::memory_order_relaxed);
         totalClipEvents.store (0, std::memory_order_relaxed);
         totalClipSamples.store (0, std::memory_order_relaxed);
         totalOverSamples.store (0, std::memory_order_relaxed);
@@ -261,6 +275,7 @@ private:
     } window;
 
     std::atomic<float> totalSamplePeak { 0.0f }, totalTruePeak { 0.0f };
+    std::atomic<float> totalTruePeakLr[2] { { 0.0f }, { 0.0f } };
     std::atomic<uint64_t> totalClipEvents { 0 }, totalClipSamples { 0 }, totalOverSamples { 0 };
     std::atomic<uint64_t> totalSamples { 0 };
     std::atomic<double> totalSum[2] { { 0.0 }, { 0.0 } };
