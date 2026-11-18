@@ -550,5 +550,79 @@ int main()
         check (editor.view.getTooltip().contains ("Delete"), "the display's tooltip says that Delete or Backspace switches the selected band off");
     }
 
+    // A / B: the header-row buttons, each slot keeps its settings, the kept parameters (OUTPUT, PHASE, GAIN MATCH) stay across a switch, and the active slot is saved.
+    std::printf ("\nA / B\n");
+    {
+        ApolloProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<ApolloEditor> (*holder);
+        editor.setVisible (true);
+        const auto pumpUntil = [] (auto&& done) {
+            for (int waited = 0; ! done() && waited < 2000; waited += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            return done();
+        };
+        const auto inTree = [&q] (const juce::String& pid, float plain) {
+            for (int i = 0; i < q.apvts.state.getNumChildren(); ++i)
+            {
+                const auto child = q.apvts.state.getChild (i);
+                if (child.getProperty ("id").toString() == pid)
+                    return std::fabs ((float) child.getProperty ("value") - plain) < 1e-3f;
+            }
+            return false;
+        };
+        const auto gainOf = [&q] (int band) { return readParams (q.apvts).bands[(size_t) band].gainDb; };
+
+        const auto abR = editor.abButtons.getBounds(), undoR = editor.undoButtons.getBounds(), clearR = editor.clearAllButton.getBounds();
+        check (editor.abButtons.isVisible() && editor.abButtons.button (1).isVisible(), "A and B are on screen in the row above the display");
+        check (editor.getLocalBounds().contains (abR) && ! abR.intersects (undoR) && ! abR.intersects (clearR) && abR.getX() > clearR.getRight(),
+               "A / B sits right of CLEAR ALL, inside the editor and overlapping nothing");
+        check (! abR.intersects (editor.view.getBounds()) && abR.getBottom() <= editor.view.getY(), "A / B is above the display, not on it");
+
+        // Each slot keeps its settings: B starts as a copy of A, then switching restores both.
+        q.undo.clearUndoHistory();
+        setValue (q.apvts, bandIds (2).gain, -7.5f);
+        setValue (q.apvts, id::out, 3.0f);
+        pumpUntil ([&] { return inTree (bandIds (2).gain, -7.5f) && inTree (id::out, 3.0f); });
+        editor.abButtons.button (1).onClick(); // B starts as a copy of A
+        check (q.ab.active() == 1 && editor.abButtons.button (1).getToggleState() && ! editor.abButtons.button (0).getToggleState(), "B is chosen and lit, A is not");
+        setValue (q.apvts, bandIds (2).gain, 4.0f);
+        setValue (q.apvts, id::out, -2.0f); // OUTPUT is kept by A / B: this stays through the switches below
+        pumpUntil ([&] { return inTree (bandIds (2).gain, 4.0f) && inTree (id::out, -2.0f); });
+        editor.abButtons.button (0).onClick();
+        pumpUntil ([&] { return inTree (bandIds (2).gain, -7.5f); });
+        check (std::fabs (gainOf (2) + 7.5f) < 0.05f, "switching to A brings back A's band gain (-7.5 dB)");
+        check (std::fabs (readParams (q.apvts).outDb + 2.0f) < 0.05f, "OUTPUT is kept across the switch (-2 dB, what it was set to in B)");
+        editor.abButtons.button (1).onClick();
+        pumpUntil ([&] { return inTree (bandIds (2).gain, 4.0f); });
+        check (std::fabs (gainOf (2) - 4.0f) < 0.05f, "switching back to B brings back B's band gain (+4 dB)");
+        editor.undoButtons.undo();
+        pumpUntil ([&] { return inTree (bandIds (2).gain, -7.5f); });
+        check (std::fabs (gainOf (2) + 7.5f) < 0.05f, "UNDO takes back the A / B switch as one step (A again)");
+
+        // A session keeps the active slot; one from before A / B opens on slot A.
+        editor.abButtons.button (1).onClick();
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        ApolloProcessor onB;
+        onB.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (onB.ab.active() == 1 && ! onB.ab.hasSettings (0), "a session saved on B opens on B, with only the active slot kept");
+
+        if (auto xml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize()))
+        {
+            check (xml->getIntAttribute ("abSlot", -1) == 1, "the B session carries abSlot 1 before it is taken out");
+            xml->removeAttribute ("abSlot");
+            juce::MemoryBlock legacy;
+            juce::AudioProcessor::copyXmlToBinary (*xml, legacy);
+            ApolloProcessor before;
+            before.setStateInformation (legacy.getData(), (int) legacy.getSize());
+            check (before.ab.active() == 0, "a session from before A / B (no abSlot) opens on slot A");
+        }
+        else
+            check (false, "the saved session is readable as XML");
+    }
+
     return test::finish ("ApolloUiCheck");
 }
