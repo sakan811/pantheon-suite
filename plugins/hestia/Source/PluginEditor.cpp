@@ -41,6 +41,8 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
       holdButton (p.apvts, id::hold, "HOLD", "Freezes the cut where it is now: the bands keep the cut they have, whatever the other stems do, until you switch it off. This stem is still seen by the others."),
       presetBox (p, presets(), "The mix letter, the sidechain's role and importance, OUTPUT and HOLD are kept."),
       view (p),
+      undoButtons (p.undo, *this),
+      abButtons (p.ab),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -53,6 +55,8 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &view, &roleBox, &mixBox, &scRoleBox, &importance, &distance, &carve, &reach, &attack, &release, &outKnob, &scImportance,
                                                               &holdButton, &deltaButton, &copyButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
+    addAndMakeVisible (undoButtons);
+    addAndMakeVisible (abButtons);
 
     startTimerHz (kTimerHz);
     setSize (kWidth, kHeight);
@@ -78,22 +82,27 @@ void HestiaEditor::resized()
     header.removeFromLeft (24);
     outKnob.setBounds (header.removeFromRight (170).withSizeKeepingCentre (170, 52));
     header.removeFromRight (16);
+    // UNDO / REDO and A / B in the top strip of the header, which the labels of the row leave free.
+    const auto strip = header.withHeight (16).translated (0, -6);
+    undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
+    abButtons.setBounds (strip.getX() + ui::UndoButtons::kWidth + 10, strip.getY(), ui::AbButtons::kWidth, strip.getHeight());
     auto row = header.withTrimmedTop (28).withHeight (28);
     roleLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    roleBox.setBounds (row.removeFromLeft (170));
-    row.removeFromLeft (14);
+    roleBox.setBounds (row.removeFromLeft (140));
+    row.removeFromLeft (12);
     mixLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    mixBox.setBounds (row.removeFromLeft (90));
-    row.removeFromLeft (14);
+    mixBox.setBounds (row.removeFromLeft (72));
+    row.removeFromLeft (12);
     presetLabel = { row.getX() + 2, row.getY() - 15, 120, 12 };
-    presetBox.setBounds (row.removeFromLeft (140));
-    row.removeFromLeft (14);
-    holdButton.setBounds (row.removeFromLeft (72));
-    row.removeFromLeft (14);
-    deltaButton.setBounds (row.removeFromLeft (80));
-    row.removeFromLeft (14);
-    copyButton.setBounds (row.removeFromLeft (112));
-    guideButton.setBounds (row.removeFromRight (64));
+    presetBox.setBounds (row.removeFromLeft (128));
+    row.removeFromLeft (12);
+    holdButton.setBounds (row.removeFromLeft (64));
+    row.removeFromLeft (12);
+    deltaButton.setBounds (row.removeFromLeft (72));
+    row.removeFromLeft (12);
+    copyButton.setBounds (row.removeFromLeft (104));
+    row.removeFromLeft (12);
+    guideButton.setBounds (row.removeFromLeft (64)); // the row must be wide enough for it: a GUIDE of no width is not a GUIDE
 
     bounds.removeFromTop (10);
     view.setBounds (bounds.removeFromTop (viewHeight));

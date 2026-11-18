@@ -7,7 +7,9 @@
 #include "PluginProcessor.h"
 #include "UI/HestiaUi.h"
 #include "UI/SpaceView.h"
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 
 // The display of the mix's space, the stem's role and mix in the header, the knobs that say how far back it sits and how it gives room, and the
 // sidechain's role. Everything drawn is the
@@ -28,6 +30,10 @@ public:
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { hestia::guideTitle(), hestia::guideText() };
     hestia::gui::SpaceView view;
+    ui::UndoButtons undoButtons; // UNDO / REDO, in the header strip above the labels (shared/ui Undo.h)
+    ui::AbButtons abButtons;     // A / B, beside them (shared/ui AbCompare.h)
+    ui::UndoButtons& undoControls() noexcept { return undoButtons; } // for UiCheck
+    ui::AbButtons& abControls() noexcept { return abButtons; }
     juce::TextButton& guide() noexcept { return guideButton; }
     void copyToMix(); // what the COPY TO MIX button does (the checks call it too)
     std::vector<ui::Note> notes() const { return hestia::adviceFor (adviceInput()); } // what the strip under the knobs says, for the checks

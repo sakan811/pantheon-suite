@@ -349,6 +349,9 @@ int main()
         q.engine.deltaOn = true;
         check (has (editor.notes(), "DELTA", Severity::warning), "DELTA in the engine reaches the editor's notes");
         q.engine.deltaOn = false;
+        check (editor.guideButton.getWidth() >= 48 && editor.getLocalBounds().contains (editor.guideButton.getBounds())
+                   && ! editor.guideButton.getBounds().intersects (editor.copyButton.getBounds()) && ! editor.guideButton.getBounds().intersects (editor.outKnob.getBounds()),
+               "GUIDE has room in the header: wide enough, inside the editor, clear of COPY TO MIX and OUTPUT");
         check (editor.guide().isVisible() && std::strlen (guideText()) > 400 && std::string (guideText()).find ("NOT FOR") != std::string::npos,
                "the GUIDE button is there and its text says what the plugin is not for");
     }
@@ -401,6 +404,129 @@ int main()
         editor.setVisible (true);
         check (editor.presetBox.getNumItems() == q.getNumPrograms() && editor.presetBox.getSelectedId() == chosen + 1, "the editor's preset box lists the presets and shows the current one");
         check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
+    }
+
+    // UNDO / REDO, A / B and the header strip they sit in.
+    std::printf ("\nUndo and A / B: one step per change, the settings of each slot, and sessions from before A / B\n");
+    {
+        HestiaProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HestiaEditor> (*holder);
+        editor.setVisible (true);
+        // The state records a change when the editor's timer writes it to the tree (in the step open then), so a change has settled when the tree holds it.
+        const auto pumpUntil = [] (auto&& done) {
+            for (int waited = 0; ! done() && waited < 2000; waited += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            return done();
+        };
+        const auto inTree = [&q] (const juce::String& pid, float plain) {
+            for (int i = 0; i < q.apvts.state.getNumChildren(); ++i)
+            {
+                const auto child = q.apvts.state.getChild (i);
+                if (child.getProperty ("id").toString() == pid)
+                    return std::fabs ((float) child.getProperty ("value") - plain) < 1e-3f;
+            }
+            return false;
+        };
+
+        const auto undoR = editor.undoControls().getBounds(), abR = editor.abControls().getBounds();
+        check (editor.undoControls().isVisible() && editor.abControls().isVisible() && editor.undoControls().undoSwitch().isVisible() && editor.abControls().button (1).isVisible(),
+               "UNDO / REDO and A / B are on screen");
+        check (editor.getLocalBounds().contains (undoR) && editor.getLocalBounds().contains (abR), "UNDO / REDO and A / B are inside the editor");
+        check (! undoR.intersects (abR) && abR.getX() > undoR.getRight(), "UNDO / REDO and A / B sit side by side without overlapping");
+        check (undoR.getX() >= 12 + 250 && undoR.getBottom() <= editor.roleBox.getY() - 15, "UNDO / REDO are right of the nameplate and above the row's labels");
+        const juce::Rectangle<int> controls[] { editor.roleBox.getBounds(), editor.mixBox.getBounds(), editor.presetBox.getBounds(), editor.holdButton.getBounds(),
+                                                editor.deltaButton.getBounds(), editor.copyButton.getBounds(), editor.guideButton.getBounds(), editor.outKnob.getBounds() };
+        bool clear = true;
+        for (const auto& r : controls)
+            clear = clear && ! undoR.intersects (r) && ! abR.intersects (r);
+        check (clear, "UNDO / REDO and A / B overlap no control of the header");
+
+        // Each change made with its own step is taken back by one UNDO, and REDO brings it again.
+        q.undo.clearUndoHistory();
+        ui::beginUndoStep (q.apvts, "Carve");
+        setValue (q.apvts, id::carve, 9.0f);
+        pumpUntil ([&] { return inTree (id::carve, 9.0f); });
+        ui::beginUndoStep (q.apvts, "Reach");
+        setValue (q.apvts, id::reach, 20.0f);
+        pumpUntil ([&] { return inTree (id::reach, 20.0f); });
+        pumpUntil ([&] { return editor.undoControls().undoSwitch().isEnabled(); });
+        check (editor.undoControls().undoSwitch().isEnabled() && ! editor.undoControls().redoSwitch().isEnabled(), "after two changes UNDO is lit and REDO is not");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).reachDb - 12.0f) < 1e-3f && std::fabs (readParams (q.apvts).carveDb - 9.0f) < 1e-3f, "UNDO takes back the last change only (REACH back to 12 dB, CARVE stays 9 dB)");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).carveDb - 6.0f) < 1e-3f, "a second UNDO takes back the carve too (6 dB)");
+        pumpUntil ([&] { return editor.undoControls().redoSwitch().isEnabled(); });
+        check (editor.undoControls().redoSwitch().isEnabled(), "REDO is lit after an UNDO");
+        editor.undoControls().redo();
+        check (std::fabs (readParams (q.apvts).carveDb - 9.0f) < 1e-3f, "REDO brings the carve back (9 dB)");
+
+        // Cmd+Z and Shift+Cmd+Z reach the same buttons from the keyboard: the editor hands them to UndoButtons::handleKey.
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) && std::fabs (readParams (q.apvts).carveDb - 6.0f) < 1e-3f,
+               "Cmd+Z takes back the carve (6 dB)");
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', juce::ModifierKeys (juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier), 0))
+                   && std::fabs (readParams (q.apvts).carveDb - 9.0f) < 1e-3f,
+               "Shift+Cmd+Z brings it back (9 dB)");
+
+        // A preset is one step: one UNDO puts back everything it moved (Kick: role, importance and carve).
+        q.undo.clearUndoHistory();
+        int kick = 0;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+            if (q.getProgramName (i) == "Kick") kick = i;
+        q.setCurrentProgram (kick);
+        pumpUntil ([&] { return inTree (id::role, 0.0f) && inTree (id::carve, 4.0f); });
+        check (readParams (q.apvts).role == Role::kick && std::fabs (readParams (q.apvts).carveDb - 4.0f) < 1e-3f, "the Kick preset moved the role and the carve");
+        editor.undoControls().undo();
+        check (readParams (q.apvts).role == Role::fullRange && std::fabs (readParams (q.apvts).importance - 0.5f) < 1e-3f && std::fabs (readParams (q.apvts).carveDb - 9.0f) < 1e-3f,
+               "one UNDO takes back the whole preset (role, importance and carve), the change before it stays");
+
+        // A / B: each slot keeps its settings, MIX is kept across a switch, and each switch is one step.
+        q.undo.clearUndoHistory();
+        setValue (q.apvts, id::carve, 9.0f);
+        setValue (q.apvts, id::importance, 80.0f);
+        pumpUntil ([&] { return inTree (id::carve, 9.0f) && inTree (id::importance, 80.0f); });
+        editor.abControls().button (1).onClick(); // B starts as a copy of A
+        check (q.ab.active() == 1 && editor.abControls().button (1).getToggleState() && ! editor.abControls().button (0).getToggleState(), "B is chosen and lit, A is not");
+        setValue (q.apvts, id::carve, 3.0f);
+        setValue (q.apvts, id::importance, 30.0f);
+        setValue (q.apvts, id::mix, 5.0f); // MIX is not part of a slot: it must survive the switches below
+        pumpUntil ([&] { return inTree (id::carve, 3.0f) && inTree (id::importance, 30.0f) && inTree (id::mix, 5.0f); });
+        editor.abControls().button (0).onClick();
+        pumpUntil ([&] { return inTree (id::carve, 9.0f) && inTree (id::importance, 80.0f); });
+        check (std::fabs (readParams (q.apvts).carveDb - 9.0f) < 0.05f && std::fabs (readParams (q.apvts).importance - 0.8f) < 0.01f, "switching to A brings back A's settings (9 dB, IMPORTANCE 80%)");
+        check (readParams (q.apvts).group == 5, "MIX stays where it was across a switch (5, E)");
+        editor.abControls().button (1).onClick();
+        pumpUntil ([&] { return inTree (id::carve, 3.0f) && inTree (id::importance, 30.0f); });
+        check (std::fabs (readParams (q.apvts).carveDb - 3.0f) < 0.05f && std::fabs (readParams (q.apvts).importance - 0.3f) < 0.01f, "switching back to B brings back B's settings (3 dB, IMPORTANCE 30%)");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).carveDb - 9.0f) < 0.05f, "UNDO takes back the A / B switch as one step (A's 9 dB again)");
+
+        // A session keeps which slot is active, not the slots themselves; a session from before A / B has no abSlot and opens on A.
+        editor.abControls().button (0).onClick();
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        HestiaProcessor reopened;
+        reopened.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (reopened.ab.active() == 0 && ! reopened.ab.hasSettings (1), "the session keeps which slot is active (A here), not the slots themselves");
+        editor.abControls().button (1).onClick();
+        q.getStateInformation (saved);
+        HestiaProcessor onB;
+        onB.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (onB.ab.active() == 1, "a session saved on B opens on B");
+        if (auto xml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize()))
+        {
+            check (xml->getIntAttribute ("abSlot", -1) == 1, "the B session carries abSlot 1 before it is taken out");
+            xml->removeAttribute ("abSlot");
+            juce::MemoryBlock legacy;
+            juce::AudioProcessor::copyXmlToBinary (*xml, legacy);
+            HestiaProcessor before;
+            before.setStateInformation (legacy.getData(), (int) legacy.getSize());
+            check (before.ab.active() == 0, "a session from before A / B (no abSlot) opens on slot A");
+        }
+        else
+            check (false, "the saved session is readable as XML");
     }
 
     return test::finish ("UI CHECK");

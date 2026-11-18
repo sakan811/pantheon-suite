@@ -10,7 +10,7 @@ HestiaProcessor::HestiaProcessor()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                           .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
-      apvts (*this, nullptr, "STATE", hestia::createLayout())
+      apvts (*this, &undo, "STATE", hestia::createLayout())
 {
 }
 
@@ -52,6 +52,7 @@ void HestiaProcessor::handleAsyncUpdate()
     hestia::Shared s;
     if (! engine.takeBroadcast (s))
         return;
+    ui::beginUndoStep (apvts, "COPY TO MIX"); // the four settings are one UNDO step
     for (const auto& [pid, value] : { std::pair<const juce::String&, float> { hestia::id::carve, s.carveDb }, { hestia::id::reach, s.reachDb },
                                       { hestia::id::attack, s.attackMs }, { hestia::id::release, s.releaseMs } })
     {
@@ -102,6 +103,7 @@ void HestiaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 void HestiaProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     programs.saveTo (apvts.state);
+    ab.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -111,7 +113,9 @@ void HestiaProcessor::setStateInformation (const void* data, int size)
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
         {
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            auto tree = juce::ValueTree::fromXml (*xml);
+            ab.loadFrom (tree); // a session from before A / B has no abSlot: it opens on slot 0
+            apvts.replaceState (tree);
             programs.loadFrom (apvts.state);
         }
 }

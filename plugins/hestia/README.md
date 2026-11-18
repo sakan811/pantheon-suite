@@ -34,6 +34,8 @@ room for all of them. (CMake targets, namespaces and plugin codes use the short 
 | **Track names** | When the host tells the plugin the name of its track (hosts that do, in VST3 and AU), the legend and the depth map call each stem by it ("Bass DI") instead of by its role. A name is kept to 24 characters. |
 | **Delta** | Listen to what Hestia changes in the stem (its output minus its input: the cut and the depth). Monitoring, not saved with the session. |
 | **Presets** | Ten starting points, one for each kind of stem (Init, Kick, Bass, Drum Bus, Lead Vocal, Backing Vocals, Guitars, Lead Synth, Pads and Strings, FX and Ambience): a role, an importance, a cut and a depth. The mix letter, the sidechain's role and importance, and OUTPUT are kept. |
+| **Undo** | UNDO and REDO in the header (Cmd+Z, Shift+Cmd+Z): step back through the changes to the controls. A preset and a COPY TO MIX are one step each. |
+| **A / B** | Two complete settings, one live: switching keeps what you set in the slot you leave, so two ways of setting up the stem can be compared while listening. The mix letter, OUTPUT, HOLD and the sidechain's role and importance are kept across a switch, as for presets. Only the active slot is saved with the session; the other starts as a copy of the settings when it is first chosen. |
 
 The display (above, all the stems' levels, in the colour of each, and the sidechain as a white line; the strip, who owns each band; the amber bars, the cut
 this stem is making now; on the right, the depth map: where each stem of the mix sits from the front to the back) is what the plugin reads and decides,
