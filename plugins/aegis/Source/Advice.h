@@ -60,6 +60,7 @@ inline const char* guideText()
            "HOW\n"
            "It looks ahead (LOOK-AHEAD) and turns the sound down before a peak arrives, so there is no click, and lets go at RELEASE. "
            "Both channels share one gain, so the stereo image does not move. AUTO RELEASE lets a short peak go sooner than RELEASE. "
+           "AUTO GAIN listens to the loudest part for four seconds and sets GAIN once, so it takes about 3 dB off that part; then move GAIN as you like. "
            "OUT PEAK is the highest true peak that leaves; MAX under REDUCTION is the most it took off (click it, or CLEAR, to start again).\n\n"
            "LISTENING\n"
            "DELTA plays what the limiter takes away: if you hear the music and not just the peaks, it is working too hard. "

@@ -32,6 +32,12 @@ inline constexpr double kAutoFastFloorMs = 2.0;
 inline constexpr double kMatchMeanMs = 1000.0;
 inline constexpr double kMatchStepMs = 20.0;
 
+// AUTO GAIN: the GAIN that takes `kAutoGainReductionDb` off the loudest passage the detector hears, at the current CEILING. Beginners' limiting is usually
+// 2 to 4 dB on the loudest sections (more squashes the sound, and a limiter is no compressor), so 3 dB is the middle of that. The measure is what the
+// detector reads before GAIN, so it does not depend on the GAIN it was taken with; a level under kAutoGainFloorDb is silence (nothing is set).
+inline constexpr float kAutoGainReductionDb = 3.0f;
+inline constexpr double kAutoGainFloorDb = -80.0;
+
 struct EngineParams
 {
     float gainDb = 0.0f;       // before the limiter
@@ -43,6 +49,29 @@ struct EngineParams
     bool delta = false;        // listen to what the limiter takes away (the sound after GAIN minus the output, aligned by the latency)
     bool matchLevel = false;   // turn the output down to the loudness of the input, so a raised GAIN is not an unfair comparison
 };
+
+// The GAIN AUTO GAIN sets, from the loudest true peak the detector read before GAIN (`peakDb`, in the ceiling's units) and the CEILING. `stopped` says the
+// value was held at an end of GAIN's range: the loudest passage takes `reductionDb` off at the value it was set to, not the 3 dB asked for.
+struct AutoGain
+{
+    bool heard = false;   // false: silence, so GAIN is not to be changed
+    float gainDb = 0.0f;  // the GAIN to set
+    float reductionDb = 0.0f; // what the loudest passage takes off at gainDb (positive)
+    bool stopped = false;
+};
+
+inline AutoGain autoGain (double peakDb, double ceilingDb) noexcept
+{
+    if (! (peakDb > kAutoGainFloorDb)) // also false for NaN
+        return {};
+    const double wanted = ceilingDb + (double) kAutoGainReductionDb - peakDb;
+    AutoGain r;
+    r.heard = true;
+    r.gainDb = (float) std::clamp (wanted, 0.0, (double) kMaxGainDb);
+    r.stopped = std::fabs (wanted - (double) r.gainDb) > 1e-6;
+    r.reductionDb = (float) std::max (0.0, peakDb + (double) r.gainDb - ceilingDb);
+    return r;
+}
 
 inline int lookaheadSamples (double fs, int choice) noexcept
 {
@@ -158,7 +187,7 @@ public:
         }
         const uint64_t mask = (uint64_t) (ring - 1), wait = (uint64_t) (look + kDetectorDelay), w1 = (uint64_t) widthOne, w2 = (uint64_t) widthTwo;
         float peakIn = 0.0f, peakOut = 0.0f;
-        double deepest = 1.0;
+        double deepest = 1.0, detected = 0.0;
 
         for (int i = 0; i < n; ++i)
         {
@@ -169,6 +198,7 @@ public:
 
             // What the limiter must do for the sound the detector is looking at now, kept for the whole look-ahead, then let go at the release.
             const double peak = std::fmax (readerL.push (xl, p.truePeak), readerR.push (xr, p.truePeak));
+            detected = std::fmax (detected, peak / gainNow); // what the detector heard before GAIN (AUTO GAIN's measure)
             const double required = peak > ceiling ? ceiling / peak : 1.0;
             const double held = mins.push (required, look + 1); // the two detector points either side of the sample that is heard now: see the README
             double step = releaseStep;
@@ -230,6 +260,8 @@ public:
             inPeak.store (peakIn, std::memory_order_relaxed);
         if (peakOut > outPeak.load (std::memory_order_relaxed))
             outPeak.store (peakOut, std::memory_order_relaxed);
+        if ((float) detected > detectorPeak.load (std::memory_order_relaxed))
+            detectorPeak.store ((float) detected, std::memory_order_relaxed);
     }
 
     uint64_t clamped = 0; // samples the final clamp had to touch (for the tests: with the limiter working it stays 0)
@@ -238,6 +270,7 @@ public:
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB (positive)
     std::atomic<float> inPeak { 0.0f };         // the largest input sample since the editor last asked (linear)
     std::atomic<float> outPeak { 0.0f };        // the largest true peak (sample peak with TRUE PEAK off) of the output since the editor last asked (linear)
+    std::atomic<float> detectorPeak { 0.0f };   // the largest peak the detector read before GAIN since the editor last asked (linear): AUTO GAIN's measure
 
 private:
     static inline double finite (float v) noexcept { return std::isfinite (v) ? (double) v : 0.0; }

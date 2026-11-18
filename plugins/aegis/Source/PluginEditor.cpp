@@ -16,7 +16,8 @@ constexpr int kTimerHz = 30;
 constexpr int kWidth = 784, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
 constexpr int displayHeight = kHeight - (headerHeight + 10 + 10 + controlsHeight + 8 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 constexpr float kReadoutWidth = 150.0f; // the right side of the glass: numbers, then the IN and OUT bars (paint() and the CLEAR button's place in resized())
-constexpr int kPasteTicks = 30 * 8; // eight seconds
+constexpr int kNoteTicks = 30 * 8;   // a line of the strip (PASTE, AUTO GAIN) stays eight seconds
+constexpr int kAutoGainTicks = 30 * 4; // AUTO GAIN listens for four seconds
 }
 
 AegisEditor::AegisEditor (AegisProcessor& p)
@@ -30,13 +31,13 @@ AegisEditor::AegisEditor (AegisProcessor& p)
       autoReleaseButton (p.apvts, id::autoRelease, "AUTO RELEASE", "A short peak is let go faster than RELEASE; a reduction that lasts is let go at RELEASE. Smoother on music with transients, and RELEASE is then the slow end. Off, the gain always comes back at RELEASE."),
       deltaButton (p.apvts, id::delta, "DELTA", "Listen to what the limiter takes away: the sound after GAIN minus the output, aligned by the delay. If it is the sound itself (not just the peaks), the limiter is working too hard. Not for the bounce: switch it off. Presets switch it off."),
       matchButton (p.apvts, id::matchLevel, "MATCH", "Turns the output down to the loudness of the input (read over about a second), so raising GAIN does not win the comparison just by being louder. It only ever turns down, so the ceiling holds. For comparing: switch it off before the bounce. Presets switch it off."),
-      presetBox (p, presets(), "Everything is set by a preset, GAIN too (set it by ear afterwards); what it does not list goes back to its default."),
+      presetBox (p, presets(), "Everything is set by a preset, GAIN too (set it by ear or with AUTO GAIN afterwards); what it does not list goes back to its default."),
       undoButtons (p.undo, *this),
       abButtons (p.ab),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &gainKnob, &ceilingKnob, &releaseKnob, &lookaheadBox, &truePeakButton, &autoReleaseButton, &deltaButton, &matchButton, &presetBox, &guideButton, &pasteButton, &clearOutButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &gainKnob, &ceilingKnob, &releaseKnob, &lookaheadBox, &truePeakButton, &autoReleaseButton, &autoGainButton, &deltaButton, &matchButton, &presetBox, &guideButton, &pasteButton, &clearOutButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
@@ -47,6 +48,9 @@ AegisEditor::AegisEditor (AegisProcessor& p)
     pasteButton.onClick = [this] { pasteFromClipboard (juce::SystemClipboard::getTextFromClipboard()); };
     clearOutButton.setTooltip ("Clear the OUT PEAK hold and the MAX REDUCTION hold (clicking the MAX REDUCTION number clears that one alone). They also clear when CEILING or TRUE PEAK changes, because the old peaks were read against another limit.");
     clearOutButton.onClick = [this] { outHold = gui::kLevelFloorDb; reductionHold = 0.0f; };
+    autoGainButton.setTooltip ("Sets GAIN once, from the loudest part you play for four seconds: the loudest part then takes about 3 dB off at the current CEILING. "
+                               "It changes GAIN; you can still move it. Silence changes nothing.");
+    autoGainButton.onClick = [this] { startAutoGain(); };
     startTimerHz (kTimerHz);
     setSize (kWidth, kHeight);
 }
@@ -101,9 +105,11 @@ void AegisEditor::resized()
     matchButton.setBounds (lookRow.removeFromLeft (84));
     right.removeFromTop (14);
     auto toggles = right.removeFromTop (28);
-    truePeakButton.setBounds (toggles.removeFromLeft (150));
+    truePeakButton.setBounds (toggles.removeFromLeft (136));
     toggles.removeFromLeft (12);
-    autoReleaseButton.setBounds (toggles.removeFromLeft (150));
+    autoReleaseButton.setBounds (toggles.removeFromLeft (136));
+    toggles.removeFromLeft (8);
+    autoGainButton.setBounds (toggles.removeFromLeft (84));
     delayTip.setBounds (latencyLabel);
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
 }
@@ -122,8 +128,8 @@ float AegisEditor::heldReductionDb() const noexcept { return *std::max_element (
 std::vector<ui::Note> AegisEditor::shownNotes() const
 {
     auto list = aegis::adviceFor (adviceInput());
-    if (pasteTicks > 0 && ! pasteSaid.empty())
-        list.insert (list.begin(), { ui::Severity::info, pasteSaid });
+    if (stripTicks > 0 && ! stripSaid.empty())
+        list.insert (list.begin(), { ui::Severity::info, stripSaid });
     return list;
 }
 
@@ -133,9 +139,44 @@ void AegisEditor::pasteFromClipboard (const juce::String& text)
     auto said = pasteLimiter (proc.apvts, text);
     if (said.empty())
         said = "Nothing to paste: copy a limiter setting from Themis' plan first (COPY on the ceiling or loudness item).";
-    pasteSaid = said;
-    pasteTicks = kPasteTicks;
+    setStripNote (said, kNoteTicks);
     repaint();
+}
+
+void AegisEditor::setStripNote (std::string text, int ticks)
+{
+    stripSaid = std::move (text);
+    stripTicks = ticks;
+    repaint();
+}
+
+void AegisEditor::startAutoGain()
+{
+    proc.engine.detectorPeak.exchange (0.0f); // only what is heard from now on counts
+    autoGainTicks = kAutoGainTicks;
+    setStripNote ("AUTO GAIN is listening: play the loudest part for four seconds.", kAutoGainTicks + 2);
+}
+
+void AegisEditor::finishAutoGain()
+{
+    autoGainTicks = 0;
+    const float peak = proc.engine.detectorPeak.exchange (0.0f);
+    const auto p = readParams (proc.apvts);
+    const auto r = autoGain (peak > 0.0f ? 20.0 * std::log10 ((double) peak) : -200.0, p.ceilingDb);
+    if (! r.heard)
+    {
+        setStripNote ("AUTO GAIN heard nothing, so GAIN is unchanged. Play the loudest part and try again.", kNoteTicks);
+        return;
+    }
+    ui::beginUndoStep (proc.apvts, "AUTO GAIN"); // one UNDO step, as the other buttons that set a value
+    setValue (proc.apvts, id::gain, r.gainDb);
+    const auto takes = juce::String (r.reductionDb, 1) + " dB off";
+    if (! r.stopped)
+        setStripNote ("AUTO GAIN set GAIN to " + juce::String (r.gainDb, 1).toStdString() + " dB: the loudest part now takes " + takes.toStdString() + ".", kNoteTicks);
+    else if (r.gainDb > 0.0f)
+        setStripNote ("AUTO GAIN stopped at the top of GAIN, " + juce::String (r.gainDb, 1).toStdString() + " dB: the loudest part takes only " + takes.toStdString() + ".", kNoteTicks);
+    else
+        setStripNote ("AUTO GAIN left GAIN at 0 dB: the loudest part already takes " + takes.toStdString() + ".", kNoteTicks);
 }
 
 AdviceInput AegisEditor::adviceInput() const
@@ -243,8 +284,10 @@ void AegisEditor::timerCallback()
     shownTruePeak = params.truePeak;
     outHold = std::max (outHold, outLevelDb);
     reductionHold = std::max (reductionHold, now);
-    if (pasteTicks > 0)
-        --pasteTicks;
+    if (stripTicks > 0)
+        --stripTicks;
+    if (autoGainTicks > 0 && --autoGainTicks == 0)
+        finishAutoGain();
     presetBox.sync();
     repaint();
 }

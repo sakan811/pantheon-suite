@@ -7,7 +7,7 @@
 #include <pantheon/ui/Presets.h>
 
 // Starting points for the jobs a true-peak limiter is most often used for. A preset sets every control: what it does not list is back at its default. GAIN is
-// set by ear and by the reduction meter, not by the preset: raise it until the sound is as loud as it should be and no further than the music can take.
+// set by AUTO GAIN, by ear or by the reduction meter, not by the preset: AUTO GAIN takes about 3 dB off the loudest part, and by ear it is as loud as the music can take.
 namespace aegis
 {
 // The listening aids are kept across an A / B switch (so the two settings are heard the same way), as Hera keeps LEVEL MATCH. The presets do not use this:
@@ -21,7 +21,7 @@ inline const std::vector<ui::Preset>& presets()
     {
         { "Init", {}, "The starting point: no gain, a ceiling of -1 dBTP, a release of 100 ms, 2 ms of look-ahead, true peak on." },
         { "Streaming Master", { { id::gain, 3.0f }, { id::ceiling, -1.0f }, { id::release, 150.0f }, { id::lookahead, 2.0f }, { id::autoRelease, 1.0f } },
-          "A few dB up to -1 dBTP, which streaming services and lossy codecs ask for, with AUTO RELEASE. Set GAIN by ear, not by the number." },
+          "A few dB up to -1 dBTP, which streaming services and lossy codecs ask for, with AUTO RELEASE. GAIN: AUTO GAIN, or by ear." },
         { "Loud Master", { { id::gain, 6.0f }, { id::ceiling, -0.5f }, { id::release, 60.0f }, { id::lookahead, 3.0f }, { id::autoRelease, 1.0f } },
           "More level: a short release, AUTO RELEASE and 5 ms of look-ahead. Past 6 dB of reduction it sounds squashed." },
         { "Gentle Peak Catch", { { id::gain, 1.5f }, { id::ceiling, -1.0f }, { id::release, 250.0f }, { id::lookahead, 3.0f }, { id::autoRelease, 1.0f } },

@@ -29,7 +29,7 @@ public:
     ui::Knob gainKnob, ceilingKnob, releaseKnob;
     ui::Choice lookaheadBox;
     ui::Toggle truePeakButton, autoReleaseButton, deltaButton, matchButton;
-    juce::TextButton pasteButton { "PASTE" }, clearOutButton { "CLEAR" };
+    juce::TextButton pasteButton { "PASTE" }, clearOutButton { "CLEAR" }, autoGainButton { "AUTO GAIN" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { aegis::guideTitle(), aegis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
@@ -50,10 +50,13 @@ public:
     float outHoldDb() const noexcept { return outHold; } // the highest true peak of the output since CLEAR (or since CEILING or TRUE PEAK changed)
     std::vector<ui::Note> shownNotes() const; // the notes, with what the last PASTE did first while it is shown
     void pasteFromClipboard (const juce::String& text); // what PASTE does with the clipboard's text (a limiter setting from Themis' plan)
+    void finishAutoGain(); // the end of AUTO GAIN's four seconds: sets GAIN from the loudest part heard (the timer calls it; UiCheck calls it directly)
 
 private:
     void timerCallback() override;
     aegis::AdviceInput adviceInput() const;
+    void startAutoGain(); // AUTO GAIN's button: listen for four seconds
+    void setStripNote (std::string text, int ticks); // a line of the strip for `ticks` timer ticks, ahead of the notes (PASTE and AUTO GAIN use it)
 
     AegisProcessor& proc;
     HardwareLookAndFeel look;
@@ -65,8 +68,9 @@ private:
     juce::Rectangle<int> holdArea;
     float shownCeilingDb = -1.0f;
     bool shownTruePeak = true;
-    std::string pasteSaid;
-    int pasteTicks = 0; // timer ticks left to show pasteSaid
+    std::string stripSaid;
+    int stripTicks = 0;   // timer ticks left to show stripSaid
+    int autoGainTicks = 0; // timer ticks left to listen for AUTO GAIN (0: not listening)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AegisEditor)
 };
