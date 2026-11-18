@@ -11,10 +11,13 @@ namespace hermes
 {
 namespace id
 {
-inline const juce::String trim { "trim" }, polarity { "polarity" }, listen { "listen" }, reference { "ref" }, levelMatch { "match" }, referenceTrim { "ref_trim" }, resetOnPlay { "reset_play" };
+inline const juce::String trim { "trim" }, polarity { "polarity" }, listen { "listen" }, reference { "ref" }, levelMatch { "match" }, referenceTrim { "ref_trim" }, resetOnPlay { "reset_play" }, autoTarget { "auto_target" }, autoPeak { "auto_peak" };
 }
 
 inline const juce::StringArray listenNames { "Stereo", "Mono", "Left", "Right", "Side", "Swap" };
+
+// The delivery targets of AUTO TRIM, in the order of kAutoTrimTargets (engine).
+inline const juce::StringArray autoTargetNames { "-14 Streaming", "-16 Podcast", "-19 Mono podcast", "-23 Broadcast" };
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 {
@@ -31,6 +34,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::levelMatch, 1 }, "Level Match", d.levelMatch));
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::referenceTrim, 1 }, "Reference Trim", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), d.referenceTrimDb, Attr().withStringFromValueFunction (db)));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::resetOnPlay, 2 }, "Auto Reset", d.resetOnPlay));
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::autoTarget, 2 }, "Auto Trim Target", autoTargetNames, d.autoTarget));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::autoPeak, 2 }, "Auto Trim Peak Ceiling", d.autoPeak));
     return { p.begin(), p.end() };
 }
 
@@ -46,6 +51,8 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.levelMatch = v (id::levelMatch) > 0.5f;
     e.referenceTrimDb = v (id::referenceTrim);
     e.resetOnPlay = v (id::resetOnPlay) > 0.5f;
+    e.autoTarget = std::clamp ((int) v (id::autoTarget), 0, (int) kAutoTrimTargets.size() - 1);
+    e.autoPeak = v (id::autoPeak) > 0.5f;
     return e;
 }
 

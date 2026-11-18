@@ -378,7 +378,37 @@ int main()
         Engine n;
         n.prepare (kFs);
         run (n, sine (500.0, -26.0, 6.0), q);
-        check (std::fabs (n.integrated.load() - kAutoTrimLufs) < 0.3, fmt ("a sound measured, trimmed by AUTO TRIM and played again reads %.2f LUFS (target %.0f)", n.integrated.load(), kAutoTrimLufs));
+        check (std::fabs (n.integrated.load() - kAutoTrimTargets[0]) < 0.3, fmt ("a sound measured, trimmed by AUTO TRIM and played again reads %.2f LUFS (target %.0f)", n.integrated.load(), kAutoTrimTargets[0]));
+
+        // The targets and the peak option, as functions: the smaller of the loudness gain and the headroom, and what says which one stopped it.
+        const auto t = autoTrim (0.0f, -20.0, -14.0, -6.0, true);
+        check (std::fabs (t.trimDb - 5.0f) < 1e-4f && t.peakLimited, "AUTO TRIM with the peak option: -20 LUFS at -6 dBTP stops at the -1 dBTP ceiling (+5 dB, not +6)");
+        const auto roomy = autoTrim (0.0f, -20.0, -14.0, -9.0, true);
+        check (std::fabs (roomy.trimDb - 6.0f) < 1e-4f && ! roomy.peakLimited, "AUTO TRIM with the peak option reaches the loudness target when the peaks leave the headroom");
+        const auto noPeak = autoTrim (0.0f, -20.0, -14.0, -6.0, false);
+        check (std::fabs (noPeak.trimDb - 6.0f) < 1e-4f && ! noPeak.peakLimited, "AUTO TRIM without the peak option ignores the peaks");
+        const auto broadcast = autoTrim (0.0f, -20.0, kAutoTrimTargets[3], -6.0, true);
+        check (std::fabs (broadcast.trimDb + 3.0f) < 1e-4f && ! broadcast.peakLimited, "AUTO TRIM to -23 is -3 dB, and the peaks do not stop it");
+        check (std::fabs (autoTrim (0.0f, -20.0, kAutoTrimTargets[2], -6.0, false).trimDb - 1.0f) < 1e-4f, "AUTO TRIM to -19 (mono podcast) is +1 dB");
+        const auto unread = autoTrim (2.0f, -200.0, -14.0, -6.0, true);
+        check (unread.trimDb == 2.0f && ! unread.peakLimited, "AUTO TRIM with the peak option leaves the trim alone when nothing is measured");
+        const auto nopeaks = autoTrim (0.0f, -20.0, -14.0, -200.0, true);
+        check (std::fabs (nopeaks.trimDb - 6.0f) < 1e-4f && ! nopeaks.peakLimited, "AUTO TRIM with no peak read yet is the loudness gain alone");
+
+        // The same on a sound with a high crest factor: a click every 100 ms at 0.5 peaks at -6 dBFS, and reads well under -14 LUFS.
+        Stereo clicks { std::vector<float> ((size_t) (20.0 * kFs), 0.0f), std::vector<float> ((size_t) (20.0 * kFs), 0.0f) };
+        for (size_t i = 0; i < clicks.l.size(); i += 4800)
+            clicks.l[i] = clicks.r[i] = 0.5f;
+        Engine c1;
+        c1.prepare (kFs);
+        run (c1, clicks, EngineParams {});
+        const auto ct = autoTrim (0.0f, c1.integrated.load(), kAutoTrimTargets[0], c1.truePeakDb.load(), true);
+        Engine c2;
+        c2.prepare (kFs);
+        EngineParams cp;
+        cp.trimDb = ct.trimDb;
+        run (c2, clicks, cp);
+        check (ct.peakLimited && std::fabs (c2.truePeakDb.load() + 1.0f) < 0.1f, fmt ("clicks at -6 dBTP read %.2f LUFS: AUTO TRIM with the peak option stops at -1 dBTP (%.2f dBTP after it)", c1.integrated.load(), c2.truePeakDb.load()));
     }
 
     return test::finish ("HermesTests");

@@ -27,8 +27,8 @@ public:
     static constexpr int kHistory = 600; // readings at 10 Hz: a minute
 
     ui::Knob trim, referenceTrim;
-    ui::Choice listen;
-    ui::Toggle polarity, reference, levelMatch, autoReset;
+    ui::Choice autoTarget, listen;
+    ui::Toggle polarity, reference, levelMatch, autoReset, autoPeak;
     juce::TextButton loadButton { "LOAD" }, restartButton { "RESTART" }, resetButton { "RESET" }, autoTrimButton { "AUTO TRIM" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { hermes::guideTitle(), hermes::guideText() };
@@ -54,7 +54,9 @@ private:
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
     std::unique_ptr<juce::FileChooser> chooser;
-    juce::Rectangle<int> nameplate, presetLabel, readouts, graph, listenLabel, referenceArea, noteStrip;
+    juce::Rectangle<int> nameplate, presetLabel, readouts, graph, autoLabel, listenLabel, referenceArea, noteStrip;
+    bool autoTrimPeakLimited = false; // the last AUTO TRIM stopped at the peak ceiling
+    float autoTrimSetTo = 0.0f;       // the TRIM it set: the note goes when TRIM is changed
     std::array<float, kHistory> momentaryHistory, shortTermHistory;
     float momentary = -200.0f, shortTerm = -200.0f, integrated = -200.0f, range = 0.0f, truePeak = -200.0f, samplePeak = -200.0f, position = 0.0f;
     int ticks = 0;

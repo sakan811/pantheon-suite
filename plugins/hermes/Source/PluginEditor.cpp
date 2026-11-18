@@ -27,6 +27,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
     : AudioProcessorEditor (&p),
       trim (p.apvts, id::trim, "TRIM", "The level of your sound: the meters read it after the trim, and so does everything downstream.", ui::Knob::Layout::below),
       referenceTrim (p.apvts, id::referenceTrim, "REF TRIM", "Adds to the reference's level (after LEVEL MATCH): when the reference should be a little louder or quieter.", ui::Knob::Layout::below),
+      autoTarget (p.apvts, id::autoTarget, "The loudness AUTO TRIM sets the sound to, for the delivery it is for: -14 streaming (what streaming services play at), -16 stereo podcast, -19 mono podcast, -23 broadcast (EBU R128). Kept with the session."),
       listen (p.apvts, id::listen,
               "A check on what you hear (the meters still read the whole sound):\nStereo: as it is.\nMono: the sum of both channels (what a mono speaker plays).\nLeft / Right: one channel in both ears.\n"
               "Side: only what differs between the channels.\nSwap: left and right exchanged."),
@@ -34,6 +35,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
       reference (p.apvts, id::reference, "REF (B)", "Hear the reference instead of your sound (A). The switch is a short crossfade, and the reference plays on while you listen to A."),
       levelMatch (p.apvts, id::levelMatch, "LEVEL MATCH", "Brings the reference to the integrated loudness of your sound, so you compare the tone and not the level. Let the meter run first: until it has read a few seconds there is nothing to match."),
       autoReset (p.apvts, id::resetOnPlay, "AUTO RESET", "Clears the integrated loudness, the range and the peaks each time the host starts playing, so every pass is measured from its start. Off by default; it is kept with the session."),
+      autoPeak (p.apvts, id::autoPeak, "-1 dBTP", "AUTO TRIM also stops at a true peak of -1 dBTP: when the peaks reach that first, it sets TRIM to the headroom and a note says the target was not reached. Off by default; it is kept with the session."),
       presetBox (p, presets(), "LISTEN and the reference are set; TRIM, POLARITY and REF TRIM are kept."),
       undoButtons (p.undo, *this),
       abButtons (p.ab),
@@ -54,16 +56,20 @@ HermesEditor::HermesEditor (HermesProcessor& p)
                 loadFile (c.getResult());
         });
     };
-    autoTrimButton.setTooltip ("Sets TRIM so the integrated loudness reads -14 LUFS: play the whole passage first (RESET starts it again). It changes TRIM once, it does not follow the sound.");
+    autoTrimButton.setTooltip ("Sets TRIM so the integrated loudness reads the target above (-14 LUFS by default): play the whole passage first (RESET starts it again). It changes TRIM once, it does not follow the sound.");
     autoTrimButton.onClick = [this]
     {
         const auto measured = proc.engine.integrated.load();
+        const auto p = readParams (proc.apvts);
+        const auto r = autoTrim (p.trimDb, measured, kAutoTrimTargets[(size_t) p.autoTarget], proc.engine.truePeakDb.load(), p.autoPeak);
         ui::beginUndoStep (proc.apvts, "AUTO TRIM");
-        setValue (proc.apvts, id::trim, autoTrimDb (readParams (proc.apvts).trimDb, measured));
+        setValue (proc.apvts, id::trim, r.trimDb);
+        autoTrimSetTo = readParams (proc.apvts).trimDb;
+        autoTrimPeakLimited = r.peakLimited;
     };
     restartButton.onClick = [this] { proc.engine.restartReference(); };
     resetButton.onClick = [this] { proc.engine.resetMeters(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &autoTrimButton, &autoReset, &presetBox, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &autoTrimButton, &autoReset, &autoPeak, &autoTarget, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
@@ -104,6 +110,17 @@ void HermesEditor::resized()
     trim.setBounds (row.removeFromLeft (cellWidth));
     referenceTrim.setBounds (row.removeFromLeft (cellWidth));
     row.removeFromLeft (14);
+    // AUTO TRIM, its target and the peak ceiling in their own cell: the target is a choice, and the ceiling is read with the meters it stops at.
+    auto auto_ = row.removeFromLeft (170).withTrimmedTop (4);
+    autoLabel = { auto_.getX() + 2, auto_.getY(), 100, 10 };
+    auto_.removeFromTop (12);
+    autoTarget.setBounds (auto_.removeFromTop (26));
+    auto_.removeFromTop (6);
+    auto autoRow = auto_.removeFromTop (26);
+    autoTrimButton.setBounds (autoRow.removeFromLeft (80));
+    autoRow.removeFromLeft (6);
+    autoPeak.setBounds (autoRow.removeFromLeft (80));
+    row.removeFromLeft (14);
     auto column = row.removeFromLeft (170).withTrimmedTop (4);
     listenLabel = { column.getX() + 2, column.getY(), 100, 10 };
     column.removeFromTop (12);
@@ -115,8 +132,6 @@ void HermesEditor::resized()
     resetButton.setBounds (two.removeFromLeft (80));
     column.removeFromTop (6);
     auto three = column.removeFromTop (26);
-    autoTrimButton.setBounds (three.removeFromLeft (80));
-    three.removeFromLeft (6);
     autoReset.setBounds (three.removeFromLeft (80));
     row.removeFromLeft (14);
     referenceArea = row.withTrimmedTop (4);
@@ -167,6 +182,7 @@ AdviceInput HermesEditor::adviceInput() const
     in.integratedLufs = integrated;
     in.truePeakDb = truePeak;
     in.rangeLu = range;
+    in.autoTrimPeakLimited = autoTrimPeakLimited && std::fabs (in.params.trimDb - autoTrimSetTo) < 1e-4f;
     return in;
 }
 
@@ -176,6 +192,7 @@ void HermesEditor::paint (juce::Graphics& g)
     hw::drawHeaderPlate (g, getLocalBounds().removeFromTop (headerHeight).toFloat());
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Gain staging and loudness", momentary > gui::kNothing, 25.0f);
     hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Auto trim to", autoLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Listen", listenLabel, juce::Justification::left, colours::dim, 9.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
 

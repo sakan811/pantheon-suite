@@ -42,7 +42,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 7, fmt ("%d parameters: trim, polarity, listen, reference, level match, reference trim and auto reset", proc.getParameters().size()));
+    check (proc.getParameters().size() == 9, fmt ("%d parameters: trim, polarity, listen, reference, level match, reference trim, auto reset, auto trim target and peak ceiling", proc.getParameters().size()));
     check (listenNames.size() == kNumListen, "the choice list matches the engine's modes");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.trimDb) < 1e-4f && ! d.polarity && d.listen == Listen::stereo && ! d.reference && d.levelMatch && ! d.resetOnPlay && proc.getLatencySamples() == 0, "a new instance changes nothing: trim 0, stereo, no reference playing, no latency");
@@ -318,6 +318,54 @@ int main()
         check (std::fabs (20.0f * std::log10 (peak / 0.05f) - 6.0f) < 0.05f, fmt ("TRIM +6 dB through the processor: %.2f dB", 20.0f * std::log10 (peak / 0.05f)));
         check (q.engine.integrated.load() > -40.0f && q.engine.integrated.load() < -20.0f && std::fabs (q.engine.referenceMatchDb.load()) > 1.0f,
                fmt ("the meters read the sound (%.1f LUFS integrated) and the reference is matched to it (%+.1f dB)", q.engine.integrated.load(), q.engine.referenceMatchDb.load()));
+    }
+
+    // AUTO TRIM's target and its peak ceiling: the note appears when the ceiling is what stopped it, and goes when TRIM is changed; the target sets the loudness aimed at.
+    {
+        HermesProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HermesEditor> (*holder);
+        editor.setVisible (true);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        long long n = 0;
+        // A click of 0.5 every 100 ms: quiet on average, with peaks at -6 dBFS, so the ceiling is what stops AUTO TRIM at -14.
+        for (int b = 0; b < 200; ++b)
+        {
+            for (int i = 0; i < 512; ++i, ++n)
+                for (int c = 0; c < 2; ++c)
+                    buffer.setSample (c, i, n % 4800 == 0 ? 0.5f : 0.0f);
+            q.processBlock (buffer, midi);
+        }
+        const float measured = q.engine.integrated.load();
+        const float peak = q.engine.truePeakDb.load();
+        check (! editor.autoTarget.getBounds().isEmpty() && ! editor.autoPeak.getBounds().isEmpty() && editor.autoPeak.getRight() <= editor.getWidth()
+                   && ! editor.autoPeak.getBounds().intersects (editor.autoTrimButton.getBounds()) && ! editor.autoTarget.getBounds().intersects (editor.autoTrimButton.getBounds())
+                   && ! editor.autoPeak.getBounds().intersects (editor.reference.getBounds()) && ! editor.autoTarget.getBounds().intersects (editor.listen.getBounds()),
+               "the AUTO TRIM target and the peak ceiling fit and overlap nothing");
+
+        setValue (q.apvts, id::autoPeak, 1.0f);
+        editor.autoTrimButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (std::fabs (readParams (q.apvts).trimDb - (-1.0f - peak)) < 0.06f && ui::hasNote (editor.notes(), "AUTO TRIM stopped at the -1 dBTP", ui::Severity::info),
+               fmt ("with the peak ceiling, AUTO TRIM stops at -1 dBTP (TRIM %.2f, peak %.2f, loudness %.1f): a note says it stopped short", readParams (q.apvts).trimDb, peak, measured));
+
+        setValue (q.apvts, id::trim, 0.0f);
+        check (! ui::hasNote (editor.notes(), "AUTO TRIM stopped at the -1 dBTP", ui::Severity::info), "the note goes when TRIM is changed");
+
+        setValue (q.apvts, id::autoPeak, 0.0f);
+        editor.autoTrimButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (std::fabs (readParams (q.apvts).trimDb - (-14.0f - measured)) < 0.06f && ! ui::hasNote (editor.notes(), "AUTO TRIM stopped", ui::Severity::info),
+               fmt ("without the peak ceiling AUTO TRIM aims at -14 LUFS (TRIM %.2f) and no note", readParams (q.apvts).trimDb));
+
+        setValue (q.apvts, id::autoTarget, 3.0f);
+        setValue (q.apvts, id::trim, 0.0f);
+        editor.autoTrimButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (std::fabs (readParams (q.apvts).trimDb - (-23.0f - measured)) < 0.06f, fmt ("the -23 broadcast target: AUTO TRIM sets TRIM to %.2f", readParams (q.apvts).trimDb));
     }
 
     // The notes.
