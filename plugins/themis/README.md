@@ -148,8 +148,11 @@ tests/                 test_main.cpp (DSP and the plain-C++ usage notes), plugin
 ```
 
 ### Continuous integration
-[.github/workflows/build.yml](../../.github/workflows/build.yml) builds the universal VST3 + AU on a macOS runner and a VST3 on
-Linux, and runs the DSP tests, on every push. It checks that the code builds and publishes nothing: no downloadable binaries, by design.
+[.github/workflows/build.yml](../../.github/workflows/build.yml) runs on every push to `main` and on every pull request.
+Three jobs run in parallel: the DSP unit tests (`make test`) on
+Linux; the universal VST3 + AU on a macOS runner; and on Linux, the VST3 and the headless `ThemisSmoke` built together, with the
+smoke test run under a virtual display and failing the job on any failed check. It checks that the code builds and passes its
+tests, and publishes nothing: no downloadable binaries, by design. The smoke test's PNGs go to a temporary folder and are not uploaded.
 Releases are version tags made by hand, source only (see [NOTICE.md](../../NOTICE.md)).
 
 Security checks, all free for a public repository and none of them publishing anything: [codeql.yml](../../.github/workflows/codeql.yml)
