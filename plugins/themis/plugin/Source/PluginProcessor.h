@@ -61,6 +61,7 @@ public:
         lowCrest.requestReset();
         scope.requestReset();
         loudness.requestReset();
+        monoLoudness.requestReset();
         measureStarted.store (true); // the status window and the checklist: a measurement has been started by Reset (or auto reset)
     }
     bool measurementStarted() const { return measureStarted.load(); }
@@ -74,6 +75,7 @@ public:
     void setAudition (const themis::Switches& s) { audition.setSwitches (s); }
     themis::Switches auditionSwitches() const { return audition.switches(); }
     const themis::LoudnessMonitor& loudnessMonitor() const { return loudness; }
+    const themis::LoudnessMonitor& monoLoudnessMonitor() const { return monoLoudness; } // the mono sum (L+R)/2, fed as (m, m)
 
     // Listening aids, like the audition: not saved, ignored offline, bit-exact while off (see themis::ListenStage).
     // The streaming preview plays the master turned down to the Deliver for target; the reference plays a loaded track at the
@@ -183,12 +185,14 @@ private:
     int deliveryIndex() const;
     const params::LoudnessTarget& deliveryTarget() const;
     void stopAnalysis();
+    void processMonoLoudness (const float* l, const float* r, int n); // audio thread
     void syncReferenceRate();
 
     themis::TonalAnalyzer analyzer;
     themis::LowCrestMeter lowCrest;
     themis::StereoScope scope;
     themis::LoudnessMonitor loudness;
+    themis::LoudnessMonitor monoLoudness; // the same meter on the mono sum: one more K-weighted pass on the audio thread
     themis::Audition audition;
     themis::ListenStage listen;
     std::atomic<bool> previewOn { false };

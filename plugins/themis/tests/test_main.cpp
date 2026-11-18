@@ -2605,6 +2605,209 @@ TEST (loudness_monitor_reads_as_cleared_while_a_reset_is_pending)
     CHECK (m.seconds() > 0.0 && m.seconds() < 0.1);
 }
 
+// ---- mono sum and block dynamics ---------------------------------------------------------------------------------
+TEST (mono_sum_of_identical_channels_reads_as_stereo)
+{
+    const double fs = 48000.0;
+    const auto x = sine (fs, 997, -20.0, 8.0);
+    std::vector<float> m (x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+        m[i] = 0.5f * (x[i] + x[i]); // (L + R) / 2 with L = R
+    LoudnessMonitor stereo, mono;
+    stereo.prepare (fs);
+    mono.prepare (fs);
+    stereo.process (x.data(), x.data(), static_cast<int> (x.size()));
+    mono.process (m.data(), m.data(), static_cast<int> (m.size()));
+    const auto c = monoloud::compare (stereo.integrated(), stereo.hasData(), mono.integrated(), mono.hasData());
+    CHECK (c.have && !c.monoSilent && !c.worthALook);
+    CHECK_NEAR (c.deltaLu, 0.0, 1.0e-4);
+}
+
+TEST (mono_sum_of_uncorrelated_channels_reads_three_db_lower_which_is_not_a_fault)
+{
+    // Two different tones, equal level, uncorrelated: a mono sum keeps half their power, so it reads about 3 dB under the stereo
+    // programme. That is the baseline every wide master has, so it is not worth a look.
+    const double fs = 48000.0;
+    const auto l = sine (fs, 997, -20.0, 8.0), r = sine (fs, 1543, -20.0, 8.0);
+    std::vector<float> m (l.size());
+    for (size_t i = 0; i < l.size(); ++i)
+        m[i] = 0.5f * (l[i] + r[i]);
+    LoudnessMonitor stereo, mono;
+    stereo.prepare (fs);
+    mono.prepare (fs);
+    stereo.process (l.data(), r.data(), static_cast<int> (l.size()));
+    mono.process (m.data(), m.data(), static_cast<int> (m.size()));
+    const auto c = monoloud::compare (stereo.integrated(), stereo.hasData(), mono.integrated(), mono.hasData());
+    CHECK (c.have && !c.worthALook);
+    CHECK_NEAR (c.deltaLu, -monoloud::kUncorrelatedLossDb, 0.1);
+}
+
+TEST (mono_sum_of_one_sided_signal_reads_three_db_lower)
+{
+    // Left only: the stereo programme is the tone's power; the mono sum puts half of it on each side, so it reads 3 dB less,
+    // the same baseline as uncorrelated channels: not worth a look by itself.
+    const double fs = 48000.0;
+    const auto l = sine (fs, 997, -20.0, 8.0);
+    const std::vector<float> r (l.size(), 0.0f);
+    std::vector<float> m (l.size());
+    for (size_t i = 0; i < l.size(); ++i)
+        m[i] = 0.5f * (l[i] + r[i]);
+    LoudnessMonitor stereo, mono;
+    stereo.prepare (fs);
+    mono.prepare (fs);
+    stereo.process (l.data(), r.data(), static_cast<int> (l.size()));
+    mono.process (m.data(), m.data(), static_cast<int> (m.size()));
+    const auto c = monoloud::compare (stereo.integrated(), stereo.hasData(), mono.integrated(), mono.hasData());
+    CHECK (c.have && !c.monoSilent && !c.worthALook);
+    CHECK_NEAR (c.deltaLu, -3.01, 0.1);
+}
+
+TEST (mono_sum_losing_more_than_uncorrelated_channels_is_worth_a_look)
+{
+    // L = s, R = -0.5 s: the stereo programme is 1.25 of the tone's power, the mono sum (0.25 s on both sides) 0.125: 10 dB less.
+    const double fs = 48000.0;
+    const auto l = sine (fs, 997, -20.0, 8.0);
+    std::vector<float> r (l.size()), m (l.size());
+    for (size_t i = 0; i < l.size(); ++i)
+    {
+        r[i] = -0.5f * l[i];
+        m[i] = 0.5f * (l[i] + r[i]);
+    }
+    LoudnessMonitor stereo, mono;
+    stereo.prepare (fs);
+    mono.prepare (fs);
+    stereo.process (l.data(), r.data(), static_cast<int> (l.size()));
+    mono.process (m.data(), m.data(), static_cast<int> (m.size()));
+    const auto c = monoloud::compare (stereo.integrated(), stereo.hasData(), mono.integrated(), mono.seconds() >= LoudnessMonitor::kMinSeconds);
+    CHECK (c.have && !c.monoSilent && c.worthALook);
+    CHECK_NEAR (c.deltaLu, -10.0, 0.1);
+}
+
+TEST (mono_sum_of_out_of_phase_channels_is_silent_and_worth_a_look)
+{
+    const double fs = 48000.0;
+    const auto l = sine (fs, 997, -20.0, 8.0);
+    std::vector<float> r (l.size()), m (l.size());
+    for (size_t i = 0; i < l.size(); ++i)
+    {
+        r[i] = -l[i];
+        m[i] = 0.5f * (l[i] + r[i]); // exactly zero
+    }
+    LoudnessMonitor stereo, mono;
+    stereo.prepare (fs);
+    mono.prepare (fs);
+    stereo.process (l.data(), r.data(), static_cast<int> (l.size()));
+    mono.process (m.data(), m.data(), static_cast<int> (m.size()));
+    const auto c = monoloud::compare (stereo.integrated(), stereo.hasData(), mono.integrated(), mono.seconds() >= LoudnessMonitor::kMinSeconds);
+    CHECK (c.have && c.monoSilent && c.worthALook);
+    CHECK (monoloud::compare (-14.0f, true, -14.5f, true).have);
+    CHECK (!monoloud::compare (-14.0f, true, -14.5f, true).worthALook);     // half an LU: not worth a look
+    CHECK (!monoloud::compare (-14.0f, true, -17.5f, true).worthALook);     // 3.5 LU: the uncorrelated baseline, not worth a look
+    CHECK (monoloud::compare (-14.0f, true, -18.2f, true).worthALook);      // 4.2 LU: 1.2 LU beyond the baseline, worth a look
+    CHECK (!monoloud::compare (-14.0f, true, -15.2f, false).have);          // the mono sum not measured yet
+    CHECK (!monoloud::compare (LoudnessMeter::kSilence, true, -14.0f, true).have); // silent stereo: nothing to compare
+
+    // A reset clears the comparison: the stereo meter is cleared while the reset is pending.
+    stereo.requestReset();
+    CHECK (!monoloud::compare (stereo.integrated(), stereo.hasData(), mono.integrated(), mono.seconds() >= LoudnessMonitor::kMinSeconds).have);
+}
+
+TEST (block_dynamics_of_a_steady_sine_is_its_crest_factor)
+{
+    const double fs = 48000.0;
+    const auto s = sine (fs, 997, -20.0, 30.0); // ten complete blocks
+    LoudnessMonitor m;
+    m.prepare (fs);
+    m.process (s.data(), s.data(), static_cast<int> (s.size()));
+    CHECK (m.hasBlockDynamics());
+    CHECK_NEAR (m.blockDynamicsDb(), 3.01, 0.1); // a sine's peak over its RMS
+}
+
+TEST (block_dynamics_are_bigger_for_loud_peaky_blocks_than_for_a_steady_tone)
+{
+    const double fs = 48000.0;
+    const size_t block = static_cast<size_t> (blockdynamics::kBlockSeconds * fs);
+    const auto quiet = sine (fs, 997, -40.0, blockdynamics::kBlockSeconds);
+    std::vector<float> s;
+    for (int b = 0; b < 10; ++b)
+    {
+        if (b % 2 == 0) // loud and peaky: one impulse at 0.8 every 240 samples
+            for (size_t i = 0; i < block; ++i)
+                s.push_back (i % 240 == 0 ? 0.8f : 0.0f);
+        else
+            s.insert (s.end(), quiet.begin(), quiet.end());
+    }
+    LoudnessMonitor m;
+    m.prepare (fs);
+    m.process (s.data(), s.data(), static_cast<int> (s.size()));
+    CHECK (m.hasBlockDynamics());
+    CHECK (m.blockDynamicsDb() > blockdynamics::kDynamicDb); // the two loudest of ten blocks are the peaky ones
+}
+
+TEST (block_dynamics_needs_enough_non_silent_blocks_and_reset_clears_them)
+{
+    const double fs = 48000.0;
+    const auto s = sine (fs, 997, -20.0, 12.0); // four blocks: too few
+    LoudnessMonitor m;
+    m.prepare (fs);
+    m.process (s.data(), s.data(), static_cast<int> (s.size()));
+    CHECK (!m.hasBlockDynamics());
+    const auto more = sine (fs, 997, -20.0, 3.0); // the fifth
+    m.process (more.data(), more.data(), static_cast<int> (more.size()));
+    CHECK (m.hasBlockDynamics());
+
+    m.requestReset();
+    CHECK (!m.hasBlockDynamics()); // a pending reset reads as cleared at once
+    m.process (s.data(), s.data(), static_cast<int> (s.size())); // four more blocks: the old five must be gone
+    CHECK (!m.hasBlockDynamics());
+
+    const std::vector<float> silence (static_cast<size_t> (fs * 30.0), 0.0f);
+    m.requestReset();
+    m.process (silence.data(), silence.data(), static_cast<int> (silence.size()));
+    CHECK (!m.hasBlockDynamics()); // digital silence is not a block
+}
+
+TEST (block_dynamics_histogram_matches_a_sort_of_the_blocks)
+{
+    // Blocks whose RMS levels sit a whole bin apart (0.37 dB), so the histogram holds each one exactly and the sort is the
+    // reference: sort by RMS, keep the loudest fraction (at least one), and take the mean peak minus the mean RMS.
+    blockdynamics::Histogram h;
+    std::vector<std::pair<float, float>> blocks; // RMS, peak
+    for (int i = 0; i < 37; ++i)
+    {
+        const float rms = -40.0f + 0.37f * static_cast<float> (i);
+        const float peak = rms + 3.0f + 0.5f * static_cast<float> (i % 7);
+        blocks.emplace_back (rms, peak);
+        h.add (rms, peak);
+    }
+    auto reference = [] (std::vector<std::pair<float, float>> b) {
+        std::sort (b.begin(), b.end(), [] (const auto& a, const auto& c) { return a.first > c.first; });
+        const int k = std::max (1, static_cast<int> (std::ceil (blockdynamics::kLoudestFraction * static_cast<double> (b.size()))));
+        double p = 0.0, r = 0.0;
+        for (int i = 0; i < k; ++i)
+        {
+            p += b[static_cast<size_t> (i)].second;
+            r += b[static_cast<size_t> (i)].first;
+        }
+        return (p - r) / k;
+    };
+    float v = 0.0f;
+    CHECK (h.count() == 37 && h.value (v));
+    CHECK_NEAR (v, reference (blocks), 1.0e-3);
+
+    blockdynamics::Histogram five;
+    std::vector<std::pair<float, float>> few (blocks.begin(), blocks.begin() + 5);
+    for (const auto& b : few)
+        five.add (b.first, b.second);
+    CHECK (five.value (v));
+    CHECK_NEAR (v, reference (few), 1.0e-3); // one block: the loudest
+
+    blockdynamics::Histogram four;
+    for (size_t i = 0; i < 4; ++i)
+        four.add (blocks[i].first, blocks[i].second);
+    CHECK (!four.value (v));
+}
+
 // ---- master advisor ----------------------------------------------------------------------------------------------
 namespace
 {
