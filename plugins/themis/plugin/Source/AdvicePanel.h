@@ -23,9 +23,20 @@ public:
         advice = themis::advise (inputs);
         eventLog = proc.eventLogCopy();
         offsets = themis::delivery::offsetsOf (inputs.integratedLufs);
+        countsNow = themis::plan::countsOf (advice);
+        verdictNow = themis::plan::verdictOf (countsNow, advice.measuring, inputs.analysedSeconds);
         firstRow = juce::jlimit (0, std::max (0, static_cast<int> (advice.items.size()) - 1), firstRow);
         repaint();
     }
+
+    // The verdict the last refresh read, in words and counts: the plate under the nameplate shows the same thing as the plan's title.
+    struct VerdictState
+    {
+        themis::plan::Verdict verdict = themis::plan::Verdict::measuring;
+        themis::plan::Counts counts;
+    };
+    VerdictState verdictState() const { return { verdictNow, countsNow }; }
+    juce::String plateDetail() const { return verdictDetail(); } // the line under the verdict word on the plate
 
     // The audition state changed elsewhere: only the HEAR chips care.
     void auditionChanged()
@@ -235,6 +246,8 @@ public:
     }
 
 private:
+    themis::plan::Counts countsNow;
+    themis::plan::Verdict verdictNow = themis::plan::Verdict::measuring;
     static constexpr int kRowHeight = 58, kMoreHeight = 14, kChipWidth = 40;
     // What the chips of a row do, in one line under the title (COPY reaches Iris and Apollo for equaliser bands, Hephaestus for a fill band, Aegis for a limiter).
     static constexpr const char* kLegend = "HEAR: solo only this problem. COPY: send the fix to Iris, Apollo, Hephaestus or Aegis. SNAP: remember the plan to compare later.";
@@ -313,23 +326,25 @@ private:
         g.drawFittedText (item.why, row.removeFromTop (14 * (3 - headlineLines)), juce::Justification::topLeft, 3 - headlineLines, 1.0f);
     }
 
+    // What goes after the verdict word: the count line, or the measuring progress. Empty when the word says it all.
+    juce::String verdictDetail() const
+    {
+        using V = themis::plan::Verdict;
+        if (verdictNow == V::faults || verdictNow == V::check)
+            return juce::String (themis::plan::countText (countsNow));
+        if (verdictNow == V::measuring)
+            return juce::String (juce::roundToInt (inputs.analysedSeconds)) + " / " + juce::String (juce::roundToInt (themis::master::kMinSeconds)) + " s";
+        return {};
+    }
+
+    // The plan's title: the count line for faults and checks, else the word (with the measuring progress).
     std::pair<juce::String, juce::Colour> verdictText() const
     {
-        if (advice.measuring)
-            return { inputs.analysedSeconds < 0.5 ? juce::String ("PLAY YOUR TRACK")
-                                                  : "MEASURING  " + juce::String (juce::roundToInt (inputs.analysedSeconds)) + " / " + juce::String (juce::roundToInt (themis::master::kMinSeconds)) + " s",
-                     colours::dim };
-        if (advice.items.empty())
-            return { "READY", colours::good };
-        int bad = 0, warn = 0;
-        for (const auto& i : advice.items)
-            (i.level == themis::Level::bad ? bad : warn)++;
-        juce::StringArray parts;
-        if (bad > 0)
-            parts.add (juce::String (bad) + " TO FIX");
-        if (warn > 0)
-            parts.add (juce::String (warn) + " TO CHECK");
-        return { parts.joinIntoString ("  -  "), colours::forLevel (advice.level()) };
+        using V = themis::plan::Verdict;
+        const juce::String word (themis::plan::verdictWord (verdictNow));
+        const auto text = verdictNow == V::faults || verdictNow == V::check ? verdictDetail()
+                        : verdictNow == V::measuring ? word + "  " + verdictDetail() : word;
+        return { text, colours::forVerdict (verdictNow) };
     }
 
     juce::String readoutText() const
