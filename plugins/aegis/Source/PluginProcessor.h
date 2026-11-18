@@ -7,6 +7,7 @@
 #include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <pantheon/dsp/BypassDelay.h>
+#include <pantheon/ui/AbCompare.h>
 
 class AegisProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
@@ -31,7 +32,7 @@ public:
 
     int getNumPrograms() override { return programs.count(); }
     int getCurrentProgram() override { return programs.current(); }
-    void setCurrentProgram (int index) override { programs.set (index); }
+    void setCurrentProgram (int index) override { ui::beginUndoStep (apvts, "Preset"); programs.set (index); } // a preset is one UNDO step
     const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
@@ -39,8 +40,10 @@ public:
     void setStateInformation (const void*, int) override;
 
     aegis::Engine engine;
+    juce::UndoManager undo; // UNDO / REDO of the parameters (shared/ui Undo.h); declared before the state that records into it
     juce::AudioProcessorValueTreeState apvts;
-    ui::Programs programs { apvts, aegis::presets() }; // after apvts
+    ui::Programs programs { apvts, aegis::presets() };                      // after apvts
+    ui::AbCompare ab { apvts, aegis::keepsParameter };                      // A / B (shared/ui AbCompare.h): two settings, one live; after apvts
 
 private:
     // The latency moves with the look-ahead; setLatencySamples belongs to the message thread, so the audio thread only asks for it.
