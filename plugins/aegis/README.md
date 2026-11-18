@@ -67,6 +67,7 @@ The display is the reduction of the last nine seconds (hanging from the top, in 
 - **It limits; it does not compress.** More than about 6 dB of reduction sounds squashed, and a RELEASE under about 40 ms follows the bass and distorts it. Compress before it.
 - **The true peak is read at 8x.** That is the standard's 4x with a margin; a converter or a codec that reconstructs differently can still differ by a few hundredths of a dB. -1 dBTP is the usual ceiling for that reason.
 - **It delays the sound** by the look-ahead + 32 samples (the host compensates it); changing LOOK-AHEAD while playing restarts the limiter.
+- **AUTO GAIN divides out the GAIN in force at each moment, so moving GAIN while it listens (four seconds) can make the result too high; leave GAIN alone while it listens.**
 - **DELTA and MATCH are for listening** and are saved with the session; presets switch them off, and notes remind you to do so before a bounce. MATCH is a plain RMS, not a BS.1770 loudness (Hermes and Themis measure that).
 - **A / B slots and the undo history are not saved with the session.** Only which slot is active is saved; a session opened again has both slots empty and no undo history (the kit clears the history when a session is loaded). The first switch to B starts it as a copy of what is loaded.
 - It does not measure loudness and does not clip. Loudness is Themis' job: put Themis after it, read its plan, COPY the ceiling or loudness item and PASTE it here. Themis' true peak is a 4x reading, so it reads the same or a little under what OUT PEAK reads.
