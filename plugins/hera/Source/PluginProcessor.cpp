@@ -10,7 +10,7 @@ HeraProcessor::HeraProcessor()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                           .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
-      apvts (*this, nullptr, "STATE", hera::createLayout())
+      apvts (*this, &undo, "STATE", hera::createLayout())
 {
 }
 
@@ -86,6 +86,7 @@ void HeraProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce
 void HeraProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     programs.saveTo (apvts.state);
+    ab.saveTo (apvts.state);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -95,7 +96,9 @@ void HeraProcessor::setStateInformation (const void* data, int size)
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
         {
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            auto tree = juce::ValueTree::fromXml (*xml);
+            ab.loadFrom (tree); // a session from before A / B has no abSlot: it opens on slot 0
+            apvts.replaceState (tree);
             programs.loadFrom (apvts.state);
         }
 }

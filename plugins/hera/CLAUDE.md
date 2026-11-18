@@ -56,6 +56,8 @@ its order is the order of `lookaheadNames`, the parameter's choice.
 
 **Presets** are `ui::Preset`s in `Presets.h`; the processor's `ui::Programs` applies them (every parameter back to its default first, except what `keepsParameter` claims: LEVEL MATCH) and saves the chosen index with the session. A new parameter needs to be thought about in each preset (it goes back to its default unless the preset lists it).
 
+**Undo and A/B.** The processor declares `juce::UndoManager undo` before `apvts` and hands it over (`&undo`), so every control change is one undo step; `setCurrentProgram` begins a step first, so a preset is one. `ab` (`ui::AbCompare`) is declared after `apvts`; its active slot is saved in the state as `abSlot`, and a session without it opens on slot 0. The two slots are not saved (a session opens with both empty). Both are the kit's (`Undo.h`, `AbCompare.h`).
+
 **Smoothing.** Makeup and mix are smoothed per sample (5 ms); everything else is per sample by nature, so the output does not depend on the host's block size (test [8], bit for bit). The first block starts them at their targets.
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.

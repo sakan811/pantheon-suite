@@ -7,7 +7,9 @@
 #include "PluginProcessor.h"
 #include "UI/HeraUi.h"
 #include <array>
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 
 // The transfer curve and the reduction of the last seconds on glass, nine knobs and four switches. Everything drawn is the shared kit's (shared/ui).
 class HeraEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -28,6 +30,10 @@ public:
     juce::TextButton deltaButton { "DELTA" }, listenButton { "SC LISTEN" };
     ui::GuideButton guideButton { hera::guideTitle(), hera::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
+    ui::UndoButtons undoButtons; // UNDO / REDO, in the header strip (shared/ui Undo.h)
+    ui::AbButtons abButtons;     // A / B, beside them (shared/ui AbCompare.h)
+    ui::UndoButtons& undoControls() noexcept { return undoButtons; } // for UiCheck
+    ui::AbButtons& abControls() noexcept { return abButtons; }
     std::vector<ui::Note> notes() const { return hera::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     float heldReductionDb() const noexcept { return *std::max_element (history.begin(), history.end()); }
 
