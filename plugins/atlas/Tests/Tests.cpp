@@ -1111,6 +1111,91 @@ void testAuto()
            fmt ("TARGET: of three octave bands against a flat shape, the one 10 dB louder than the others is %.2f dB over once the mean is taken out (6.67); 30 dB over is held to %.0f dB; one band heard alone: %.0f dB",
                 shifts[2], clamped[2], lone[2]));
 }
+// OUTPUT for LEARN ALL: the engine measures the input and the bands' sum before OUTPUT over the window; the gain that equalises them
+// brings a steady tone to the input's level, is the same with solo on (monitoring is not measured), and silence measures nothing.
+void feedTo (Engine& e, const EngineParams& p, Stereo& s, int& pos, int count)
+{
+    for (int k = 0; k < count; k += 512)
+    {
+        const int m = std::min (512, count - k);
+        e.process (s.l.data() + pos, s.r.data() + pos, m, p);
+        pos += m;
+    }
+}
+
+// Power in dB (10 log10): the measures here are mean squares, not amplitudes.
+double dB10 (double power) { return 10.0 * std::log10 (std::max (power, 1.0e-12)); }
+
+void testLoudness()
+{
+    std::printf ("\nOUTPUT for LEARN ALL (the loudness window)\n");
+    const int window = (int) (BandProfile::kListenSeconds * fs);
+    const auto tone = sine (1000.0, 0.25, 9 * second);
+    const auto p = midrangeOnly (-30.0, 4.0);
+
+    // One second of settling with the bands as they are learned, then the window; OUTPUT is then set and the output is heard for two seconds.
+    const auto measure = [&] (Engine& e, EngineParams q, double& inPower, double& outPower, double& db) -> bool
+    {
+        Stereo s { tone, tone };
+        int pos = 0;
+        feedTo (e, q, s, pos, second);
+        e.loudnessStart();
+        feedTo (e, q, s, pos, window);
+        const bool took = e.loudnessTake (inPower, outPower);
+        return took && LoudnessMatch::gainDb (inPower, outPower, db);
+    };
+    Engine e;
+    e.prepare (fs);
+    double inPower = 0.0, outPower = 0.0, db = 0.0;
+    const bool ok = measure (e, p, inPower, outPower, db);
+    // Both channels are summed: a 0.25 sine on each is -15.05 dB per channel, so -12.04 dB together.
+    check (ok && db > 6.0 && db < 15.0 && std::fabs (dB10 (inPower) + 12.04) < 0.1,
+           fmt ("the window: the stereo tone's input is %.2f dB (two channels of a 0.25 sine: -12.04 dB) and the output before OUTPUT %.2f dB under it, so OUTPUT is set to %+.2f dB", dB10 (inPower), dB10 (outPower / inPower), db));
+
+    // Solo is monitoring: with another band soloed (and so its band heard alone) the same window gives the same answer.
+    Engine soloed;
+    soloed.prepare (fs);
+    soloed.monitor.solo = 1u;
+    double inSolo = 0.0, outSolo = 0.0, dbSolo = 0.0;
+    const bool okSolo = measure (soloed, p, inSolo, outSolo, dbSolo);
+    check (okSolo && std::fabs (dbSolo - db) < 0.01, fmt ("solo on another band changes nothing measured: %+.3f dB against %+.3f dB", dbSolo, db));
+
+    // Set OUTPUT to the measured gain: a steady tone comes out as loud as it goes in.
+    EngineParams trimmed = p;
+    trimmed.outGainDb = db;
+    Stereo s { tone, tone };
+    int pos = 0;
+    feedTo (e, trimmed, s, pos, second);
+    const int from = pos, n = 2 * second;
+    feedTo (e, trimmed, s, pos, n);
+    const double inRms = rms (tone, from, n), outRms = rms (s.l, from, n);
+    check (ok && std::fabs (20.0 * std::log10 (outRms / inRms)) < 0.5,
+           fmt ("with OUTPUT at %+.2f dB the steady tone's output is %+.3f dB against its input (within 0.5 dB)", db, 20.0 * std::log10 (outRms / inRms)));
+
+    // Silence: nothing to match, so the caller leaves OUTPUT where it is.
+    Engine quiet;
+    quiet.prepare (fs);
+    Stereo z { std::vector<float> ((size_t) (second + window), 0.0f), std::vector<float> ((size_t) (second + window), 0.0f) };
+    int zpos = 0;
+    feedTo (quiet, p, z, zpos, second);
+    quiet.loudnessStart();
+    feedTo (quiet, p, z, zpos, window);
+    double zIn = 0.0, zOut = 0.0, zDb = 0.0;
+    const bool zTook = quiet.loudnessTake (zIn, zOut);
+    check (zTook && ! LoudnessMatch::gainDb (zIn, zOut, zDb) && quiet.loudnessState() == Engine::LoudState::idle,
+           "silence: the window is taken, and it gives no gain (OUTPUT is left as it was)");
+
+    // A reset during a window drops it (the editor then says so); a cancel ends it.
+    Engine dropped;
+    dropped.prepare (fs);
+    dropped.loudnessStart();
+    dropped.process (z.l.data(), z.r.data(), 64, p);
+    dropped.reset();
+    check (dropped.loudnessState() == Engine::LoudState::silent && ! dropped.loudnessTake (zIn, zOut), "a reset during the window drops it: state `silent`, nothing to take");
+    dropped.loudnessStart();
+    dropped.loudnessCancel();
+    check (dropped.loudnessState() == Engine::LoudState::idle, "a cancelled window is idle");
+}
 } // namespace
 
 int main()
@@ -1130,6 +1215,7 @@ int main()
     testMix();
     testOutput();
     testLearn();
+    testLoudness();
     testAuto();
     testIssueFinder();
     return test::finish ("AtlasTests");

@@ -198,4 +198,26 @@ private:
     double peak = 0.0, trough = 0.0;
     int peakIdx = 0;
 };
+
+// OUTPUT for LEARN ALL: the gain that makes the output as loud as the input over the same window. Plain C++.
+//
+// Why a measurement and not a formula: a listener prefers the louder of two versions, so a compressed sound with its makeup left
+// at 0 dB sounds worse than the input for no other reason (A/B comparisons of dynamics are only fair at the same loudness; practice
+// is within about 0.5 dB). The bands' gains, MATCH, MAKEUP, the detectors and the crossovers add up in ways no formula from the
+// settings gets exactly right, so the engine measures the mean square of the input and of the sum of the bands before OUTPUT (the
+// monitoring of solo and delta is left out) over the window, with the learned settings in effect. OUTPUT is linear after that sum, so
+// the gain that equalises the two powers is exactly 10 log10 (in / out), whatever OUTPUT is set to.
+struct LoudnessMatch
+{
+    static constexpr double kSilentPower = 1.0e-10; // -100 dBFS mean square: below it a window heard nothing
+
+    // The gain in dB that makes `outPower` (before OUTPUT) equal `inPower`; false when either is silence (nothing to match).
+    static bool gainDb (double inPower, double outPower, double& db) noexcept
+    {
+        if (! (inPower > kSilentPower) || ! (outPower > kSilentPower))
+            return false;
+        db = 10.0 * std::log10 (inPower / outPower);
+        return true;
+    }
+};
 } // namespace atlas

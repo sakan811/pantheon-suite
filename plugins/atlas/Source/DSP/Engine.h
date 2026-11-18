@@ -139,6 +139,23 @@ public:
         return true;
     }
 
+    // OUTPUT for LEARN ALL (LoudnessMatch in Learn.h says why): the mean square of the input and of the bands' sum before OUTPUT, over
+    // BandProfile::kListenSeconds of audio, the output read `latencySamples` late so both windows hold the same samples. Taken once
+    // `done`; `silent` when the measurement was dropped (a reset). Not state: nothing is saved.
+    enum class LoudState : int { idle, requested, measuring, done, silent };
+    void loudnessStart () noexcept { loudState.store ((int) LoudState::requested); }
+    void loudnessCancel () noexcept { loudState.store ((int) LoudState::idle); }
+    LoudState loudnessState () const noexcept { return (LoudState) loudState.load(); }
+    bool loudnessTake (double& inPower, double& outPower) noexcept
+    {
+        int expected = (int) LoudState::done;
+        if (! loudState.compare_exchange_strong (expected, (int) LoudState::idle))
+            return false;
+        inPower = loudIn.load();
+        outPower = loudOut.load();
+        return true;
+    }
+
     void prepare (double sampleRate, PhaseMode initialPhase = PhaseMode::zeroLatency, int initialOs = 0, int initialLookahead = 0)
     {
         fs = sampleRate;
@@ -181,6 +198,8 @@ public:
         for (auto& l : learnSlot) // a listening does not outlive what it was listening to
             if (const auto st = l.state.load(); st == (int) LearnState::requested || st == (int) LearnState::listening)
                 l.state.store ((int) LearnState::silent);
+        if (const auto st = loudState.load(); st == (int) LoudState::requested || st == (int) LoudState::measuring)
+            loudState.store ((int) LoudState::silent);
         for (auto& b : band)
         {
             b.grA = b.grB = b.msIn = b.msOut = 0.0;
@@ -384,6 +403,14 @@ private:
             ramp (s.heard, s.heardTarget, s.heardStep, heard ? 1.0 : 0.0, fade);
             ramp (s.dryHeard, s.dryHeardTarget, s.dryHeardStep, heard && (delta & (1u << i)) != 0u ? 1.0 : 0.0, fade);
         }
+        // A loudness measurement starts at a tick, with the settings this tick took in (the window is counted from here).
+        if (loudState.load (std::memory_order_relaxed) == (int) LoudState::requested)
+        {
+            loudIndex = 0;
+            loudSumIn = loudSumOut = 0.0;
+            loudLatency = latencySamples.load (std::memory_order_relaxed);
+            loudState.store ((int) LoudState::measuring);
+        }
         outGain = first ? std::pow (10.0, p.outGainDb / 20.0) : outGainTarget;
         outGainTarget = std::pow (10.0, p.outGainDb / 20.0);
         outGainStep = (outGainTarget - outGain) / tick;
@@ -476,6 +503,13 @@ private:
             if (! std::isfinite (r[i])) r[i] = 0.0f;
             peakIn = std::max (peakIn, std::max (std::fabs (l[i]), std::fabs (r[i])));
         }
+        // The loudness measurement (OUTPUT for LEARN ALL) counts samples from its start: the input as it comes in, the output
+        // `loudLatency` samples later, so each window holds the same sound. `measuring` is read once per segment (the state moves at ticks).
+        const bool measuring = loudState.load (std::memory_order_relaxed) == (int) LoudState::measuring;
+        if (measuring)
+            for (int i = 0; i < n; ++i)
+                if (loudIndex + i < loudWindow())
+                    loudSumIn += (double) l[i] * l[i] + (double) r[i] * r[i];
         splitInto (splitter, linear, bandBuffer, l, r, n);
         // scActive is refreshed once per tick but the sidechain can vanish between two blocks: no input, nothing to split.
         if (scActive && scL != nullptr)
@@ -483,11 +517,32 @@ private:
         for (int i = 0; i < n; ++i)
             l[i] = r[i] = 0.0f;
 
+        for (int i = 0; i < n; ++i)
+            sumBuffer[0][(size_t) i] = sumBuffer[1][(size_t) i] = 0.0f;
         for (int b = 0; b < kBands; ++b)
             if (owner[(size_t) b] == b)
                 runBand (band[(size_t) b], bandBuffer[(size_t) b][0].data(), bandBuffer[(size_t) b][1].data(),
                          band[(size_t) b].listenSc ? scBuffer[(size_t) b][0].data() : nullptr, band[(size_t) b].listenSc ? scBuffer[(size_t) b][1].data() : nullptr,
-                         l, r, n);
+                         l, r, n, sumBuffer[0].data(), sumBuffer[1].data());
+
+        if (measuring)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                const juce::int64 k = loudIndex + i - loudLatency;
+                if (k >= 0 && k < loudWindow())
+                    loudSumOut += (double) sumBuffer[0][(size_t) i] * sumBuffer[0][(size_t) i] + (double) sumBuffer[1][(size_t) i] * sumBuffer[1][(size_t) i];
+            }
+            loudIndex += n;
+            if (loudIndex >= loudLatency + loudWindow())
+            {
+                const double window = (double) loudWindow();
+                loudIn.store (loudSumIn / window, std::memory_order_relaxed);
+                loudOut.store (loudSumOut / window, std::memory_order_relaxed);
+                int expected = (int) LoudState::measuring; // a cancel meanwhile wins
+                loudState.compare_exchange_strong (expected, (int) LoudState::done);
+            }
+        }
 
         mixNow += mixStep * n; // the bands above read the ramp from the start of the segment; the next one starts here
         for (int i = 0; i < n; ++i)
@@ -499,8 +554,11 @@ private:
         }
     }
 
+    juce::int64 loudWindow() const noexcept { return (juce::int64) (BandProfile::kListenSeconds * fs + 0.5); }
+
     // `sl` / `sr`: the sidechain's piece of this band, when the band listens to it (else null).
-    void runBand (BandState& s, float* dl, float* dr, const float* sl, const float* sr, float* outL, float* outR, int n) noexcept
+    // `sumL` / `sumR` get the band's output without solo and delta (what OUTPUT is set on): the loudness measurement reads them.
+    void runBand (BandState& s, float* dl, float* dr, const float* sl, const float* sr, float* outL, float* outR, int n, float* sumL, float* sumR) noexcept
     {
         const bool ms = usesMidSide (s.channels);
         const bool run = s.follower.on || s.grA != 0.0 || s.grB != 0.0;
@@ -583,6 +641,8 @@ private:
             s.dryHeard += s.dryHeardStep;
             outL[i] += (float) (s.heard * s.gain * yL - s.dryHeard * dryL);
             outR[i] += (float) (s.heard * s.gain * yR - s.dryHeard * dryR);
+            sumL[i] += (float) (s.gain * yL);
+            sumR[i] += (float) (s.gain * yR);
         }
     }
 
@@ -656,5 +716,10 @@ private:
     std::array<std::array<std::array<float, tick>, 2>, kBands> bandBuffer {}, scBuffer {};
     std::array<std::array<float, tick * (1 << (kNumOsModes - 1))>, 2> detBuffer {}; // the sidechain's piece of a band, at the oversampled rate
     std::array<std::array<float, tick>, 2> workBuffer {};
+    std::array<std::array<float, tick>, 2> sumBuffer {}; // the bands summed before solo, delta and OUTPUT, one tick
+    std::atomic<int> loudState { (int) LoudState::idle };
+    std::atomic<double> loudIn { 0.0 }, loudOut { 0.0 }; // the answer, mean squares (LoudnessMatch)
+    juce::int64 loudIndex = 0, loudLatency = 0;          // samples counted since the measurement started, and the output's delay
+    double loudSumIn = 0.0, loudSumOut = 0.0;
 };
 } // namespace atlas
