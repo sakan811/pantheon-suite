@@ -70,7 +70,7 @@ The display is the reduction of the last nine seconds (hanging from the top, in 
 - **AUTO GAIN divides out the GAIN in force at each moment, so moving GAIN while it listens (four seconds) can make the result too high; leave GAIN alone while it listens.**
 - **DELTA and MATCH are for listening** and are saved with the session; presets switch them off, and notes remind you to do so before a bounce. MATCH is a plain RMS, not a BS.1770 loudness (Hermes and Themis measure that).
 - **A / B slots and the undo history are not saved with the session.** Only which slot is active is saved; a session opened again has both slots empty and no undo history (the kit clears the history when a session is loaded). The first switch to B starts it as a copy of what is loaded.
-- It does not measure loudness and does not clip. Loudness is Themis' job: put Themis after it, read its plan, COPY the ceiling or loudness item and PASTE it here. Themis' true peak is a 4x reading, so it reads the same or a little under what OUT PEAK reads.
+- It does not measure loudness and does not clip. Loudness is Themis' job: put Themis after it, read its plan, COPY the ceiling or loudness item and PASTE it here. Themis reads its true peak with the same 8x reader (`shared/dsp` TruePeak.h), so on the same signal it gives the same value as OUT PEAK.
 - It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
 
 ## Building
