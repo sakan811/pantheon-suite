@@ -12,6 +12,7 @@
 
 #include <themis/Common.h>
 #include <themis/EqMove.h>
+#include <themis/MasterAdvisor.h>
 #include <themis/Translation.h>
 
 // What the shared hardware kit (shared/ui) cannot know about: Themis' own words, number formats and verdict type. The
@@ -24,6 +25,13 @@ inline juce::Colour forLevel (themis::Level l)
     return l == themis::Level::good ? good : l == themis::Level::warn ? warn : bad;
 }
 
+// The lamp of the plan's verdict word (the word says it too: a colour is never the only coding). Measuring states are unlit.
+inline juce::Colour forVerdict (themis::plan::Verdict v)
+{
+    using V = themis::plan::Verdict;
+    return v == V::faults ? bad : v == V::check ? warn : v == V::clear ? good : dim;
+}
+
 // What the scope and the spectrogram draw that the kit has no colour for: the bezel of the round scope (metal, lit and in shade) and the dark teal
 // the spectrogram's ramp passes through between the glass and its accent.
 inline const juce::Colour bezelLit { 0xff6b675d }, bezelShade { 0xff25231f }, rampTeal { 0xff0f3a40 };
@@ -31,6 +39,20 @@ inline const juce::Colour bezelLit { 0xff6b675d }, bezelShade { 0xff25231f }, ra
 
 namespace gui
 {
+// The silkscreen captions of the header's three groups. The control rows are the same in both rows; a caption sits above its group.
+inline constexpr const char* kTargetCaption = "TARGET";
+inline constexpr const char* kJudgeCaption = "JUDGE";
+inline constexpr const char* kSessionCaption = "SESSION";
+
+// An engraved rule: a dark groove with its lit edge beside it, the way the header plate is grooved.
+inline void drawEngravedRule (juce::Graphics& g, juce::Line<float> line)
+{
+    g.setColour (juce::Colours::black.withAlpha (0.65f));
+    g.drawLine (line, 1.0f);
+    g.setColour (juce::Colours::white.withAlpha (0.07f));
+    g.drawLine (line.getStartX() + 1.0f, line.getStartY(), line.getEndX() + 1.0f, line.getEndY(), 1.0f);
+}
+
 // The two words of the plugin's name. The full name ("Themis Verdict") is set once, in CMakeLists.txt (PLUGIN_NAME), and
 // reaches the code as JucePlugin_Name; the smoke test checks that the two agree.
 inline constexpr const char* kProjectWord = "Themis";

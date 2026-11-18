@@ -34,6 +34,8 @@ public:
 
 private:
     void timerCallback() override;
+    void paintHeaderGroups (juce::Graphics&) const;
+    void paintVerdictPlate (juce::Graphics&) const;
     void setStatus (const juce::String& text, bool isError);
     void showIdleStatus();
     void copyTonalEq();
@@ -50,8 +52,14 @@ private:
     static constexpr int kMinWidth = 1400;     // the smallest (and opening) width: the header's two rows of controls need it
     static constexpr int kMinHeight = ui::editorHeightFor (kMinWidth), kMaxWidth = 2080, kMaxHeight = ui::editorHeightFor (kMaxWidth); // 16:10 all the way (1400 x 875 to 2080 x 1300)
     static constexpr int kHistoryHeight = 240; // the two time graphs along the bottom
-    static constexpr int kHeaderHeight = 84;   // the control panel along the top
-    static constexpr int kTitleWidth = 196;    // the nameplate; the header rows start after it
+    // The control panel along the top: two rows, each with its group captions above. The left column holds the nameplate and the verdict plate.
+    static constexpr int kHeaderHeight = 112;
+    static constexpr int kTitleWidth = 196;    // the left column (nameplate and verdict plate); the header rows start after it
+    static constexpr int kCaptionHeight = 12, kRowHeight = 28, kKnobRowHeight = 40, kRowGap = 8; // a caption line, a row of buttons and combos, the knobs, the gap between the rows
+    static constexpr int kVerdictHeight = 30;  // the verdict plate under the nameplate
+    static constexpr int kTargetWidth = 748, kJudgeWidth = 984, kSessionWidth = 172; // the groups' widths (their controls, and the gaps between them)
+    static constexpr int kKnobWidth = 150;     // a knob with its read-out box, in the JUDGE group
+    static constexpr int kGroupGap = 12;       // between a group and the next, with an engraved rule in it
     static constexpr int kSideWidth = 450;  // the right-hand column: master plan on top, stereo scope and audition below
     static constexpr int kScopeHeight = 246, kAuditionWidth = 226; // the stereo scope and the audition strip along the bottom of that column
     static constexpr int kPlanRefreshTicks = 15; // the plan is re-read twice a second
@@ -78,7 +86,9 @@ private:
 
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<ui::ResizeGrips> grips; // the four corners; added last, so it is on top
-    juce::Rectangle<int> nameplate, statusWindow;
+    juce::Rectangle<int> nameplate, verdictPlate, statusWindow;
+    juce::Rectangle<int> captionTarget, captionJudge, captionSession; // the group captions above the header's groups
+    juce::Line<float> ruleTarget, ruleJudge, ruleRows;                 // the engraved rules between groups, and between the two rows
     int statusTicks = 0, planTicks = 0;
     float shownCeilingDb = 0.0f; // the true-peak ceiling the graphs were last judged against
     bool signalPresent = false; // the SIGNAL lamp: audio is reaching the plugin

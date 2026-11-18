@@ -83,6 +83,7 @@ ThemisEditor::ThemisEditor (ThemisProcessor& p)
     resetButton.onClick = [this] {
         proc.resetAnalyzer();
         advicePanel.refresh();
+        repaint (verdictPlate);
     };
 
     showIdleStatus();
@@ -129,6 +130,7 @@ void ThemisEditor::timerCallback()
         planTicks = 0;
         proc.updateListen(); // the preview and reference gains follow the loudness measured so far
         advicePanel.refresh();
+        repaint (verdictPlate); // the plate reads the same refresh as the plan
     }
     if (statusTicks > 0)
         --statusTicks;
@@ -292,9 +294,42 @@ void ThemisEditor::paint (juce::Graphics& g)
     ui::hw::fillMetal (g, getLocalBounds().toFloat(), colours::background);
     ui::hw::drawHeaderPlate (g, juce::Rectangle<float> (0.0f, 0.0f, static_cast<float> (getWidth()), static_cast<float> (kHeaderHeight + 8)));
     ui::hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Mastering check suite", signalPresent);
+    paintVerdictPlate (g);
+    paintHeaderGroups (g);
 
     ui::hw::drawGlass (g, statusWindow.toFloat(), 3.0f, colours::amber);
     ui::hw::drawGlassOverlay (g, statusWindow.toFloat(), 3.0f, false);
+}
+
+// The three groups' captions and the engraved rules between them.
+void ThemisEditor::paintHeaderGroups (juce::Graphics& g) const
+{
+    ui::hw::drawLabel (g, gui::kTargetCaption, captionTarget, juce::Justification::left, colours::text, 9.5f);
+    ui::hw::drawLabel (g, gui::kJudgeCaption, captionJudge, juce::Justification::left, colours::text, 9.5f);
+    ui::hw::drawLabel (g, gui::kSessionCaption, captionSession, juce::Justification::left, colours::text, 9.5f);
+    gui::drawEngravedRule (g, ruleTarget);
+    gui::drawEngravedRule (g, ruleJudge);
+    gui::drawEngravedRule (g, ruleRows);
+}
+
+// The verdict in one word, read from the plan's own refresh: the word and the lamp say it, the colour only repeats it.
+void ThemisEditor::paintVerdictPlate (juce::Graphics& g) const
+{
+    const auto state = advicePanel.verdictState();
+    const auto colour = colours::forVerdict (state.verdict);
+    const auto plate = verdictPlate.toFloat();
+    ui::hw::drawGlass (g, plate, 3.0f, colours::amber);
+    ui::hw::drawGlassOverlay (g, plate, 3.0f, false);
+
+    const auto text = plate.reduced (8.0f, 0.0f);
+    ui::hw::drawLamp (g, { text.getX() + 4.0f, text.getCentreY() }, 4.5f, colour, colour != colours::dim);
+    auto area = text.withTrimmedLeft (16.0f);
+    g.setColour (colour);
+    g.setFont (ui::lcdFont (15.0f, juce::Font::bold));
+    g.drawText (juce::String (themis::plan::verdictWord (state.verdict)), area.removeFromTop (17.0f).toNearestInt(), juce::Justification::centredLeft);
+    g.setColour (colours::amber);
+    g.setFont (ui::lcdFont (10.0f));
+    g.drawText (advicePanel.plateDetail(), area.toNearestInt(), juce::Justification::centredLeft);
 }
 
 void ThemisEditor::resized()
@@ -304,46 +339,64 @@ void ThemisEditor::resized()
     auto r = getLocalBounds().reduced (10, 8);
 
     auto head = r.removeFromTop (kHeaderHeight - 8);
-    nameplate = head.removeFromLeft (kTitleWidth - 14).reduced (0, 2);
+    auto column = head.removeFromLeft (kTitleWidth - 14);
+    verdictPlate = column.removeFromBottom (kVerdictHeight);
+    column.removeFromBottom (2);
+    nameplate = column;
     head.removeFromLeft (14);
-    auto row1 = head.removeFromTop (30);
-    targetBox.setBounds (row1.removeFromLeft (200).reduced (0, 2));
-    row1.removeFromLeft (8);
-    learnButton.setBounds (row1.removeFromLeft (150).reduced (0, 3));
-    row1.removeFromLeft (4);
-    closestButton.setBounds (row1.removeFromLeft (80).reduced (0, 3));
-    row1.removeFromLeft (4);
-    saveButton.setBounds (row1.removeFromLeft (84).reduced (0, 3));
-    row1.removeFromLeft (4);
-    loadButton.setBounds (row1.removeFromLeft (84).reduced (0, 3));
-    row1.removeFromLeft (4);
-    copyEqButton.setBounds (row1.removeFromLeft (76).reduced (0, 3));
-    row1.removeFromLeft (4);
-    holdButton.setBounds (row1.removeFromLeft (92).reduced (0, 3));
-    row1.removeFromLeft (14);
-    deviceLabel.setBounds (row1.removeFromLeft (84));
-    row1.removeFromLeft (6);
-    deviceBox.setBounds (row1.removeFromLeft (160).reduced (0, 2));
-    row1.removeFromLeft (14);
-    resetOnPlayButton.setBounds (row1.removeFromLeft (96).reduced (0, 3));
 
-    head.removeFromTop (4);
-    auto row2 = head;
-    avgKnob.setBounds (row2.removeFromLeft (158));
-    row2.removeFromLeft (8);
-    toleranceKnob.setBounds (row2.removeFromLeft (158));
-    row2.removeFromLeft (8);
-    ceilingKnob.setBounds (row2.removeFromLeft (158));
-    row2.removeFromLeft (16);
-    resetButton.setBounds (row2.removeFromLeft (70).withSizeKeepingCentre (70, 26));
-    row2.removeFromLeft (18);
-    loudnessLabel.setBounds (row2.removeFromLeft (84).withSizeKeepingCentre (84, 20));
-    row2.removeFromLeft (6);
-    loudnessBox.setBounds (row2.removeFromLeft (170).withSizeKeepingCentre (170, 26));
-    row2.removeFromLeft (14);
-    statusWindow = row2.withSizeKeepingCentre (row2.getWidth(), 26);
+    // Row A: TARGET, then the status window (the GUIDE line) with the rest of the row. Row B: JUDGE, then SESSION.
+    auto rowA = head.removeFromTop (kCaptionHeight + 2 + kRowHeight);
+    auto captionRowA = rowA.removeFromTop (kCaptionHeight + 2);
+    const auto ruleY = static_cast<float> (head.getY() + kRowGap / 2); // the engraved rule between the two rows
+    head.removeFromTop (kRowGap);
+    auto rowB = head.removeFromTop (kCaptionHeight + 2 + kKnobRowHeight);
+    auto captionRowB = rowB.removeFromTop (kCaptionHeight + 2);
+    ruleRows = { static_cast<float> (head.getX()), ruleY, static_cast<float> (head.getRight()), ruleY };
+
+    auto target = rowA.removeFromLeft (kTargetWidth);
+    captionTarget = captionRowA.removeFromLeft (kTargetWidth);
+    targetBox.setBounds (target.removeFromLeft (180).reduced (0, 2));
+    target.removeFromLeft (8);
+    learnButton.setBounds (target.removeFromLeft (140).reduced (0, 2));
+    target.removeFromLeft (4);
+    closestButton.setBounds (target.removeFromLeft (74).reduced (0, 2));
+    target.removeFromLeft (4);
+    saveButton.setBounds (target.removeFromLeft (84).reduced (0, 2));
+    target.removeFromLeft (4);
+    loadButton.setBounds (target.removeFromLeft (84).reduced (0, 2));
+    target.removeFromLeft (4);
+    copyEqButton.setBounds (target.removeFromLeft (70).reduced (0, 2));
+    target.removeFromLeft (4);
+    holdButton.setBounds (target.removeFromLeft (88).reduced (0, 2));
+    rowA.removeFromLeft (kGroupGap);
+    ruleTarget = { static_cast<float> (rowA.getX() - kGroupGap / 2), static_cast<float> (captionRowA.getY()), static_cast<float> (rowA.getX() - kGroupGap / 2), static_cast<float> (rowA.getBottom()) };
+    statusWindow = rowA;
     guideButton.setBounds (statusWindow.withTrimmedLeft (statusWindow.getWidth() - 62).reduced (3));
     statusLabel.setBounds (statusWindow.withTrimmedRight (62).reduced (8, 0));
+
+    auto judge = rowB.removeFromLeft (kJudgeWidth);
+    captionJudge = captionRowB.removeFromLeft (kJudgeWidth);
+    avgKnob.setBounds (judge.removeFromLeft (kKnobWidth));
+    judge.removeFromLeft (8);
+    toleranceKnob.setBounds (judge.removeFromLeft (kKnobWidth));
+    judge.removeFromLeft (8);
+    ceilingKnob.setBounds (judge.removeFromLeft (kKnobWidth));
+    judge.removeFromLeft (14);
+    deviceLabel.setBounds (judge.removeFromLeft (84).withSizeKeepingCentre (84, kRowHeight));
+    judge.removeFromLeft (6);
+    deviceBox.setBounds (judge.removeFromLeft (150).withSizeKeepingCentre (150, kRowHeight).reduced (0, 0));
+    judge.removeFromLeft (14);
+    loudnessLabel.setBounds (judge.removeFromLeft (84).withSizeKeepingCentre (84, kRowHeight));
+    judge.removeFromLeft (6);
+    loudnessBox.setBounds (judge.removeFromLeft (160).withSizeKeepingCentre (160, kRowHeight));
+    rowB.removeFromLeft (kGroupGap);
+    ruleJudge = { static_cast<float> (rowB.getX() - kGroupGap / 2), static_cast<float> (captionRowB.getY()), static_cast<float> (rowB.getX() - kGroupGap / 2), static_cast<float> (rowB.getBottom()) };
+    captionSession = captionRowB.removeFromLeft (kSessionWidth);
+    auto session = rowB.removeFromLeft (kSessionWidth);
+    resetButton.setBounds (session.removeFromLeft (70).withSizeKeepingCentre (70, kRowHeight - 2));
+    session.removeFromLeft (6);
+    resetOnPlayButton.setBounds (session.removeFromLeft (96).withSizeKeepingCentre (96, kRowHeight));
 
     auto history = r.removeFromBottom (kHistoryHeight);
     r.removeFromBottom (8);

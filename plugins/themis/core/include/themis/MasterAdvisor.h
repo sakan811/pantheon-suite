@@ -120,6 +120,69 @@ struct MasterAdvice
     Level level() const { return items.empty() ? Level::good : items.front().level; }
 };
 
+// The one verdict of the master plan, in words: the plate under the nameplate, the plan's title and its count line all read it.
+namespace plan
+{
+inline constexpr double kNoSignalSeconds = 0.5; // less audio than this and nothing has reached the plugin yet
+
+struct Counts
+{
+    int bad = 0;  // items to fix
+    int warn = 0; // items to check
+};
+
+enum class Verdict { faults, check, clear, measuring, noSignal };
+
+inline Counts countsOf (const MasterAdvice& advice)
+{
+    Counts c;
+    for (const auto& item : advice.items)
+        (item.level == Level::bad ? c.bad : c.warn)++;
+    return c;
+}
+
+// Faults win even while measuring (only clipping is judged then, and it is exact); then a check; then, with nothing counted, the
+// measuring states; and CLEAR only when the plan has measured and has nothing left to fix or check.
+inline Verdict verdictOf (Counts c, bool measuring, double analysedSeconds)
+{
+    if (c.bad > 0)
+        return Verdict::faults;
+    if (c.warn > 0)
+        return Verdict::check;
+    if (measuring)
+        return analysedSeconds < kNoSignalSeconds ? Verdict::noSignal : Verdict::measuring;
+    return Verdict::clear;
+}
+
+inline const char* verdictWord (Verdict v)
+{
+    switch (v)
+    {
+        case Verdict::faults: return "FAULTS";
+        case Verdict::check: return "CHECK";
+        case Verdict::clear: return "CLEAR";
+        case Verdict::measuring: return "MEASURING";
+        case Verdict::noSignal: return "NO SIGNAL";
+    }
+    return "";
+}
+
+// The count line, "3 TO FIX  -  5 TO CHECK"; empty when there is nothing to count.
+inline std::string countText (Counts c)
+{
+    std::string text;
+    if (c.bad > 0)
+        text += std::to_string (c.bad) + " TO FIX";
+    if (c.warn > 0)
+    {
+        if (!text.empty())
+            text += "  -  ";
+        text += std::to_string (c.warn) + " TO CHECK";
+    }
+    return text;
+}
+} // namespace plan
+
 namespace master
 {
 inline std::string rounded (float db) { return format ("%.1f", static_cast<double> (std::round (db * 2.0f) / 2.0f)); }

@@ -4024,6 +4024,44 @@ TEST (advisor_names_narrow_rings_as_suggestions_with_a_bell_to_copy)
     CHECK (!pick (flat, Topic::resonance) && advise (flat).passed == advise (flat).checks);
 }
 
+TEST (plan_verdict_is_one_word_from_the_counts_and_the_measuring_state)
+{
+    using namespace plan;
+    // Faults beat checks, checks beat the measuring states, and CLEAR needs a finished measurement with nothing counted.
+    CHECK (verdictOf ({ 1, 0 }, false, 60.0) == Verdict::faults);
+    CHECK (verdictOf ({ 3, 5 }, false, 60.0) == Verdict::faults);
+    CHECK (verdictOf ({ 0, 2 }, false, 60.0) == Verdict::check);
+    CHECK (verdictOf ({ 0, 0 }, false, 60.0) == Verdict::clear);
+    CHECK (verdictOf ({ 0, 0 }, true, 5.0) == Verdict::measuring);
+    CHECK (verdictOf ({ 0, 0 }, true, 0.0) == Verdict::noSignal);
+    CHECK (verdictOf ({ 0, 0 }, true, kNoSignalSeconds) == Verdict::measuring);
+    // A clipping fault shows while the long-term checks are still measuring, as the plan lists it.
+    CHECK (verdictOf ({ 1, 0 }, true, 5.0) == Verdict::faults);
+    CHECK (verdictOf ({ 0, 1 }, true, 5.0) == Verdict::check);
+    CHECK (std::string (verdictWord (Verdict::faults)) == "FAULTS");
+    CHECK (std::string (verdictWord (Verdict::check)) == "CHECK");
+    CHECK (std::string (verdictWord (Verdict::clear)) == "CLEAR");
+    CHECK (std::string (verdictWord (Verdict::measuring)) == "MEASURING");
+    CHECK (std::string (verdictWord (Verdict::noSignal)) == "NO SIGNAL");
+    CHECK (countText ({ 3, 5 }) == "3 TO FIX  -  5 TO CHECK");
+    CHECK (countText ({ 2, 0 }) == "2 TO FIX");
+    CHECK (countText ({ 0, 4 }) == "4 TO CHECK");
+    CHECK (countText ({ 0, 0 }).empty());
+
+    // The counts come from the plan's own items, so the plate and the plan's title cannot disagree.
+    MasterAdvice advice;
+    Advice bad;
+    bad.level = Level::bad;
+    Advice warn;
+    warn.level = Level::warn;
+    advice.items = { bad, warn, warn };
+    advice.measuring = false;
+    const auto counts = countsOf (advice);
+    CHECK (counts.bad == 1 && counts.warn == 2);
+    CHECK (countText (counts) == "1 TO FIX  -  2 TO CHECK");
+    CHECK (verdictOf (counts, advice.measuring, 60.0) == Verdict::faults);
+}
+
 TEST (advisor_suggests_a_check_for_sibilance_without_a_copy_path)
 {
     constexpr int n = 120;
