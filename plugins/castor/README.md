@@ -10,7 +10,7 @@ namespaces and plugin codes use the short name "Castor".)
 
 ![Castor Pair](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz; the glass above the six knobs draws those widths as bars over their knobs (the amber line is 100%, the sides as recorded, and the top is 200%). The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. Under the correlation bar, LISTEN is on Stereo and MIN shows the lowest correlation the bar has read (0.88). Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz; the glass above the six knobs draws those widths as bars over their knobs (the amber line is 100%, the sides as recorded, and the top is 200%). The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. The header has UNDO and REDO above the preset (UNDO is lit because the render changed the settings; REDO is dim) and PASTE beside GUIDE, which takes a width from a Themis plan (not in the picture: the clipboard is not read in a render). Under the correlation bar, LISTEN is on Stereo and MIN shows the lowest correlation the bar has read (0.88). Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -22,6 +22,7 @@ namespaces and plugin codes use the short name "Castor".)
 | **Balance** | L 100 to R 100: turns one channel down (not a pan). On a mono bus it is ignored (there is no other channel to hear it against). |
 | **Output** | -12 to +12 dB. |
 | **Listen** | A check on what you hear, after everything: *Stereo* (as it is; the default), *Mono* (`(L + R) / 2` in both channels: what a mono speaker plays; what is out of phase vanishes) or *Side* (`(L - R) / 2` in both: only what differs between the channels). The goniometer and the correlation still read the sound as it is. Presets set it back to Stereo, and a note reminds you before a bounce. |
+| **Paste and undo** | PASTE takes the width a Themis plan suggests (COPY on a width item) into the bands it names, as one step; UNDO and REDO (Cmd+Z, Shift+Cmd+Z) take it back and forth, and undo every control change too. |
 | **Presets** | Seven starting points (Init, Mono Bass, Club Safe, Widen Highs, Wide Master, Narrow Mix, Vocal Forward). A preset sets the widths, MID, SIDE and MONO BELOW; BALANCE and OUTPUT are kept. |
 
 The glass above the band knobs shows the six widths at once as bars (a drawing of the knobs, nothing measured; its top is 200% and the amber line is 100%). The goniometer draws the last 1536 samples of the output as a cloud, left and right turned a quarter (a vertical line is mono, a horizontal one out of phase); the bar under it is the
