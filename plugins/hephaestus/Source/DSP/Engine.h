@@ -286,7 +286,7 @@ private:
         msWet += tc * (eWet / (n * nCh) - msWet);
 
         const double target = std::clamp (std::sqrt ((msDry + 1.0e-9) / (msWet + 1.0e-9)), 0.25, 4.0);
-        matchGain += 0.02 * (target - matchGain);
+        matchGain += tc * (target - matchGain); // the same time constant as the estimators, whatever the host's block size
         return matchGain;
     }
 
