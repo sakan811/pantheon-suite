@@ -107,6 +107,7 @@ public:
 
         ClipWindow w;
         const float* channels[2] = { l, r };
+        double windowSquares = 0.0;
         for (int c = 0; c < 2; ++c)
         {
             auto& s = state[c];
@@ -122,11 +123,14 @@ public:
             }
             s.sum += sum;
             s.sumSquares += squares;
+            windowSquares += squares;
         }
-        publish (w, static_cast<uint64_t> (n));
+        publish (w, static_cast<uint64_t> (n), windowSquares);
     }
 
-    // Analysis thread: everything seen since the previous call.
+    // Analysis thread: everything seen since the previous call. The mean square is taken over the same samples as the peaks.
+    // The two drains are separate atomic steps, so a block that lands between them can move one frame's mean square by about
+    // a block's share; a crest factor of one frame reads that much off.
     ClipWindow take()
     {
         ClipWindow w;
@@ -135,6 +139,9 @@ public:
         w.clipEvents = window.clipEvents.exchange (0, std::memory_order_acq_rel);
         w.clipSamples = window.clipSamples.exchange (0, std::memory_order_acq_rel);
         w.overSamples = window.overSamples.exchange (0, std::memory_order_acq_rel);
+        const double squares = window.squares.exchange (0.0, std::memory_order_acq_rel);
+        const uint64_t count = window.channelSamples.exchange (0, std::memory_order_acq_rel);
+        w.meanSquare = count > 0 ? static_cast<float> (squares / static_cast<double> (count)) : 0.0f;
         return w;
     }
 
@@ -215,13 +222,18 @@ private:
         }
     }
 
-    void publish (const ClipWindow& w, uint64_t samples)
+    void publish (const ClipWindow& w, uint64_t samples, double squares)
     {
         raiseTo (window.samplePeak, w.samplePeak);
         raiseTo (window.truePeak, w.truePeak);
         window.clipEvents.fetch_add (w.clipEvents, std::memory_order_relaxed);
         window.clipSamples.fetch_add (w.clipSamples, std::memory_order_relaxed);
         window.overSamples.fetch_add (w.overSamples, std::memory_order_relaxed);
+        window.channelSamples.fetch_add (2 * samples, std::memory_order_relaxed);
+        double old = window.squares.load (std::memory_order_relaxed);
+        while (!window.squares.compare_exchange_weak (old, old + squares, std::memory_order_relaxed)) // only this thread adds
+        {
+        }
 
         // The totals have this thread as their only writer, so a load + store is enough.
         totalSamplePeak.store (std::max (totalSamplePeak.load (std::memory_order_relaxed), w.samplePeak), std::memory_order_relaxed);
@@ -272,6 +284,8 @@ private:
     {
         std::atomic<float> samplePeak { 0.0f }, truePeak { 0.0f };
         std::atomic<uint32_t> clipEvents { 0 }, clipSamples { 0 }, overSamples { 0 };
+        std::atomic<double> squares { 0.0 };          // sum of squares of the finite samples, both channels
+        std::atomic<uint64_t> channelSamples { 0 };   // samples counted, both channels
     } window;
 
     std::atomic<float> totalSamplePeak { 0.0f }, totalTruePeak { 0.0f };
