@@ -123,6 +123,8 @@ code-checker ┘   (edits)   (the diff)      (completeness)     (only on request
 - Third-party code needs a compatible licence and an entry in [NOTICE.md](NOTICE.md). Do not name other companies' products in
   a UI or in source comments; a README may mention one where it is factual and neutral, and NOTICE.md carries the trademark note.
 - CI runs per plugin; workflows are SHA-pinned with read-only tokens. Do not add a release or artifact upload.
+- **A workflow never filters by `paths:` on its `on:` triggers.** A workflow skipped that way reports no checks at all, so a required check (the per-plugin jobs are named `linux`) waits for ever on a pull request that touches none of its paths. The
+  per-plugin workflows start with a `changes` job that diffs against the base commit and passes `relevant` to the real job (`needs: changes`, `if:`): a job skipped by `if:` reports success. A new plugin's workflow copies that job, with its own paths.
 
 ## Not yet in line (Hephaestus and Harmonia were imported as they were)
 
