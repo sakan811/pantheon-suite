@@ -24,6 +24,7 @@ public:
         eventLog = proc.eventLogCopy();
         offsets = themis::delivery::offsetsOf (inputs.integratedLufs);
         countsNow = themis::plan::countsOf (advice);
+        copyAllNow = themis::plancopy::copyAll (advice);
         verdictNow = themis::plan::verdictOf (countsNow, advice.measuring, inputs.analysedSeconds);
         firstRow = juce::jlimit (0, std::max (0, static_cast<int> (advice.items.size()) - 1), firstRow);
         repaint();
@@ -62,7 +63,7 @@ public:
     // The painted chips at the panel's current size (SNAP, TEXT, and each shown row's HEAR and COPY), for the smoke test's control audit.
     std::vector<juce::Rectangle<int>> chipAreas() const
     {
-        std::vector<juce::Rectangle<int>> chips { snapChip, textChip };
+        std::vector<juce::Rectangle<int>> chips { snapChip, textChip, copyAllChip };
         for (int r = 0; r < visibleRows() && firstRow + r < static_cast<int> (advice.items.size()); ++r)
         {
             const auto& item = advice.items[static_cast<size_t> (firstRow + r)];
@@ -84,6 +85,17 @@ public:
 
         auto titleRow = area.removeFromTop (16.0f);
         ui::hw::drawLabel (g, "MASTER PLAN", titleRow.toNearestInt());
+        // COPY ALL: the whole plan as one clipboard text, after the title. Greyed (with its reason on hover and in the status line)
+        // when the plan has nothing a plugin can take.
+        const auto titleBounds = titleRow.toNearestInt();
+        juce::GlyphArrangement labelGlyphs;
+        labelGlyphs.addLineOfText (ui::labelFont (10.5f), "MASTER PLAN", 0.0f, 0.0f);
+        const int labelWidth = juce::roundToInt (labelGlyphs.getBoundingBox (0, -1, false).getWidth());
+        copyAllChip = { titleBounds.getX() + labelWidth + 10, titleBounds.getY(), kCopyAllWidth, 16 };
+        ui::hw::drawPushButton (g, copyAllChip.toFloat(), false, colours::amber, false, hoverCopyAll, copyAllOn());
+        g.setColour (copyAllOn() ? colours::text : colours::dim);
+        g.setFont (ui::labelFont (9.5f));
+        g.drawText ("COPY ALL", copyAllChip, juce::Justification::centred);
         const auto [verdict, verdictColour] = verdictText();
         ui::hw::drawLamp (g, { titleRow.getRight() - 5.0f, titleRow.getCentreY() }, 4.0f, verdictColour, verdictColour != colours::dim);
         g.setColour (verdictColour);
@@ -154,6 +166,12 @@ public:
             hoverCopy = copy;
             repaint();
         }
+        const bool copyAll = copyAllChip.contains (e.position.toInt());
+        if (copyAll != hoverCopyAll)
+        {
+            hoverCopyAll = copyAll;
+            repaint (copyAllChip);
+        }
         const bool snap = snapChip.contains (e.position.toInt());
         if (snap != hoverSnap)
         {
@@ -166,9 +184,9 @@ public:
             hoverText = text;
             repaint (textChip);
         }
-        setMouseCursor (hoverSnap || hoverText || hoverCopy || (hoverRow >= 0 && advice.items[static_cast<size_t> (hoverRow)].hear.active()) ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        setMouseCursor (hoverSnap || hoverText || hoverCopy || hoverCopyAll || (hoverRow >= 0 && advice.items[static_cast<size_t> (hoverRow)].hear.active()) ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
-    void mouseExit (const juce::MouseEvent&) override { hoverRow = -1; hoverSnap = hoverCopy = hoverText = false; }
+    void mouseExit (const juce::MouseEvent&) override { hoverRow = -1; hoverSnap = hoverCopy = hoverText = hoverCopyAll = false; }
 
     // Called with the status text after COPY put an item's bands on the clipboard.
     std::function<void (const juce::String&)> onCopied;
@@ -193,8 +211,23 @@ public:
                       + juce::String (static_cast<int> (advice.items.size())) + " item(s)): paste it in a note, a message or a session log.");
     }
 
+    // COPY ALL: the whole plan on the clipboard as one text (plancopy::copyAll), or the reason it has nothing to copy. The status line says which.
+    void copyAllToClipboard()
+    {
+        refresh();
+        if (!copyAllNow.empty())
+            juce::SystemClipboard::copyTextToClipboard (juce::String (copyAllNow.text));
+        if (onCopied)
+            onCopied (juce::String (themis::plancopy::statusText (copyAllNow)));
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (copyAllChip.contains (e.position.toInt()))
+        {
+            copyAllToClipboard();
+            return;
+        }
         if (snapChip.contains (e.position.toInt()))
         {
             toggleSnapshot();
@@ -245,6 +278,12 @@ public:
                    "each new true-peak maximum above the ceiling and each loudness excursion, with the time in the audio since the Reset. "
                    "Shift-TEXT copies only the plan. For a note to yourself, a message to the client or a session log. "
                    "(COPY on an item is different: it hands bands or a limiter setting to another plugin.)";
+        if (hoverCopyAll)
+            return copyAllNow.empty() ? juce::String ("COPY ALL is off: ") + juce::String (copyAllNow.reason) + "."
+                                      : juce::String ("COPY ALL puts every item of the plan that a plugin can take on the clipboard as one text: the bands for Iris or Apollo "
+                                        "(Hephaestus takes the fill band), the limiter line for Aegis and the width line for Castor. Paste it once in each plugin; each one takes "
+                                        "the lines it reads and skips the rest. A width line is left out when a band on the side makes the same cut. "
+                                        "COPY on a single item still works for one item at a time.");
         if (hoverRow < 0 && readoutArea.contains (lastMouse))
             return loudnessTooltip();
         if (hoverRow < 0)
@@ -266,11 +305,11 @@ public:
 private:
     themis::plan::Counts countsNow;
     themis::plan::Verdict verdictNow = themis::plan::Verdict::measuring;
-    static constexpr int kRowHeight = 58, kMoreHeight = 14, kChipWidth = 40;
+    static constexpr int kRowHeight = 58, kMoreHeight = 14, kChipWidth = 40, kCopyAllWidth = 64;
     static constexpr int kLevelWordWidth = 40; // the level word at the end of a headline's first line (gui::levelMark)
     // What the chips of a row do, in one line under the title (COPY reaches Iris and Apollo for equaliser bands, Hephaestus for a fill band,
     // Aegis for a limiter and Castor for a width line).
-    static constexpr const char* kLegend = "HEAR: solo only this problem. COPY: send to Iris, Apollo, Hephaestus, Aegis or Castor. SNAP: remember the plan to compare later.";
+    static constexpr const char* kLegend = "HEAR: solo only this problem. COPY: one item to Iris, Apollo, Hephaestus, Aegis or Castor. COPY ALL: the whole plan. SNAP: keep it to compare.";
 
     // The status line after COPY. A width item hands the same cut twice (a side bell for Iris or Apollo, a width line for Castor),
     // so the status says to paste one of them, not both.
@@ -295,6 +334,7 @@ private:
     static juce::Rectangle<int> chipColumn (juce::Rectangle<int> row) { return row.withTrimmedBottom (4).reduced (9, 5).removeFromRight (kChipWidth); }
     static juce::Rectangle<int> hearChip (juce::Rectangle<int> column) { return column.removeFromTop (17); }
     static juce::Rectangle<int> copyChip (juce::Rectangle<int> column) { return column.withTrimmedTop (21).removeFromTop (17); }
+    bool copyAllOn() const { return !copyAllNow.empty(); }
     bool overCopy (juce::Point<int> p) const
     {
         for (int r = 0; r < visibleRows(); ++r)
@@ -492,11 +532,12 @@ private:
     std::array<themis::delivery::Offset, static_cast<size_t> (themis::delivery::kCount)> offsets {};
     themis::Switches audition;
     themis::PlanSnapshot snapshot;
-    juce::Rectangle<int> listArea, snapChip, textChip, readoutArea;
+    juce::Rectangle<int> listArea, snapChip, textChip, copyAllChip, readoutArea;
+    themis::plancopy::Result copyAllNow; // the COPY ALL text of the last refresh (empty = nothing to copy, with its reason)
     themis::events::EventLog eventLog; // the event log since the reset, copied at each refresh
     juce::Point<int> lastMouse;
     int firstRow = 0, hoverRow = -1;
-    bool hoverSnap = false, hoverCopy = false, hoverText = false;
+    bool hoverSnap = false, hoverCopy = false, hoverText = false, hoverCopyAll = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AdvicePanel)
 };

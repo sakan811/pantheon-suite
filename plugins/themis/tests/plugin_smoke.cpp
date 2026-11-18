@@ -1015,6 +1015,19 @@ int main (int argc, char** argv)
                     CHECK (report.find ("  CLIP  ") != std::string::npos, "the demo programme's first clip is in the event log");
                     CHECK (report.find ("  LOUD  ") != std::string::npos, "the demo programme's loud chorus is in the event log");
                 }
+                {
+                    // COPY ALL: the whole plan as one text, read back by each reader. The demo clips (a limiter line), has bands and a width
+                    // item whose side bell carries its cut, so its width line is left out and the text has no band on the side with a width line.
+                    const auto copy = themis::plancopy::copyAll (advice);
+                    std::vector<pdsp::LinkBand> bands;
+                    pdsp::LinkLimiter limiter;
+                    pdsp::LinkWidth wide;
+                    CHECK (!copy.empty() && copy.items > 0 && pdsp::link::decode (copy.text, bands) && static_cast<int> (bands.size()) == copy.bands);
+                    CHECK (copy.limiters == 1 && pdsp::link::decodeLimiter (copy.text, limiter) && limiter.hasCeiling, "the demo's clipping gives the limiter its ceiling");
+                    CHECK (copy.widthItemsLeftOut >= 1 && !pdsp::link::decodeWidth (copy.text, wide), "a width item's width line is not written next to its side bell");
+                    CHECK (copy.curves == 0 && copy.text.find ("curve ") == std::string::npos, "the plan carries no target curve");
+                    std::printf ("    COPY ALL: %s\n", themis::plancopy::statusText (copy).c_str());
+                }
                 const auto has = [&] (themis::Topic t) { return std::any_of (advice.items.begin(), advice.items.end(), [t] (const themis::Advice& a) { return a.topic == t; }); };
                 CHECK (has (themis::Topic::clipping) && has (themis::Topic::phase), "the demo programme clips and has a channel delay");
                 CHECK (has (themis::Topic::width), "the demo programme has a widened top");

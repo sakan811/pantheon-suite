@@ -15,6 +15,8 @@
 #include <themis/MasterAdvisor.h>
 #include <themis/Translation.h>
 
+#include "PlanCopy.h"
+
 // What the shared hardware kit (shared/ui) cannot know about: Themis' own words, number formats and verdict type. The
 // drawing itself (panels, lamps, knobs, glass, meters) lives in shared/ui and is used from here, not redrawn.
 namespace colours
@@ -127,23 +129,9 @@ inline juce::String deviceLossTitle (bool deviceChosen) { return deviceChosen ? 
 inline juce::String linkText (const themis::EqMoves& moves, const themis::TargetCurve* target = nullptr, const themis::LimiterMove& limiter = {},
                              const themis::WidthMove& width = {})
 {
-    using K = themis::EqMove::Kind;
     std::vector<pdsp::LinkBand> bands;
     for (const auto& m : moves)
-    {
-        pdsp::LinkBand b;
-        b.kind = m.kind == K::lowShelf ? pdsp::LinkBand::Kind::lowShelf : m.kind == K::highShelf ? pdsp::LinkBand::Kind::highShelf
-               : m.kind == K::lowCut ? pdsp::LinkBand::Kind::lowCut : m.kind == K::highCut ? pdsp::LinkBand::Kind::highCut
-               : m.kind == K::harmonicFill ? pdsp::LinkBand::Kind::fill : pdsp::LinkBand::Kind::bell;
-        b.place = m.place == themis::EqMove::Place::mid ? pdsp::LinkBand::Place::mid
-                : m.place == themis::EqMove::Place::side ? pdsp::LinkBand::Place::side : pdsp::LinkBand::Place::stereo;
-        b.freq = m.freqHz;
-        b.gainDb = m.gainDb;
-        b.q = m.q;
-        b.loHz = m.kind == K::harmonicFill ? m.loHz : b.loHz;
-        b.hiHz = m.kind == K::harmonicFill ? m.hiHz : b.hiHz;
-        bands.push_back (b);
-    }
+        bands.push_back (themis::plancopy::toLinkBand (m));
     pdsp::LinkCurve curve;
     if (target != nullptr)
     {
