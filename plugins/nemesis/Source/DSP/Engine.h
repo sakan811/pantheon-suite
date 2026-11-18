@@ -36,6 +36,20 @@ inline constexpr int kFindBins = 17;
 inline constexpr double kFindLoHz = 4000.0, kFindHiHz = 10000.0, kFindQ = 10.0, kFindMs = 1500.0;
 inline constexpr double kFindMinEnergy = 1e-10; // mean square of the sound under which there is nothing to find (-100 dBFS)
 
+// SET THRESH: a listening pass like FIND's, but on the band the detector hears at FREQ (so FREQ is not moved). It keeps a histogram, in 1 dB bins, of the band's level over the
+// active sound only: the sound counts while it is above kSetGateDb in the band and in the whole sound (silence and the hum under -100 dB are not sibilance). THRESH goes where the
+// loudest kSetTopFraction of that sound begins. A level would fit one recording only; a share of the sound fits a quiet and a loud one, so it is a percentile. Commercial
+// de-essers set their threshold against the level of the signal too; the percentile is this plugin's own choice. A band that is as loud all the time (no s in it) has its top
+// within kSetMinContrastDb of its middle, and then THRESH is left alone rather than set to the voice's own leakage.
+inline constexpr double kSetMs = 1500.0;
+inline constexpr double kSetTopFraction = 0.06;
+inline constexpr double kSetMinContrastDb = 10.0;
+inline constexpr double kSetMinActiveMs = 100.0; // less active sound than this: nothing to measure
+inline constexpr double kSetGateDb = -100.0;
+inline constexpr int kSetBins = 120;             // 1 dB bins, from kFloorDb (-120 dB) up to 0 dB
+
+enum class SetStatus { silent, tooLittle, set, stopped }; // silent: no sound to measure; tooLittle: no sibilance stands out; stopped: a reset came before the end of the pass
+
 struct EngineParams
 {
     float freqHz = 6500.0f;     // the centre of the sibilance
@@ -102,6 +116,10 @@ public:
         designedFor = { -1.0, -1.0 };
         findActive = false;
         finding.store (false, std::memory_order_relaxed);
+        if (setActive)
+            answerSet (SetStatus::stopped, 0.0f); // a stop or a locate ends the pass: the answer says so, and the editor is not left waiting
+        setActive = false;
+        setting.store (false, std::memory_order_relaxed);
     }
 
     // In place. Everything that is not a number is silence.
@@ -139,6 +157,16 @@ public:
             findActive = true;
             finding.store (true, std::memory_order_relaxed);
         }
+        if (const int wanted = setRequest.exchange (-1, std::memory_order_relaxed); wanted >= 0)
+        {
+            setHist.fill (0);
+            setActiveCount = 0;
+            setSamples = 0;
+            setLength = std::max (1, (int) (0.001 * kSetMs * fs));
+            setRelative = wanted == 1;
+            setActive = true;
+            setting.store (true, std::memory_order_relaxed);
+        }
         float deepest = 0.0f;
 
         for (int i = 0; i < n; ++i)
@@ -160,6 +188,8 @@ public:
             double levelDb = level > 1e-6 ? 20.0 * std::log10 (level) : kFloorDb;
             if (p.detection == Detection::relative && level > 1e-6) // in silence there is nothing to be relative to: stay at the floor, so a stretch of silence does not leave the reduction at full range
                 levelDb -= 10.0 * std::log10 (std::fmax (body, 1e-12) * 2.0); // the whole sound, read as the peak of a sine
+            if (setActive)
+                feedSet (level, body);
             const double wanted = reductionDb (levelDb, p.thresholdDb, p.rangeDb);
             gr += (wanted - gr) * (wanted > gr ? attackCoef : releaseCoef);
             if (gr < kRestDb && wanted == 0.0)
@@ -202,6 +232,14 @@ public:
     std::atomic<unsigned> findCount { 0 };
     std::atomic<float> foundHz { 0.0f };
 
+    // SET THRESH, from the message thread: listen for kSetMs of the sound, with the band as it is set now, for the detection given. `setCount` goes up when the answer is ready;
+    // `setStatus` is a SetStatus, and `setDb` the THRESH to set (in that detection's units) when it is `set`.
+    void startSetThreshold (Detection d) noexcept { setRequest.store (d == Detection::relative ? 1 : 0, std::memory_order_relaxed); }
+    std::atomic<bool> setting { false };
+    std::atomic<unsigned> setCount { 0 };
+    std::atomic<int> setStatus { (int) SetStatus::silent };
+    std::atomic<float> setDb { 0.0f };
+
 private:
     struct Channel
     {
@@ -243,6 +281,66 @@ private:
         findCount.fetch_add (1, std::memory_order_release);
     }
 
+    // One sample of the pass: the band's level and the whole sound's, in the detection asked for. Quiet sound is not counted.
+    void feedSet (double level, double body) noexcept
+    {
+        const double absDb = level > 1e-6 ? 20.0 * std::log10 (level) : kFloorDb;
+        const double bodyDb = 10.0 * std::log10 (std::fmax (2.0 * body, 1e-12));
+        if (absDb > kSetGateDb && bodyDb > kSetGateDb)
+        {
+            ++setActiveCount;
+            const double db = setRelative ? absDb - bodyDb : absDb;
+            ++setHist[(size_t) std::clamp ((int) std::floor (db - kFloorDb), 0, kSetBins - 1)];
+        }
+        if (++setSamples >= setLength)
+            finishSet();
+    }
+
+    // The loudest kSetTopFraction of the active sound begins at `top`; the middle of it is at `mid`. Sibilance only if the top stands out of the middle.
+    void finishSet() noexcept
+    {
+        setActive = false;
+        setting.store (false, std::memory_order_relaxed);
+        SetStatus status = SetStatus::silent;
+        float db = 0.0f;
+        const unsigned n = setActiveCount;
+        if ((double) n >= 0.001 * kSetMinActiveMs * fs)
+        {
+            status = SetStatus::tooLittle;
+            const unsigned topCount = std::max (1u, (unsigned) std::ceil (kSetTopFraction * (double) n));
+            unsigned seen = 0;
+            int top = kSetBins - 1;
+            for (; top > 0; --top)
+            {
+                seen += setHist[(size_t) top];
+                if (seen >= topCount)
+                    break;
+            }
+            unsigned below = 0;
+            int mid = 0;
+            for (; mid < kSetBins - 1; ++mid)
+            {
+                below += setHist[(size_t) mid];
+                if (2 * below >= n)
+                    break;
+            }
+            const double topDb = kFloorDb + top, midDb = kFloorDb + mid + 0.5;
+            if (topDb + 0.5 - midDb >= kSetMinContrastDb)
+            {
+                status = SetStatus::set;
+                db = (float) topDb;
+            }
+        }
+        answerSet (status, db);
+    }
+
+    void answerSet (SetStatus status, float value) noexcept
+    {
+        setStatus.store ((int) status, std::memory_order_relaxed);
+        setDb.store (value, std::memory_order_relaxed);
+        setCount.fetch_add (1, std::memory_order_release); // after the values: the editor reads the count first
+    }
+
     static inline double finite (float v) noexcept { return std::isfinite (v) ? (double) v : 0.0; }
     double coefOf (double ms) const noexcept { return 1.0 - std::exp (-1.0 / std::fmax (0.001 * ms * fs, 1.0)); }
 
@@ -261,5 +359,10 @@ private:
     int findSamples = 0, findLength = 1;
     bool findActive = false;
     std::atomic<bool> findRequest { false };
+    std::atomic<int> setRequest { -1 }; // -1: none; 0: absolute; 1: relative
+    std::array<unsigned, kSetBins> setHist {};
+    unsigned setActiveCount = 0;
+    int setSamples = 0, setLength = 1;
+    bool setActive = false, setRelative = false;
 };
 } // namespace nemesis

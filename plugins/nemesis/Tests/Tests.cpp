@@ -391,5 +391,105 @@ int main()
         check (pending.finding.load() && pending.findCount.load() == 0, "FIND takes the next 1.5 s of sound: 0.1 s in, it is still listening");
     }
 
+    // [10] SET THRESH: THRESH from the sound that plays.
+    std::printf ("\n[10] Set thresh\n");
+    {
+        // A speech-like sound: a vowel (300 Hz, -12 dBFS) all the time and every 0.3 s a 120 ms s at 6.5 kHz. Every fourth s is loud (-12 dBFS), the others quieter (-24, -20).
+        const auto speech = [] (double shiftDb)
+        {
+            const int total = 3 * 48000;
+            Stereo s = tones ({ { 300.0, -12.0 + shiftDb } }, total);
+            const double pattern[3] { -12.0, -24.0, -20.0 };
+            for (int k = 0; 4800 + k * 14400 + 5760 <= total; ++k)
+            {
+                const int start = 4800 + k * 14400;
+                const double a = std::pow (10.0, (pattern[k % 3] + shiftDb) / 20.0);
+                for (int i = start; i < start + 5760; ++i)
+                    s.l[(size_t) i] += (float) (a * std::sin (2.0 * M_PI * 6500.0 * i / kFs));
+            }
+            s.r = s.l;
+            return s;
+        };
+        // The level of a tone in a window, as a DFT of that window (the other tones do not count).
+        const auto levelWindow = [] (const std::vector<float>& x, double hz, size_t from, size_t count)
+        {
+            double re = 0.0, im = 0.0;
+            for (size_t i = from; i < from + count; ++i)
+            {
+                re += x[i] * std::cos (2.0 * M_PI * hz * (double) i / kFs);
+                im += x[i] * std::sin (2.0 * M_PI * hz * (double) i / kFs);
+            }
+            return db (2.0 * std::sqrt (re * re + im * im) / (double) count);
+        };
+        const auto measure = [] (const Stereo& in, Detection d)
+        {
+            Engine e;
+            e.prepare (kFs);
+            e.startSetThreshold (d);
+            run (e, in, EngineParams {});
+            return std::make_pair ((SetStatus) e.setStatus.load(), (double) e.setDb.load());
+        };
+
+        const auto in = speech (0.0);
+        const auto absolute = measure (in, Detection::absolute);
+        check (absolute.first == SetStatus::set && absolute.second > -14.0 && absolute.second < -11.0,
+               fmt ("SET THRESH on a speech-like sound: THRESH %.1f dBFS (the loudest s is -12 dBFS; the top 6%% of the sound starts there)", absolute.second));
+
+        // With that THRESH the loud s is turned down a little and the quieter s and the vowel are not touched.
+        EngineParams p;
+        p.thresholdDb = (float) absolute.second;
+        p.rangeDb = 12.0f;
+        Engine e;
+        e.prepare (kFs);
+        const auto out = run (e, in, p);
+        bool loudDown = true, quietUntouched = true;
+        double loudest = 0.0;
+        for (int k = 0; 4800 + k * 14400 + 5760 <= 3 * 48000; ++k)
+        {
+            const size_t from = (size_t) (4800 + k * 14400 + 960), count = 4080; // from 20 ms to 105 ms of the s: the gain has settled
+            const double change = levelWindow (out.l, 6500.0, from, count) - levelWindow (in.l, 6500.0, from, count);
+            if (k % 3 == 0)
+            {
+                loudDown = loudDown && change < -0.5;
+                loudest = std::fmin (loudest, change);
+            }
+            else
+                quietUntouched = quietUntouched && std::fabs (change) < 0.1;
+        }
+        check (loudDown, fmt ("the loud s is turned down (THRESH holds its top): by %.2f dB (the 6 dB knee starts 3 dB under THRESH, so the reduction is gentle)", -loudest));
+        check (quietUntouched, "the quieter s are not turned down");
+        check (std::fabs (changeAt (in, out, 300.0)) < 0.1, fmt ("the vowel, the non-sibilant body, is not touched (%+.3f dB)", changeAt (in, out, 300.0)));
+
+        // RELATIVE: the same sound 30 dB quieter gets the same THRESH (ABSOLUTE moves by the 30 dB).
+        const auto quiet = speech (-30.0);
+        const auto rel = measure (in, Detection::relative), relQuiet = measure (quiet, Detection::relative);
+        const auto absQuiet = measure (quiet, Detection::absolute);
+        check (rel.first == SetStatus::set && relQuiet.first == SetStatus::set && std::fabs (rel.second - relQuiet.second) <= 1.0,
+               fmt ("RELATIVE: the same sound 30 dB quieter gets the same THRESH (%.1f and %.1f dB under the sound)", rel.second, relQuiet.second));
+        check (std::fabs ((absolute.second - absQuiet.second) - 30.0) < 1.0, fmt ("ABSOLUTE: the quieter sound's THRESH is 30 dB lower (%.1f against %.1f dBFS)", absQuiet.second, absolute.second));
+
+        // No sibilance: a vowel alone has a band that is as loud all the time, so there is nothing to set from. Silence: nothing to measure.
+        const auto vowel = tones ({ { 300.0, -12.0 } }, 3 * 48000);
+        const auto none = measure (vowel, Detection::absolute);
+        const auto silence = measure (tones ({}, 3 * 48000), Detection::absolute);
+        check (none.first == SetStatus::tooLittle, "a vowel alone (no s stands out of it): no THRESH is set");
+        check (silence.first == SetStatus::silent, "silence: no THRESH is set");
+
+        // The pass is 1.5 s: at 1 s there is no answer yet; a reset in the middle of it answers `stopped`, so nobody waits for ever.
+        Engine w;
+        w.prepare (kFs);
+        w.startSetThreshold (Detection::absolute);
+        run (w, in, EngineParams {}); // the whole sound: the answer comes at 1.5 s
+        check (w.setCount.load() == 1 && w.setStatus.load() == (int) SetStatus::set, "the answer comes once, after the 1.5 s of the pass");
+        Engine r;
+        r.prepare (kFs);
+        r.startSetThreshold (Detection::absolute);
+        const auto half = tones ({ { 6500.0, -12.0 } }, 24000);
+        run (r, half, EngineParams {});
+        check (r.setCount.load() == 0 && r.setting.load(), "half a second in, the pass is still listening");
+        r.reset();
+        check (r.setCount.load() == 1 && r.setStatus.load() == (int) SetStatus::stopped && ! r.setting.load(), "a reset in the middle of the pass answers `stopped`");
+    }
+
     return test::finish ("NemesisTests");
 }
