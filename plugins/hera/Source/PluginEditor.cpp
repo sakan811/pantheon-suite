@@ -40,6 +40,8 @@ HeraEditor::HeraEditor (HeraProcessor& p)
       key (p.apvts, id::external, "KEY", "The detector listens to the sidechain input (another track routed in the host) instead of this one. With nothing connected it listens to itself."),
       levelMatch (p.apvts, id::match, "LEVEL MATCH", "Takes the level the compressor and MAKEUP add or take away off again, slowly (about 0.6 s, within 12 dB), so an A/B is not decided by loudness: "
                                                      "a louder sound is heard as better. Kept by presets; while it is on the gain it applies is read out in the display."),
+      undoButtons (p.undo, *this),
+      abButtons (p.ab),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -51,6 +53,8 @@ HeraEditor::HeraEditor (HeraProcessor& p)
     listenButton.onClick = [this] { proc.engine.scListen = listenButton.getToggleState(); };
     for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &levelMatch, &deltaButton, &listenButton, &guideButton })
         addAndMakeVisible (*c);
+    addAndMakeVisible (undoButtons);
+    addAndMakeVisible (abButtons);
     startTimerHz (kTimerHz);
     setSize (kWidth, kHeight);
 }
@@ -69,6 +73,10 @@ void HeraEditor::resized()
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
     header.removeFromLeft (24);
+    // UNDO / REDO and A / B in the top strip of the header, which the labels of the preset and look-ahead leave free.
+    const auto strip = header.withHeight (16).translated (0, -6);
+    undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
+    abButtons.setBounds (strip.getX() + ui::UndoButtons::kWidth + 10, strip.getY(), ui::AbButtons::kWidth, strip.getHeight());
     auto headerRow = header.withTrimmedTop (28).withHeight (28);
     presetLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
     presetBox.setBounds (headerRow.removeFromLeft (190));
@@ -150,6 +158,16 @@ void HeraEditor::paint (juce::Graphics& g)
         }
         g.setColour (colours::glassGrid.brighter (0.6f));
         g.drawLine (xOf (gui::kCurveMinDb), yOf (gui::kCurveMinDb), xOf (gui::kCurveMaxDb), yOf (gui::kCurveMaxDb));
+        // Where the compression starts: the knee band (THRESH plus or minus half the KNEE on the input) and THRESH itself, a line down and a line across the whole display.
+        {
+            const float t = (float) params.thresholdDb, half = 0.5f * (float) params.kneeDb;
+            const float x0 = juce::jlimit (r.getX(), r.getRight(), xOf (t - half)), x1 = juce::jlimit (r.getX(), r.getRight(), xOf (t + half));
+            g.setColour (colours::accent.withAlpha (0.10f));
+            g.fillRect (juce::Rectangle<float> (x0, r.getY(), x1 - x0, r.getHeight()));
+            g.setColour (colours::dim.withAlpha (0.6f));
+            g.drawLine (xOf (t), r.getBottom(), xOf (t), r.getY(), 1.0f);
+            g.drawLine (r.getX(), yOf (t), r.getRight(), yOf (t), 1.0f);
+        }
         const double makeupDb = params.makeupDb + (params.autoMakeup ? autoMakeupDb (params.thresholdDb, params.ratio, params.kneeDb) : 0.0);
         juce::Path curve;
         for (int i = 0; i <= 120; ++i)

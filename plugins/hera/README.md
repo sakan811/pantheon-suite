@@ -11,7 +11,7 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 
 ![Hera Bond](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, an 8 dB knee, AUTO REL, AUTO MAKEUP and LEVEL MATCH on. On the left, the transfer curve (input across, output up) with the dot where the level is now; on the right, the reduction over the last seconds (-9.3 dB now), with **LEVEL MATCH** on and its gain read out under the reduction (-9.4 dB: the compression takes about that much level, and the match gives it back). The strip warns that taking off 11 dB or more will pump. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, an 8 dB knee, AUTO REL, AUTO MAKEUP and LEVEL MATCH on. On the left, the transfer curve (input across, output up) with the dot where the level is now, the shaded band of the knee (THRESH -22 dB, 8 dB knee: -26 to -18 dB on the input) and the thin lines at THRESH; at the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit, as on opening); on the right, the reduction over the last seconds (-9.3 dB now), with **LEVEL MATCH** on and its gain read out under the reduction (-9.4 dB: the compression takes about that much level, and the match gives it back). The strip warns that taking off 11 dB or more will pump. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -32,9 +32,10 @@ makeup (or one that makes up what the compression takes), a parallel **mix**, a 
 | **Level match** | Takes the level the compressor and MAKEUP add or take away off again, slowly (about 0.6 s, within 12 dB), so an A/B is not decided by loudness. Off by default; while it is on, the gain it applies is read out beside the reduction. Kept by presets. |
 | **Delta** | Plays only what the compressor changes (output minus the input, delayed like the output). Not saved, not automatable, off when the window closes. |
 | **SC listen** | Plays what the detector hears: the key (this track, or the sidechain with KEY on) after SC HPF, instead of the track. Not saved, not automatable, off when the window closes. |
+| **Undo and A/B** | **UNDO / REDO** (Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus; Ctrl on other systems) take back and redo changes to the controls, a preset included (as one step each). They are not kept with the session. **A / B** holds two settings of every control except LEVEL MATCH (which stays as it is, as with a preset): choosing B the first time copies A; after that each switch keeps what you have set in the one you leave and loads the other, so the plugin can be set up two ways and compared while listening. A later switch is one undo step (the first, which only copies A into B, is not). The slots are not saved with the session, only which one is active. Both come from the shared kit (`Undo.h`, `AbCompare.h`). |
 | **Presets** | Eight starting points (Init, Vocal Level, Drum Punch, Bus Glue, Bass Control, Parallel Smash, Peak Catcher, Sidechain Duck). A preset sets every control; what it does not list goes back to its default (LEVEL MATCH is kept). The thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves. |
 
-The display is the transfer curve (input level across, output up; the diagonal is "no compression", the dot is the level now) and the reduction of the last ten seconds.
+The display is the transfer curve (input level across, output up; the diagonal is "no compression", the dot is the level now; the shaded band is the knee, THRESH plus or minus half the KNEE, and the thin lines mark THRESH) and the reduction of the last ten seconds.
 
 ## How it works
 
