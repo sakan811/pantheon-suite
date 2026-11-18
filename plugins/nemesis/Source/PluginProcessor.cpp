@@ -9,7 +9,7 @@ NemesisProcessor::NemesisProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "STATE", nemesis::createLayout())
+      apvts (*this, &undo, "STATE", nemesis::createLayout())
 {
 }
 

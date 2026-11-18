@@ -8,6 +8,7 @@
 #include "UI/NemesisUi.h"
 #include <array>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 
 // The band the detector listens to and the reduction of the last seconds on glass, five knobs, two selectors and LISTEN. Everything drawn is the shared kit's (shared/ui).
 class NemesisEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -26,10 +27,14 @@ public:
     ui::PresetBox presetBox;
     ui::Toggle listen, delta;
     juce::TextButton findButton { "FIND" }; // listens for a moment and sets FREQ to the strongest place between 4 and 10 kHz (LISTEN on)
+    juce::TextButton setThreshButton { "SET THRESH" }; // listens for 1.5 s and sets THRESH where the loudest few percent of the s begin (Engine.h, SET THRESH)
+    std::string setNote () const { return setNoteText; } // what SET THRESH last said, for the checks
     void tickDisplay() { timerCallback(); } // one reading of the engine (the checks and a snapshot call it as the timer would)
     bool findPending() const noexcept { return awaiting; }
     ui::GuideButton guideButton { nemesis::guideTitle(), nemesis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
+    ui::UndoButtons undoButtons; // UNDO / REDO, in the header's top strip (shared/ui Undo.h)
+    ui::UndoButtons& undoControls() noexcept { return undoButtons; } // for UiCheck
     std::vector<ui::Note> notes() const { return nemesis::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     float heldReductionDb() const noexcept { return *std::max_element (history.begin(), history.end()); }
 
@@ -45,6 +50,10 @@ private:
     float shownReduction = 0.0f;
     bool awaiting = false;      // FIND was pressed and its answer has not come
     unsigned findCountAtClick = 0;
+    bool setAwaiting = false;                             // SET THRESH was pressed and its answer has not come
+    unsigned setCountAtClick = 0;
+    nemesis::Detection setDetectionAtClick = nemesis::Detection::absolute; // the detection it listens for: THRESH is in its units
+    std::string setNoteText;                              // what SET THRESH last said: the strip shows it
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NemesisEditor)
 };

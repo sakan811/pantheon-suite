@@ -39,6 +39,7 @@ public:
     void setStateInformation (const void*, int) override;
 
     nemesis::Engine engine;
+    juce::UndoManager undo; // one step per change a button makes (SET THRESH, a preset): shared/ui Undo.h; declared before the state that records into it
     juce::AudioProcessorValueTreeState apvts;
     ui::Programs programs { apvts, nemesis::presets() }; // after apvts
 

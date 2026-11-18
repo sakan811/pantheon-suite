@@ -10,7 +10,7 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 
 ![Nemesis Hush](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB and RELEASE 40 ms. LISTEN, DELTA and FIND (dimmed: LISTEN is off) are under the selectors. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-2.0 dB now) and rests at 0 between them. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB and RELEASE 40 ms. LISTEN, DELTA and FIND (dimmed: LISTEN is off) are under the selectors; UNDO / REDO sit in the header's top strip, above the labels: UNDO is lit and REDO dimmed, as after a change; SET THRESH is in the header, beside LOOK-AHEAD. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-1.2 dB now) and rests at 0 between them. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -26,6 +26,8 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 | **Listen** | Hear the band the detector hears. Monitoring: switch it off before a bounce. |
 | **Delta** | Off by default. Hear only what is turned down (the sound minus the output: `(1 - gain) x band` in split-band, `(1 - gain) x sound` in wideband): if it is the voice and not just the hiss of the s, THRESH is too low or RANGE too high. It takes the place of LISTEN while it is on; presets switch it off. |
 | **Find** | With LISTEN on, **FIND** listens to the next 1.5 s of the sound that plays and sets FREQ to the strongest place between 4 and 10 kHz: a bank of 17 narrow band-passes (Q 10, equal ratios) keeps the energy of the mono sum, the energy per hertz is smoothed over the neighbours, and the strongest place is refined between the bins. A sound under -100 dBFS gives no answer and FREQ is left alone. |
+| **Set thresh** | With the sound playing, **SET THRESH** (in the header) listens for 1.5 s to the band the detector hears at FREQ and sets THRESH where the loudest 6% of the s begin: a 1 dB histogram of the active sound, in the detection Detection shows (absolute or relative). FREQ is not moved. With no s in the sound (silence, or a band as loud all the time) THRESH stays as it was and the strip says why. It is one undo step. |
+| **Undo** | **UNDO / REDO** (in the header's top strip) take back and redo every control change, SET THRESH and a preset included, one step each (Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus; Ctrl on other systems). They are not kept with the session. From the shared kit (`Undo.h`). |
 | **Look-ahead** | Off (default), 0.5, 1, 2 or 5 ms: the detector hears the sound as it arrives and the sound is heard that long after, so the first of a loud s is already turned down. It is a delay (the host compensates). |
 | **Presets** | Seven starting points (Init, Male Vocal, Female Vocal, Gentle Touch, Hard Sibilance, Broadcast Voice, Find the S). A preset sets every control; what it does not list goes back to its default. Find the s with LISTEN and move FREQ onto it first. |
 
@@ -49,6 +51,7 @@ The display shows the response of the band the detector hears and the reduction 
 - FIND: tones at 4.5, 6.2, 7.8 and 9.5 kHz are found at 4484, 6206, 7813 and 9497 Hz; a 7 kHz tone at -26 dBFS under a 300 Hz tone at 0 dBFS at 7011 Hz; noise with a hump at 5.6 kHz at 5574 Hz; a sound at -130 dBFS gives no answer.
 - Bypassed by the host, the sound is delayed by the reported look-ahead (an impulse at 7 is heard at 103 with 96 samples of latency).
 - LISTEN: the 6.5 kHz tone passes (-0.00 dB) and the 300 Hz tone is 31 dB down.
+- SET THRESH on a speech-like sound (a vowel at 300 Hz, -12 dBFS, and every 0.3 s a 120 ms s at 6.5 kHz: every fourth at -12 dBFS, the others at -20 and -24): THRESH -13.0 dBFS; the loud s is turned down by 1.40 dB, the quieter s and the vowel by 0.00 dB. RELATIVE: the same sound 30 dB quieter gets the same THRESH (-3.0 dB under the sound both times); ABSOLUTE moves by 30 dB (-43.0 against -13.0). A vowel alone and silence leave THRESH as it was; a reset in the middle of the pass answers "stopped".
 - Under the threshold the output is the input, bit for bit, in both modes; half a second after a loud sibilant the gain is back at exactly 1 and a quiet sound is the input, bit for bit.
 - RELEASE 50 ms: 14.8 dB at the end of a one-second sibilant, 38% of it (5.6 dB) 50 ms later, and gone after a second.
 - Relative detection: the same sound 30 dB quieter is turned down by the same amount (5.09 dB both). Absolute: 18.10 dB for the loud one and +0.000 dB for the quiet one.
@@ -58,6 +61,7 @@ The display shows the response of the band the detector hears and the reduction 
 ## Limits
 
 - **FIND reads the sound that plays**, so play a passage with the s in it; it finds the strongest place of the whole 1.5 s (a loud vowel with energy above 4 kHz can win over a quiet s), and a very loud sound just under 4 kHz leaks a little into its lowest bin. Check the result with LISTEN.
+- **SET THRESH needs a passage with s in it, and several of them.** It takes the loudest 6% of the active sound, so with one s in 1.5 s THRESH lands on the loudest of the rest. It moves THRESH only, measured at the FREQ set now: set FREQ first (FIND). It is a gentle start: the 6 dB knee begins 3 dB under THRESH, so the first reduction is small (1.4 dB in the test). The change is one undo step of the processor's UndoManager; UNDO in the header takes it back, as does the host's undo.
 - **DELTA and LISTEN are monitoring**; switch them off before a bounce (a note says so).
 - **With LOOK-AHEAD off** the first 0.3 ms of a very loud s gets through before the attack closes; with it on the gain is already down (in split-band the band-pass itself takes about 70 microseconds to answer, so the very first cycle of a burst is still not turned down). LOOK-AHEAD delays the sound by its time (the host compensates); changing it while playing restarts the de-esser (a short gap).
 - **Taking off 10 dB or more makes a lisp.** Raise THRESH or lower RANGE. In wideband mode the whole voice ducks with the s.

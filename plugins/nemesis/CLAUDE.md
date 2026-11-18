@@ -38,7 +38,7 @@ A notch or a shelf in the path at 0 dB would not be exact (that is the lesson of
 **Look-ahead delays the sound and its band, not the detector.** The detector's band-pass reads what is arriving; the sound and that band are written into a ring (`Channel::ringSound`, `ringBand`) and what is heard is `delaySamples` back, so `y = heard - (1 - gain) x heardBand` is still the subtraction above (the delayed band is the band of the delayed sound).
 With `delaySamples == 0` the ring returns the input, so the engine is bit-identical to the one without. A change of the setting clears the rings (a short gap) and moves `latencySamples`, which the processor hands to the host on the message thread (`handleAsyncUpdate`). The list is `kLookaheadMs`, in the order of `lookaheadNames`.
 
-**DELTA is the third output branch** (`y = (1 - gain) x heardBand` in split-band, `heard x (1 - gain)` in wideband, ahead of LISTEN): it is exactly what the other branches take off, so output + DELTA is the delayed input. **FIND** (`startFind`, `findCount`, `foundHz`) is a bank of `kFindBins` band-passes that only runs for `kFindMs` after a request, on the mono sum, fixed arrays, no allocation; the editor's FIND button (enabled only with LISTEN on) sets FREQ from `foundHz` when `findCount` moves.
+**DELTA is the third output branch** (`y = (1 - gain) x heardBand` in split-band, `heard x (1 - gain)` in wideband, ahead of LISTEN): it is exactly what the other branches take off, so output + DELTA is the delayed input. **FIND** (`startFind`, `findCount`, `foundHz`) is a bank of `kFindBins` band-passes that only runs for `kFindMs` after a request, on the mono sum, fixed arrays, no allocation; the editor's FIND button (enabled only with LISTEN on) sets FREQ from `foundHz` when `findCount` moves. **SET THRESH** (`startSetThreshold`, `setCount`, `setStatus`, `setDb`) is the same kind of pass on the band at the current FREQ: a 1 dB histogram of the active sound (above -100 dB in the band and the whole sound), THRESH at the top 6% of it, and no THRESH at all when the top is not 10 dB over the middle (no s). It moves THRESH only; the editor clips the value to THRESH's range and makes it one undo step (`beginUndoStep`). The processor owns the `UndoManager` for it, and the editor's UNDO / REDO (in the header strip) use the same manager.
 
 **Bypass.** The plugin reports latency (the look-ahead), so `processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay` (prepared for the longest look-ahead); UiCheck pins it.
 
@@ -75,6 +75,7 @@ The order of `modeNames` and `detectionNames` is the order of `Mode` and `Detect
 - In an editor constructor call `setSize()` **last**.
 - `createEditor()` returns a `ui::ScaledEditor<NemesisEditor>`, not the editor: tests and snapshots reach it with `ui::innerOf<NemesisEditor> (*processor.createEditor())`.
 - A test of the absolute threshold needs a level well under it (-12 dB), not one just under: the 6 dB knee already takes 0.1 dB off at 2 dB under.
+- `ui::Button::triggerClick()` is asynchronous: a UiCheck that presses a button and then processes audio must dispatch the message loop first, or the request reaches the engine after the audio (SET THRESH's check did).
 
 ## Conventions
 

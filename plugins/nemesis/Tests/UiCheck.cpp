@@ -6,6 +6,8 @@
 
 #include "Advice.h"
 #include "Check.h"
+#include <cmath>
+#include <functional>
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
 
@@ -147,6 +149,139 @@ int main()
         check (! editor.findPending() && std::fabs (readParams (q.apvts).freqHz - 8200.0f) < 330.0f, fmt ("FIND set FREQ to %.0f Hz for an 8.2 kHz sound", readParams (q.apvts).freqHz));
         setValue (q.apvts, id::delta, 1.0f);
         check (ui::hasNote (editor.notes(), "DELTA is on", ui::Severity::warning) && ! ui::hasNote (editor.notes(), "LISTEN is on", ui::Severity::warning), "DELTA on is flagged (and replaces LISTEN's note)");
+    }
+
+    // SET THRESH: sets THRESH from the sound that plays, and nothing else; one undo step; silence and a sound with no s leave THRESH as it was, and the strip says so.
+    {
+        NemesisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<NemesisEditor> (*holder);
+        editor.setVisible (true);
+        const auto& b = editor.setThreshButton.getBounds();
+        check (editor.getLocalBounds().contains (b) && ! b.intersects (editor.guideButton.getBounds()) && ! b.intersects (editor.presetBox.getBounds()) && ! b.intersects (editor.lookahead.getBounds()) && b.getX() > editor.lookahead.getRight(),
+               "SET THRESH is in the header, inside the window, beside the look-ahead and clear of GUIDE");
+
+        // Plays `seconds` of a signal into the processor, presses SET THRESH first and lets the editor read the answer.
+        const auto pressOn = [] (NemesisProcessor& p, NemesisEditor& ed, const std::function<float (int)>& sample, double seconds)
+        {
+            ed.setThreshButton.triggerClick(); // asynchronous: the press reaches the engine on the message loop, before the audio
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            const int blocks = (int) std::ceil (seconds * 48000.0 / 512.0);
+            for (int block = 0; block < blocks; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                    for (int c = 0; c < 2; ++c)
+                        buffer.setSample (c, i, sample (block * 512 + i));
+                p.processBlock (buffer, midi);
+            }
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            ed.tickDisplay();
+        };
+        // A speech-like sound: a vowel (300 Hz, -12 dBFS) all the time, every 0.3 s a 120 ms s at 6.5 kHz: every fourth one -12 dBFS, the others -24 and -20.
+        const auto speech = [] (int i)
+        {
+            float v = 0.251f * std::sin (2.0f * 3.14159265f * 300.0f * (float) i / 48000.0f);
+            if (i >= 4800 && (i - 4800) % 14400 < 5760 && (i - 4800) / 14400 <= 9)
+            {
+                const float dbs[3] { -12.0f, -24.0f, -20.0f };
+                const int k = (i - 4800) / 14400;
+                v += std::pow (10.0f, dbs[k % 3] / 20.0f) * std::sin (2.0f * 3.14159265f * 6500.0f * (float) i / 48000.0f);
+            }
+            return v;
+        };
+        const auto before = readParams (q.apvts);
+        pressOn (q, editor, speech, 3.0);
+        const auto after = readParams (q.apvts);
+        const bool onlyThresh = std::fabs (after.freqHz - before.freqHz) < 1e-3f && std::fabs (after.q - before.q) < 1e-6f && std::fabs (after.rangeDb - before.rangeDb) < 1e-6f &&
+                                std::fabs (after.releaseMs - before.releaseMs) < 1e-6f && after.mode == before.mode && after.detection == before.detection && after.listen == before.listen &&
+                                after.delta == before.delta && after.lookahead == before.lookahead;
+        check (std::fabs (after.thresholdDb - before.thresholdDb) > 5.0f && after.thresholdDb >= -60.0f && after.thresholdDb <= 0.0f && onlyThresh,
+               fmt ("SET THRESH on a speech-like sound: THRESH %.1f -> %.1f dB, and no other knob or switch moved", before.thresholdDb, after.thresholdDb));
+        check (ui::hasNote (editor.notes(), "SET THRESH: ", ui::Severity::info) && editor.setNote().find ("dBFS") != std::string::npos, "the strip says what THRESH was set to");
+        const float set = after.thresholdDb;
+        editor.undoControls().undo();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (std::fabs (readParams (q.apvts).thresholdDb - before.thresholdDb) < 0.01f && ! q.undo.canUndo(), "UNDO (the editor's button) takes SET THRESH back in one step");
+        editor.undoControls().redo();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (std::fabs (readParams (q.apvts).thresholdDb - set) < 0.01f, "REDO brings it back");
+
+        // A vowel alone: no s stands out, so THRESH stays and the strip says why.
+        const auto vowel = [] (int i) { return 0.251f * std::sin (2.0f * 3.14159265f * 300.0f * (float) i / 48000.0f); };
+        const float keep = readParams (q.apvts).thresholdDb;
+        pressOn (q, editor, vowel, 3.0);
+        check (std::fabs (readParams (q.apvts).thresholdDb - keep) < 1e-4f && ui::hasNote (editor.notes(), "no s stands out", ui::Severity::info),
+               "a vowel alone (no s): THRESH is unchanged, and the strip says no s stands out");
+        pressOn (q, editor, [] (int) { return 0.0f; }, 2.0);
+        check (std::fabs (readParams (q.apvts).thresholdDb - keep) < 1e-4f && ui::hasNote (editor.notes(), "was silent", ui::Severity::info),
+               "silence: THRESH is unchanged, and the strip says the sound was silent");
+        bool fits = true;
+        for (const auto& n : editor.notes())
+            fits = fits && (int) n.text.size() <= ui::kMaxNoteChars;
+        check (fits, "every SET THRESH note fits a line of the strip");
+    }
+
+    // UNDO / REDO: on screen in the header, clear of the controls; a knob move is taken back by UNDO and brought again by REDO.
+    {
+        NemesisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<NemesisEditor> (*holder);
+        editor.setVisible (true);
+        const auto undoR = editor.undoControls().getBounds();
+        check (editor.undoControls().isVisible() && editor.undoControls().undoSwitch().isVisible() && editor.undoControls().redoSwitch().isVisible() && editor.getLocalBounds().contains (undoR),
+               "UNDO / REDO are on screen, inside the window");
+        check (! undoR.intersects (editor.setThreshButton.getBounds()) && ! undoR.intersects (editor.guideButton.getBounds()) && ! undoR.intersects (editor.presetBox.getBounds())
+                   && ! undoR.intersects (editor.lookahead.getBounds()) && ! undoR.intersects (editor.listen.getBounds()),
+               "UNDO / REDO overlap neither SET THRESH, GUIDE, the preset box, LOOK-AHEAD nor LISTEN");
+
+        // The APVTS writes a change into its state on the message loop, so each step waits until the state holds it before the next one begins.
+        const auto pumpUntil = [] (auto&& done) {
+            for (int waited = 0; ! done() && waited < 2000; waited += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            return done();
+        };
+        const auto inTree = [&q] (const juce::String& pid, float plain) {
+            for (int i = 0; i < q.apvts.state.getNumChildren(); ++i)
+            {
+                const auto child = q.apvts.state.getChild (i);
+                if (child.getProperty ("id").toString() == pid)
+                    return std::fabs ((float) child.getProperty ("value") - plain) < 1e-3f;
+            }
+            return false;
+        };
+
+        q.undo.clearUndoHistory();
+        ui::beginUndoStep (q.apvts, "Range");
+        setValue (q.apvts, id::range, 20.0f);
+        pumpUntil ([&] { return inTree (id::range, 20.0f); });
+        check (editor.undoControls().undoSwitch().isEnabled() && ! editor.undoControls().redoSwitch().isEnabled(), "after a knob move UNDO is lit and REDO is not");
+        editor.undoControls().undo();
+        pumpUntil ([&] { return inTree (id::range, 8.0f); });
+        check (std::fabs (readParams (q.apvts).rangeDb - 8.0f) < 1e-3f, "UNDO takes the RANGE move back to 8 dB");
+        pumpUntil ([&] { return editor.undoControls().redoSwitch().isEnabled(); }); // the buttons follow the manager on the message loop, as in Hera
+        check (editor.undoControls().redoSwitch().isEnabled() && ! editor.undoControls().undoSwitch().isEnabled(), "after that UNDO is off and REDO is lit");
+        editor.undoControls().redo();
+        pumpUntil ([&] { return inTree (id::range, 20.0f); });
+        check (std::fabs (readParams (q.apvts).rangeDb - 20.0f) < 1e-3f, "REDO brings the RANGE move back to 20 dB");
+
+        // SET THRESH is one undo step of its own: it is checked where it presses (above); here it is one step among the knob moves.
+        q.undo.clearUndoHistory();
+        ui::beginUndoStep (q.apvts, "Range");
+        setValue (q.apvts, id::range, 12.0f);
+        pumpUntil ([&] { return inTree (id::range, 12.0f); });
+        ui::beginUndoStep (q.apvts, "SET THRESH");
+        setValue (q.apvts, id::threshold, -20.0f);
+        pumpUntil ([&] { return inTree (id::threshold, -20.0f); });
+        editor.undoControls().undo();
+        pumpUntil ([&] { return inTree (id::threshold, -30.0f); });
+        check (std::fabs (readParams (q.apvts).thresholdDb + 30.0f) < 1e-3f && std::fabs (readParams (q.apvts).rangeDb - 12.0f) < 1e-3f,
+               "one UNDO takes back a SET THRESH step and leaves the RANGE move before it");
     }
 
     // Presets: each applies, has a name and a one-line purpose, and the chosen one is kept with the session.

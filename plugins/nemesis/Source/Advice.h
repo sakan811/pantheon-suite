@@ -17,6 +17,7 @@ struct AdviceInput
     EngineParams params;
     float reductionDb = 0.0f; // what it is taking off now
     float heldDb = 0.0f;      // the most in the last few seconds
+    std::string threshNote;   // what SET THRESH last said (empty: nothing yet); the strip shows it
 };
 
 constexpr float kHeavyDb = 10.0f;
@@ -39,6 +40,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         warn ("THRESH is at the top: the band hardly ever gets over it, so nothing is turned down. Lower it until the meter moves.");
     if (in.heldDb >= kHeavyDb)
         warn ("Taking off " + std::to_string ((int) (in.heldDb + 0.5f)) + " dB or more makes a lisp: the voice sounds dull. Raise THRESH or lower RANGE.");
+    if (! in.threshNote.empty())
+        info (in.threshNote);
     if (p.mode == Mode::wideband && in.heldDb >= 4.0f)
         info ("WIDEBAND turns the whole voice down with each s: it can sound as if it ducks. SPLIT-BAND does not.");
     if (p.detection == Detection::relative)
@@ -57,6 +60,7 @@ inline const char* guideText()
            "by up to RANGE. SPLIT-BAND turns down only that band, so the rest of the voice is not touched; WIDEBAND turns the whole sound down.\n\n"
            "FINDING IT\n"
            "Switch LISTEN on and move FREQ until you hear the hiss of the s: that is the band the detector hears. FIND does it for you: with LISTEN on, play a passage with s in it and press FIND; it listens for a second and a half and sets FREQ to the strongest place between 4 and 10 kHz. "
+           "SET THRESH (in the header) listens to a second and a half of the sound and sets THRESH where its loudest few percent of s begin: a starting point, for a passage with s in it. "
            "DELTA plays only what is turned down: if it is the voice and not just the hiss, THRESH is too low or RANGE too high. Switch both off before you bounce. RELATIVE detection compares the band with the "
            "whole sound, so one threshold works for a quiet and a loud passage.\n\n"
            "NOT FOR\n"

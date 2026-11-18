@@ -5,6 +5,7 @@
 
 #include <pantheon/ui/Aspect.h>
 #include <pantheon/ui/FreqAxis.h>
+#include <pantheon/ui/Undo.h>
 
 using namespace nemesis;
 namespace hw = ui::hw;
@@ -31,13 +32,25 @@ NemesisEditor::NemesisEditor (NemesisProcessor& p)
       lookahead (p.apvts, id::lookahead, "The sound is heard this long after the detector has seen it, so the first of a loud s is already turned down (the attack is 0.3 ms).\n"
                                          "It is a delay: the host compensates it. Changing it while playing restarts the de-esser (a short gap)."),
       presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default."),
+      undoButtons (p.undo, *this),
       listen (p.apvts, id::listen, "LISTEN", "Hear only the band the detector hears, to find the s. Not saved as a sound: switch it off before you bounce."),
       delta (p.apvts, id::delta, "DELTA", "Hear only what is turned down (the sound minus the output): if it is the voice and not just the hiss of the s, THRESH is too low or RANGE too high. It takes the place of LISTEN while it is on. Switch it off before you bounce."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &release, &mode, &detection, &lookahead, &presetBox, &listen, &delta, &findButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &release, &mode, &detection, &lookahead, &presetBox, &listen, &delta, &findButton, &setThreshButton, &guideButton })
         addAndMakeVisible (*c);
+    addAndMakeVisible (undoButtons);
+    setThreshButton.setTooltip ("Listens to a second and a half of your sound and sets THRESH where its loudest few percent of the s begin: a starting point. FREQ is not moved; "
+                                "if the sound has no s in it, or is silent, THRESH stays as it is and the strip says why.");
+    setThreshButton.onClick = [this]
+    {
+        setCountAtClick = proc.engine.setCount.load (std::memory_order_acquire);
+        setDetectionAtClick = readParams (proc.apvts).detection;
+        setAwaiting = true;
+        proc.engine.startSetThreshold (setDetectionAtClick);
+        setNoteText = "SET THRESH: listening for 1.5 s. Play a passage with the s in it.";
+    };
     findButton.setTooltip ("With LISTEN on: listens to the next second and a half of your sound and sets FREQ to the strongest place between 4 and 10 kHz (the s). Play a passage with the s in it; if the sound is too quiet nothing changes.");
     findButton.onClick = [this]
     {
@@ -59,6 +72,9 @@ void NemesisEditor::resized()
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
     header.removeFromLeft (20);
+    // UNDO / REDO in the top strip of the header, above the preset and look-ahead labels, which the header row leaves no room for beside SET THRESH.
+    const auto strip = header.withHeight (16).translated (0, -6);
+    undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
     auto headerRow = header.withTrimmedTop (28).withHeight (28);
     presetLabel = { headerRow.getX() + 2, headerRow.getY() - 15, 120, 12 };
     presetBox.setBounds (headerRow.removeFromLeft (160));
@@ -67,6 +83,8 @@ void NemesisEditor::resized()
     lookahead.setBounds (headerRow.removeFromLeft (100));
     headerRow.removeFromLeft (10);
     latencyLabel = headerRow.removeFromLeft (100);
+    headerRow.removeFromLeft (6);
+    setThreshButton.setBounds (headerRow.removeFromLeft (110));
 
     bounds.removeFromTop (10);
     auto display = bounds.removeFromTop (displayHeight);
@@ -102,6 +120,7 @@ AdviceInput NemesisEditor::adviceInput() const
     in.params = readParams (proc.apvts);
     in.reductionDb = shownReduction;
     in.heldDb = heldReductionDb();
+    in.threshNote = setNoteText;
     return in;
 }
 
@@ -214,6 +233,33 @@ void NemesisEditor::timerCallback()
     if (! awaiting)
         findButton.setButtonText ("FIND");
     findButton.setEnabled (readParams (proc.apvts).listen && ! awaiting);
+
+    if (setAwaiting && proc.engine.setCount.load (std::memory_order_acquire) != setCountAtClick)
+    {
+        setAwaiting = false;
+        const auto status = (SetStatus) proc.engine.setStatus.load (std::memory_order_relaxed);
+        const bool relative = setDetectionAtClick == Detection::relative;
+        if (status == SetStatus::silent)
+            setNoteText = "SET THRESH: the sound was silent, so THRESH is unchanged.";
+        else if (status == SetStatus::tooLittle)
+            setNoteText = "SET THRESH: no s stands out of the sound, so THRESH is unchanged. Play a passage with s in it.";
+        else if (status == SetStatus::stopped)
+            setNoteText = "SET THRESH: it stopped before it had listened, so THRESH is unchanged.";
+        else if (readParams (proc.apvts).detection != setDetectionAtClick)
+            setNoteText = "SET THRESH: the detection changed while it listened, so THRESH is unchanged.";
+        else
+        {
+            // THRESH's own range (Parameters.h) bounds the value; the step is one undo step, as a preset is.
+            const float db = proc.engine.setDb.load (std::memory_order_relaxed);
+            const float value = static_cast<juce::AudioParameterFloat*> (proc.apvts.getParameter (id::threshold))->range.getRange().clipValue (db);
+            ui::beginUndoStep (proc.apvts, "SET THRESH");
+            setValue (proc.apvts, id::threshold, value);
+            setNoteText = "SET THRESH: " + juce::String (value, 1).toStdString() + (relative ? " dB under the sound" : " dBFS") +
+                          ". Only the loudest few percent of the s is over it. DELTA shows what is cut.";
+        }
+    }
+    setThreshButton.setButtonText (setAwaiting ? "SETTING" : "SET THRESH");
+    setThreshButton.setEnabled (! setAwaiting);
     presetBox.sync();
     repaint();
 }
