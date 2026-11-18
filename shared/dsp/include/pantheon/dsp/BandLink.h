@@ -106,8 +106,8 @@ struct LinkCurve
     // The level at any frequency, linearly interpolated on the log-frequency axis and held beyond the ends.
     double at (double hz) const
     {
-        if (db.empty())
-            return 0.0;
+        if (db.size() < 2)
+            return db.empty() ? 0.0 : db[0];
         const double pos = std::clamp (std::log2 (std::max (hz, 1.0e-3) / f0Hz) * perOctave, 0.0, static_cast<double> (db.size() - 1));
         const size_t i = std::min (static_cast<size_t> (pos), db.size() - 2);
         const double t = pos - static_cast<double> (i);
