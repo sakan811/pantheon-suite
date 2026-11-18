@@ -89,9 +89,14 @@ inline const char* idleTip() { return "Tip: use 'Learn from tracks...' to build 
 
 inline const char* guideTitle() { return "Themis Verdict"; }
 
+// The headroom an encode needs below 0 dBTP, read from the default ceiling (the rule of thumb the clip verdict already uses):
+// a lossy codec can clip a master that sits at the ceiling, so the delivery leaves this much room. A rule of thumb, not a measurement.
+inline constexpr float kEncodeHeadroomDb = -themis::history::clip::kTruePeakWarnDb;
+
 // The GUIDE text. The glossary at its end is the one place the plugin's jargon is explained; its lines are held to kMaxChars.
-inline const char* guideText()
+inline std::string guideText()
 {
+    const std::string headroom = themis::format ("%.0f dB", static_cast<double> (kEncodeHeadroomDb));
     return "IT IS FOR judging a finished master:\n"
            "  - Put it last on the master bus (after the limiter), press Reset and play the whole track. The MASTER PLAN lists what to "
            "fix, worst first, with the amount and the place; hover for why.\n"
@@ -106,6 +111,8 @@ inline const char* guideText()
            "limit is a rule of thumb. It is a checklist for your ears, not a replacement for them.\n"
            "  - Certifying a delivery spec. The loudness meter follows BS.1770 but is not a certified meter, and clip detection is a "
            "heuristic on the waveform.\n"
+           "  - Encoding. Themis encodes nothing. A master whose true peak sits at the ceiling can clip when it is encoded to MP3 or AAC, "
+           "so leave " + headroom + " or more of room below 0 dBTP before delivery (a rule of thumb).\n"
            "  - A short excerpt: a loop of the chorus reads like a chorus. The plan needs 20 s, and a whole track reads best.\n"
            "\n"
            "BEFORE YOU EXPORT: press CLEAR in AUDITION. A host that renders in real time cannot tell, and an engaged audition would end "

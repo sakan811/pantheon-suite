@@ -551,8 +551,16 @@ private:
     {
         namespace clip = themis::history::clip;
         juce::String text = "CLIPPING since the last reset: sample peak " + juce::String (clipTotals.samplePeakDb, 1) + " dBFS, true peak (the waveform between the samples) "
-                            + juce::String (clipTotals.truePeakDb, 1) + " dBTP. "
-                            + juce::String (static_cast<juce::int64> (clipTotals.clipEvents)) + " flat-topped clips (" + juce::String (static_cast<juce::int64> (clipTotals.clipSamples))
+                            + juce::String (clipTotals.truePeakDb, 1) + " dBTP. ";
+        // Each channel's true peak, judged against the ceiling by the same verdict as the total; then which one is higher.
+        constexpr float kChannelLevelDb = 0.1f; // closer than this, the channels read as level (the figures have one decimal)
+        const auto peakWord = [] (themis::Level l) { return l == themis::Level::good ? juce::String ("under your ceiling") : l == themis::Level::warn ? juce::String ("above your ceiling") : juce::String ("above 0 dBTP"); };
+        const auto leftLevel = clip::level (clipTotals.truePeakLeftDb, 0, 0, ceilingDb), rightLevel = clip::level (clipTotals.truePeakRightDb, 0, 0, ceilingDb);
+        const float imbalance = clipTotals.truePeakLeftDb - clipTotals.truePeakRightDb;
+        text += "Left " + juce::String (clipTotals.truePeakLeftDb, 1) + " dBTP (" + peakWord (leftLevel) + "), right " + juce::String (clipTotals.truePeakRightDb, 1) + " dBTP ("
+                + peakWord (rightLevel) + "): " + (std::abs (imbalance) < kChannelLevelDb ? juce::String ("the channels are level. ")
+                                                   : (imbalance > 0.0f ? juce::String ("the left is higher, by ") : juce::String ("the right is higher, by ")) + juce::String (std::abs (imbalance), 1) + " dB. ");
+        text += juce::String (static_cast<juce::int64> (clipTotals.clipEvents)) + " flat-topped clips (" + juce::String (static_cast<juce::int64> (clipTotals.clipSamples))
                             + " samples) and " + juce::String (static_cast<juce::int64> (clipTotals.overSamples)) + " samples at or over 0 dBFS. ";
         text += "DC offset (the average of the samples, which should be zero): " + juce::String (clipTotals.dcOffsetDb(), 0) + " dBFS"
                 + (themis::history::dc::level (clipTotals.dcOffsetDb()) == themis::Level::good ? " (none worth removing). " : ", worth removing: see the master plan. ");

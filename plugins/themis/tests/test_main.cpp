@@ -1957,6 +1957,39 @@ TEST (clip_meter_totals_accumulate_and_reset)
     CHECK (m.totals().have && m.totals().clipEvents == 0);
 }
 
+TEST (clip_meter_reports_each_channels_true_peak_and_reset_clears_them)
+{
+    const double fs = 48000;
+    const int n = 4800;
+    std::vector<float> loud (n), quiet (n);
+    for (int i = 0; i < n; ++i)
+    {
+        const double x = std::sin (2.0 * 3.14159265358979 * 997.0 * i / fs);
+        loud[static_cast<size_t> (i)] = static_cast<float> (0.5 * x);  // -6 dBFS
+        quiet[static_cast<size_t> (i)] = static_cast<float> (0.1 * x); // -20 dBFS
+    }
+    ClipMeter m;
+    m.prepare();
+    m.process (loud.data(), quiet.data(), n); // left is the louder channel
+    auto t = m.totals();
+    CHECK (t.have);
+    CHECK_NEAR (t.truePeakLeftDb, -6.0, 0.1);
+    CHECK_NEAR (t.truePeakRightDb, -20.0, 0.1);
+    CHECK (t.truePeakLeftDb > t.truePeakRightDb);
+    CHECK_NEAR (t.truePeakDb, std::max (t.truePeakLeftDb, t.truePeakRightDb), 1e-4);
+    m.requestReset();
+    m.process (quiet.data(), loud.data(), n); // now the right channel is the louder one
+    t = m.totals();
+    CHECK (t.truePeakRightDb > t.truePeakLeftDb);
+    CHECK_NEAR (t.truePeakDb, t.truePeakRightDb, 1e-4);
+    m.requestReset();
+    m.process (quiet.data(), quiet.data(), 16);
+    t = m.totals();
+    CHECK (t.have && t.truePeakLeftDb < -19.0f && t.truePeakRightDb < -19.0f); // the reset cleared the louder channel's peak
+    m.requestReset();
+    CHECK (!m.totals().have);
+}
+
 TEST (clip_verdict_follows_the_true_peak_and_any_clip)
 {
     using history::clip::level;
@@ -2138,6 +2171,65 @@ TEST (history_bass_report_counts_balance_and_sub_floor_time)
     CHECK (fundamental::tiltDb (FrameStats {}) <= kHistoryFloorDb);
     std::vector<FrameStats> none (50);
     CHECK (!history::analyseBass (none.data(), 50).have);
+}
+
+TEST (history_crest_over_time_reads_sine_square_and_silence)
+{
+    // A sine of unit peak has a mean square of 1/2, an RMS of -3.01 dB: a crest of 3.01 dB.
+    const auto sine = framesWith (100, [] (int, FrameStats& f) {
+        f.samplePeakDb = 0.0f;
+        f.energy (Signal::stereo, kAllRanges) = -3.0103f;
+    });
+    CHECK_NEAR (history::crestDb (sine[0]), 3.01, 0.01);
+    const auto sineReport = history::analyseCrest (sine.data(), 100);
+    CHECK (sineReport.have && sineReport.crest == history::Crest::low); // 3 dB is squashed by the rule of thumb
+    CHECK_NEAR (sineReport.medianDb, 3.01, 0.01);
+
+    // A square wave at full scale: its RMS is its peak, so no crest at all.
+    const auto square = framesWith (100, [] (int, FrameStats& f) {
+        f.samplePeakDb = 0.0f;
+        f.energy (Signal::stereo, kAllRanges) = 0.0f;
+    });
+    CHECK_NEAR (history::crestDb (square[0]), 0.0, 0.01);
+    CHECK (history::analyseCrest (square.data(), 100).crest == history::Crest::low);
+
+    // Silence has no crest to plot, and silent frames are skipped rather than read as 0 dB.
+    const auto silent = framesWith (100, [] (int, FrameStats& f) {
+        for (auto& signal : f.energyDb)
+            signal.fill (kHistoryFloorDb);
+        f.samplePeakDb = kHistoryFloorDb;
+    });
+    CHECK (!hasLevel (history::crestDb (silent[0])));
+    CHECK (!history::analyseCrest (silent.data(), 100).have);
+    auto mixed = framesWith (100, [] (int i, FrameStats& f) {
+        if (i < 50) // a silent half must not drag the median down to 0 dB
+        {
+            for (auto& signal : f.energyDb)
+                signal.fill (kHistoryFloorDb);
+            f.samplePeakDb = kHistoryFloorDb;
+            return;
+        }
+        f.samplePeakDb = -4.0f;
+        f.energy (Signal::stereo, kAllRanges) = -14.0f; // 10 dB
+    });
+    const auto mixedReport = history::analyseCrest (mixed.data(), 100);
+    CHECK (mixedReport.have && mixedReport.crest == history::Crest::typical);
+    CHECK_NEAR (mixedReport.medianDb, 10.0, 0.01);
+    CHECK (!history::analyseCrest (mixed.data(), 5).have); // too little to judge
+
+    // The three verdicts, and the limits they are cut at.
+    const auto at = [] (float crestDb) {
+        return framesWith (100, [crestDb] (int, FrameStats& f) {
+            f.samplePeakDb = 0.0f;
+            f.energy (Signal::stereo, kAllRanges) = -crestDb;
+        });
+    };
+    const auto squashed = at (history::kCrestLowDb - 2.0f);
+    CHECK (history::analyseCrest (squashed.data(), 100).crest == history::Crest::low && history::analyseCrest (squashed.data(), 100).level == Level::warn);
+    const auto typical = at ((history::kCrestLowDb + history::kCrestHighDb) * 0.5f);
+    CHECK (history::analyseCrest (typical.data(), 100).crest == history::Crest::typical && history::analyseCrest (typical.data(), 100).level == Level::good);
+    const auto dynamic = at (history::kCrestHighDb + 2.0f);
+    CHECK (history::analyseCrest (dynamic.data(), 100).crest == history::Crest::high && history::analyseCrest (dynamic.data(), 100).level == Level::good);
 }
 
 // ---- audition (solo / mute) ---------------------------------------------------------------------------------------
@@ -3073,6 +3165,14 @@ TEST (guide_glossary_explains_the_jargon_in_lines_that_fit)
     CHECK (lines >= 10);
     for (const char* term : { "  LUFS ", "  LU ", "  dBTP ", "  PLR ", "  LRA ", "  Crest factor", "  Mid / side", "  Mono fold", "  Tolerance" })
         CHECK (glossary.find (term) != std::string::npos);
+}
+
+TEST (guide_says_how_much_room_an_encode_needs)
+{
+    const std::string text = usage::guideText();
+    CHECK_NEAR (usage::kEncodeHeadroomDb, -history::clip::kTruePeakWarnDb, 1e-6f); // derived from the default ceiling, not typed
+    CHECK (text.find ("leave 1 dB or more of room below 0 dBTP before delivery (a rule of thumb).") != std::string::npos);
+    CHECK (text.find ("Themis encodes nothing.") != std::string::npos);
 }
 
 // ---- the plan's wording: a DAW suffix where COPY has no path, and plain openers for the jargon ----

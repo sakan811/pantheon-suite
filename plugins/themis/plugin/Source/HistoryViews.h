@@ -589,7 +589,7 @@ inline juce::String percentText (float share) { return juce::String (juce::round
 class LevelView : public HistoryPanel
 {
 public:
-    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks (p), spectrogram() }) {}
+    explicit LevelView (ThemisProcessor& p) : HistoryPanel (p, "LEVEL", { bands(), midSide(), leftRight(), peaks (p), crest(), spectrogram() }) {}
 
 private:
     using Verdict = HistoryPanel::Verdict;
@@ -734,6 +734,34 @@ private:
         };
         t.detail = [] (const themis::FrameStats& f) {
             return f.clipped() ? "CLIPPED " + juce::String (juce::roundToInt (f.clipSamples)) + " samples" + (f.overSamples > 0.0f ? ", over 0 dBFS" : "") : juce::String();
+        };
+        return t;
+    }
+
+    // The whole signal's crest factor, frame by frame: how far the peaks stand above the average.
+    static Tab crest()
+    {
+        namespace hist = themis::history;
+        constexpr float kTop = 24.0f;
+        Tab t { "CREST",
+                "The crest factor of the whole signal over the last minute, frame by frame: the highest sample peak of the audio in each "
+                "frame minus the level of the whole spectrum (its RMS), in dB. A sine reads about 3 dB and a square wave 0 dB; the more "
+                "a limiter or compressor squashes a master, the closer its peaks sit to its average. Silent frames are left out.\n\n"
+                "The verdict is the median over the window: under " + juce::String (hist::kCrestLowDb, 0) + " dB reads squashed (a warning), over "
+                + juce::String (hist::kCrestHighDb, 0) + " dB dynamic, between typical. Those limits are rules of thumb, not measured data: "
+                "a master can be squashed or dynamic on purpose.",
+                { kTop, 0.0f, 6.0f, [] (float v) { return juce::String (juce::roundToInt (v)); } } };
+        t.zones = { { 0.0f, hist::kCrestLowDb, colours::warn, "squashed" },
+                    { hist::kCrestLowDb, hist::kCrestHighDb, colours::good, "typical" },
+                    { hist::kCrestHighDb, kTop, palette::blue, "dynamic" } };
+        t.series = { { "CREST", palette::aqua, [] (const themis::FrameStats& f, int) { return hist::crestDb (f); } } };
+        t.verdict = [] (const themis::FrameStats* f, int n, int) -> Verdict {
+            const auto r = hist::analyseCrest (f, n);
+            if (!r.have)
+                return Verdict {};
+            const juce::String shape = r.crest == hist::Crest::low ? "squashed: the peaks barely stand above the average"
+                                       : r.crest == hist::Crest::high ? "dynamic" : "typical";
+            return Verdict { "Median crest " + juce::String (r.medianDb, 1) + " dB: " + shape + ".", r.level };
         };
         return t;
     }

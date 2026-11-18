@@ -119,7 +119,7 @@ static constexpr int kEditorWidth = 1440, kEditorHeight = 900; // the editor's d
 static void pump (int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil (ms); }
 
 // Every tab of the two history graphs, stacked: the level graph (BANDS, MID / SIDE looking at the low range, LEFT / RIGHT,
-// PEAKS, SPECTROGRAM) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
+// PEAKS, CREST, SPECTROGRAM) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
 static juce::Image renderGraphs (juce::Component& editor)
 {
     gui::HistoryPanel *level = nullptr, *fundamental = nullptr;
@@ -140,13 +140,13 @@ static juce::Image renderGraphs (juce::Component& editor)
         return panel.createComponentSnapshot (panel.getLocalBounds(), true, 1.0f);
     };
     constexpr int kGap = 8;
-    const int levelTabs[] = { 0, 1, 2, 3, 4 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges };
+    const int levelTabs[] = { 0, 1, 2, 3, 4, 5 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges };
     const int fundamentalTabs[] = { 0, 1, 2 };
     const int h = level->getHeight(), w = level->getWidth() + kGap + fundamental->getWidth();
-    juce::Image out (juce::Image::RGB, w, 5 * h + 4 * kGap, true);
+    juce::Image out (juce::Image::RGB, w, 6 * h + 5 * kGap, true);
     juce::Graphics g (out);
     g.fillAll (colours::background);
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 6; ++i)
         g.drawImageAt (snapshot (*level, levelTabs[i], levelColumns[i]), 0, i * (h + kGap));
     for (int i = 0; i < 3; ++i)
         g.drawImageAt (snapshot (*fundamental, fundamentalTabs[i], themis::kAllRanges), level->getWidth() + kGap, i * (h + kGap));
@@ -778,6 +778,9 @@ int main (int argc, char** argv)
                          peaks.clippedFrames, width.sideMinusMidDb, balance.leftMinusRightDb);
             CHECK (bass.have && peaks.have && peaks.clippedFrames > 3 && peaks.clippedFrames < 90 && peaks.level == themis::Level::bad);
             CHECK (balance.have && std::abs (balance.leftMinusRightDb - 1.0f) < 0.4f);
+            const auto crest = themis::history::analyseCrest (frames.data(), static_cast<int> (frames.size()));
+            std::printf ("    crest over time: median %.1f dB\n", crest.medianDb);
+            CHECK (crest.have && crest.medianDb > 0.0f, "the CREST tab should have a verdict on the demo programme");
         }
         std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
         CHECK (editor != nullptr);
@@ -837,8 +840,8 @@ int main (int argc, char** argv)
                 CHECK (static_cast<int> (longest) <= usage::kMaxChars, "the longest note is %d characters (the status window holds %d)", static_cast<int> (longest), usage::kMaxChars);
                 CHECK (usage::notesFor (in).front().severity == ui::Severity::warning, "warnings come first");
                 auto* themisEditor = dynamic_cast<ThemisEditor*> (editor.get());
-                CHECK (themisEditor != nullptr && themisEditor->guide().isVisible() && std::strlen (usage::guideText()) > 400
-                           && std::string (usage::guideText()).find ("NOT FOR") != std::string::npos,
+                CHECK (themisEditor != nullptr && themisEditor->guide().isVisible() && usage::guideText().size() > 400
+                           && usage::guideText().find ("NOT FOR") != std::string::npos,
                        "the GUIDE button is there and its text says what the plugin is not for");
                 if (themisEditor != nullptr)
                 {
@@ -942,11 +945,11 @@ int main (int argc, char** argv)
                     clickAlong (*panel, 16.0f, 4.0f, tabs, columns); // the title row: the tabs on the left...
                     CHECK (tabs.count (1) == 1 && tabs.count (2) == 1, "clicking the tabs should select them");
                     if (dynamic_cast<gui::LevelView*> (panel) != nullptr)
-                        CHECK (tabs.count (4) == 1, "the SPECTROGRAM tab can be clicked");
+                        CHECK (tabs.count (4) == 1 && tabs.count (5) == 1, "the CREST and SPECTROGRAM tabs can be clicked");
                     if (dynamic_cast<gui::LevelView*> (panel) != nullptr)
                     {
-                        panel->selectTab (1); // ...and, on a tab that has them, the range chips on the right
-                        clickAlong (*panel, 16.0f, static_cast<float> (panel->getWidth()) * 0.5f, tabs, columns);
+                        panel->selectTab (1); // ...and, on a tab that has them, the range chips on the right (the tab row ends before 60 %)
+                        clickAlong (*panel, 16.0f, static_cast<float> (panel->getWidth()) * 0.6f, tabs, columns);
                         CHECK (columns.size() >= 4, "clicking the range chips should select %d ranges", static_cast<int> (columns.size()));
                     }
                     panel->selectTab (0);

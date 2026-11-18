@@ -245,6 +245,50 @@ inline PeakReport analysePeaks (const FrameStats* frames, int n, float ceilingDb
     return r;
 }
 
+// ---- crest factor over time (CREST) ----------------------------------------------------------
+// Rules of thumb, not measured data: a master whose median crest sits under kCrestLowDb has its peaks barely above its
+// average (squashed by a limiter or compressor); one over kCrestHighDb is dynamic. Suggested starting values; a master can be
+// either on purpose. A sine reads about 3 dB, a square wave 0 dB.
+inline constexpr float kCrestLowDb = 8.0f, kCrestHighDb = 12.0f;
+
+enum class Crest { low, typical, high };
+
+// Crest factor of one frame in dB: its sample peak over its whole-band level (the stereo energy in the whole-spectrum column,
+// which is the RMS of both channels in dB). kHistoryFloorDb when the frame has no level to measure, so silence is never a crest.
+inline float crestDb (const FrameStats& f)
+{
+    const float rms = f.energy (Signal::stereo, kAllRanges);
+    if (!hasLevel (rms) || !hasLevel (f.samplePeakDb))
+        return kHistoryFloorDb;
+    return f.samplePeakDb - rms;
+}
+
+struct CrestReport
+{
+    bool have = false;
+    float medianDb = 0.0f; // median of the frames with a crest
+    Crest crest = Crest::typical;
+    Level level = Level::good; // squashed is a warning; typical and dynamic are readings, not faults
+};
+
+inline CrestReport analyseCrest (const FrameStats* frames, int n)
+{
+    CrestReport r;
+    std::vector<float> v;
+    v.reserve (static_cast<size_t> (std::max (n, 0)));
+    for (int i = 0; i < n; ++i)
+        if (const float c = crestDb (frames[i]); hasLevel (c))
+            v.push_back (c);
+    if (n < kMinFrames || static_cast<int> (v.size()) < kMinFrames)
+        return r;
+    std::sort (v.begin(), v.end());
+    r.have = true;
+    r.medianDb = v[static_cast<size_t> (std::lround (0.5 * static_cast<double> (v.size() - 1)))];
+    r.crest = r.medianDb < kCrestLowDb ? Crest::low : r.medianDb > kCrestHighDb ? Crest::high : Crest::typical;
+    r.level = r.crest == Crest::low ? Level::warn : Level::good;
+    return r;
+}
+
 // ---- bass fundamental ------------------------------------------------------------------------
 struct BassReport
 {
