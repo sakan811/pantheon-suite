@@ -124,7 +124,8 @@ inline juce::String deviceLossTitle (bool deviceChosen) { return deviceChosen ? 
 // Suggested bands as the text the other plugins of the repository paste (pdsp::link): equaliser bands go to the equaliser,
 // a harmonic-fill band to the harmonic generator.
 // The band list for the other plugins, with the target curve the bands were fitted to when there is one (Iris and Apollo draw it as their reference).
-inline juce::String linkText (const themis::EqMoves& moves, const themis::TargetCurve* target = nullptr, const themis::LimiterMove& limiter = {})
+inline juce::String linkText (const themis::EqMoves& moves, const themis::TargetCurve* target = nullptr, const themis::LimiterMove& limiter = {},
+                             const themis::WidthMove& width = {})
 {
     using K = themis::EqMove::Kind;
     std::vector<pdsp::LinkBand> bands;
@@ -156,7 +157,11 @@ inline juce::String linkText (const themis::EqMoves& moves, const themis::Target
     set.ceilingDb = limiter.ceilingDb;
     set.hasGainChange = limiter.changesGain;
     set.gainChangeDb = limiter.gainChangeDb;
-    return juce::String (pdsp::link::encode (bands, target != nullptr ? &curve : nullptr, limiter.active() ? &set : nullptr));
+    pdsp::LinkWidth wide;
+    for (size_t b = 0; b < pdsp::bands::kCount; ++b)
+        wide.percent[b] = width.percent[b];
+    return juce::String (pdsp::link::encode (bands, target != nullptr ? &curve : nullptr, limiter.active() ? &set : nullptr,
+                                             width.active() ? &wide : nullptr));
 }
 
 // Where a copied fix goes, for the status line.

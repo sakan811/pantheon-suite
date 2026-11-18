@@ -356,6 +356,10 @@ int main()
                    "the cut keeps its placement and its 24 dB/oct slope");
         }
         check (pasteBands (fresh.apvts, "some other text", skipped).empty(), "text that is not a band list adds nothing");
+        IrisProcessor half;
+        const auto halved = pasteBands (half.apvts, "pantheon-bands 1\nbell freq=270 gain=-2.0 q=1.00 place=mid amount=0.5", skipped);
+        check (halved.size() == 1 && std::fabs (value (half, bandIds (halved[0]).gain) + 1.0f) < 0.06f,
+               "amount=0.5 halves a pasted gain: -2.0 dB comes in at -1.0 dB");
     }
 
     std::printf ("\nReference and match\n");

@@ -96,7 +96,7 @@ inline std::string pasteLimiter (juce::AudioProcessorValueTreeState& s, const ju
     }
     if (l.hasGainChange)
     {
-        const float before = s.getRawParameterValue (id::gain)->load(), wanted = before + (float) l.gainChangeDb, now = std::clamp (wanted, 0.0f, kMaxGainDb);
+        const float before = s.getRawParameterValue (id::gain)->load(), wanted = before + (float) (l.gainChangeDb * l.amount), now = std::clamp (wanted, 0.0f, kMaxGainDb); // amount: how much of the change to take
         setValue (s, id::gain, now);
         said += std::string (l.hasCeiling ? "," : "") + " GAIN " + juce::String (before, 1).toStdString() + " to " + juce::String (s.getRawParameterValue (id::gain)->load(), 1).toStdString() + " dB";
         if (std::fabs (wanted - now) > 0.05f)

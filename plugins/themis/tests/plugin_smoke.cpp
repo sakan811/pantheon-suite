@@ -454,6 +454,26 @@ int main (int argc, char** argv)
                "a copied limiter setting reads back: the ceiling and the gain change");
         CHECK (pdsp::link::decode (text, back) && back.empty() && gui::linkDestination ({}, move) == "Aegis", "... an equaliser's reader sees no band in it, and the destination is Aegis");
         CHECK (! pdsp::link::decodeLimiter (gui::linkText ({ cut }).toStdString(), got), "a band list holds no limiter setting");
+        // A width line (the side width per band, from a width item) travels with the bands: a width reader gets it, `decode` skips it.
+        // The mild and the strong table, set only for the bands the range covers: LOW-MID (120 Hz to 1 kHz) covers bass, low-mid and mid.
+        const auto strong = themis::master::widthOver (1, 9.0, 3.0), mild = themis::master::widthOver (3, 6.0, 6.0);
+        CHECK (strong.active() && ! strong.percent[0].has_value() && *strong.percent[1] == 0.0 && *strong.percent[2] == 60.0 && *strong.percent[3] == 80.0
+                   && ! strong.percent[4].has_value() && ! strong.percent[5].has_value(),
+               "a width item over LOW-MID with a strong mono loss sets bass 0, low-mid 60 and mid 80 %, and nothing it does not cover");
+        CHECK (mild.active() && *mild.percent[5] == 100.0 && ! mild.percent[4].has_value() && ! mild.percent[1].has_value(),
+               "a width item over HIGH (6 kHz up) with a mild loss sets only the high band, at its mild value");
+        CHECK (*themis::master::widthOver (1, 3.5, 3.0).percent[2] == 90.0, "a loss only a little over its limit takes the mild table (low-mid 90 %)");
+        CHECK (! themis::WidthMove {}.active(), "an empty width move is not active");
+        const auto withWidth = gui::linkText ({ cut }, nullptr, {}, strong).toStdString();
+        pdsp::LinkWidth wideBack;
+        CHECK (pdsp::link::decodeWidth (withWidth, wideBack) && wideBack.percent[1].has_value() && *wideBack.percent[1] == 0.0 && *wideBack.percent[2] == 60.0
+                   && ! wideBack.percent[0].has_value(),
+               "the width line reads back, key by key, with the bands it does not name left absent");
+        CHECK (pdsp::link::decode (withWidth, back) && back.size() == 1 && back[0].kind == pdsp::LinkBand::Kind::lowCut,
+               "a band reader skips the width line and keeps the band");
+        CHECK (! pdsp::link::decodeWidth (gui::linkText ({ cut }).toStdString(), wideBack) && ! pdsp::link::decodeWidth (text, wideBack),
+               "a copy with no width item carries no width line (the old form)");
+        CHECK (gui::linkText ({ cut }).toStdString().find("amount") == std::string::npos, "Themis writes no amount key: amount=1 is the default and is not written");
         CHECK (gui::linkDestination ({ cut }) == "Iris or Apollo", "equaliser bands go to Iris or Apollo (both read them, and Copy EQ's curve)");
     }
 

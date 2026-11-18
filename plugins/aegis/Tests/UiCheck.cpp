@@ -142,6 +142,11 @@ int main()
         check (pasteLimiter (q.apvts, "pantheon-bands 1\nbell freq=270 gain=-2.0 q=0.70 place=mid").empty() && pasteLimiter (q.apvts, "hello").empty()
                    && readParams (q.apvts).gainDb == before.gainDb && readParams (q.apvts).ceilingDb == before.ceilingDb,
                "a band list or any other text pastes nothing and changes nothing");
+        // amount=0.5 takes half of the gain change (-4 dB from 5 dB gives 3 dB); the ceiling is absolute and is not scaled.
+        setValue (q.apvts, id::gain, 5.0f);
+        pasteLimiter (q.apvts, "pantheon-bands 1\nlimiter ceiling=-1.0 gainchange=-4.0 amount=0.5");
+        check (std::fabs (readParams (q.apvts).gainDb - 3.0f) < 0.01f && std::fabs (readParams (q.apvts).ceilingDb + 1.0f) < 0.01f,
+               "amount=0.5 halves a pasted gain change (5 dB to 3 dB), and the ceiling is still -1 dBTP");
         std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
         auto& editor = ui::innerOf<AegisEditor> (*holder);
         editor.setVisible (true);

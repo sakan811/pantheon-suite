@@ -433,6 +433,12 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
         const auto range = effectiveRange (BandMode::fill, b.loHz, b.hiHz);
         setParameterValue (s, bandIds (slot).lo, (float) range.lo);
         setParameterValue (s, bandIds (slot).hi, (float) range.hi);
+        if (b.amount < 1.0) // amount: the Amount is dialled back from its off level (the default stays as it is at 1)
+        {
+            const auto amountId = bandIds (slot).amount;
+            const float cur = s.getRawParameterValue (amountId)->load();
+            setParameterValue (s, amountId, fillOffDb + (cur - fillOffDb) * (float) b.amount);
+        }
         setParameterValue (s, bandIds (slot).on, 1.0f); // last: the band never runs with the centred range placeBand set
         slots.push_back (slot);
     }

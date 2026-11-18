@@ -209,7 +209,7 @@ public:
         if (row >= 0 && overCopy (e.position.toInt()))
         {
             const auto& item = advice.items[static_cast<size_t> (row)];
-            juce::SystemClipboard::copyTextToClipboard (gui::linkText (item.moves, nullptr, item.limiter));
+            juce::SystemClipboard::copyTextToClipboard (gui::linkText (item.moves, nullptr, item.limiter, item.width));
             if (onCopied)
                 onCopied ("Copied: paste it in " + gui::linkDestination (item.moves, item.limiter) + " (PASTE on its " + (item.moves.empty() ? "panel)." : "band panel)."));
             return;
