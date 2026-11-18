@@ -25,7 +25,7 @@ struct TargetBand
     bool heard = false;
 };
 
-// The dB the curve holds inside a band (the power of its points between the edges, at least one point: the one nearest the middle).
+// The dB the curve holds inside a band (the power of its points between the edges, with no point between the edges, the curve read at the middle of the band).
 inline double curveBandDb (const pdsp::LinkCurve& c, double loHz, double hiHz)
 {
     double sum = 0.0;

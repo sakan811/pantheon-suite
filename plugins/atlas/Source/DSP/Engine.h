@@ -512,7 +512,8 @@ private:
                     loudSumIn += (double) l[i] * l[i] + (double) r[i] * r[i];
         splitInto (splitter, linear, bandBuffer, l, r, n);
         // scActive is refreshed once per tick but the sidechain can vanish between two blocks: no input, nothing to split.
-        if (scActive && scL != nullptr)
+        const bool scFresh = scActive && scL != nullptr; // a band reads the sidechain pieces only when this block filled them
+        if (scFresh)
             splitInto (scSplitter, scLinear, scBuffer, scL, scR, n); // what a band that listens to the sidechain reads
         for (int i = 0; i < n; ++i)
             l[i] = r[i] = 0.0f;
@@ -522,7 +523,7 @@ private:
         for (int b = 0; b < kBands; ++b)
             if (owner[(size_t) b] == b)
                 runBand (band[(size_t) b], bandBuffer[(size_t) b][0].data(), bandBuffer[(size_t) b][1].data(),
-                         band[(size_t) b].listenSc ? scBuffer[(size_t) b][0].data() : nullptr, band[(size_t) b].listenSc ? scBuffer[(size_t) b][1].data() : nullptr,
+                         scFresh && band[(size_t) b].listenSc ? scBuffer[(size_t) b][0].data() : nullptr, scFresh && band[(size_t) b].listenSc ? scBuffer[(size_t) b][1].data() : nullptr,
                          l, r, n, sumBuffer[0].data(), sumBuffer[1].data());
 
         if (measuring)
