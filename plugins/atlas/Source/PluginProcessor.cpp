@@ -111,6 +111,7 @@ void AtlasProcessor::setStateInformation (const void* data, int size)
         if (xml->hasTagName (apvts.state.getType()))
         {
             auto tree = juce::ValueTree::fromXml (*xml);
+            restored = true;
             currentProgram = (int) tree.getProperty ("program", 0);
             apvts.replaceState (tree);
         }

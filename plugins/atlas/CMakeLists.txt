@@ -66,7 +66,7 @@ target_link_libraries(Atlas
 # ---------------------------------------------------------------------------------------
 juce_add_console_app(AtlasTests PRODUCT_NAME "AtlasTests")
 target_sources(AtlasTests PRIVATE Tests/Tests.cpp)
-target_include_directories(AtlasTests PRIVATE Source Tests)
+target_include_directories(AtlasTests PRIVATE Source Tests ../../shared/ui/include) # Advice.h takes the kit's Note.h (plain C++)
 target_link_libraries(AtlasTests
     PRIVATE
         pantheon_dsp

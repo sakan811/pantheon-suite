@@ -188,6 +188,7 @@ AdviceInput AtlasEditor::adviceInput() const
     in.lookaheadMs = kLookaheadMs[(size_t) params.lookahead];
     in.sidechainConnected = proc.sidechainConnected.load (std::memory_order_relaxed);
     in.learnedAll = learnedAll;
+    in.restored = proc.restored;
     return in;
 }
 

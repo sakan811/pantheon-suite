@@ -88,6 +88,8 @@ The crossovers stop at 40 Hz because the kernels (+-2048 samples at 48 kHz) cann
 new mode, and reaches the host through `AtlasProcessor::handleAsyncUpdate` on the message thread; `prepareToPlay` passes the saved
 modes to `Engine::prepare` so the host hears the right latency before the first block. A mode switch clears the histories.
 
+**The beginner's note** (`freshAndUntouched` in `Advice.h`): a fresh instance is told to press LEARN ALL while every THRESH is at its init value (`BandParams().thresholdDb`), LEARN ALL is not pressed and `AtlasProcessor::restored` is false (set in `setStateInformation`, so a saved session never gets it). While it shows, the per-band "THRESH is at the top" warnings are left out, because the strip shows two lines and they would hide it. Changing any THRESH removes it.
+
 **One to six bands.** The splitter always makes six pieces; `bandOwners (split)` says which band each piece belongs to (a split
 that is off joins the piece above it to the band below), the pieces of a band are added together before its compressor, and only
 owners run (`segment`). A band's settings, solo bit and meters are its owner piece's index (its *slot*). The engine accepts any
