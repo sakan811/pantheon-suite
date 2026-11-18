@@ -339,6 +339,13 @@ int main()
                "Themis' low cut is a 24 dB/oct high-pass in band 1, on the Side");
         check (! p.bands[7].on && std::none_of (p.bands.begin(), p.bands.end(), [] (const BandParams& b) { return b.on && std::fabs (b.freqHz - 500.0) < 1.0; }), "the left band and the fill band went nowhere");
 
+        // amount=0.5 takes half of a pasted band's gain (-4 dB comes in at -2 dB), into the next free band.
+        auto halfBand = band (K::bell, 1000.0, -4.0, 1.0);
+        halfBand.amount = 0.5;
+        const auto half = pasteBands (q.apvts, juce::String (pdsp::link::encode ({ halfBand })));
+        check (half.slots.size() == 1 && std::fabs (readParams (q.apvts).bands[(size_t) half.slots[0]].gainDb + 2.0) < 0.01,
+               "amount=0.5 halves a pasted gain: -4 dB comes in at -2 dB");
+
         // Full: a paste with no free band says so.
         for (int i = 0; i < kBands; ++i)
         {

@@ -416,7 +416,7 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
         }
         const auto type = b.kind == K::lowShelf ? BandType::lowShelf : b.kind == K::highShelf ? BandType::highShelf
                         : b.kind == K::lowCut ? BandType::lowCut : b.kind == K::highCut ? BandType::highCut : BandType::bell;
-        const int slot = placeBand (s, type, b.freq, b.gainDb);
+        const int slot = placeBand (s, type, b.freq, b.gainDb * b.amount); // amount: how much of the gain to take
         if (slot < 0)
         {
             ++skipped;

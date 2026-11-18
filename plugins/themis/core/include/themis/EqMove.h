@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <pantheon/dsp/MusicBands.h>
+
+#include <array>
+#include <optional>
 #include <vector>
 
 namespace themis
@@ -31,5 +35,20 @@ struct LimiterMove
     float ceilingDb = -1.0f, gainChangeDb = 0.0f;
 
     bool active() const { return setsCeiling || changesGain; }
+};
+
+// A width change Themis suggests for a stereo-widening stage (the width line of pdsp::link, read by Castor): the percent of the side
+// signal to keep in each band of pdsp::bands (index = band). A band the suggestion does not cover is nullopt (not suggested).
+struct WidthMove
+{
+    std::array<std::optional<double>, pdsp::bands::kCount> percent {};
+
+    bool active() const
+    {
+        for (const auto& p : percent)
+            if (p.has_value())
+                return true;
+        return false;
+    }
 };
 } // namespace themis

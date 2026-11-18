@@ -3,10 +3,14 @@
 
 #pragma once
 
+#include <pantheon/dsp/MusicBands.h>
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -18,9 +22,17 @@ namespace pdsp
 //
 //   pantheon-bands 1
 //   bell freq=270 gain=-2.0 q=0.70 place=mid
-//   fill lo=40 hi=90
+//   fill lo=40 hi=90 amount=0.50
 //   curve f0=20 oct=6 name=Modern_Pop db=-1.2,0.0,0.8,...
-//   limiter ceiling=-1.0 gainchange=-3.0
+//   width sub=0 bass=50 lowmid=90 mid=100 uppermid=100 high=100
+//   limiter ceiling=-1.0 gainchange=-3.0 amount=0.50
+//
+// `amount` (0..1, default 1, written only when below 1) is how much of a band or a limiter setting to take: a band's gain is
+// scaled by it (a fill band's Amount is scaled from its off level), a limiter's gain change is scaled by it (its ceiling is not).
+//
+// A width line gives, per band of `pdsp::bands` (sub, bass, lowmid, mid, uppermid, high in that order), the percent of the side
+// signal to keep (0 = mono, 100 = as it is, 200 = twice); a key that is absent is not suggested. `decodeWidth` reads it; `decode`
+// skips it like any other kind it does not know.
 //
 // A curve line carries a spectrum shape (not a band): the dB of each point of a log-frequency grid (f0 is the first point's
 // frequency, oct the points per octave, name has its spaces written as underscores), relative to the level around the middle of
@@ -44,6 +56,7 @@ inline constexpr double kMinSlopeDbPerOct = 6.0, kMaxSlopeDbPerOct = 96.0;
 inline constexpr double kMinCurveF0Hz = 1.0, kMaxCurveF0Hz = 100000.0; // a curve's first point
 inline constexpr double kMinCurvePerOctave = 0.5, kMaxCurvePerOctave = 96.0;
 inline constexpr double kMaxCurveDb = 120.0;                    // a curve's level, either way
+inline constexpr double kMinWidthPercent = 0.0, kMaxWidthPercent = 200.0; // a width line's share of the side signal, per band
 } // namespace limits
 
 struct LinkBand
@@ -56,6 +69,22 @@ struct LinkBand
     double freq = 1000.0, gainDb = 0.0, q = 0.7071; // equaliser bands; a cut's q is unused, its slope is `slopeDbPerOct`
     double slopeDbPerOct = 24.0;
     double loHz = 40.0, hiHz = 120.0;                  // a fill band's range
+    double amount = 1.0;                               // 0..1: how much of the gain (or a fill band's Amount) to take
+};
+
+// The width a suggestion asks for, per band of pdsp::bands (index = band): the percent of the side signal to keep. An absent
+// band is not suggested (nullopt). Values are clamped into limits::kMin/kMaxWidthPercent when read.
+struct LinkWidth
+{
+    std::array<std::optional<double>, bands::kCount> percent {};
+
+    bool valid() const
+    {
+        for (const auto& p : percent)
+            if (p.has_value())
+                return true;
+        return false;
+    }
 };
 
 // A spectrum shape handed over with the bands: `db[i]` is the level at f0Hz * 2^(i / perOctave).
@@ -91,6 +120,7 @@ struct LinkLimiter
 {
     bool hasCeiling = false, hasGainChange = false;
     double ceilingDb = -1.0, gainChangeDb = 0.0;
+    double amount = 1.0; // 0..1: how much of the gain change to take (the ceiling is absolute and not scaled)
 
     bool valid() const { return hasCeiling || hasGainChange; }
 };
@@ -124,6 +154,20 @@ inline const char* placeName (LinkBand::Place p)
         case LinkBand::Place::side:   return "side";
     }
     return "stereo";
+}
+
+// The keys of a width line, in the order of pdsp::bands.
+inline constexpr std::array<const char*, bands::kCount> kWidthKeys { "sub", "bass", "lowmid", "mid", "uppermid", "high" };
+
+// " amount=0.50" when the amount takes less than all of it, empty otherwise (the default is not written).
+inline std::string amountText (double amount)
+{
+    const double a = std::clamp (amount, 0.0, 1.0);
+    if (!(a < 1.0))
+        return {};
+    char buf[32];
+    std::snprintf (buf, sizeof (buf), " amount=%.2f", a);
+    return buf;
 }
 
 inline std::string encodeCurve (const LinkCurve& c)
@@ -160,10 +204,27 @@ inline std::string encodeLimiter (const LinkLimiter& l)
         std::snprintf (buf, sizeof (buf), " gainchange=%.1f", l.gainChangeDb);
         out += buf;
     }
-    return out.empty() ? out : "\nlimiter" + out;
+    return out.empty() ? out : "\nlimiter" + out + amountText (l.amount);
 }
 
-inline std::string encode (const std::vector<LinkBand>& bands, const LinkCurve* curve = nullptr, const LinkLimiter* limiter = nullptr)
+inline std::string encodeWidth (const LinkWidth& w)
+{
+    if (!w.valid())
+        return {};
+    std::string out = "\nwidth";
+    char buf[32];
+    for (size_t i = 0; i < bands::kCount; ++i)
+        if (w.percent[i].has_value())
+        {
+            const double v = std::clamp (*w.percent[i], limits::kMinWidthPercent, limits::kMaxWidthPercent);
+            std::snprintf (buf, sizeof (buf), " %s=%.0f", kWidthKeys[i], v);
+            out += buf;
+        }
+    return out;
+}
+
+inline std::string encode (const std::vector<LinkBand>& bands, const LinkCurve* curve = nullptr, const LinkLimiter* limiter = nullptr,
+                           const LinkWidth* width = nullptr)
 {
     std::string out = kHeader;
     char line[160];
@@ -176,9 +237,12 @@ inline std::string encode (const std::vector<LinkBand>& bands, const LinkCurve* 
         else
             std::snprintf (line, sizeof (line), "\n%s freq=%.0f gain=%.1f q=%.2f place=%s", kindName (b.kind), b.freq, b.gainDb, b.q, placeName (b.place));
         out += line;
+        out += amountText (b.amount);
     }
     if (curve != nullptr && curve->valid())
         out += encodeCurve (*curve);
+    if (width != nullptr)
+        out += encodeWidth (*width);
     if (limiter != nullptr)
         out += encodeLimiter (*limiter);
     return out;
@@ -304,6 +368,7 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out, LinkCur
                           : key == "slope" ? &b.slopeDbPerOct
                           : key == "lo"    ? &b.loHz
                           : key == "hi"    ? &b.hiHz
+                          : key == "amount" ? &b.amount
                                            : nullptr;
             if (field == nullptr)
                 continue; // a key this reader does not know, whatever its value: ignored, not a reason to drop the band
@@ -324,6 +389,7 @@ inline bool decode (const std::string& text, std::vector<LinkBand>& out, LinkCur
         b.slopeDbPerOct = std::clamp (b.slopeDbPerOct, limits::kMinSlopeDbPerOct, limits::kMaxSlopeDbPerOct);
         b.loHz = std::clamp (b.loHz, limits::kMinFreqHz, limits::kMaxFreqHz);
         b.hiHz = std::clamp (b.hiHz, limits::kMinFreqHz, limits::kMaxFreqHz);
+        b.amount = std::clamp (b.amount, 0.0, 1.0);
         if (b.hiHz > b.loHz)
             out.push_back (b);
     }
@@ -377,9 +443,62 @@ inline bool decodeLimiter (const std::string& text, LinkLimiter& out)
                 l.hasGainChange = true;
                 l.gainChangeDb = v;
             }
+            else if (key == "amount")
+                l.amount = std::clamp (v, 0.0, 1.0);
         }
         if (l.valid())
             out = l;
+    }
+    return out.valid();
+}
+
+// False when the text is not a Pantheon list or holds no width line with a number in it. The keys are read in the order of
+// pdsp::bands; a number that is not finite is left out, one outside the limits is clamped. The last width line wins.
+inline bool decodeWidth (const std::string& text, LinkWidth& out)
+{
+    out = {};
+    std::istringstream in (text);
+    std::string line;
+    bool header = false, firstLine = true;
+    while (std::getline (in, line))
+    {
+        trimLine (line, firstLine);
+        firstLine = false;
+        if (!header)
+        {
+            if (line.empty())
+                continue;
+            if (line != kHeader)
+                return false;
+            header = true;
+            continue;
+        }
+        std::istringstream words (line);
+        std::string kind;
+        if (!(words >> kind) || kind != "width")
+            continue;
+        LinkWidth w;
+        std::string pair;
+        while (words >> pair)
+        {
+            const auto eq = pair.find ('=');
+            if (eq == std::string::npos)
+                continue;
+            const auto key = pair.substr (0, eq), value = pair.substr (eq + 1);
+            size_t index = bands::kCount;
+            for (size_t i = 0; i < bands::kCount; ++i)
+                if (key == kWidthKeys[i])
+                    index = i;
+            if (index == bands::kCount)
+                continue; // a band this reader does not know: ignored
+            char* end = nullptr;
+            const double v = std::strtod (value.c_str(), &end);
+            if (end == value.c_str() || !std::isfinite (v))
+                continue;
+            w.percent[index] = std::clamp (v, limits::kMinWidthPercent, limits::kMaxWidthPercent);
+        }
+        if (w.valid())
+            out = w;
     }
     return out.valid();
 }

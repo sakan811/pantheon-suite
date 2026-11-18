@@ -66,8 +66,9 @@ struct Advice
     Switches hear;        // the Solo / Mute setting that lets you listen to it (nothing = no suggestion)
     EqMoves moves;        // the band(s) that make the change, where an equaliser or a harmonic generator can (empty = none)
     LimiterMove limiter;  // the ceiling and/or gain change that makes it, where a limiter can (not active = none)
+    WidthMove width;      // the side width per band, where a width stage can make it (not active = none)
 
-    bool canCopy() const { return !moves.empty() || limiter.active(); } // COPY has something to put on the clipboard
+    bool canCopy() const { return !moves.empty() || limiter.active() || width.active(); } // COPY has something to put on the clipboard
 };
 
 struct MasterInputs
@@ -212,7 +213,7 @@ inline constexpr float kMinBoostDb = 0.5f; // the least: under it a suggested be
 
 inline Advice make (Level level, Topic topic, std::string headline, std::string why, Switches hear = {})
 {
-    return { level, topic, std::move (headline), std::move (why), hear, {}, {} };
+    return { level, topic, std::move (headline), std::move (why), hear, {}, {}, {} };
 }
 
 // What a check about one of the readouts' ranges (a column of kEnergyRanges) plays: every audition band that overlaps it.
@@ -225,6 +226,24 @@ inline Switches soloSideLow() { return { Switches::bit (Source::side) | soloLow(
 inline Switches soloSide() { return { Switches::bit (Source::side), 0u }; }
 // The side signal of one readout range (a width item: the part of the image a mono sum loses).
 inline Switches soloSideOf (int column) { return { Switches::bit (Source::side) | soloBitsOf (column), 0u }; }
+
+// The width a width item suggests over one range column (a column of kEnergyRanges): the side signal to keep in each band the range
+// covers, as the mild or the strong table (see kWidthMild, kWidthStrong). The bands are the ones the range's solo plays, and a band
+// the range does not cover is not suggested. Conservative on purpose: mono below about 100 to 150 Hz is the usual start.
+inline constexpr std::array<double, pdsp::bands::kCount> kWidthMild { 0.0, 50.0, 90.0, 100.0, 100.0, 100.0 };   // Sub .. High, percent
+inline constexpr std::array<double, pdsp::bands::kCount> kWidthStrong { 0.0, 0.0, 60.0, 80.0, 80.0, 70.0 };
+inline constexpr double kStrongWidthMarginDb = 3.0; // a mono loss this far over its warning limit takes the strong table
+inline WidthMove widthOver (int column, double monoLossDb, double monoWarnDb)
+{
+    const auto& table = monoLossDb - monoWarnDb >= kStrongWidthMarginDb ? kWidthStrong : kWidthMild;
+    const auto& range = kEnergyRanges[column];
+    const unsigned covered = pdsp::bands::bandsOverlapping (range.loHz, range.hiHz);
+    WidthMove m;
+    for (size_t b = 0; b < pdsp::bands::kCount; ++b)
+        if ((covered >> b) & 1u)
+            m.percent[b] = table[b];
+    return m;
+}
 
 // The band that takes `cutDb` off the side signal over an energy range (a column of `kEnergyRanges`): a shelf for the top
 // range, a bell across the others, at the geometric centre and as wide as the range (Q from its width in octaves).
@@ -479,6 +498,7 @@ inline MasterAdvice advise (const MasterInputs& in)
                                                static_cast<double> (w.monoLossDb), signedDbText (w.sideMinusMidDb).c_str(), static_cast<double> (history::monoWarnDb (column))),
                                        master::soloSideOf (column)));
             out.items.back().moves = { master::sideCutOver (column, std::min (master::kMaxCutDb, cut)) };
+            out.items.back().width = master::widthOver (column, static_cast<double> (w.monoLossDb), static_cast<double> (history::monoWarnDb (column)));
         }
 
         const auto bass = history::analyseBass (frames, numFrames);

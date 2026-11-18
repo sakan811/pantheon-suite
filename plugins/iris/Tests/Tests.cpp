@@ -1119,6 +1119,55 @@ void testReferenceMatch()
            "a curve line travels with the bands, name and grid included");
     check (pdsp::link::decode (text, back) && back.size() == 1, "a reader that does not know curves reads the bands and skips the line");
     check (pdsp::link::decode (pdsp::link::kHeader + std::string ("\ncurve f0=20 oct=6 db=1,2,x"), back, &backCurve) && ! backCurve.valid(), "a curve with a bad number is dropped");
+    // amount (0..1, written only below 1) and the width line (per band of pdsp::bands; clamped to 0..200; read by a width reader, skipped by the rest).
+    {
+        std::vector<pdsp::LinkBand> one (1);
+        one[0].kind = pdsp::LinkBand::Kind::bell;
+        one[0].freq = 270.0;
+        one[0].gainDb = -2.0;
+        check (pdsp::link::encode (one).find ("amount") == std::string::npos, "a band with the default amount writes no amount key");
+        one[0].amount = 0.5;
+        const auto halfText = pdsp::link::encode (one);
+        std::vector<pdsp::LinkBand> halfBack;
+        check (halfText.find ("amount=0.50") != std::string::npos && pdsp::link::decode (halfText, halfBack) && halfBack.size() == 1 && std::fabs (halfBack[0].amount - 0.5) < 1.0e-9,
+               "amount=0.5 is written on the band and reads back as 0.5");
+        std::vector<pdsp::LinkBand> clamped;
+        check (pdsp::link::decode (pdsp::link::kHeader + std::string ("\nbell freq=270 gain=-2 amount=7"), clamped) && clamped.size() == 1 && clamped[0].amount == 1.0
+                   && pdsp::link::decode (pdsp::link::kHeader + std::string ("\nbell freq=270 gain=-2 amount=-3"), clamped) && clamped.size() == 1 && clamped[0].amount == 0.0,
+               "an amount outside 0..1 is clamped into it");
+        check (pdsp::link::decode (pdsp::link::kHeader + std::string ("\nbell freq=270 gain=-2 amount=abc"), clamped) && clamped.empty(), "a non-numeric amount drops its band, like any other bad number");
+        check (pdsp::link::decode (pdsp::link::kHeader + std::string ("\nbell freq=270 gain=-2 q=0.70 place=mid"), clamped) && clamped.size() == 1 && clamped[0].amount == 1.0,
+               "an old-style band line with no amount reads at amount 1");
+        pdsp::LinkLimiter lim;
+        lim.hasCeiling = true;
+        lim.ceilingDb = -1.0;
+        lim.hasGainChange = true;
+        lim.gainChangeDb = -4.0;
+        lim.amount = 0.5;
+        const auto limText = pdsp::link::encode ({}, nullptr, &lim);
+        pdsp::LinkLimiter limBack;
+        check (limText.find ("amount=0.50") != std::string::npos && pdsp::link::decodeLimiter (limText, limBack) && std::fabs (limBack.amount - 0.5) < 1.0e-9
+                   && limBack.hasCeiling && limBack.ceilingDb == -1.0 && std::fabs (limBack.gainChangeDb + 4.0) < 1.0e-9,
+               "the limiter's amount reads back beside its ceiling and gain change");
+
+        pdsp::LinkWidth width;
+        width.percent[1] = 50.0;
+        width.percent[2] = 90.0;
+        width.percent[3] = 100.0;
+        const auto wideText = pdsp::link::encode (one, nullptr, nullptr, &width);
+        pdsp::LinkWidth wideBack;
+        check (wideText.find ("\nwidth bass=50 lowmid=90 mid=100") != std::string::npos && pdsp::link::decodeWidth (wideText, wideBack) && wideBack.valid()
+                   && wideBack.percent[1] == 50.0 && wideBack.percent[2] == 90.0 && wideBack.percent[3] == 100.0 && ! wideBack.percent[0].has_value() && ! wideBack.percent[5].has_value(),
+               "a width line reads back key by key, the bands it does not name absent");
+        check (pdsp::link::decode (wideText, clamped) && clamped.size() == 1, "a band reader skips the width line and keeps the band");
+        check (pdsp::link::decodeWidth (pdsp::link::kHeader + std::string ("\nwidth sub=-5 high=900 bass=1e9 mid=nan uppermid=10 lowmid=abc"), wideBack)
+                   && *wideBack.percent[0] == 0.0 && *wideBack.percent[5] == 200.0 && *wideBack.percent[1] == 200.0 && ! wideBack.percent[3].has_value() && *wideBack.percent[4] == 10.0
+                   && ! wideBack.percent[2].has_value(),
+               "a width value is clamped into 0..200, a value that is not a number is left out");
+        check (! pdsp::link::decodeWidth (pdsp::link::kHeader + std::string ("\nbell freq=270 gain=-2"), wideBack) && ! pdsp::link::decodeWidth ("not bands", wideBack),
+               "a band list with no width line, and text that is not a band list, read no width");
+        check (pdsp::link::encode (one, nullptr, nullptr, nullptr).find ("width") == std::string::npos, "an encode with no width writes no width line (the old form)");
+    }
     Shape fromCurve {};
     check (shapeFromCurve (curve, fromCurve), "a curve becomes a shape");
     double ca = 0.0;

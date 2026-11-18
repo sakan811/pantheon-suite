@@ -206,7 +206,7 @@ inline PasteResult pasteBands (juce::AudioProcessorValueTreeState& s, const juce
         const auto& ids = bandIds (slot);
         setValue (s, ids.type, (float) (int) type);
         setValue (s, ids.freq, (float) std::clamp (b.freq, kMinHz, kMaxHz));
-        setValue (s, ids.gain, hasGain (type) ? (float) std::clamp (b.gainDb, -kMaxGainDb, kMaxGainDb) : 0.0f);
+        setValue (s, ids.gain, hasGain (type) ? (float) std::clamp (b.gainDb * b.amount, -kMaxGainDb, kMaxGainDb) : 0.0f); // amount: how much of the gain to take
         setValue (s, ids.q, (float) std::clamp (hasSlope (type) ? 0.7071 : b.q, 0.1, 10.0));
         setValue (s, ids.slope, (float) std::clamp ((int) std::lround (b.slopeDbPerOct / 12.0) - 1, 0, kNumSlopes - 1));
         setValue (s, ids.target, (float) (b.place == P::mid ? (int) Target::mid : b.place == P::side ? (int) Target::side : (int) Target::stereo));

@@ -319,6 +319,12 @@ int main()
                        && std::fabs (fresh.apvts.getRawParameterValue (bandIds (slots[0]).lo)->load() - 40.0f) < 0.5f
                        && std::fabs (fresh.apvts.getRawParameterValue (bandIds (slots[0]).hi)->load() - 90.0f) < 0.5f,
                    "... over the range it was given");
+        // Amount: a fill with no amount keeps the default Amount; amount=0.5 dials it back halfway from its off level (-30 dB to -9 dB gives -19.5 dB).
+        const auto plain = pasteBands (fresh.apvts, "pantheon-bands 1\nfill lo=100 hi=200 place=mid", skipped);
+        const auto dialled = pasteBands (fresh.apvts, "pantheon-bands 1\nfill lo=300 hi=600 place=mid amount=0.5", skipped);
+        check (plain.size() == 1 && std::fabs (fresh.apvts.getRawParameterValue (bandIds (plain[0]).amount)->load() - defaultAmountDb) < 0.06f
+                   && dialled.size() == 1 && std::fabs (fresh.apvts.getRawParameterValue (bandIds (dialled[0]).amount)->load() - (fillOffDb + 0.5f * (defaultAmountDb - fillOffDb))) < 0.06f,
+               "a fill with no amount keeps its default Amount; amount=0.5 takes half of its distance above off");
     }
 
     std::printf ("\nBand solo\n");
