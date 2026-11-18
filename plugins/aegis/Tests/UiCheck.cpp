@@ -452,5 +452,69 @@ int main()
                "one UNDO takes back the whole PASTE (CEILING -0.2, GAIN 5 dB, TRUE PEAK off)");
     }
 
+    // AUTO GAIN: the button is in the editor and clear of the controls; a listen sets GAIN once, as one UNDO step; silence leaves GAIN as it was.
+    {
+        AegisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<AegisEditor> (*holder);
+        editor.setVisible (true);
+        const auto b = editor.autoGainButton.getBounds();
+        const juce::Rectangle<int> others[] { editor.autoReleaseButton.getBounds(), editor.truePeakButton.getBounds(), editor.deltaButton.getBounds(), editor.matchButton.getBounds(),
+                                              editor.pasteButton.getBounds(), editor.guideButton.getBounds(), editor.presetBox.getBounds(), editor.undoControls().getBounds(),
+                                              editor.abControls().getBounds(), editor.gainKnob.getBounds(), editor.ceilingKnob.getBounds(), editor.releaseKnob.getBounds(),
+                                              editor.lookaheadBox.getBounds() };
+        bool clear = true;
+        for (const auto& r : others)
+            clear = clear && ! b.intersects (r);
+        check (editor.autoGainButton.isVisible() && editor.getLocalBounds().contains (b) && clear && b.getWidth() >= 80,
+               fmt ("AUTO GAIN is on screen, inside the editor, %d px wide, and beside none of the controls", b.getWidth()));
+
+        // The loop plays a steady tone of the given peak through the processor, as the host would.
+        const auto play = [] (AegisProcessor& pr, double peakDb, int samples, bool silent) {
+            const float amp = (float) std::pow (10.0, peakDb / 20.0);
+            for (int start = 0; start < samples; start += 512)
+            {
+                const int n = std::min (512, samples - start);
+                juce::AudioBuffer<float> buffer (2, n);
+                for (int i = 0; i < n; ++i)
+                {
+                    const float v = silent ? 0.0f : amp * (float) std::sin (2.0 * M_PI * 1000.0 * (start + i) / 48000.0);
+                    buffer.setSample (0, i, v);
+                    buffer.setSample (1, i, v);
+                }
+                juce::MidiBuffer midi;
+                pr.processBlock (buffer, midi);
+            }
+        };
+
+        // A tone at -6 dBFS (its loudest part) with CEILING -1 and GAIN 0: the listen sets GAIN to +8 dB, as one UNDO step.
+        setValue (q.apvts, id::gain, 0.0f);
+        setValue (q.apvts, id::ceiling, -1.0f);
+        ui::beginUndoStep (q.apvts, "Settings");
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 0.0f) && inTree (q.apvts, id::ceiling, -1.0f); });
+        q.undo.clearUndoHistory();
+        editor.autoGainButton.onClick();
+        check (ui::hasNote (editor.shownNotes(), "listening", ui::Severity::info), "a click on AUTO GAIN says in the strip that it is listening");
+        play (q, -6.0, 48000, false);
+        editor.finishAutoGain();
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 8.0f); });
+        check (std::fabs (readParams (q.apvts).gainDb - 8.0f) < 0.1f, fmt ("AUTO GAIN sets GAIN to %.2f dB for a -6 dBFS passage at CEILING -1", readParams (q.apvts).gainDb));
+        check (ui::hasNote (editor.shownNotes(), "set GAIN to 8.0 dB", ui::Severity::info), "the strip says what AUTO GAIN set");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).gainDb) < 1e-4f, "one UNDO takes back the AUTO GAIN change");
+
+        // Silence: nothing is heard, GAIN stays where it is, and the strip says so.
+        setValue (q.apvts, id::gain, 5.0f);
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 5.0f); });
+        play (q, 0.0, 4096, true); // the readers' last taps of the tone before this carry its peak into the first samples: let them run out before the listen
+        editor.autoGainButton.onClick();
+        play (q, 0.0, 48000, true);
+        editor.finishAutoGain();
+        check (std::fabs (readParams (q.apvts).gainDb - 5.0f) < 1e-3f, fmt ("silence leaves GAIN at 5 dB (it is %.4f)", readParams (q.apvts).gainDb));
+        check (ui::hasNote (editor.shownNotes(), "heard nothing", ui::Severity::info), "the strip says that AUTO GAIN heard nothing");
+    }
+
     return test::finish ("AegisUiCheck");
 }

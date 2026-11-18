@@ -409,5 +409,42 @@ int main()
         check (std::fabs (db (rms (quietMatched, from)) - db (rms (quietIn, from))) < 0.3, fmt ("MATCH LEVEL takes back a plain GAIN of +9 dB: %.2f dB against the input's %.2f dB", db (rms (quietMatched, from)), db (rms (quietIn, from))));
     }
 
+    // [14] AUTO GAIN: the GAIN it sets takes about 3 dB off a steady tone's loudest part at the ceiling; silence is not heard, so GAIN is not to change.
+    {
+        const auto steady = [] (double peakDb, int n) {
+            Stereo s { std::vector<float> ((size_t) n), std::vector<float> ((size_t) n) };
+            const float a = (float) std::pow (10.0, peakDb / 20.0);
+            for (int i = 0; i < n; ++i)
+                s.l[(size_t) i] = s.r[(size_t) i] = a * (float) std::sin (2.0 * M_PI * 1000.0 * i / kFs); // 1 kHz, a sine: its true peak is its peak
+            return s;
+        };
+        for (double ceilingDb : { -1.0, -6.0 })
+        {
+            EngineParams p;
+            p.ceilingDb = (float) ceilingDb;
+            Engine measure;
+            measure.prepare (kFs, 2);
+            run (measure, steady (-6.0, 48000), p); // GAIN 0: the detector hears the input as it is
+            const auto g = autoGain (db (measure.detectorPeak.load()), ceilingDb);
+            EngineParams set = p;
+            set.gainDb = g.gainDb;
+            Engine limited;
+            limited.prepare (kFs, 2);
+            run (limited, steady (-6.0, 48000), set);
+            const float reduction = limited.reductionMeter.load();
+            check (g.heard && std::fabs (g.gainDb - (ceilingDb + 3.0 + 6.0)) < 0.1 && std::fabs (reduction - 3.0f) < 0.1 && ! g.stopped,
+                   fmt ("AUTO GAIN on a -6 dBFS tone at CEILING %.0f sets GAIN to %.2f dB (expected %.0f), and the loudest part then takes %.2f dB off", ceilingDb, g.gainDb, ceilingDb + 9.0, reduction));
+        }
+        Engine silent;
+        silent.prepare (kFs, 2);
+        Stereo zeros { std::vector<float> (48000, 0.0f), std::vector<float> (48000, 0.0f) };
+        run (silent, zeros, EngineParams {});
+        check (! autoGain (db (silent.detectorPeak.load()), -1.0).heard, "AUTO GAIN on silence is not heard, so GAIN is left as it was");
+        check (! autoGain (std::nan (""), -1.0).heard && ! autoGain (-200.0, -1.0).heard, "a NaN or an empty measure is not heard either");
+        const auto quiet = autoGain (-60.0, -1.0), loud = autoGain (5.0, -1.0);
+        check (quiet.stopped && quiet.gainDb == kMaxGainDb && loud.stopped && loud.gainDb == 0.0f && std::fabs (loud.reductionDb - 6.0f) < 1e-4f,
+               fmt ("a passage far under the ceiling stops at the top of GAIN (%.0f dB), one far over it at 0 dB, taking %.1f dB off", quiet.gainDb, loud.reductionDb));
+    }
+
     return test::finish ("AegisTests");
 }
