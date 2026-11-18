@@ -32,6 +32,24 @@ void HestiaProcessor::updateTrackProperties (const TrackProperties& properties)
 {
     AudioProcessor::updateTrackProperties (properties);
     engine.setTrackName (properties.name.has_value() ? properties.name->toRawUTF8() : "");
+
+    // AUTO ROLE by itself: once, on the first name the host gives. The rule is hestia::autoRoleOnName (RoleGuess.h); here only the state it reads.
+    if (autoRoleDone || ! properties.name.has_value() || properties.name->isEmpty())
+        return;
+    autoRoleDone = true;
+    const auto name = properties.name->toStdString();
+    const bool untouched = ! sessionRestored && hestia::readParams (apvts).role == hestia::EngineParams().role; // a fresh instance, still on its default
+    const auto role = hestia::autoRoleOnName (name, untouched);
+    if (! role)
+        return;
+    ui::beginUndoStep (apvts, "AUTO ROLE"); // one UNDO step, as the button's
+    auto* p = apvts.getParameter (hestia::id::role);
+    p->beginChangeGesture();
+    p->setValueNotifyingHost (p->convertTo0to1 ((float) (int) *role));
+    p->endChangeGesture();
+    autoRoleSet = true;
+    autoRoleTo = *role;
+    autoRoleFrom = name.substr (0, (std::size_t) hestia::kNameChars);
 }
 
 int HestiaProcessor::copyToMix()
@@ -113,6 +131,8 @@ void HestiaProcessor::setStateInformation (const void* data, int size)
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
         {
+            sessionRestored = true; // from now on ROLE is the saved one: AUTO ROLE does not set it
+            autoRoleSet = false;    // and a note about a choice made before the session was loaded does not apply to it
             auto tree = juce::ValueTree::fromXml (*xml);
             ab.loadFrom (tree); // a session from before A / B has no abSlot: it opens on slot 0
             apvts.replaceState (tree);

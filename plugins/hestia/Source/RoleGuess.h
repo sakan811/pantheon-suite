@@ -130,8 +130,14 @@ inline std::vector<std::string> words (std::string_view name)
 }
 } // namespace guess
 
-// The role the name suggests, or nothing when no word of it is on the list.
-inline std::optional<Role> roleFromName (std::string_view name)
+// The role the name suggests and the priority of the word that gave it, or nothing when no word of it is on the list.
+struct Guess
+{
+    Role role;
+    int priority;
+};
+
+inline std::optional<Guess> guessFromName (std::string_view name)
 {
     const auto w = guess::words (name);
     bool backing = false, vocal = false;
@@ -143,21 +149,40 @@ inline std::optional<Role> roleFromName (std::string_view name)
                 vocal = true;
     }
     if (backing && vocal)
-        return Role::backVocal;
+        return Guess { Role::backVocal, 5 };
 
     for (size_t i = 0; i + 1 < w.size(); ++i)
         if (w[i] == "bass" && guess::isDrumWord (w[i + 1]))
-            return Role::kick;
+            return Guess { Role::kick, 4 };
 
-    std::optional<Role> best;
-    int bestPriority = 0;
+    std::optional<Guess> best;
     for (const auto& word : w)
         for (const auto& k : guess::kKeywords)
-            if (k.word == word && k.priority > bestPriority)
-            {
-                best = k.role;
-                bestPriority = k.priority; // strictly greater: between equal words the one further left stays
-            }
+            if (k.word == word && (! best || k.priority > best->priority))
+                best = Guess { k.role, k.priority }; // strictly greater: between equal words the one further left stays
     return best;
+}
+
+inline std::optional<Role> roleFromName (std::string_view name)
+{
+    const auto g = guessFromName (name);
+    if (! g)
+        return std::nullopt;
+    return g->role;
+}
+
+// AUTO ROLE by itself, when the host gives the track name: only when `roleUntouched` (ROLE is still its default and no saved session set it), and
+// only for a confident guess. A word of priority 1 (synth, mix, master, full, stereo) is a hint, not a name: it does not decide by itself.
+// This is the rule the processor runs once, on the first name the host gives; the editor's button still takes any guess.
+inline constexpr int kConfidentPriority = 2;
+
+inline std::optional<Role> autoRoleOnName (std::string_view name, bool roleUntouched)
+{
+    if (! roleUntouched)
+        return std::nullopt;
+    const auto g = guessFromName (name);
+    if (! g || g->priority < kConfidentPriority)
+        return std::nullopt;
+    return g->role;
 }
 } // namespace hestia

@@ -8,6 +8,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Undo.h>
+#include "RoleGuess.h"
+#include <string>
 
 class HestiaProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
@@ -49,8 +51,14 @@ public:
     int copyToMix();
     // Whether the host handed the last block a sidechain: the editor says so.
     std::atomic<bool> sidechainConnected { false };
+    // AUTO ROLE by itself (updateTrackProperties): what it set, for the editor's strip. Message thread only.
+    bool autoRoleSet = false;
+    hestia::Role autoRoleTo = hestia::Role::fullRange;
+    std::string autoRoleFrom;
 
 private:
+    bool autoRoleDone = false;   // the first track name the host gave has been read (once, whatever it said)
+    bool sessionRestored = false; // a saved session has been loaded: its ROLE is the user's and is never overwritten
     // The audio thread saw a broadcast for this mix; the parameters are set on the message thread.
     void handleAsyncUpdate() override;
     std::vector<float> monoRight; // a mono host: the engine's second channel

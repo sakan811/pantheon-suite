@@ -34,7 +34,7 @@ Source/DSP/        no GUI dependencies, no JUCE; covered by Tests/Tests.cpp
   Engine.h           the signal path and the rule (pressureOn()), the tick, the sidechain stem, the monitor, the output gain
 Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the knobs and the GUIDE text; plain C++, no JUCE
-Source/RoleGuess.h   AUTO ROLE: the role a track name suggests (its keyword list and priorities); plain C++, the roles are `DSP/Roles.h`'s
+Source/RoleGuess.h   AUTO ROLE: the role a track name suggests (its keyword list and priorities), and `autoRoleOnName` (the rule the processor runs by itself); plain C++, the roles are `DSP/Roles.h`'s
 Source/Parameters.h  parameter layout, readParams()                                                     <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/SpaceView.h` is the display
 ../../shared/dsp/    Biquad.h (the bells and the band-passes are `pdsp::Biquad`)
@@ -104,6 +104,8 @@ on a band's centre reads `20 log10 A`: every threshold and the -80/-60 dB presen
 over a tick through `deltaMix`; the output is `wet - deltaMix x dry`, `wet` being the stem after the cut and the depth.
 
 **HOLD** (`EngineParams::hold`, the parameter `hold`, version 2) skips the whole decision in `tick` (the rule, the follow, `carver.setTarget`), so `cut`, `cutShown` and the bells stay as they are; the level, the publishing, the gathering and the depth go on. With it off the code is the code that was, so every earlier test stands.
+
+**AUTO ROLE by itself** runs once, in `HestiaProcessor::updateTrackProperties`, on the first non-empty name the host gives. It sets ROLE only when `autoRoleOnName` (RoleGuess.h, pure, tested in HestiaTests [14]) says so: ROLE is still `EngineParams().role` (Full Range) and no saved session was loaded (`sessionRestored`, set in `setStateInformation`), and the word is at least `kConfidentPriority`. It is one UNDO step ("AUTO ROLE") and it sets the parameter with a gesture, as the button does. What it set (`autoRoleSet`, `autoRoleTo`, `autoRoleFrom`) is read by the editor's `adviceInput`, and `adviceFor` says so only while ROLE is still that role. A saved session clears it. Do not let it run on the audio thread or on a second name: the first name only. Known limit: a user who sets ROLE to Full Range by hand, before the name arrives, is indistinguishable from a fresh instance.
 
 **Track names and COPY TO MIX live on the bus.** A slot keeps `kNameChars` (24) characters of the host's track name in six relaxed atomic words (`Bus::setName` / `nameOf`, message thread; cleared on claim and release); `HestiaProcessor::updateTrackProperties` sets it, `SpaceView::tick` reads it (`stemLabel`, `thisLabel`: the name, else the role). `Bus::broadcast` writes carve, reach, attack and release with the sender's slot and group and moves a sequence number; every `Engine::tick` compares it with the one it has seen (`seenBroadcast`, taken at construction, so a new instance does not get an old copy) and, if it is for its group and not from itself, raises `broadcastPending`; `processBlock` then `triggerAsyncUpdate`s and `handleAsyncUpdate` (message thread) takes the values with `takeBroadcast` and sets the parameters with a gesture each. Two broadcasts at once may mix their numbers: a copy is a rare, deliberate click.
 

@@ -23,6 +23,9 @@ struct AdviceInput
     int sentTo = -1;              // COPY TO MIX has just handed its settings to this many other instances (-1: not lately)
     std::string trackName;        // the host's name for this track (empty: it gave none)
     bool autoRoleMissed = false;  // AUTO ROLE was pressed and the name had no role word in it
+    bool autoRoleApplied = false; // AUTO ROLE ran by itself on the track name and set ROLE to autoRole
+    Role autoRole = Role::fullRange;
+    std::string autoRoleName;     // the track name it read (at most kNameChars)
 };
 
 constexpr float kSameImportance = 0.05f;
@@ -42,6 +45,9 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
     if (in.sentTo >= 0)
         info (in.sentTo == 0 ? "Copy to mix: no other instance is in this mix yet, so nothing was sent."
                               : "Copied CARVE, REACH, ATTACK and RELEASE to " + std::to_string (in.sentTo) + (in.sentTo == 1 ? " other instance" : " other instances") + " of this mix.");
+    // Shown while ROLE is still what AUTO ROLE set: once the user changes it, the note has done its job.
+    if (in.autoRoleApplied && p.role == in.autoRole)
+        info (std::string ("Role set to ") + roleName (in.autoRole) + " from the track name '" + in.autoRoleName + "'; change it any time.");
     if (in.autoRoleMissed)
         info (in.trackName.empty() ? "AUTO ROLE: the host gave this track no name, so there is nothing to read. Set ROLE by hand."
                                    : "AUTO ROLE found no role word in the track name \"" + in.trackName + "\". Set ROLE by hand.");
@@ -90,7 +96,8 @@ inline const char* guideText()
            "  - SIDECHAIN: route any track into Hestia's sidechain input (a track with no Hestia on it, from any plugin chain) and set SC ROLE "
            "and SC IMPORTANCE to say what it is: it is then one more stem in the mix. It is only listened to, never heard.\n"
            "  - Where the host tells Hestia the name of its track, the lists and the depth map call each stem by it instead of by its role.\n"
-           "  - AUTO ROLE sets ROLE from that name (kick, bass, vox, gtr, keys, hat...). It sets only the role; a name with no such word says so.\n"
+           "  - AUTO ROLE sets ROLE from that name (kick, bass, vox, gtr, keys, hat...). It sets only the role; a name with no such word says so. A fresh "
+           "instance that has been given a clear name sets its role by itself once, and says so; a saved session is never changed.\n"
            "\n"
            "IT IS NOT FOR:\n"
            "  - Fixing a single stem: it only cuts, and only because another stem is there. For a fixed cut use an equaliser (Iris).\n"
