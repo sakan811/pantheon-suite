@@ -91,6 +91,7 @@ AtlasEditor::AtlasEditor (AtlasProcessor& p)
     clearButton.setTooltip ("End every solo and delta: all six bands, as they come out.");
     clearButton.onClick = [this] { proc.engine.monitor.solo = 0u; proc.engine.monitor.delta = 0u; };
     learnAllButton.setTooltip ("Listens to every band at once for four seconds of audio and sets THRESH, RATIO, ATTACK and RELEASE of each from what it hears. "
+                               "Then listens to four more seconds with those settings and sets OUTPUT so the output is as loud as the input (A/B at equal loudness). "
                                "Play a typical stretch, with its loudest part. A band that heard nothing is left as it was.");
     targetButton.setTooltip ("Like LEARN ALL, and also compares the bands with a spectrum shape copied from Themis (Copy EQ; copy first, then press this): a band that stands out of the "
                              "shape gets a lower THRESH, by how far, at most 12 dB. A starting point: a band's level and a curve are measured differently.");

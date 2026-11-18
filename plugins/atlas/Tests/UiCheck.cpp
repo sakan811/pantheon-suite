@@ -236,6 +236,71 @@ int main()
         for (int band = 0; band < layoutOf (proc.apvts).numBands; ++band)
             allSet = allSet && learnedAll[(size_t) band] < -10.0;
         check (allSet, fmt ("... and after four seconds every band has its own THRESH (%.1f, %.1f, %.1f, %.1f, %.1f, %.1f dB)", learnedAll[0], learnedAll[1], learnedAll[2], learnedAll[3], learnedAll[4], learnedAll[5]));
+        // The thresholds LEARN ALL gives this noise, before OUTPUT was ever set (the baseline of the build that had no OUTPUT step): the
+        // OUTPUT step must not move them.
+        const std::array<double, 6> baselineThresholds { -45.2, -42.4, -36.0, -28.2, -25.2, -17.1 };
+        bool unchanged = true;
+        for (int band = 0; band < 6; ++band)
+            unchanged = unchanged && std::fabs (learnedAll[(size_t) band] - baselineThresholds[(size_t) band]) < 0.05;
+        check (unchanged, "LEARN ALL's THRESH for this noise is what it was before OUTPUT was learned as well (-45.2 ... -17.1 dB)");
+
+        // OUTPUT: LEARN ALL then measures four more seconds with the learned settings and sets OUTPUT, so the output is as loud as the input.
+        // Then a second stretch of noise (its own seed) is taken in and out and must come out within 0.5 dB.
+        std::mt19937 verifyGen (11);
+        std::uniform_real_distribution<float> verifyD (-0.2f, 0.2f);
+        const auto block = [&] (double* inSum, double* outSum)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                const float a = verifyD (verifyGen), b = verifyD (verifyGen);
+                audio.setSample (0, i, a);
+                audio.setSample (1, i, b);
+                if (inSum != nullptr)
+                    *inSum += (double) a * a + (double) b * b;
+            }
+            proc.processBlock (audio, noMidi);
+            if (outSum != nullptr)
+                for (int i = 0; i < 512; ++i)
+                    *outSum += (double) audio.getSample (0, i) * audio.getSample (0, i) + (double) audio.getSample (1, i) * audio.getSample (1, i);
+        };
+        clearThresholds();
+        setValue (proc.apvts, id::out, 0.0f);
+        editor.learnAllButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        for (int b = 0; b < 1200 && (view.learningSlot() >= 0 || view.matchingOutput()); ++b)
+        {
+            block (nullptr, nullptr);
+            if (b % 3 == 0)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+        }
+        const double setOutput = (double) readParams (proc.apvts).outGainDb;
+        check (! view.matchingOutput() && std::fabs (setOutput) > 0.05 && std::fabs (setOutput) < 24.0,
+               fmt ("LEARN ALL sets OUTPUT too: %+.2f dB, from four more seconds with the learned settings in effect", setOutput));
+        double inSum = 0.0, outSum = 0.0;
+        for (int b = 0; b < 420; ++b)
+        {
+            block (&inSum, &outSum);
+            if (b % 3 == 0)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+        }
+        const double levelDb = 10.0 * std::log10 (outSum / inSum);
+        check (std::fabs (levelDb) < 0.5, fmt ("... and the output is %+.3f dB against the input over four seconds of noise (within 0.5 dB)", levelDb));
+
+        // Silence: a LEARN ALL that hears nothing sets no knob, OUTPUT included.
+        setValue (proc.apvts, id::out, 3.0f);
+        editor.learnAllButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        for (int b = 0; b < 1200 && view.learningSlot() >= 0; ++b)
+        {
+            audio.clear();
+            proc.processBlock (audio, noMidi);
+            if (b % 3 == 0)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+        }
+        const double silentOutput = (double) readParams (proc.apvts).outGainDb;
+        check (! view.matchingOutput() && std::fabs (silentOutput - 3.0) < 0.01, fmt ("LEARN ALL on silence leaves OUTPUT as it was (%.2f dB)", silentOutput));
+        setValue (proc.apvts, id::out, 0.0f);
+
         check (! editor.useTarget ("not a curve"), "TARGET with nothing on the clipboard says so and starts nothing");
         pdsp::LinkCurve flatShape;
         flatShape.f0Hz = 20.0;

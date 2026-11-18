@@ -57,6 +57,7 @@ public:
         numPeaks = finder.peaks (peaks);
         numSwings = finder.swings (swings);
         learn (dt);
+        matchOutputStep (dt);
         repaint();
     }
 
@@ -81,7 +82,7 @@ public:
     void learnBand (int slot) { listen ({ slot }, nullptr); }
 
     // LEARN ALL: every band at once, from the same stretch of audio. With a `target` (a curve copied from another plugin: TARGET) the bands that
-    // stand out of its shape also get a lower THRESH (Target.h).
+    // stand out of its shape also get a lower THRESH (Target.h). Then OUTPUT is set so the output is as loud as the input (matchOutputStep).
     void learnAll (const pdsp::LinkCurve* target = nullptr)
     {
         const auto l = layoutOf (proc.apvts);
@@ -89,6 +90,7 @@ public:
         for (int b = 0; b < l.numBands; ++b)
             slots.push_back (l.slot[(size_t) b]);
         listen (slots, target);
+        learning.matchOutput = true;
     }
     void say (const juce::String& text) { notice = text; noticeSeconds = kNoticeSeconds; }
     // The first band that is listening, or -1; isLearning says it for one.
@@ -100,6 +102,7 @@ public:
         return -1;
     }
     bool isLearning (int slot) const noexcept { return learning.active[(size_t) slot]; }
+    bool matchingOutput() const noexcept { return loudness.active; } // LEARN ALL is setting OUTPUT (the engine is measuring)
 
     void paint (juce::Graphics& g) override
     {
@@ -268,6 +271,7 @@ private:
         for (int i = 0; i < kBands; ++i)
             if (learning.active[(size_t) i])
                 proc.engine.learnCancel (i);
+        cancelOutputMatch(); // a new listening supersedes a measurement of the old settings
         learning = {};
         learning.hasTarget = target != nullptr;
         if (target != nullptr)
@@ -348,7 +352,7 @@ private:
                 setValue (proc.apvts, ids.release, r.releaseMs);
                 ++set;
             }
-        const bool someSilent = learning.silent;
+        const bool someSilent = learning.silent, matchOutput = learning.matchOutput && set > 0;
         learning = {};
         if (set == 0)
             say ("Heard nothing: play the part the band is for, then press LEARN again.");
@@ -356,6 +360,49 @@ private:
             say ("Some bands heard nothing and were left as they were. " + targetNote);
         else if (targetNote.isNotEmpty())
             say (targetNote);
+        if (matchOutput)
+        {
+            // OUTPUT needs the learned settings in effect: the engine measures a second window of audio with them (the notice says so).
+            proc.engine.loudnessStart();
+            loudness = { true, 0.0f };
+            say ("Matching OUTPUT to the input: play the same part for four more seconds.");
+        }
+    }
+
+    // OUTPUT for LEARN ALL: the engine measures the input and the output (before OUTPUT) over four seconds with the learned settings; the
+    // gain that makes them equal is written to OUTPUT. Silence, or no audio at all, leaves OUTPUT as it was (LoudnessMatch, Learn.h).
+    void matchOutputStep (float dt)
+    {
+        if (! loudness.active)
+            return;
+        loudness.seconds += dt;
+        double inPower = 0.0, outPower = 0.0;
+        if (proc.engine.loudnessTake (inPower, outPower))
+        {
+            loudness.active = false;
+            double db = 0.0;
+            if (! LoudnessMatch::gainDb (inPower, outPower, db))
+            {
+                say ("Heard nothing to match: OUTPUT is as it was.");
+                return;
+            }
+            const auto range = proc.apvts.getParameterRange (id::out);
+            db = std::clamp (db, (double) range.start, (double) range.end);
+            setValue (proc.apvts, id::out, (float) db);
+            say (juce::String::formatted ("OUTPUT is %+.1f dB: the output is as loud as the input.", db));
+        }
+        else if (proc.engine.loudnessState() == Engine::LoudState::silent || loudness.seconds >= kTimeoutSeconds)
+        {
+            cancelOutputMatch();
+            say ("No audio to match: OUTPUT is as it was.");
+        }
+    }
+
+    void cancelOutputMatch()
+    {
+        if (loudness.active)
+            proc.engine.loudnessCancel();
+        loudness = {};
     }
 
     AtlasProcessor& proc;
@@ -373,9 +420,14 @@ private:
         std::array<std::array<double, 2>, kBands> edges {}; // each listening band's lower and upper edge (Hz) when it started: a split moved meanwhile does not change what was heard
         std::array<Learned, kBands> result {};
         float seconds = 0.0f;
-        bool silent = false, hasTarget = false;
+        bool silent = false, hasTarget = false, matchOutput = false; // matchOutput: LEARN ALL (also TARGET), which then sets OUTPUT
         pdsp::LinkCurve curve;
     } learning;
+    struct OutputMatch
+    {
+        bool active = false;
+        float seconds = 0.0f; // while the engine measures: how long it has been waiting
+    } loudness;
     juce::String notice;
     float noticeSeconds = 0.0f; // seconds left of the message
 };
