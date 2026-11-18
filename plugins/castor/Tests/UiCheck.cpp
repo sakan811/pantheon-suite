@@ -177,7 +177,7 @@ int main()
         auto w = widths();
         check (std::fabs (w[1] - 50.0f) < 0.5f && std::fabs (w[2] - 90.0f) < 0.5f && std::fabs (w[3] - 120.0f) < 0.5f && std::fabs (w[0] - 100.0f) < 0.5f && std::fabs (w[4] - 100.0f) < 0.5f && std::fabs (w[5] - 100.0f) < 0.5f,
                fmt ("a width line sets bass 50%% and low-mid 90%%, and leaves the others (sub %.1f, mid %.1f, upper-mid %.1f, high %.1f)", w[0], w[3], w[4], w[5]));
-        check (ui::hasNote (editor.shownNotes(), "Pasted from Themis: BASS 50%, LOW-MID 90%.", ui::Severity::info), "the strip says which bands it set");
+        check (ui::hasNote (editor.shownNotes(), "Pasted from Themis: BASS 50%, LOW-MID 90%. Change by hand or UNDO.", ui::Severity::info), "the strip says which bands it set and that they can be changed or undone");
         check (editor.undoControls().undoSwitch().isEnabled(), "UNDO is lit after a paste");
         editor.undoControls().undo();
         settle();
@@ -207,6 +207,76 @@ int main()
         check (editor.getLocalBounds().contains (undoR) && ! undoR.intersects (editor.pasteButton.getBounds()) && ! undoR.intersects (editor.presetBox.getBounds())
                    && editor.pasteButton.getRight() < editor.guideButton.getX() && editor.presetBox.getRight() < editor.pasteButton.getX(),
                "UNDO / REDO, PASTE, the preset box and GUIDE sit in the header without overlapping");
+    }
+
+    // PASTE of Themis' low-end mono (a lowcut on the side) sets MONO BELOW; with a width line both are one UNDO step; text with neither changes nothing.
+    {
+        CastorProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<CastorEditor> (*holder);
+        editor.setVisible (true);
+        const auto settle = [] { for (int i = 0; i < 20; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (10); };
+        const auto mono = [&q] { return readParams (q.apvts).monoBelowHz; };
+        const auto widths = [&q] { std::array<float, kBands> w {}; for (int b = 0; b < kBands; ++b) w[(size_t) b] = readParams (q.apvts).width[(size_t) b] * 100.0f; return w; };
+        const auto reset = [&] { setValue (q.apvts, id::monoBelow, 40.0f); setValue (q.apvts, id::width (1), 100.0f); setValue (q.apvts, id::width (2), 100.0f); settle(); q.undo.clearUndoHistory(); };
+
+        reset();
+        editor.pasteFromClipboard ("pantheon-bands 1\nlowcut freq=120 slope=24 place=side");
+        settle();
+        check (std::fabs (mono() - 120.0f) < 0.5f && ui::hasNote (editor.shownNotes(), "Pasted from Themis: MONO BELOW 120 Hz. Change by hand or UNDO.", ui::Severity::info),
+               "a low-end cut on the side sets MONO BELOW to its frequency, and the strip says so");
+        editor.undoControls().undo();
+        settle();
+        check (std::fabs (mono() - 40.0f) < 0.5f, "UNDO takes MONO BELOW back");
+        editor.undoControls().redo();
+        settle();
+        check (std::fabs (mono() - 120.0f) < 0.5f, "REDO brings MONO BELOW back");
+
+        // A width line and a low-end cut from one clipboard: both are set, and one UNDO takes back both.
+        reset();
+        editor.pasteFromClipboard ("pantheon-bands 1\nwidth bass=50 lowmid=90\nlowcut freq=120 slope=24 place=side");
+        settle();
+        auto w = widths();
+        check (std::fabs (w[1] - 50.0f) < 0.5f && std::fabs (w[2] - 90.0f) < 0.5f && std::fabs (mono() - 120.0f) < 0.5f,
+               fmt ("the widths (bass %.1f, low-mid %.1f) and MONO BELOW (%.1f Hz) are both set", w[1], w[2], mono()));
+        check (ui::hasNote (editor.shownNotes(), "Pasted from Themis: BASS 50%, LOW-MID 90%, MONO BELOW 120 Hz. Change by hand or UNDO.", ui::Severity::info),
+               "the strip names the widths and MONO BELOW");
+        editor.undoControls().undo();
+        settle();
+        w = widths();
+        check (std::fabs (w[1] - 100.0f) < 0.5f && std::fabs (w[2] - 100.0f) < 0.5f && std::fabs (mono() - 40.0f) < 0.5f,
+               fmt ("one UNDO takes back the widths (bass %.1f, low-mid %.1f) and MONO BELOW (%.1f Hz)", w[1], w[2], mono()));
+        editor.undoControls().redo();
+        settle();
+        w = widths();
+        check (std::fabs (w[1] - 50.0f) < 0.5f && std::fabs (mono() - 120.0f) < 0.5f, "REDO brings both back");
+
+        // A low-end cut on the stereo (not the side) is not MONO BELOW, and neither is a cut above or below the range: those clamp.
+        reset();
+        const auto before = widths();
+        editor.pasteFromClipboard ("pantheon-bands 1\nlowcut freq=200 slope=24 place=stereo");
+        settle();
+        check (std::fabs (mono() - 40.0f) < 0.5f && widths() == before && ui::hasNote (editor.shownNotes(), "Nothing to paste", ui::Severity::info),
+               "a low-cut on the stereo changes nothing and says so");
+        editor.pasteFromClipboard ("pantheon-bands 1\nlowcut freq=800 slope=24 place=side");
+        settle();
+        check (std::fabs (mono() - 500.0f) < 0.5f, "a low-end cut above the range sets MONO BELOW to its top, 500 Hz");
+        editor.pasteFromClipboard ("pantheon-bands 1\nlowcut freq=12 slope=24 place=side");
+        settle();
+        check (std::fabs (mono() - 20.0f) < 0.5f && ui::hasNote (editor.shownNotes(), "MONO BELOW Off", ui::Severity::info),
+               "a low-end cut at the bottom of the range switches MONO BELOW off, and the strip says so");
+
+        // Six widths and MONO BELOW would not fit a line of the strip: the widths are counted, and the line fits.
+        reset();
+        editor.pasteFromClipboard ("pantheon-bands 1\nwidth sub=0 bass=50 lowmid=90 mid=100 uppermid=100 high=100\nlowcut freq=120 slope=24 place=side");
+        settle();
+        bool fits = true;
+        for (const auto& n : editor.shownNotes())
+            fits = fits && (int) n.text.size() <= ui::kMaxNoteChars;
+        check (fits && ui::hasNote (editor.shownNotes(), "Pasted from Themis: 6 widths, MONO BELOW 120 Hz. Change by hand or UNDO.", ui::Severity::info),
+               "six widths and MONO BELOW are counted in the strip when naming them would not fit a line");
     }
 
     // The notes.

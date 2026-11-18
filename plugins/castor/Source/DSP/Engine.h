@@ -17,6 +17,7 @@ inline constexpr int kBands = pdsp::bands::kCount;
 inline constexpr int kCrossovers = pdsp::bands::kNumCrossovers;
 inline constexpr float kMaxWidth = 2.0f;     // 200%
 inline constexpr float kMonoOffHz = 20.0f;   // MONO BELOW at or under this is off
+inline constexpr float kMonoMaxHz = 500.0f;  // the top of MONO BELOW
 
 // A check on what is heard, after everything (the goniometer and the correlation still read the sound as it is): the sum of both channels (what a mono speaker plays), or only the sides.
 enum class Listen { stereo, mono, side };
