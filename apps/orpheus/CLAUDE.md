@@ -112,7 +112,7 @@ so. Notes that are each off in their own way give a "reference" that is only rou
 ## Gotchas already paid for
 
 - `juce::String (x, 0)` is "as many decimals as it takes", not none: use `numberText()` (it printed "-33.9989ct").
-- `juce::Font::getStringWidth` is gone in JUCE 8: `textWidth()` in `OrpheusUi.h`.
+- `juce::Font::getStringWidth` is gone in the JUCE that cmake/Juce.cmake pins: `textWidth()` in `OrpheusUi.h`.
 - `HardwareLookAndFeel` finds the lit colour of a button on the look and feel, not on the button, so `button.setColour (buttonOnColourId, ...)` does nothing: every lit switch is amber.
 - `Button::setToggleState (x, sendNotification)` runs `onClick`; the key handlers rely on it. A `ComboBox` is different: `sendNotification` is *asynchronous* there, so a check that needs `onChange` now uses `sendNotificationSync`.
 - `AlertWindow::showOkCancelBox` with a callback gives 1 for the first button and 0 for the second; the window's `ask` hides it. Anything that would open a dialog in a check goes through `ask` / `reportError`.
