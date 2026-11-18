@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "FrameHistory.h"
 #include "Loudness.h"
 
 #include <atomic>
@@ -77,6 +78,10 @@ public:
     double seconds() const { return read (published.seconds, 0.0); }                                // audio measured since the reset
     float momentary() const { return read (published.momentary, LoudnessMeter::kSilence); }         // LUFS over the last 400 ms
     float loudnessRange() const { return read (published.range, 0.0f); }                            // LU, EBU Tech 3342, since the reset
+
+    // The short-term value as a time graph takes it (any thread): the history floor until hasData() and while the value is
+    // the meter's silence, so a partial window or a gated passage plots nothing.
+    float shortTermForHistory() const { return hasData() && shortTerm() > LoudnessMeter::kSilence + 1.0f ? shortTerm() : kHistoryFloorDb; }
 
 private:
     template <typename T>

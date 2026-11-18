@@ -231,6 +231,17 @@ TEST (loudness_range_follows_ebu_tech_3342)
     CHECK (m.momentary() > -20.0f && m.momentary() < -16.0f); // a stereo sine at -20 dBFS reads about -17.7 LUFS
     m.requestReset();
     CHECK (m.momentary() <= LoudnessMeter::kSilence && m.loudnessRange() == 0.0f);
+
+    // The history's short-term value: the floor until a full 3 s window, a level after it, and the floor again after a reset.
+    LoudnessMonitor h;
+    h.prepare (fs);
+    auto y = sine (fs, 1000, -20.0, 5.0);
+    h.process (y.data(), y.data(), static_cast<int> (static_cast<double> (fs) * 2.0));
+    CHECK (h.shortTermForHistory() == kHistoryFloorDb); // 2 s: a partial window plots nothing
+    h.process (y.data() + static_cast<size_t> (fs * 2.0), y.data() + static_cast<size_t> (fs * 2.0), static_cast<int> (static_cast<double> (fs) * 2.0));
+    CHECK (h.shortTermForHistory() > -20.0f && h.shortTermForHistory() < -14.0f); // 4 s: about -17.7 LUFS for this sine
+    h.requestReset();
+    CHECK (h.shortTermForHistory() == kHistoryFloorDb);
 }
 
 // ---- listening aids: streaming preview and reference player --------------------------------------------------------
@@ -2230,6 +2241,48 @@ TEST (history_crest_over_time_reads_sine_square_and_silence)
     CHECK (history::analyseCrest (typical.data(), 100).crest == history::Crest::typical && history::analyseCrest (typical.data(), 100).level == Level::good);
     const auto dynamic = at (history::kCrestHighDb + 2.0f);
     CHECK (history::analyseCrest (dynamic.data(), 100).crest == history::Crest::high && history::analyseCrest (dynamic.data(), 100).level == Level::good);
+}
+
+TEST (history_loudness_shares_split_the_zone_and_skip_gaps)
+{
+    const float target = -14.0f;
+    const auto at = [] (float lufs) {
+        return framesWith (100, [lufs] (int, FrameStats& f) { f.shortTermLufs = lufs; });
+    };
+
+    const auto inside = history::analyseLoudness (at (target - 0.4f).data(), 100, target);
+    CHECK (inside.have && inside.withinShare == 1.0f && inside.aboveShare == 0.0f && inside.belowShare == 0.0f && inside.level == Level::good);
+    CHECK (history::analyseLoudness (at (target + history::kLoudnessZoneLu).data(), 100, target).withinShare == 1.0f); // the zone's edge is inside it
+    const auto above = history::analyseLoudness (at (target + 2.0f).data(), 100, target);
+    CHECK (above.have && above.aboveShare == 1.0f && above.level == Level::warn);
+    const auto below = history::analyseLoudness (at (target - 2.0f).data(), 100, target);
+    CHECK (below.have && below.belowShare == 1.0f && below.level == Level::warn);
+
+    // Thirds: within, above and below, with the quarter that is silence left out of the shares (and out of the count).
+    const auto mixed = framesWith (100, [target] (int i, FrameStats& f) {
+        f.shortTermLufs = i % 4 == 0 ? target : i % 4 == 1 ? target + 4.0f : i % 4 == 2 ? target - 6.0f : kHistoryFloorDb;
+    });
+    const auto m = history::analyseLoudness (mixed.data(), 100, target);
+    CHECK (m.have);
+    CHECK_NEAR (m.withinShare, 1.0 / 3.0, 1e-6);
+    CHECK_NEAR (m.aboveShare, 1.0 / 3.0, 1e-6);
+    CHECK_NEAR (m.belowShare, 1.0 / 3.0, 1e-6);
+    CHECK_NEAR (m.withinShare + m.aboveShare + m.belowShare, 1.0, 1e-6);
+    CHECK (m.level == Level::warn); // two thirds of the measured time are outside the zone
+
+    // A gap at the start (the first 3 s read as the floor) is not counted as time below the zone.
+    const auto gap = framesWith (100, [target] (int i, FrameStats& f) { f.shortTermLufs = i < 30 ? kHistoryFloorDb : target; });
+    CHECK_NEAR (history::analyseLoudness (gap.data(), 100, target).withinShare, 1.0, 1e-6);
+    CHECK_NEAR (history::analyseLoudness (gap.data(), 100, target).belowShare, 0.0, 1e-6);
+
+    // Digital silence and too little audio give no verdict at all.
+    CHECK (!history::analyseLoudness (at (kHistoryFloorDb).data(), 100, target).have);
+    CHECK (!history::analyseLoudness (at (target).data(), history::kMinFrames - 1, target).have);
+
+    // Half the time 7 LU above the target: exactly half outside is not more than half, so the lamp turns on the spread alone.
+    const auto spread = framesWith (100, [target] (int i, FrameStats& f) { f.shortTermLufs = i % 2 == 0 ? target : target + 7.0f; });
+    const auto s = history::analyseLoudness (spread.data(), 100, target);
+    CHECK (s.have && s.aboveShare == 0.5f && s.spreadLu > history::kLoudnessSpreadWarnLu && s.level == Level::warn);
 }
 
 // ---- audition (solo / mute) ---------------------------------------------------------------------------------------

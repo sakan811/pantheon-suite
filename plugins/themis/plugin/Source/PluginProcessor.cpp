@@ -54,7 +54,7 @@ void ThemisProcessor::prepareToPlay (double sr, int)
                 syncReferenceRate();
         });
     }
-    analysisThread = std::make_unique<AnalysisThread> (analyzer);
+    analysisThread = std::make_unique<AnalysisThread> (analyzer, loudness);
     analysisThread->startThread();
 }
 
@@ -310,9 +310,19 @@ bool ThemisProcessor::readLowCrest (float& outDb) const
     return true;
 }
 
+int ThemisProcessor::deliveryIndex() const
+{
+    return juce::jlimit (0, params::kNumLoudnessTargets - 1, static_cast<int> (paramReader.value (params::loudnessTarget)));
+}
+
 const params::LoudnessTarget& ThemisProcessor::deliveryTarget() const
 {
-    return params::loudnessTargets[juce::jlimit (0, params::kNumLoudnessTargets - 1, static_cast<int> (paramReader.value (params::loudnessTarget)))];
+    return params::loudnessTargets[deliveryIndex()];
+}
+
+juce::String ThemisProcessor::deliveryChoiceText() const
+{
+    return params::loudnessTargetNames()[deliveryIndex()];
 }
 
 themis::MasterInputs ThemisProcessor::masterInputs() const

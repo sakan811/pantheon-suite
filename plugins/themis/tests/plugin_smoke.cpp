@@ -119,7 +119,7 @@ static constexpr int kEditorWidth = 1440, kEditorHeight = 900; // the editor's d
 static void pump (int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil (ms); }
 
 // Every tab of the two history graphs, stacked: the level graph (BANDS, MID / SIDE looking at the low range, LEFT / RIGHT,
-// PEAKS, CREST, SPECTROGRAM) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
+// PEAKS, CREST, LOUDNESS, SPECTROGRAM) on the left and the fundamental graph (BALANCE, LEVELS, PITCH) on the right. Leaves the panels on their first tab.
 static juce::Image renderGraphs (juce::Component& editor)
 {
     gui::HistoryPanel *level = nullptr, *fundamental = nullptr;
@@ -140,13 +140,14 @@ static juce::Image renderGraphs (juce::Component& editor)
         return panel.createComponentSnapshot (panel.getLocalBounds(), true, 1.0f);
     };
     constexpr int kGap = 8;
-    const int levelTabs[] = { 0, 1, 2, 3, 4, 5 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges };
+    const int levelTabs[] = { 0, 1, 2, 3, 4, 5, 6 }, levelColumns[] = { themis::kAllRanges, 0, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges, themis::kAllRanges };
     const int fundamentalTabs[] = { 0, 1, 2 };
+    const int levelCount = static_cast<int> (std::size (levelTabs));
     const int h = level->getHeight(), w = level->getWidth() + kGap + fundamental->getWidth();
-    juce::Image out (juce::Image::RGB, w, 6 * h + 5 * kGap, true);
+    juce::Image out (juce::Image::RGB, w, levelCount * h + (levelCount - 1) * kGap, true);
     juce::Graphics g (out);
     g.fillAll (colours::background);
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < levelCount; ++i)
         g.drawImageAt (snapshot (*level, levelTabs[i], levelColumns[i]), 0, i * (h + kGap));
     for (int i = 0; i < 3; ++i)
         g.drawImageAt (snapshot (*fundamental, fundamentalTabs[i], themis::kAllRanges), level->getWidth() + kGap, i * (h + kGap));
@@ -781,6 +782,11 @@ int main (int argc, char** argv)
             const auto crest = themis::history::analyseCrest (frames.data(), static_cast<int> (frames.size()));
             std::printf ("    crest over time: median %.1f dB\n", crest.medianDb);
             CHECK (crest.have && crest.medianDb > 0.0f, "the CREST tab should have a verdict on the demo programme");
+            const auto loud = themis::history::analyseLoudness (frames.data(), static_cast<int> (frames.size()), proc.deliveryLufs());
+            std::printf ("    loudness over time against %.0f LUFS: %.0f %% within %.0f LU, %.0f %% above, %.0f %% below; spread %.1f LU\n",
+                         proc.deliveryLufs(), loud.withinShare * 100.0f, themis::history::kLoudnessZoneLu, loud.aboveShare * 100.0f,
+                         loud.belowShare * 100.0f, loud.spreadLu);
+            CHECK (loud.have && std::abs (loud.withinShare + loud.aboveShare + loud.belowShare - 1.0f) < 1e-4f, "the LOUDNESS tab should have a verdict on the demo programme");
         }
         std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
         CHECK (editor != nullptr);
@@ -945,11 +951,11 @@ int main (int argc, char** argv)
                     clickAlong (*panel, 16.0f, 4.0f, tabs, columns); // the title row: the tabs on the left...
                     CHECK (tabs.count (1) == 1 && tabs.count (2) == 1, "clicking the tabs should select them");
                     if (dynamic_cast<gui::LevelView*> (panel) != nullptr)
-                        CHECK (tabs.count (4) == 1 && tabs.count (5) == 1, "the CREST and SPECTROGRAM tabs can be clicked");
+                        CHECK (tabs.count (4) == 1 && tabs.count (5) == 1 && tabs.count (6) == 1, "the CREST, LOUDNESS and SPECTROGRAM tabs can be clicked");
                     if (dynamic_cast<gui::LevelView*> (panel) != nullptr)
                     {
-                        panel->selectTab (1); // ...and, on a tab that has them, the range chips on the right (the tab row ends before 60 %)
-                        clickAlong (*panel, 16.0f, static_cast<float> (panel->getWidth()) * 0.6f, tabs, columns);
+                        panel->selectTab (1); // ...and, on a tab that has them, the range chips on the right (the tab row ends before 70 %)
+                        clickAlong (*panel, 16.0f, static_cast<float> (panel->getWidth()) * 0.7f, tabs, columns);
                         CHECK (columns.size() >= 4, "clicking the range chips should select %d ranges", static_cast<int> (columns.size()));
                     }
                     panel->selectTab (0);

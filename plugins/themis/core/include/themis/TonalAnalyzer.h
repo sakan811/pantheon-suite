@@ -171,6 +171,10 @@ public:
     // 0 = infinite (cumulative mean).
     void setAveragingSeconds (float s) { avgSeconds.store (s, std::memory_order_relaxed); }
 
+    // Any thread. The loudness the frames pushed by the next pump() carry (see FrameStats::shortTermLufs): the analysis thread
+    // copies it from the LoudnessMonitor before each pump, so the audio thread does no extra work.
+    void setShortTermLufs (float lufs) { shortTermLufs.store (lufs, std::memory_order_relaxed); }
+
     // Safe from any thread; applied on the next pump().
     void requestReset()
     {
@@ -412,7 +416,8 @@ private:
                 l += std::max (both + x, 0.0);
                 r += std::max (both - x, 0.0);
             }
-            s.energy (Signal::stereo, column) = toDb (m + sd);
+            s.shortTermLufs = shortTermLufs.load (std::memory_order_relaxed);
+        s.energy (Signal::stereo, column) = toDb (m + sd);
             s.energy (Signal::mid, column) = toDb (m);
             s.energy (Signal::side, column) = toDb (sd);
             s.energy (Signal::left, column) = toDb (l);
@@ -605,6 +610,7 @@ private:
     double hopPhase = 0.0;
 
     std::atomic<float> avgSeconds { kDefaultAveragingSeconds };
+    std::atomic<float> shortTermLufs { kHistoryFloorDb }; // set by the analysis thread (setShortTermLufs), read by frameStats()
     std::atomic<bool> resetFlag { false };
 
     struct Published
