@@ -31,11 +31,17 @@ AegisEditor::AegisEditor (AegisProcessor& p)
       deltaButton (p.apvts, id::delta, "DELTA", "Listen to what the limiter takes away: the sound after GAIN minus the output, aligned by the delay. If it is the sound itself (not just the peaks), the limiter is working too hard. Not for the bounce: switch it off. Presets switch it off."),
       matchButton (p.apvts, id::matchLevel, "MATCH", "Turns the output down to the loudness of the input (read over about a second), so raising GAIN does not win the comparison just by being louder. It only ever turns down, so the ceiling holds. For comparing: switch it off before the bounce. Presets switch it off."),
       presetBox (p, presets(), "Everything is set by a preset, GAIN too (set it by ear afterwards); what it does not list goes back to its default."),
+      undoButtons (p.undo, *this),
+      abButtons (p.ab),
       proc (p)
 {
     setLookAndFeel (&look);
     for (auto* c : std::initializer_list<juce::Component*> { &gainKnob, &ceilingKnob, &releaseKnob, &lookaheadBox, &truePeakButton, &autoReleaseButton, &deltaButton, &matchButton, &presetBox, &guideButton, &pasteButton, &clearOutButton })
         addAndMakeVisible (*c);
+    addAndMakeVisible (undoButtons);
+    addAndMakeVisible (abButtons);
+    for (auto* t : std::initializer_list<juce::Component*> { &reductionTip, &maxTip, &outPeakTip, &levelTip, &delayTip })
+        addAndMakeVisible (*t);
     pasteButton.setTooltip ("Take the limiter setting that Themis copied from its master plan (COPY on the ceiling or the loudness item): the CEILING it names and how far to move GAIN. "
                             "A ceiling in dBTP needs TRUE PEAK, so a paste that sets one switches it on.");
     pasteButton.onClick = [this] { pasteFromClipboard (juce::SystemClipboard::getTextFromClipboard()); };
@@ -61,12 +67,21 @@ void AegisEditor::resized()
     auto presetRow = header.withTrimmedTop (28).withHeight (28);
     presetLabel = { presetRow.getX() + 2, presetRow.getY() - 15, 120, 12 };
     presetBox.setBounds (presetRow.removeFromLeft (190));
+    // UNDO / REDO and A / B in the top strip of the header, which the labels of the preset and look-ahead leave free.
+    const auto strip = header.withHeight (16).translated (0, -6);
+    undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
+    abButtons.setBounds (strip.getX() + ui::UndoButtons::kWidth + 10, strip.getY(), ui::AbButtons::kWidth, strip.getHeight());
 
     bounds.removeFromTop (10);
     display = bounds.removeFromTop (displayHeight);
     {
         const auto plot = display.toFloat().reduced (46.0f, 14.0f).withTrimmedRight (kReadoutWidth);
-        holdArea = { (int) plot.getRight() + 10, (int) plot.getY() + 34, 104, 30 }; // the MAX REDUCTION number (paint() draws it at the same place)
+        const int x0 = (int) plot.getRight() + 10; // where paint() puts the readouts
+        holdArea = { x0, (int) plot.getY() + 34, 104, 30 }; // the MAX REDUCTION number (paint() draws it at the same place)
+        reductionTip.setBounds (plot.toNearestInt());
+        maxTip.setBounds (holdArea);
+        outPeakTip.setBounds (x0, (int) plot.getY() + 74, 104, 30);
+        levelTip.setBounds (x0 + 104, (int) plot.getY(), 46, (int) plot.getHeight()); // the IN and OUT bars
     }
     clearOutButton.setBounds ((int) (display.toFloat().reduced (46.0f, 14.0f).withTrimmedRight (kReadoutWidth).getRight()) + 10, display.getY() + 14 + 116, 56, 20);
     bounds.removeFromTop (10);
@@ -89,6 +104,7 @@ void AegisEditor::resized()
     truePeakButton.setBounds (toggles.removeFromLeft (150));
     toggles.removeFromLeft (12);
     autoReleaseButton.setBounds (toggles.removeFromLeft (150));
+    delayTip.setBounds (latencyLabel);
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
 }
 
@@ -113,6 +129,7 @@ std::vector<ui::Note> AegisEditor::shownNotes() const
 
 void AegisEditor::pasteFromClipboard (const juce::String& text)
 {
+    ui::beginUndoStep (proc.apvts, "Paste"); // what PASTE writes is one UNDO step
     auto said = pasteLimiter (proc.apvts, text);
     if (said.empty())
         said = "Nothing to paste: copy a limiter setting from Themis' plan first (COPY on the ceiling or loudness item).";

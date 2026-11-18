@@ -280,5 +280,177 @@ int main()
         check (editor.presetBox.getRight() < editor.getWidth() && ! editor.presetBox.getBounds().intersects (editor.guideButton.getBounds()), "the preset box fits the header beside the GUIDE button");
     }
 
+    // The state records a change when its timer next writes it to the tree (in the undo step open then), so a change has settled when the tree holds it.
+    // Pumps the message loop in 10 ms steps for at most 2 s; a check after it says what is wrong if the condition never holds.
+    const auto pumpUntil = [] (auto&& done) {
+        for (int waited = 0; ! done() && waited < 2000; waited += 10)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+        return done();
+    };
+    const auto inTree = [] (juce::AudioProcessorValueTreeState& s, const juce::String& pid, float plain) {
+        for (int i = 0; i < s.state.getNumChildren(); ++i)
+        {
+            const auto child = s.state.getChild (i);
+            if (child.getProperty ("id").toString() == pid)
+                return std::fabs ((float) child.getProperty ("value") - plain) < 1e-3f;
+        }
+        return false;
+    };
+
+    // UNDO / REDO, A / B and the header strip they sit in.
+    {
+        AegisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<AegisEditor> (*holder);
+        editor.setVisible (true);
+
+        // Placement: UNDO / REDO and A / B sit side by side in the header strip and overlap none of the header controls.
+        const auto undoR = editor.undoControls().getBounds(), abR = editor.abControls().getBounds();
+        check (editor.undoControls().isVisible() && editor.abControls().isVisible() && editor.undoControls().undoSwitch().isVisible() && editor.abControls().button (1).isVisible(),
+               "UNDO / REDO and A / B are on screen");
+        check (editor.getLocalBounds().contains (undoR) && editor.getLocalBounds().contains (abR), "UNDO / REDO and A / B are inside the editor");
+        check (! undoR.intersects (abR) && abR.getX() > undoR.getRight(), "UNDO / REDO and A / B sit side by side without overlapping");
+        check (undoR.getX() >= 12 + 250 && undoR.getBottom() <= editor.presetBox.getY() - 15, "UNDO / REDO are right of the nameplate and above the preset label");
+        const juce::Rectangle<int> others[] { editor.presetBox.getBounds(), editor.lookaheadBox.getBounds(), editor.guideButton.getBounds(), editor.pasteButton.getBounds(), editor.delayTip.getBounds() };
+        bool clear = true;
+        for (const auto& r : others)
+            clear = clear && ! undoR.intersects (r) && ! abR.intersects (r);
+        check (clear, "UNDO / REDO and A / B overlap neither the preset box, LOOK-AHEAD, PASTE, the delay nor GUIDE");
+
+        // Each change made with its own step is taken back by one UNDO, and REDO brings it again.
+        q.undo.clearUndoHistory();
+        ui::beginUndoStep (q.apvts, "Gain");
+        setValue (q.apvts, id::gain, 3.0f);
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 3.0f); }); // the tree takes the change in the step open now
+        ui::beginUndoStep (q.apvts, "Ceiling");
+        setValue (q.apvts, id::ceiling, -2.0f);
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 3.0f) && inTree (q.apvts, id::ceiling, -2.0f); });
+        check (editor.undoControls().undoSwitch().isEnabled() && ! editor.undoControls().redoSwitch().isEnabled(), "after two changes UNDO is lit and REDO is not");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).ceilingDb + 1.0f) < 1e-3f && std::fabs (readParams (q.apvts).gainDb - 3.0f) < 1e-3f, "UNDO takes back the last change only (CEILING back to -1, GAIN stays at 3)");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).gainDb) < 1e-3f, "a second UNDO takes back the gain too (0 dB)");
+        pumpUntil ([&] { return editor.undoControls().redoSwitch().isEnabled(); });
+        check (editor.undoControls().redoSwitch().isEnabled(), "REDO is lit after an UNDO");
+        editor.undoControls().redo();
+        check (std::fabs (readParams (q.apvts).gainDb - 3.0f) < 1e-3f, "REDO brings the gain back (3 dB)");
+
+        // Cmd+Z and Shift+Cmd+Z reach the same buttons from the keyboard: the editor hands them to UndoButtons::handleKey.
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) && std::fabs (readParams (q.apvts).gainDb) < 1e-3f,
+               "Cmd+Z undoes the gain step (0 dB)");
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', juce::ModifierKeys (juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier), 0))
+                   && std::fabs (readParams (q.apvts).gainDb - 3.0f) < 1e-3f,
+               "Shift+Cmd+Z redoes it (3 dB)");
+
+        // A preset is one step: one UNDO puts back everything it moved, and the change made before it stays.
+        q.undo.clearUndoHistory();
+        ui::beginUndoStep (q.apvts, "Ceiling");
+        setValue (q.apvts, id::ceiling, -2.0f);
+        pumpUntil ([&] { return inTree (q.apvts, id::ceiling, -2.0f); });
+        int loud = 0;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+            if (q.getProgramName (i) == "Loud Master")
+                loud = i;
+        q.setCurrentProgram (loud);
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 6.0f) && inTree (q.apvts, id::autoRelease, 1.0f); });
+        check (std::fabs (readParams (q.apvts).gainDb - 6.0f) < 1e-3f, "the Loud Master preset is applied (6 dB of gain)");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).gainDb - 3.0f) < 1e-3f && std::fabs (readParams (q.apvts).ceilingDb + 2.0f) < 1e-3f && ! readParams (q.apvts).autoRelease
+                   && readParams (q.apvts).lookahead == kDefaultLookahead,
+               "one UNDO takes back the whole preset (GAIN 3, CEILING -2, AUTO RELEASE off, LOOK-AHEAD back); the change before it stays");
+
+        // A / B: each slot keeps its settings, switching restores both, and a listening aid (DELTA) is kept across a switch.
+        q.undo.clearUndoHistory();
+        setValue (q.apvts, id::gain, 2.0f);
+        setValue (q.apvts, id::ceiling, -2.0f);
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 2.0f) && inTree (q.apvts, id::ceiling, -2.0f); });
+        editor.abControls().button (1).onClick(); // B starts as a copy of A
+        check (q.ab.active() == 1 && editor.abControls().button (1).getToggleState() && ! editor.abControls().button (0).getToggleState(), "B is chosen and lit, A is not");
+        check (std::fabs (readParams (q.apvts).gainDb - 2.0f) < 1e-3f, "B starts as a copy of A (GAIN 2 dB)");
+        setValue (q.apvts, id::gain, 4.0f);
+        setValue (q.apvts, id::delta, 1.0f);
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 4.0f) && inTree (q.apvts, id::delta, 1.0f); });
+        editor.abControls().button (0).onClick();
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 2.0f); });
+        check (std::fabs (readParams (q.apvts).gainDb - 2.0f) < 1e-3f && readParams (q.apvts).delta, "switching to A brings back A's GAIN (2 dB) and keeps DELTA on");
+        editor.abControls().button (1).onClick();
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 4.0f); });
+        check (std::fabs (readParams (q.apvts).gainDb - 4.0f) < 1e-3f, "switching back to B brings back B's GAIN (4 dB)");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).gainDb - 2.0f) < 1e-3f, "UNDO takes back the A / B switch as one step (A again)");
+
+        // A session saved with A / B keeps the active slot; one from before A / B opens on slot A.
+        editor.abControls().button (0).onClick();
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        AegisProcessor reopened;
+        reopened.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (reopened.ab.active() == 0 && ! reopened.ab.hasSettings (1), "the session keeps which slot is active (A here), not the slots themselves");
+        editor.abControls().button (1).onClick();
+        q.getStateInformation (saved);
+        AegisProcessor onB;
+        onB.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (onB.ab.active() == 1, "a session saved on B opens on B");
+        if (auto xml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize()))
+        {
+            check (xml->getIntAttribute ("abSlot", -1) == 1, "the B session carries abSlot 1 before it is taken out");
+            xml->removeAttribute ("abSlot");
+            juce::MemoryBlock legacy;
+            juce::AudioProcessor::copyXmlToBinary (*xml, legacy);
+            AegisProcessor before;
+            before.setStateInformation (legacy.getData(), (int) legacy.getSize());
+            check (before.ab.active() == 0, "a session from before A / B (no abSlot) opens on slot A");
+        }
+        else
+            check (false, "the saved session is readable as XML");
+
+        // The tooltips: each painted part of the display has its own text, the areas do not overlap one another, the controls or the MAX number, and
+        // the MAX number's area still clears the hold when clicked (its strip hands the click to the editor).
+        check (editor.reductionTip.getTooltip().contains ("nine seconds") && editor.maxTip.getTooltip().contains ("Click this number") && editor.outPeakTip.getTooltip().contains ("CEILING")
+                   && editor.levelTip.getTooltip().contains ("CEILING") && editor.delayTip.getTooltip().contains ("LOOK-AHEAD"),
+               "the display's parts each have a tooltip (trace, MAX, OUT PEAK, IN / OUT, delay)");
+        const juce::Rectangle<int> tipAreas[] { editor.reductionTip.getBounds(), editor.maxTip.getBounds(), editor.outPeakTip.getBounds(), editor.levelTip.getBounds(), editor.delayTip.getBounds() };
+        bool tipsFit = true;
+        for (int i = 0; i < 5; ++i)
+            for (int j = i + 1; j < 5; ++j)
+                tipsFit = tipsFit && ! tipAreas[i].intersects (tipAreas[j]);
+        for (const auto& r : tipAreas)
+            tipsFit = tipsFit && editor.getLocalBounds().contains (r) && ! r.intersects (editor.clearOutButton.getBounds()) && ! r.intersects (undoR) && ! r.intersects (abR);
+        check (tipsFit, "the tooltip areas lie inside the window, do not overlap each other, the CLEAR button or the UNDO / A / B strip");
+        check (editor.maxTip.getBounds() == editor.reductionHoldArea(), "the MAX tooltip area is the MAX number's click area");
+        q.undo.clearUndoHistory();
+        q.engine.reductionMeter.store (4.0f);
+        pumpUntil ([&] { return editor.reductionHoldDb() >= 3.9f; });
+        check (editor.reductionHoldDb() >= 3.9f, "the MAX hold has risen to the reduction before the click");
+        const auto where = editor.maxTip.getLocalBounds().getCentre().toFloat();
+        const juce::MouseEvent tipClick (juce::Desktop::getInstance().getMainMouseSource(), where, juce::ModifierKeys(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &editor.maxTip, &editor.maxTip,
+                                         juce::Time::getCurrentTime(), where, juce::Time::getCurrentTime(), 1, false);
+        editor.maxTip.mouseDown (tipClick);
+        check (editor.reductionHoldDb() == 0.0f, "a click on the MAX tooltip area clears the MAX hold (the strip hands the click to the editor)");
+    }
+
+    // PASTE is one UNDO step: the CEILING, TRUE PEAK and GAIN it writes come back together.
+    {
+        AegisProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<AegisEditor> (*holder);
+        editor.setVisible (true);
+        setValue (q.apvts, id::gain, 5.0f);
+        setValue (q.apvts, id::ceiling, -0.2f);
+        setValue (q.apvts, id::truePeak, 0.0f);
+        pumpUntil ([&] { return inTree (q.apvts, id::gain, 5.0f) && inTree (q.apvts, id::ceiling, -0.2f) && inTree (q.apvts, id::truePeak, 0.0f); });
+        q.undo.clearUndoHistory();
+        editor.pasteFromClipboard ("pantheon-bands 1\nlimiter ceiling=-1.0 gainchange=-3.2");
+        pumpUntil ([&] { return inTree (q.apvts, id::ceiling, -1.0f) && inTree (q.apvts, id::truePeak, 1.0f); });
+        check (std::fabs (readParams (q.apvts).ceilingDb + 1.0f) < 0.01f && std::fabs (readParams (q.apvts).gainDb - 1.8f) < 0.01f, "PASTE sets CEILING -1 and GAIN 1.8 dB");
+        editor.undoControls().undo();
+        check (std::fabs (readParams (q.apvts).ceilingDb + 0.2f) < 0.01f && std::fabs (readParams (q.apvts).gainDb - 5.0f) < 0.01f && ! readParams (q.apvts).truePeak,
+               "one UNDO takes back the whole PASTE (CEILING -0.2, GAIN 5 dB, TRUE PEAK off)");
+    }
+
     return test::finish ("AegisUiCheck");
 }

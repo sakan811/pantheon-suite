@@ -28,6 +28,7 @@ Source/DSP/Engine.h  no GUI, no JUCE: SlidingMin, Engine (the whole signal path)
 Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
 Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
+Source/TipArea.h     the transparent strips that carry the tooltips of the painted display; a click on one goes to the editor
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`)
 Tests/               Tests.cpp (DSP), UiCheck.cpp (editor on the real processor), Snapshot.cpp (editor -> PNG), Check.h
 ```
@@ -70,14 +71,19 @@ input bit for bit (test [3]). The smoothed input GAIN starts at its target (`gai
 
 **Bad samples.** NaN and infinity are replaced by 0 on the way in (`finite()`).
 
-**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter goes back to its default first, so a preset does not inherit the last one: Aegis passes no `keepsParameter`, so nothing is kept) and keeps the chosen index in the session's state
-(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, and that the box fits the header.
+**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter goes back to its default first, so a preset does not inherit the last one: `Programs` is given no `keepsParameter`, so nothing is kept, and a preset switches DELTA and MATCH off) and keeps the chosen index in the session's state
+(`program`); `setCurrentProgram` begins an undo step (`ui::beginUndoStep`) first, so a preset is one UNDO step. The editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, and that the box fits the header.
+
+**Undo and A/B.** The processor declares `juce::UndoManager undo` before `apvts` and hands it over (`&undo`), so every control change is one undo step; a preset (`setCurrentProgram`) and a PASTE (`pasteFromClipboard`) each begin a step first, so each is one. `ab` (`ui::AbCompare`) is declared after `apvts` and is given `aegis::keepsParameter`: DELTA and MATCH are left out of both slots and are not changed by a switch (they are listening aids, so a switch does not change how the sound is heard). Presets do not use that function and still switch them off. The active slot is saved in the state as `abSlot`, and a session without it opens on slot 0. The two slots are not saved (a session opens with both empty). Both are the kit's (`Undo.h`, `AbCompare.h`).
+
+**Tooltips over the display.** The painted parts (the trace, MAX, OUT PEAK, the IN and OUT bars, the delay) have `TipArea`s laid over them. A component that does not take clicks is never the one under the mouse, so no tooltip would show on it: a `TipArea` takes the click and hands it to the editor's `mouseDown`, which is where the MAX number clears its hold.
 
 **Parameters.** Ids (`aegis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `autorel`, `delta` and `match` (version 2, off: a session saved before them has the old behaviour; UiCheck pins `autorel`); a new one needs a higher version, an entry in
 `readParams()` and a place in the editor.
 
 ## DRY: where each thing lives
 
+- the undo and A/B wiring -> the kit (`Undo.h`, `AbCompare.h`); the plugin only names what A/B keeps (`keepsParameter` in `Presets.h`)
 - parameter ranges, defaults, choice lists -> `Parameters.h`; the look-ahead times -> `kLookaheadMs` in `Engine.h` (the parameter's names, the engine and the editor read it)
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it
   there, a test in UiCheck's Notes section, and at most `ui::kMaxNoteChars` characters

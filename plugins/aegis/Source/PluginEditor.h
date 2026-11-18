@@ -5,9 +5,12 @@
 
 #include "Advice.h"
 #include "PluginProcessor.h"
+#include "TipArea.h"
 #include "UI/AegisUi.h"
 #include <array>
+#include <pantheon/ui/AbCompare.h>
 #include <pantheon/ui/Advice.h>
+#include <pantheon/ui/Undo.h>
 
 // A window of glass with the reduction of the last seconds and the input level, the three knobs (GAIN, CEILING, RELEASE), the look-ahead and the
 // true-peak switch. Everything drawn is the shared kit's (shared/ui).
@@ -30,6 +33,16 @@ public:
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { aegis::guideTitle(), aegis::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }
+    ui::UndoButtons undoButtons; // UNDO / REDO, in the header strip (shared/ui Undo.h)
+    ui::AbButtons abButtons;     // A / B, beside them (shared/ui AbCompare.h)
+    ui::UndoButtons& undoControls() noexcept { return undoButtons; } // for UiCheck
+    ui::AbButtons& abControls() noexcept { return abButtons; }
+    // Tooltips over the painted parts of the display (see TipArea.h): the trace, the MAX number, OUT PEAK, the IN and OUT bars, and the delay.
+    aegis::TipArea reductionTip { "The reduction of the last nine seconds, in dB: the deeper the trace, the more the limiter took off." },
+        maxTip { "The most the limiter has taken off since CLEAR. Click this number to clear it alone." },
+        outPeakTip { "The highest true peak that has left since CLEAR. Red when it is over CEILING (by more than 0.1 dB)." },
+        levelTip { "Input (left) and output (right) level now, in dBFS. The mark on OUT is CEILING." },
+        delayTip { "The delay the host compensates: LOOK-AHEAD plus the true-peak reader." };
     std::vector<ui::Note> notes() const { return aegis::adviceFor (adviceInput()); } // what the strip under the controls says, for the checks
     float heldReductionDb() const noexcept; // the most the limiter took off in the history
     float reductionHoldDb() const noexcept { return reductionHold; } // the most the limiter took off since CLEAR, a click on the number, or CEILING or TRUE PEAK changed

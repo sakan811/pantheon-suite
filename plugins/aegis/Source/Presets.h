@@ -10,6 +10,10 @@
 // set by ear and by the reduction meter, not by the preset: raise it until the sound is as loud as it should be and no further than the music can take.
 namespace aegis
 {
+// The listening aids are kept across an A / B switch (so the two settings are heard the same way), as Hera keeps LEVEL MATCH. The presets do not use this:
+// they switch DELTA and MATCH off, as they always have, so Programs is given no keeps.
+inline bool keepsParameter (const juce::String& pid) { return pid == id::delta || pid == id::matchLevel; }
+
 inline const std::vector<ui::Preset>& presets()
 {
     // LOOK-AHEAD is a choice: 0 = 0.5 ms, 1 = 1 ms, 2 = 2 ms, 3 = 5 ms.
