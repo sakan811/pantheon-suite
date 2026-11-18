@@ -16,6 +16,21 @@ inline constexpr double kToneMaxDb = 6.0;      // each shelf: the tilt is twice 
 inline constexpr double kDcBlockHz = 10.0;
 inline constexpr int kMaxLatency = oversamplingLatency (kNumOversampling - 1); // the dry sound's ring is this long at most
 
+// SET DRIVE: the loudest level of the programme, as it reaches the curve, goes to here (0 dB is where the curves turn over): moderate saturation that MIX can back off.
+inline constexpr double kSetDriveTargetDb = 0.0;
+inline constexpr double kSilencePeak = 1e-5; // -100 dBFS: a programme below it is silence, and SET DRIVE leaves DRIVE alone
+
+// The DRIVE (dB) that puts `inputPeak` (linear, the level before DRIVE and after LOW CUT) on kSetDriveTargetDb, rounded to the knob's 0.1 dB and kept in its range.
+// Returns false, and does not touch `driveDb`, when there was nothing to measure (silence, or not a number).
+inline bool driveForPeak (double inputPeak, float& driveDb) noexcept
+{
+    if (! (inputPeak > kSilencePeak))
+        return false;
+    const double db = kSetDriveTargetDb - 20.0 * std::log10 (inputPeak);
+    driveDb = (float) (std::round (std::clamp (db, 0.0, (double) kMaxDriveDb) * 10.0) / 10.0);
+    return true;
+}
+
 struct EngineParams
 {
     float driveDb = 12.0f;

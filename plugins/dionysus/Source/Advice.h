@@ -58,6 +58,7 @@ inline const char* guideText()
            "Adding harmonics: it pushes the sound through a curve (CURVE) that rounds off the peaks, so the sound gets denser, thicker or harsher "
            "the more DRIVE it gets. TAPE and TUBE are gentle, TRANSFORMER is thicker, DIODE is uneven (it adds even harmonics, a rounder sound), FOLD turns "
            "peaks back on themselves, CLIP cuts them. BIAS moves the working point to add even harmonics, TONE tilts the result bright or dark. LOW CUT keeps the bass out of the curve (the saturated path only, so with MIX under 100% the lows stay as they were), which keeps the low end clean.\n\n"
+           "SET DRIVE: play your track, press it, and for one second it sets DRIVE so the loudest level reaches the curves' turning point. Then back MIX off to keep more of the clean sound.\n\n"
            "THE DISPLAY\n"
            "The curve shows what each level in becomes; the bars show the harmonics a -12 dBFS sine gets, in dB under the sound that went in. The meter on the right is the level that reaches the curve (the sound times DRIVE): 0 dB is where the curves turn over, above it is hard saturation; its lamp lights when the output reaches 0 dBFS. DELTA plays only what the saturator adds.\n\n"
            "NOT FOR\n"

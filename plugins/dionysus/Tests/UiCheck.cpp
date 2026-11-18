@@ -194,6 +194,40 @@ int main()
         check (! ui::hasNote (adviceFor (in), "LOW CUT filters", ui::Severity::info), "... and not under 100%");
     }
 
+    // SET DRIVE: a second of programme while it plays sets DRIVE from its peak; with no sound DRIVE is left alone and the button says so.
+    {
+        DionysusProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<DionysusEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.setDriveButton.getRight() <= editor.getWidth() && editor.setDriveButton.getBottom() <= editor.getHeight()
+                   && ! editor.setDriveButton.getBounds().intersects (editor.autoGain.getBounds()) && ! editor.setDriveButton.getBounds().intersects (editor.deltaButton.getBounds())
+                   && ! editor.setDriveButton.getBounds().intersects (editor.out.getBounds()),
+               "SET DRIVE sits under DELTA in the toggle column, overlapping nothing");
+        setValue (q.apvts, id::drive, 24.0f);
+        editor.setDriveButton.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (1500); // no audio: the second passes, nothing is measured
+        check (std::fabs (readParams (q.apvts).driveDb - 24.0f) < 0.01f && editor.setDriveButton.getButtonText() == "NO AUDIO",
+               fmt ("SET DRIVE with no sound leaves DRIVE at %.1f dB and says NO AUDIO (button: %s)", readParams (q.apvts).driveDb, editor.setDriveButton.getButtonText().toRawUTF8()));
+
+        // A -12 dBFS sine through the processor at +24 dB: its peak reaches the curve at +12 dB, so SET DRIVE sets DRIVE to 12 dB.
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        editor.setDriveButton.triggerClick();
+        for (int block = 0; block < 100 && editor.setDriveButton.getButtonText() != "DRIVE SET"; ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+                for (int c = 0; c < 2; ++c)
+                    buffer.setSample (c, i, 0.25f * std::sin (6.2831853f * 1000.0f * (float) (block * 512 + i) / 48000.0f));
+            q.processBlock (buffer, midi);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (25);
+        }
+        check (std::fabs (readParams (q.apvts).driveDb - 12.0f) < 0.15f && editor.setDriveButton.getButtonText() == "DRIVE SET",
+               fmt ("SET DRIVE on a -12 dBFS sine at +24 dB sets DRIVE to %.1f dB (12.0) and says DRIVE SET", readParams (q.apvts).driveDb));
+    }
+
     // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.
     {
         DionysusProcessor q;
