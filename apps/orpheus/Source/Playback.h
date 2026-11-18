@@ -54,6 +54,8 @@ public:
                     p = loopStart.load();
                     pos.store (p);
                 }
+                if (end <= p) // a loop start at or past the end (a loop left over from a longer file): nothing to copy and no way to advance
+                    break;
                 const int n = (int) std::min<juce::int64> (info.numSamples - done, end - p);
                 for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
                     buffer->copyFrom (ch, info.startSample + done, audio, ch % sourceChannels, (int) p, n);
