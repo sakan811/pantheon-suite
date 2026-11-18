@@ -5,6 +5,9 @@
 
 #include "DSP/Engine.h"
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <pantheon/dsp/BandLink.h>
+#include <pantheon/dsp/MusicBands.h>
+#include <pantheon/ui/Undo.h>
 
 // The single source of truth for parameters: ids, ranges, defaults, and readParams().
 namespace castor
@@ -71,5 +74,29 @@ inline void setValue (juce::AudioProcessorValueTreeState& s, const juce::String&
 {
     auto* p = s.getParameter (pid);
     p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
+
+// The width suggestion Themis hands over as text (pdsp::link's width line, from a width item of its plan): the side width of each band, in percent.
+// Every band the line names is set, the others are left as they are; the whole paste is one UNDO step. Nothing changes when the text is not a Pantheon
+// list or has no width line, and the result says so. The line's amount is not read (pdsp::link does not expose it), so it is taken as 1.
+inline std::string pasteWidth (juce::AudioProcessorValueTreeState& s, const juce::String& text)
+{
+    pdsp::LinkWidth w;
+    if (! pdsp::link::decodeWidth (text.toStdString(), w))
+        return "Nothing to paste: copy a width item from Themis' plan first (COPY on it).";
+    ui::beginUndoStep (s, "Paste"); // every band of one paste is one UNDO step
+    std::string said = "Pasted from Themis:";
+    bool first = true;
+    for (size_t b = 0; b < pdsp::bands::kCount; ++b)
+    {
+        if (! w.percent[b].has_value())
+            continue;
+        const float value = std::clamp ((float) *w.percent[b], 0.0f, kMaxWidth * 100.0f);
+        setValue (s, id::width ((int) b), value);
+        const auto shown = juce::String (juce::roundToInt (s.getRawParameterValue (id::width ((int) b))->load())).toStdString();
+        said += std::string (first ? " " : ", ") + juce::String (pdsp::bands::kBands[b].name).toUpperCase().toStdString() + " " + shown + "%";
+        first = false;
+    }
+    return said + ".";
 }
 } // namespace castor

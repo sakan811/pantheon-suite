@@ -164,14 +164,21 @@ inline juce::String linkText (const themis::EqMoves& moves, const themis::Target
                                              width.active() ? &wide : nullptr));
 }
 
-// Where a copied fix goes, for the status line.
-inline juce::String linkDestination (const themis::EqMoves& moves, const themis::LimiterMove& limiter = {})
+// Where a copied fix goes, for the status line: the bands, the limiter setting and the width line each have their own reader.
+inline juce::String linkDestination (const themis::EqMoves& moves, const themis::LimiterMove& limiter = {}, const themis::WidthMove& width = {})
 {
+    juce::String to;
     if (moves.empty())
-        return limiter.active() ? "Aegis" : "";
-    bool fill = false, eq = false;
-    for (const auto& m : moves)
-        (m.kind == themis::EqMove::Kind::harmonicFill ? fill : eq) = true;
-    return fill && eq ? "Iris or Apollo (EQ) and Hephaestus (fill)" : fill ? "Hephaestus" : "Iris or Apollo";
+        to = limiter.active() ? "Aegis" : "";
+    else
+    {
+        bool fill = false, eq = false;
+        for (const auto& m : moves)
+            (m.kind == themis::EqMove::Kind::harmonicFill ? fill : eq) = true;
+        to = fill && eq ? "Iris or Apollo (EQ) and Hephaestus (fill)" : fill ? "Hephaestus" : "Iris or Apollo";
+    }
+    if (width.active())
+        to = to.isEmpty() ? juce::String ("Castor") : to + " and Castor (width)";
+    return to;
 }
 } // namespace gui

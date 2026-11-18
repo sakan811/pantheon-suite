@@ -7,6 +7,7 @@
 #include "Presets.h"
 #include <pantheon/dsp/AnalyzerTap.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <pantheon/ui/Undo.h>
 
 class CastorProcessor : public juce::AudioProcessor
 {
@@ -29,7 +30,7 @@ public:
 
     int getNumPrograms() override { return programs.count(); }
     int getCurrentProgram() override { return programs.current(); }
-    void setCurrentProgram (int index) override { programs.set (index); }
+    void setCurrentProgram (int index) override { ui::beginUndoStep (apvts, "Preset"); programs.set (index); } // a preset is one UNDO step
     const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
@@ -37,6 +38,7 @@ public:
     void setStateInformation (const void*, int) override;
 
     castor::Engine engine;
+    juce::UndoManager undo; // UNDO / REDO of the parameters (shared/ui Undo.h); declared before the state that records into it
     juce::AudioProcessorValueTreeState apvts;
     ui::Programs programs { apvts, castor::presets(), castor::keepsParameter }; // after apvts
     pdsp::StereoTap tapOut; // the output, for the goniometer

@@ -475,6 +475,8 @@ int main (int argc, char** argv)
                "a copy with no width item carries no width line (the old form)");
         CHECK (gui::linkText ({ cut }).toStdString().find("amount") == std::string::npos, "Themis writes no amount key: amount=1 is the default and is not written");
         CHECK (gui::linkDestination ({ cut }) == "Iris or Apollo", "equaliser bands go to Iris or Apollo (both read them, and Copy EQ's curve)");
+        CHECK (gui::linkDestination ({}, {}, strong) == "Castor" && gui::linkDestination ({ cut }, {}, strong) == "Iris or Apollo and Castor (width)",
+               "a width line is pasted in Castor, and the destination names it after the bands it comes with");
     }
 
     std::printf ("[1b] stereo scope: correlation follows the channel coherence, level does not matter\n");

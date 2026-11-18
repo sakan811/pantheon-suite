@@ -9,7 +9,7 @@ CastorProcessor::CastorProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "STATE", castor::createLayout())
+      apvts (*this, &undo, "STATE", castor::createLayout())
 {
 }
 

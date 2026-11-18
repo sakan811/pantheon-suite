@@ -66,7 +66,7 @@ inline const char* guideText()
            "The width of a stereo sound, band by band: what is the same in both channels is the middle, what differs is the sides, and each of the six bands "
            "of music (Sub, Bass, Low-Mid, Midrange, Upper-Mid, High) has its own WIDTH for its sides: 0% is mono, 100% as it is, 200% twice the sides. "
            "MID and SIDE set their levels as a whole, MONO BELOW takes the sides away under a frequency so the bass stays in the middle, "
-           "BALANCE turns one channel down.\n\n"
+           "BALANCE turns one channel down. PASTE takes the width a Themis plan suggests (COPY on a width item), and UNDO takes it back.\n\n"
            "READING IT\n"
            "The goniometer draws the left and right as a cloud: a vertical line is mono, a horizontal one is out of phase. The correlation bar reads +1 for mono, "
            "0 for wide, and below 0 for a sound that will cancel in mono; MIN is the lowest it has read since you last clicked it. "

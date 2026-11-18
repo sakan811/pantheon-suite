@@ -157,6 +157,58 @@ int main()
         check (std::fabs (o.width[3] - 1.5f) < 0.01f && std::fabs (o.monoBelowHz - 90.0f) < 1.0f && std::fabs (o.balance + 0.25f) < 0.01f, "the state of a session comes back as it was saved");
     }
 
+    // PASTE of a Themis width line: the bands it names are set and the others are not, the paste is one UNDO step, and text without a width line changes nothing.
+    {
+        CastorProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<CastorEditor> (*holder);
+        editor.setVisible (true);
+        // The state takes a change on the message loop's timer, in the undo step open then: let it settle before each step.
+        const auto settle = [] { for (int i = 0; i < 20; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (10); };
+        const auto widths = [&q] { std::array<float, kBands> w {}; for (int b = 0; b < kBands; ++b) w[(size_t) b] = readParams (q.apvts).width[(size_t) b] * 100.0f; return w; };
+        setValue (q.apvts, id::width (3), 120.0f); // the midrange, which the paste does not name
+        settle();
+        q.undo.clearUndoHistory();
+
+        editor.pasteFromClipboard ("pantheon-bands 1\nwidth bass=50 lowmid=90");
+        settle();
+        auto w = widths();
+        check (std::fabs (w[1] - 50.0f) < 0.5f && std::fabs (w[2] - 90.0f) < 0.5f && std::fabs (w[3] - 120.0f) < 0.5f && std::fabs (w[0] - 100.0f) < 0.5f && std::fabs (w[4] - 100.0f) < 0.5f && std::fabs (w[5] - 100.0f) < 0.5f,
+               fmt ("a width line sets bass 50%% and low-mid 90%%, and leaves the others (sub %.1f, mid %.1f, upper-mid %.1f, high %.1f)", w[0], w[3], w[4], w[5]));
+        check (ui::hasNote (editor.shownNotes(), "Pasted from Themis: BASS 50%, LOW-MID 90%.", ui::Severity::info), "the strip says which bands it set");
+        check (editor.undoControls().undoSwitch().isEnabled(), "UNDO is lit after a paste");
+        editor.undoControls().undo();
+        settle();
+        w = widths();
+        check (std::fabs (w[1] - 100.0f) < 0.5f && std::fabs (w[2] - 100.0f) < 0.5f && std::fabs (w[3] - 120.0f) < 0.5f,
+               fmt ("one UNDO takes back the whole paste (bass %.1f, low-mid %.1f), the midrange stays at 120%%", w[1], w[2]));
+        editor.undoControls().redo();
+        settle();
+        w = widths();
+        check (std::fabs (w[1] - 50.0f) < 0.5f && std::fabs (w[2] - 90.0f) < 0.5f, "REDO brings the paste back");
+
+        const auto before = widths();
+        editor.pasteFromClipboard ("pantheon-bands 1\nbell freq=1000 gain=2.0 q=0.70 place=stereo");
+        settle();
+        check (widths() == before && ui::hasNote (editor.shownNotes(), "Nothing to paste", ui::Severity::info), "a band list with no width line changes nothing and says so");
+        editor.pasteFromClipboard ("hello world");
+        settle();
+        check (widths() == before && ui::hasNote (editor.shownNotes(), "Nothing to paste", ui::Severity::info), "text that is not a Pantheon list changes nothing and says so");
+
+        editor.pasteFromClipboard ("pantheon-bands 1\nwidth sub=0 bass=50 lowmid=90 mid=100 uppermid=100 high=100");
+        bool fits = true;
+        for (const auto& n : editor.shownNotes())
+            fits = fits && (int) n.text.size() <= ui::kMaxNoteChars;
+        check (fits, "a paste of all six bands fits a line of the strip");
+
+        const auto undoR = editor.undoControls().getBounds();
+        check (editor.getLocalBounds().contains (undoR) && ! undoR.intersects (editor.pasteButton.getBounds()) && ! undoR.intersects (editor.presetBox.getBounds())
+                   && editor.pasteButton.getRight() < editor.guideButton.getX() && editor.presetBox.getRight() < editor.pasteButton.getX(),
+               "UNDO / REDO, PASTE, the preset box and GUIDE sit in the header without overlapping");
+    }
+
     // The notes.
     {
         AdviceInput in;

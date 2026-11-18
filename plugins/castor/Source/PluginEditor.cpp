@@ -18,6 +18,7 @@ constexpr int kWidth = 24 + 6 * cellWidth + 14 + goniometerSize + 8, kHeight = u
 constexpr int bodyHeight = kHeight - (headerHeight + 10 + 8 + ui::kNoteStripHeight + 12);
 constexpr int widthGlassHeight = bodyHeight - (2 * cellHeight + 40) - 6; // the glass over the band knobs takes what the rest leaves
 constexpr int kTimerHz = 30;
+constexpr int kNoteTicks = 30 * 8; // a line of the strip (PASTE) stays eight seconds
 
 juce::String hzName (double hz) { return hz < 1000.0 ? juce::String (juce::roundToInt (hz)) + " Hz" : juce::String (hz / 1000.0, hz < 10000.0 ? 1 : 0) + " kHz"; }
 }
@@ -31,6 +32,7 @@ CastorEditor::CastorEditor (CastorProcessor& p)
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything.", ui::Knob::Layout::below),
       listen (p.apvts, id::listen, "A check on what you hear (the goniometer and the correlation still show the sound):\nStereo: as it is.\nMono: the sum of both channels, what a mono speaker plays. What fades or changes here is a phase problem.\nSide: only what differs between the channels. Set it back to Stereo before you bounce."),
       presetBox (p, presets(), "BALANCE and OUTPUT are kept; the widths, MID, SIDE and MONO BELOW are set."),
+      undoButtons (p.undo, *this),
       proc (p)
 {
     setLookAndFeel (&look);
@@ -42,8 +44,12 @@ CastorEditor::CastorEditor (CastorProcessor& p)
                                                          ui::Knob::Layout::below);
         addAndMakeVisible (*widths[(size_t) b]);
     }
-    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &listen, &minButton, &presetBox, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &listen, &minButton, &presetBox, &guideButton, &pasteButton })
         addAndMakeVisible (*c);
+    addAndMakeVisible (undoButtons);
+    pasteButton.setTooltip ("Take the width Themis copied from its master plan (COPY on a width item): the side width of each band it names, the others stay as they are. "
+                            "UNDO takes it back.");
+    pasteButton.onClick = [this] { pasteFromClipboard (juce::SystemClipboard::getTextFromClipboard()); };
     minButton.setTooltip ("The lowest the correlation has read since the last click (the bar's thin mark shows it too): a dip under 0 is a moment that cancels in mono. Click to start again.");
     minButton.onClick = [this] { minHold = 1.0f; proc.engine.correlationMin.store (1.0f); repaint(); };
     scratchL.resize (4096);
@@ -60,10 +66,16 @@ void CastorEditor::resized()
     auto header = bounds.removeFromTop (headerHeight).withTrimmedTop (8).withTrimmedBottom (8);
     nameplate = header.removeFromLeft (250);
     guideButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
+    header.removeFromRight (8);
+    pasteButton.setBounds (header.removeFromRight (64).withSizeKeepingCentre (64, 28));
+    header.removeFromRight (12);
     header.removeFromLeft (24);
     auto presetRow = header.withTrimmedTop (28).withHeight (28);
     presetLabel = { presetRow.getX() + 2, presetRow.getY() - 15, 120, 12 };
     presetBox.setBounds (presetRow.removeFromLeft (190));
+    // UNDO / REDO in the top strip of the header, which the label of the preset leaves free.
+    const auto strip = header.withHeight (16).translated (0, -6);
+    undoButtons.setBounds (strip.getX(), strip.getY(), ui::UndoButtons::kWidth, strip.getHeight());
 
     bounds.removeFromTop (10);
     auto body = bounds.removeFromTop (bodyHeight);
@@ -138,7 +150,7 @@ void CastorEditor::paint (juce::Graphics& g)
     hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Width of the sides, by band", bandsLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Whole sound", otherLabel, juce::Justification::left, colours::dim, 9.0f);
-    ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
+    ui::drawNoteStrip (g, noteStrip, shownNotes());
 
     drawWidthGlass (g);
 
@@ -208,5 +220,28 @@ void CastorEditor::timerCallback()
     minHold = std::min (minHold, proc.engine.correlationMin.exchange (1.0f, std::memory_order_relaxed));
     minButton.setButtonText (minHold >= 1.0f ? juce::String ("MIN --") : "MIN " + juce::String (minHold, 2));
     presetBox.sync();
+    if (stripTicks > 0)
+        --stripTicks;
+    repaint();
+}
+
+std::vector<ui::Note> CastorEditor::shownNotes() const
+{
+    auto list = castor::adviceFor (adviceInput());
+    if (stripTicks > 0 && ! stripSaid.empty())
+        list.insert (list.begin(), { ui::Severity::info, stripSaid });
+    return list;
+}
+
+void CastorEditor::pasteFromClipboard (const juce::String& text)
+{
+    setStripNote (pasteWidth (proc.apvts, text), kNoteTicks); // one UNDO step when the text has a width line (Parameters.h)
+    repaint();
+}
+
+void CastorEditor::setStripNote (std::string text, int ticks)
+{
+    stripSaid = std::move (text);
+    stripTicks = ticks;
     repaint();
 }
