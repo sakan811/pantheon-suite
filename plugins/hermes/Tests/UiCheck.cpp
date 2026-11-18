@@ -146,6 +146,15 @@ int main()
         editor.autoTrimButton.triggerClick();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         check (std::fabs (readParams (q.apvts).trimDb - (-14.0f - measured)) < 0.06f, fmt ("AUTO TRIM sets TRIM to %.1f dB (-14 target, %.1f LUFS read)", readParams (q.apvts).trimDb, measured));
+        {
+            const float trimmed = readParams (q.apvts).trimDb;
+            for (int waited = 0; std::fabs (q.apvts.getRawParameterValue (id::trim)->load() - trimmed) > 1e-3f && waited < 2000; waited += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            editor.undoControls().undo();
+            check (std::fabs (readParams (q.apvts).trimDb) < 1e-3f, "UNDO takes back AUTO TRIM (TRIM back to 0 dB)");
+            editor.undoControls().redo();
+            check (std::fabs (readParams (q.apvts).trimDb - trimmed) < 1e-3f, "REDO brings AUTO TRIM back");
+        }
         check (editor.autoTrimButton.getRight() <= editor.getWidth() && editor.autoReset.getBottom() <= editor.getHeight() && ! editor.autoTrimButton.getBounds().intersects (editor.autoReset.getBounds()) && ! editor.autoTrimButton.getBounds().intersects (editor.resetButton.getBounds()), "AUTO TRIM and AUTO RESET fit and overlap nothing");
 
         play (5);
@@ -163,6 +172,126 @@ int main()
         play (200);
         check (after < -150.0f, fmt ("with AUTO RESET on, the transport starting clears the integrated loudness (%.1f LUFS right after)", after));
         q.setPlayHead (nullptr);
+    }
+
+    // UNDO / REDO, A / B and the header strip they sit in.
+    {
+        HermesProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HermesEditor> (*holder);
+        editor.setVisible (true);
+        // The state records a change when its timer next writes it to the tree (in the step open then), so a change has settled when the tree holds it.
+        // Pumps the message loop in 10 ms steps for at most 2 s; a check after it says what is wrong if the condition never holds.
+        const auto pumpUntil = [] (auto&& done) {
+            for (int waited = 0; ! done() && waited < 2000; waited += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            return done();
+        };
+        const auto inTree = [&q] (const juce::String& pid, float plain) {
+            for (int i = 0; i < q.apvts.state.getNumChildren(); ++i)
+            {
+                const auto child = q.apvts.state.getChild (i);
+                if (child.getProperty ("id").toString() == pid)
+                    return std::fabs ((float) child.getProperty ("value") - plain) < 1e-3f;
+            }
+            return false;
+        };
+        const auto raw = [&q] (const juce::String& pid) { return q.apvts.getRawParameterValue (pid)->load(); };
+
+        const auto undoR = editor.undoControls().getBounds(), abR = editor.abControls().getBounds();
+        check (editor.undoControls().isVisible() && editor.abControls().isVisible() && editor.undoControls().undoSwitch().isVisible() && editor.abControls().button (1).isVisible(),
+               "UNDO / REDO and A / B are on screen");
+        check (editor.getLocalBounds().contains (undoR) && editor.getLocalBounds().contains (abR), "UNDO / REDO and A / B are inside the editor");
+        check (! undoR.intersects (abR) && abR.getX() > undoR.getRight(), "UNDO / REDO and A / B sit side by side without overlapping");
+        check (undoR.getX() >= 12 + 250 && undoR.getBottom() <= editor.presetBox.getY() - 15, "UNDO / REDO are right of the nameplate and above the preset label");
+        check (! undoR.intersects (editor.presetBox.getBounds()) && ! undoR.intersects (editor.guideButton.getBounds())
+                   && ! abR.intersects (editor.presetBox.getBounds()) && ! abR.intersects (editor.guideButton.getBounds()),
+               "UNDO / REDO and A / B overlap neither the preset box nor GUIDE");
+
+        // Each change made with its own step is taken back by one UNDO, and REDO brings it again.
+        q.undo.clearUndoHistory();
+        ui::beginUndoStep (q.apvts, "Trim");
+        setValue (q.apvts, id::trim, -6.0f);
+        pumpUntil ([&] { return inTree (id::trim, -6.0f); });
+        ui::beginUndoStep (q.apvts, "REF TRIM");
+        setValue (q.apvts, id::referenceTrim, 3.0f);
+        pumpUntil ([&] { return inTree (id::referenceTrim, 3.0f); });
+        check (editor.undoControls().undoSwitch().isEnabled() && ! editor.undoControls().redoSwitch().isEnabled(), "after two changes UNDO is lit and REDO is not");
+        editor.undoControls().undo();
+        check (std::fabs (raw (id::referenceTrim)) < 1e-3f && std::fabs (raw (id::trim) + 6.0f) < 1e-3f, "UNDO takes back the last change only (REF TRIM back to 0 dB)");
+        editor.undoControls().undo();
+        check (std::fabs (raw (id::trim)) < 1e-3f, "a second UNDO takes back the trim too (0 dB)");
+        pumpUntil ([&] { return editor.undoControls().redoSwitch().isEnabled(); });
+        check (editor.undoControls().redoSwitch().isEnabled(), "REDO is lit after an UNDO");
+        editor.undoControls().redo();
+        check (std::fabs (raw (id::trim) + 6.0f) < 1e-3f, "REDO brings the trim back (-6 dB)");
+
+        // Cmd+Z and Shift+Cmd+Z reach the same buttons from the keyboard: the editor hands them to UndoButtons::handleKey.
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) && std::fabs (raw (id::trim)) < 1e-3f,
+               "Cmd+Z takes back the trim (0 dB)");
+        check (editor.undoControls().handleKey (juce::KeyPress ('z', juce::ModifierKeys (juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier), 0))
+                   && std::fabs (raw (id::trim) + 6.0f) < 1e-3f,
+               "Shift+Cmd+Z brings it back (-6 dB)");
+
+        // A preset is one step: one UNDO puts back what it moved, and the trim (kept by presets) stays.
+        ui::beginUndoStep (q.apvts, "Trim");
+        setValue (q.apvts, id::trim, 3.0f);
+        pumpUntil ([&] { return inTree (id::trim, 3.0f); });
+        int sideOnly = 0;
+        for (int i = 0; i < q.getNumPrograms(); ++i)
+            if (q.getProgramName (i) == "Side Only") sideOnly = i;
+        q.setCurrentProgram (sideOnly);
+        pumpUntil ([&] { return inTree (id::listen, 4.0f); });
+        check ((int) raw (id::listen) == 4 && std::fabs (raw (id::trim) - 3.0f) < 1e-3f, "the preset moved LISTEN and kept the trim");
+        editor.undoControls().undo();
+        check ((int) raw (id::listen) == 0 && std::fabs (raw (id::trim) - 3.0f) < 1e-3f, "one UNDO takes back the whole preset, and the trim change made before it stays");
+
+        // A / B: each slot keeps its LISTEN and LEVEL MATCH, the trim is kept across a switch, and a switch is one step.
+        q.undo.clearUndoHistory();
+        setValue (q.apvts, id::trim, -6.0f);
+        pumpUntil ([&] { return inTree (id::trim, -6.0f); });
+        editor.abControls().button (1).onClick(); // B starts as a copy of A
+        check (q.ab.active() == 1 && editor.abControls().button (1).getToggleState() && ! editor.abControls().button (0).getToggleState(), "B is chosen and lit, A is not");
+        setValue (q.apvts, id::listen, 1.0f);
+        setValue (q.apvts, id::levelMatch, 0.0f);
+        pumpUntil ([&] { return inTree (id::listen, 1.0f) && inTree (id::levelMatch, 0.0f); });
+        editor.abControls().button (0).onClick();
+        pumpUntil ([&] { return inTree (id::listen, 0.0f) && inTree (id::levelMatch, 1.0f); });
+        check ((int) raw (id::listen) == 0 && raw (id::levelMatch) > 0.5f && std::fabs (raw (id::trim) + 6.0f) < 1e-3f, "switching to A brings back A's LISTEN and LEVEL MATCH, and the trim is kept");
+        editor.abControls().button (1).onClick();
+        pumpUntil ([&] { return inTree (id::listen, 1.0f) && inTree (id::levelMatch, 0.0f); }); // also lets the switch be recorded as its own step
+        check ((int) raw (id::listen) == 1 && raw (id::levelMatch) < 0.5f, "switching back to B brings back B's LISTEN and LEVEL MATCH");
+        editor.undoControls().undo();
+        check ((int) raw (id::listen) == 0 && raw (id::levelMatch) > 0.5f, "UNDO takes back the A / B switch as one step (A again)");
+
+        // A session saved with A / B keeps the active slot; one from before A / B opens on slot A.
+        editor.abControls().button (0).onClick();
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        HermesProcessor reopened;
+        reopened.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (reopened.ab.active() == 0 && ! reopened.ab.hasSettings (1), "the session keeps which slot is active (A here), not the slots themselves");
+        editor.abControls().button (1).onClick();
+        q.getStateInformation (saved);
+        HermesProcessor onB;
+        onB.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (onB.ab.active() == 1, "a session saved on B opens on B");
+
+        // A session from before A / B has no abSlot: take the B session saved above, remove the property from its XML, and open it through the processor.
+        if (auto xml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize()))
+        {
+            check (xml->getIntAttribute ("abSlot", -1) == 1, "the B session carries abSlot 1 before it is taken out");
+            xml->removeAttribute ("abSlot");
+            juce::MemoryBlock legacy;
+            juce::AudioProcessor::copyXmlToBinary (*xml, legacy);
+            HermesProcessor before;
+            before.setStateInformation (legacy.getData(), (int) legacy.getSize());
+            check (before.ab.active() == 0, "a session from before A / B (no abSlot) opens on slot A");
+        }
+        else
+            check (false, "the saved session is readable as XML");
     }
 
     // The audio path through the real processor: the trim, and the reference at the loudness of the sound.

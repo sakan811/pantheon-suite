@@ -55,6 +55,8 @@ and a seek (`seekReference`, a fraction) are flags the audio thread takes (`rest
 **State.** The reference's path is a property of the state (`refPath`), not a parameter; a state with no `refPath`, or whose file is gone, clears the reference (`clearReference`); a processor given a state with a file loads it again with `callAsync` through a `WeakReference` (the processor may be gone by then), and
 `prepareToPlay` loads it again if the sample rate changed.
 
+**Undo and A/B.** The processor declares `juce::UndoManager undo` before `apvts` and hands it over (`&undo`), so every control change is one undo step; `setCurrentProgram` begins a step first, so a preset load is one UNDO step. `ab` (`ui::AbCompare`) is declared after `apvts`; its active slot is saved in the state as `abSlot`, and a session without it opens on slot 0. The two slots are not saved (a session opens with both empty). Both are the kit's (`Undo.h`, `AbCompare.h`).
+
 **Real time.** `Engine::process` allocates and locks nothing (the histograms are fixed arrays). **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state

@@ -7,6 +7,7 @@
 #include "Presets.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <pantheon/ui/AbCompare.h>
 
 class HermesProcessor : public juce::AudioProcessor
 {
@@ -29,7 +30,7 @@ public:
 
     int getNumPrograms() override { return programs.count(); }
     int getCurrentProgram() override { return programs.current(); }
-    void setCurrentProgram (int index) override { programs.set (index); }
+    void setCurrentProgram (int index) override { ui::beginUndoStep (apvts, "Preset"); programs.set (index); } // a preset is one UNDO step
     const juce::String getProgramName (int index) override { return programs.name (index); }
     void changeProgramName (int, const juce::String&) override {}
 
@@ -37,8 +38,10 @@ public:
     void setStateInformation (const void*, int) override;
 
     hermes::Engine engine;
+    juce::UndoManager undo; // UNDO / REDO of the parameters (shared/ui Undo.h); declared before the state that records into it
     juce::AudioProcessorValueTreeState apvts;
     ui::Programs programs { apvts, hermes::presets(), hermes::keepsParameter }; // after apvts
+    ui::AbCompare ab { apvts, hermes::keepsParameter };                       // A / B (shared/ui AbCompare.h): two settings, one live; after apvts
 
     // On the message thread. Decodes the whole file (at most kMaxReferenceMinutes), brings it to the session's sample rate, measures its loudness and hands it to the engine.
     // Returns an empty string on success, else why not.

@@ -10,7 +10,7 @@ It changes nothing but the level and what you listen to.
 
 ![Hermes Level](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary, short-term and integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary, short-term and integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. At the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit). The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -21,6 +21,7 @@ It changes nothing but the level and what you listen to.
 | **Meters** | **Momentary** (400 ms) and **short-term** (3 s) loudness in LUFS; **integrated** loudness (gated, since RESET); **range** in LU; the **true peak** in dBTP and the sample peak in dBFS; and a graph of the last minute. **RESET** clears the integrated loudness, the range and the peaks; **AUTO RESET** (off by default, saved with the session) does it each time the host starts playing. |
 | **Reference** | **LOAD** a track (WAV, AIFF, FLAC, OGG, MP3 where the system can read it; at most 10 minutes, kept in memory), **REF (B)** to hear it instead of your sound (A) with a 20 ms crossfade, **LEVEL MATCH** to bring it to the integrated loudness of your sound, **REF TRIM** (+-12 dB) to add to that, **RESTART**, and a click or drag on the progress bar to play from there. It loops, and plays on while you listen to A. The file's path is kept in the session. |
 | **Presets** | Eight listening setups (Normal, Mono Check, Side Only, Left Only, Right Only, Swap Check, Reference A/B, Reference As Is). A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY, REF TRIM and AUTO RESET are kept. LISTEN and REF are saved with the session: choose Normal before a bounce. |
+| **Undo and A/B** | **UNDO / REDO** (Cmd+Z and Shift+Cmd+Z; Ctrl+Z and Ctrl+Y on other systems; while the editor has the keyboard focus) take back changes to the controls one step at a time: a change to a control, AUTO TRIM and a preset load are one step each, while loading a reference file is not. **A / B** holds two complete settings, keeping TRIM, POLARITY, REF TRIM and AUTO RESET as presets do: choosing B the first time copies A, and each switch after that keeps what you have set in the one you leave and loads the other, as one undo step; only the active slot is saved in the session, not the two settings (a reopened session's other slot starts empty). |
 
 ## How it works
 
