@@ -282,6 +282,19 @@ int main()
         pumpUntil ([&] { return inTree (id::threshold, -30.0f); });
         check (std::fabs (readParams (q.apvts).thresholdDb + 30.0f) < 1e-3f && std::fabs (readParams (q.apvts).rangeDb - 12.0f) < 1e-3f,
                "one UNDO takes back a SET THRESH step and leaves the RANGE move before it");
+
+        // A preset is one undo step of its own: the knob move before it stays, and one UNDO takes the preset back to that move.
+        q.undo.clearUndoHistory();
+        ui::beginUndoStep (q.apvts, "Range");
+        setValue (q.apvts, id::range, 16.0f); // not the 12 dB left above: a move to the same value records nothing
+        pumpUntil ([&] { return inTree (id::range, 16.0f); });
+        q.setCurrentProgram (0); // Init: RANGE 8 dB
+        pumpUntil ([&] { return inTree (id::range, 8.0f); });
+        check (std::fabs (readParams (q.apvts).rangeDb - 8.0f) < 1e-3f, "loading a preset sets RANGE to the preset's 8 dB");
+        editor.undoControls().undo();
+        pumpUntil ([&] { return inTree (id::range, 16.0f); });
+        check (std::fabs (readParams (q.apvts).rangeDb - 16.0f) < 1e-3f && q.undo.canUndo(),
+               "one UNDO takes back a preset and leaves the RANGE move made before it");
     }
 
     // Presets: each applies, has a name and a one-line purpose, and the chosen one is kept with the session.

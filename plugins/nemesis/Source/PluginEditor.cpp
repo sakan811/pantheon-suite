@@ -32,9 +32,9 @@ NemesisEditor::NemesisEditor (NemesisProcessor& p)
       lookahead (p.apvts, id::lookahead, "The sound is heard this long after the detector has seen it, so the first of a loud s is already turned down (the attack is 0.3 ms).\n"
                                          "It is a delay: the host compensates it. Changing it while playing restarts the de-esser (a short gap)."),
       presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default."),
-      undoButtons (p.undo, *this),
       listen (p.apvts, id::listen, "LISTEN", "Hear only the band the detector hears, to find the s. Not saved as a sound: switch it off before you bounce."),
       delta (p.apvts, id::delta, "DELTA", "Hear only what is turned down (the sound minus the output): if it is the voice and not just the hiss of the s, THRESH is too low or RANGE too high. It takes the place of LISTEN while it is on. Switch it off before you bounce."),
+      undoButtons (p.undo, *this),
       proc (p)
 {
     setLookAndFeel (&look);
