@@ -23,6 +23,8 @@ struct AdviceInput
     bool scListen = false; // SC LISTEN is on (the same kind of monitor)
     bool autoThreshAsked = false;     // AUTO THRESH was pressed and answered (the editor's, kept until the next press)
     AutoThresh autoThresh;            // its answer
+    AutoSetup autoSet;                // the RATIO, ATTACK and RELEASE it set (with a set answer)
+    double autoCrestDb = 0.0;         // how peaky the listened sound was (dB of peak over RMS)
 };
 
 constexpr float kHeavyDb = 10.0f;
@@ -50,22 +52,24 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         warn ("Taking off " + std::to_string ((int) (in.heldDb + 0.5f)) + " dB or more: it will pump. Raise THRESH or lower RATIO.");
     if (in.autoThreshAsked) // first among the infos: the answer to the last press is what the user looks for
     {
-        char db[16];
-        std::snprintf (db, sizeof db, "%.1f", (double) in.autoThresh.thresholdDb);
+        char text[256];
         switch (in.autoThresh.result)
         {
             case AutoThresh::Result::set:
-                info (std::string ("AUTO THRESH set THRESH to ") + db + " dB: about 3.5 dB of reduction on average while the sound played.");
-                info ("MIX blends the compressed path back out: back off with MIX, or edit THRESH by hand.");
+                std::snprintf (text, sizeof text, "AUTO SETUP set RATIO %.1f:1, ATTACK %.1f ms, RELEASE %d ms and THRESH %.1f dB (peaks %d dB over RMS).",
+                               (double) in.autoSet.ratio, (double) in.autoSet.attackMs, (int) in.autoSet.releaseMs, (double) in.autoThresh.thresholdDb,
+                               (int) (in.autoCrestDb + 0.5));
+                info (text);
+                info ("A starting point, about 3.5 dB of reduction on average: change any control, or UNDO takes all four back.");
                 break;
             case AutoThresh::Result::silent:
-                info ("AUTO THRESH heard no sound in four seconds: THRESH is unchanged. Play the track, then press it again.");
+                info ("AUTO SETUP heard no sound in four seconds: nothing is changed. Play the track, then press it again.");
                 break;
             case AutoThresh::Result::flat:
-                info ("AUTO THRESH needs RATIO above 1:1 to set anything: THRESH is unchanged.");
+                info ("AUTO SETUP: RATIO 1:1 reduces nothing, so THRESH could not be set from it: nothing is changed.");
                 break;
             case AutoThresh::Result::quiet:
-                info ("AUTO THRESH: the sound is too quiet to reach 3.5 dB of reduction, even at -60 dB: THRESH is unchanged.");
+                info ("AUTO SETUP: the sound is too quiet to reach 3.5 dB of reduction, even at -60 dB: nothing is changed.");
                 break;
         }
     }

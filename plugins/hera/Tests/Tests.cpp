@@ -476,8 +476,9 @@ int main()
         check (run (un, noise, EngineParams()).l == o1.l, "with SC LISTEN off the sound is as it was");
     }
 
-    // [11] AUTO THRESH: four seconds of sound, then the THRESH that turns it down by 3.5 dB on average at the RATIO and KNEE set.
-    std::printf ("\n[11] AUTO THRESH\n");
+    // [11] AUTO THRESH and AUTO SETUP: four seconds of sound, then the THRESH that turns it down by 3.5 dB on average at the RATIO and KNEE set, and the
+    // starting RATIO, ATTACK and RELEASE that the crest factor of the same sound gives.
+    std::printf ("\n[11] AUTO THRESH and AUTO SETUP\n");
     {
         // A listening as the editor starts it: the request, the audio thread, the answer. Returns the answer and whether it is done.
         const auto listenTo = [] (const Stereo& in, const EngineParams& p, int block = 512)
@@ -579,6 +580,59 @@ int main()
         check (idle.autoThreshState() == Engine::AutoState::listening, "two seconds in, the listening is still going");
         idle.autoThreshCancel();
         check (idle.autoThreshState() == Engine::AutoState::idle, "a cancel puts it back to idle");
+
+        // AUTO SETUP: the RATIO, ATTACK and RELEASE from the crest factor (peak minus RMS) of what was heard. The mapping is pure: monotonic in the
+        // crest factor (more peaky, more ratio and attack, shorter release), inside the controls' ranges, and at its two ends as written.
+        const std::vector<double> crests { -5.0, 0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 24.0, 40.0 };
+        bool monotonic = true, inRange = true;
+        AutoSetup prev = autoSetupFor (crests[0]);
+        for (const double c : crests)
+        {
+            const AutoSetup s = autoSetupFor (c);
+            monotonic = monotonic && s.ratio >= prev.ratio && s.attackMs >= prev.attackMs && s.releaseMs <= prev.releaseMs;
+            inRange = inRange && s.ratio >= 1.0f && s.ratio <= 20.0f && s.attackMs >= 0.1f && s.attackMs <= 200.0f && s.releaseMs >= 10.0f && s.releaseMs <= 2000.0f;
+            prev = s;
+        }
+        check (monotonic, "AUTO SETUP: a more peaky sound gets a higher RATIO and ATTACK and a shorter RELEASE, at every crest factor tried");
+        check (inRange, "AUTO SETUP: every value is inside the control's range");
+        const AutoSetup dense = autoSetupFor (3.0), dynamic = autoSetupFor (20.0);
+        check (std::fabs (dense.ratio - 2.0f) < 1e-4f && std::fabs (dense.attackMs - 10.0f) < 1e-4f && std::fabs (dense.releaseMs - 300.0f) < 1e-4f,
+               "a sine (3 dB) gets 2:1, 10 ms and 300 ms: the gentle end");
+        check (std::fabs (dynamic.ratio - 4.0f) < 1e-4f && std::fabs (dynamic.attackMs - 25.0f) < 1e-4f && std::fabs (dynamic.releaseMs - 100.0f) < 1e-4f
+                   && std::fabs (autoSetupFor (40.0).ratio - 4.0f) < 1e-4f,
+               "20 dB and more gets 4:1, 25 ms and 100 ms, and no more");
+        check (std::fabs (autoSetupFor (std::nan ("")).ratio - dense.ratio) < 1e-4f, "a crest factor that is not a number gets the gentle end");
+        check (std::fabs (autoSetupFor (12.0).ratio - 2.7f) < 0.05f, "a crest factor of 12 dB, a full mix, gets about 2.7:1");
+
+        // The crest factor the listening measures: a steady sine is 3 dB (peak 0, RMS -3); bursts of a 0 dB sine for a tenth of the time are about 13 dB.
+        Engine steadyListen;
+        steadyListen.prepare (kFs);
+        steadyListen.autoThreshStart();
+        run (steadyListen, steady, p);
+        check (std::fabs (steadyListen.autoCrestDb() - 3.01) < 0.1, fmt ("a steady sine's crest factor is measured: %.2f dB (3.01)", steadyListen.autoCrestDb()));
+        Engine burstListen;
+        burstListen.prepare (kFs);
+        burstListen.autoThreshStart();
+        run (burstListen, bursty, p);
+        const double burstCrest = burstListen.autoCrestDb();
+        check (burstCrest > 12.5 && burstCrest < 13.5, fmt ("loud bursts over a quiet tone: the crest factor is measured at %.2f dB (about 12.97: peak 0 dB, RMS -12.97 dB)", burstCrest));
+
+        // The whole path, as the editor does it: the setup from the listening, THRESH answered at the RATIO it set, then the four values turn the
+        // bursts down by about 3.5 dB on average. The THRESH correction for the release tail is measured at the settings the listening ran with
+        // (150 ms here, 217 ms set), so it lands a little over (4.2 dB measured): within a dB, and the README says so. A second press is worse
+        // (it measured 2.5 dB), because the tail depends on THRESH, which the first press moved: that is a limit, not checked here.
+        const AutoSetup setup = autoSetupFor (burstCrest);
+        const auto answer = burstListen.autoThreshAnswer (setup.ratio, p.kneeDb);
+        EngineParams applied = p;
+        applied.ratio = setup.ratio;
+        applied.attackMs = setup.attackMs;
+        applied.releaseMs = setup.releaseMs;
+        applied.thresholdDb = answer.thresholdDb;
+        check (answer.result == AutoThresh::Result::set, "AUTO SETUP's THRESH is answered at the setup's RATIO and it is set");
+        const double appliedRed = averageReduction (bursty, applied);
+        check (std::fabs (appliedRed - 3.5) < 1.0, fmt ("... and with ratio %.1f, attack %.1f ms, release %.0f ms, THRESH %.1f dB the sound is turned down %.2f dB on average (aimed at 3.5)",
+                                                       (double) setup.ratio, (double) setup.attackMs, (double) setup.releaseMs, (double) answer.thresholdDb, appliedRed));
+
     }
 
     return test::finish ("HeraTests");
