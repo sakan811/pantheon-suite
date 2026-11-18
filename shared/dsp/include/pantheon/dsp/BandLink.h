@@ -28,11 +28,11 @@ namespace pdsp
 //   limiter ceiling=-1.0 gainchange=-3.0 amount=0.50
 //
 // `amount` (0..1, default 1, written only when below 1) is how much of a band or a limiter setting to take: a band's gain is
-// scaled by it (a fill band's Amount is scaled from its off level), a limiter's gain change is scaled by it (its ceiling is not).
+// scaled by it (a fill band's strength is scaled from its off level), a limiter's gain change is scaled by it (its ceiling is not).
 //
 // A width line gives, per band of `pdsp::bands` (sub, bass, lowmid, mid, uppermid, high in that order), the percent of the side
-// signal to keep (0 = mono, 100 = as it is, 200 = twice); a key that is absent is not suggested. `decodeWidth` reads it; `decode`
-// skips it like any other kind it does not know.
+// signal to keep (0 = mono, 100 = as it is, 200 = twice); a key that is absent is not suggested. A width line has no `amount`
+// key: each band's percent is taken as it is. `decodeWidth` reads it; `decode` skips it like any other kind it does not know.
 //
 // A curve line carries a spectrum shape (not a band): the dB of each point of a log-frequency grid (f0 is the first point's
 // frequency, oct the points per octave, name has its spaces written as underscores), relative to the level around the middle of
@@ -69,7 +69,7 @@ struct LinkBand
     double freq = 1000.0, gainDb = 0.0, q = 0.7071; // equaliser bands; a cut's q is unused, its slope is `slopeDbPerOct`
     double slopeDbPerOct = 24.0;
     double loHz = 40.0, hiHz = 120.0;                  // a fill band's range
-    double amount = 1.0;                               // 0..1: how much of the gain (or a fill band's Amount) to take
+    double amount = 1.0;                               // 0..1: how much of the gain (or a fill band's strength) to take
 };
 
 // The width a suggestion asks for, per band of pdsp::bands (index = band): the percent of the side signal to keep. An absent

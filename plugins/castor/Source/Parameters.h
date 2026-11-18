@@ -78,7 +78,7 @@ inline void setValue (juce::AudioProcessorValueTreeState& s, const juce::String&
 
 // The width suggestion Themis hands over as text (pdsp::link's width line, from a width item of its plan): the side width of each band, in percent.
 // Every band the line names is set, the others are left as they are; the whole paste is one UNDO step. Nothing changes when the text is not a Pantheon
-// list or has no width line, and the result says so. The line's amount is not read (pdsp::link does not expose it), so it is taken as 1.
+// list or has no width line, and the result says so. The width line has no amount key (pdsp::link's encodeWidth writes none), so each band's percent is taken as it is.
 inline std::string pasteWidth (juce::AudioProcessorValueTreeState& s, const juce::String& text)
 {
     pdsp::LinkWidth w;
