@@ -22,7 +22,7 @@ inline constexpr float kFastAutoReleaseMs = 50.0f, kSlowAutoReleaseMs = 600.0f;
 inline constexpr double kRmsMs = 10.0;            // the window of the RMS detector
 inline constexpr double kPeakFallMs = 15.0;       // the peak detector holds a peak and lets it fall at this rate, so a low tone does not make the gain ripple
 inline constexpr double kFloorDb = -120.0;
-inline constexpr double kRestDb = 1e-3;           // a reduction under this, with nothing to reduce, is let go to exactly 0 (-78 dB of the gain: not audible, and the gain is then exactly 1)
+inline constexpr double kRestDb = 1e-3;           // a reduction under this, with nothing to reduce, is let go to exactly 0 (-0.001 dB of the gain: not audible, and the gain is then exactly 1)
 
 // LOOK-AHEAD: the detector reads the sound as it arrives and the sound is heard this long after, so the gain is already down when a peak gets to the output.
 // The choice is an index into this list (Off first), so a session keeps its meaning if a value is ever added at the end.
