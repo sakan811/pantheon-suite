@@ -7,6 +7,9 @@
 
 #include <pantheon/dsp/Biquad.h>
 
+#include <algorithm>
+#include <array>
+
 ThemisProcessor::ThemisProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
@@ -38,6 +41,7 @@ void ThemisProcessor::prepareToPlay (double sr, int)
     lowCrest.prepare (sr);
     scope.prepare (sr);
     loudness.prepare (sr);
+    monoLoudness.prepare (sr);
     audition.prepare (sr);
     listen.prepare (sr);
     wasPlaying = false;
@@ -105,6 +109,7 @@ void ThemisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     lowCrest.process (l, r, n);
     scope.push (l, r, n);
     loudness.process (l, r, n);
+    processMonoLoudness (l, r, n);
 
     // The audition is the only thing that writes to the buffer, and only while a Solo / Mute is engaged. A render
     // (non-realtime) is never altered.
@@ -112,6 +117,21 @@ void ThemisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     {
         audition.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n);
         listen.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n, hostPlaying ? position : -1);
+    }
+}
+
+// The mono sum (L+R)/2 goes through a second loudness meter as (m, m): what a mono playback sounds like. Converted in
+// fixed chunks on the stack, so nothing is allocated on the audio thread.
+void ThemisProcessor::processMonoLoudness (const float* l, const float* r, int n)
+{
+    constexpr int kChunk = 256;
+    std::array<float, kChunk> mono {};
+    for (int i = 0; i < n; i += kChunk)
+    {
+        const int count = std::min (kChunk, n - i);
+        for (int j = 0; j < count; ++j)
+            mono[static_cast<size_t> (j)] = 0.5f * (l[i + j] + r[i + j]);
+        monoLoudness.process (mono.data(), mono.data(), count);
     }
 }
 
@@ -337,6 +357,11 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.deliveryName = delivery.shortName;
     readClip (in.clip);
     in.maxShortTermLufs = loudness.maxShortTerm();
+    // The mono sum counts as measured once its time has passed, even when it is silent (the channels cancel): hasData() would hide that case.
+    in.mono = themis::monoloud::compare (loudness.integrated(), loudness.hasData(), monoLoudness.integrated(),
+                                         monoLoudness.seconds() >= themis::LoudnessMonitor::kMinSeconds);
+    in.haveBlockDynamics = loudness.hasBlockDynamics();
+    in.blockDynamicsDb = loudness.blockDynamicsDb();
     in.haveSilence = analyzer.soundHeard();
     in.leadingSilenceSeconds = analyzer.leadingSilenceSeconds();
     in.trailingSilenceSeconds = analyzer.trailingSilenceSeconds();

@@ -10,6 +10,7 @@
 #include "Harshness.h"
 #include "HistoryChecks.h"
 #include "Loudness.h"
+#include "LoudnessMonitor.h"
 #include "LowCrestMeter.h"
 #include "PhaseCancellation.h"
 #include "Resonance.h"
@@ -101,6 +102,12 @@ struct MasterInputs
     float maxShortTermLufs = LoudnessMeter::kSilence;
     bool haveSilence = false;
     double leadingSilenceSeconds = 0.0, trailingSilenceSeconds = 0.0;
+
+    // Readouts only, for the loudness hover: the mono sum against the stereo loudness (monoloud::), and the block dynamics
+    // since the reset (blockdynamics::, Themis' own figure).
+    monoloud::Comparison mono;
+    bool haveBlockDynamics = false;
+    float blockDynamicsDb = 0.0f;
 };
 
 struct MasterAdvice

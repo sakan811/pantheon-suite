@@ -385,6 +385,26 @@ private:
                 text += "\n\nThe loudest 3 s since the Reset sit " + juce::String (loudest.aboveAverageLu, 1) + " LU above the integrated loudness. A wide gap means the loud "
                         "sections stand out from the rest; a narrow one means the sections sit close together.";
         }
+        if (inputs.mono.have)
+        {
+            if (inputs.mono.monoSilent)
+                text += "\n\nMono sum (L + R) / 2: silent, so the channels cancel completely while the stereo programme is not.";
+            else
+            {
+                const float delta = inputs.mono.deltaLu;
+                const juce::String amount = std::abs (delta) < 0.05f ? juce::String ("reads the same as the stereo programme")
+                                                                    : juce::String (std::abs (delta), 1) + (delta < 0.0f ? " LU lower" : " LU higher") + " than the stereo programme";
+                text += "\n\nMono sum (L + R) / 2 integrated: " + juce::String (inputs.mono.monoLufs, 1) + " LUFS, " + amount + ". Uncorrelated channels already lose "
+                        + juce::String (themis::monoloud::kUncorrelatedLossDb, 1) + " LU in a mono sum; rule of thumb: " + juce::String (themis::monoloud::kWorthALookLu, 1)
+                        + " LU more than that is worth a look, since a master that cancels in mono may translate badly.";
+            }
+        }
+        if (inputs.haveBlockDynamics)
+            text += "\n\nBlock dynamics (Themis' own measure, not a standard and not comparable with other meters' dynamic range): the mean peak minus the mean RMS of the loudest "
+                    + juce::String (themis::blockdynamics::kLoudestFraction * 100.0, 0) + " % of the "
+                    + juce::String (themis::blockdynamics::kBlockSeconds, 0) + " s blocks since the Reset, " + juce::String (inputs.blockDynamicsDb, 1)
+                    + " dB. Rule of thumb: " + juce::String (themis::blockdynamics::kHeavilyLimitedDb, 0) + " dB or less reads heavily limited, "
+                    + juce::String (themis::blockdynamics::kDynamicDb, 0) + " dB or more dynamic.";
         if (inputs.clip.haveCrest())
             text += "\n\nCrest factor (full band, the sample peak over the RMS level of both channels): " + juce::String (inputs.clip.crestDb(), 1)
                     + " dB. A sine reads 3 dB and a square wave 0 dB. The plan's squashed check uses PLR, the true peak over the integrated loudness.";
