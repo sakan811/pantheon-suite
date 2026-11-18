@@ -366,6 +366,7 @@ private:
             signal.fill (kHistoryFloorDb);
         s.samplePeakDb = peakToDb (clip.samplePeak);
         s.truePeakDb = peakToDb (clip.truePeak);
+        s.peakWindowRmsDb = clip.meanSquare > 0.0f ? static_cast<float> (powerToDb (clip.meanSquare, 1.0e-12)) : kHistoryFloorDb;
         s.clipEvents = static_cast<float> (clip.clipEvents);
         s.clipSamples = static_cast<float> (clip.clipSamples);
         s.overSamples = static_cast<float> (clip.overSamples);

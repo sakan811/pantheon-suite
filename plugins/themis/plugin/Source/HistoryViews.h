@@ -744,9 +744,11 @@ private:
         namespace hist = themis::history;
         constexpr float kTop = 24.0f;
         Tab t { "CREST",
-                "The crest factor of the whole signal over the last minute, frame by frame: the highest sample peak of the audio in each "
-                "frame minus the level of the whole spectrum (its RMS), in dB. A sine reads about 3 dB and a square wave 0 dB; the more "
-                "a limiter or compressor squashes a master, the closer its peaks sit to its average. Silent frames are left out.\n\n"
+                "The crest factor of the whole signal over the last minute, frame by frame (each frame is about 85 ms): the highest sample "
+                "peak of the audio in the frame minus the RMS of both channels over the same samples, in dB. A sine reads about 3 dB and a "
+                "square wave 0 dB; the more a limiter or compressor squashes a master, the closer its peaks sit to its average. A frame "
+                "that is only bass reads low, so this is a typical frame, not the whole track: the loudness hover's crest keeps the loudest "
+                "peak of the whole track. Silent frames are left out.\n\n"
                 "The verdict is the median over the window: under " + juce::String (hist::kCrestLowDb, 0) + " dB reads squashed (a warning), over "
                 + juce::String (hist::kCrestHighDb, 0) + " dB dynamic, between typical. Those limits are rules of thumb, not measured data: "
                 "a master can be squashed or dynamic on purpose.",

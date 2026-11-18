@@ -253,11 +253,12 @@ inline constexpr float kCrestLowDb = 8.0f, kCrestHighDb = 12.0f;
 
 enum class Crest { low, typical, high };
 
-// Crest factor of one frame in dB: its sample peak over its whole-band level (the stereo energy in the whole-spectrum column,
-// which is the RMS of both channels in dB). kHistoryFloorDb when the frame has no level to measure, so silence is never a crest.
+// Crest factor of one frame in dB: its sample peak over the RMS of both channels, both read over the same samples (the peak
+// and the RMS of the clip window; the spectrum's whole-band level spans the analyser's longer FFT window, so it is not used
+// here). kHistoryFloorDb when the frame has no level to measure, so silence is never a crest.
 inline float crestDb (const FrameStats& f)
 {
-    const float rms = f.energy (Signal::stereo, kAllRanges);
+    const float rms = f.peakWindowRmsDb;
     if (!hasLevel (rms) || !hasLevel (f.samplePeakDb))
         return kHistoryFloorDb;
     return f.samplePeakDb - rms;

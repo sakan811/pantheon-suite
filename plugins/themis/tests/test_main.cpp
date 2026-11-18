@@ -2178,7 +2178,7 @@ TEST (history_crest_over_time_reads_sine_square_and_silence)
     // A sine of unit peak has a mean square of 1/2, an RMS of -3.01 dB: a crest of 3.01 dB.
     const auto sine = framesWith (100, [] (int, FrameStats& f) {
         f.samplePeakDb = 0.0f;
-        f.energy (Signal::stereo, kAllRanges) = -3.0103f;
+        f.peakWindowRmsDb = -3.0103f;
     });
     CHECK_NEAR (history::crestDb (sine[0]), 3.01, 0.01);
     const auto sineReport = history::analyseCrest (sine.data(), 100);
@@ -2188,7 +2188,7 @@ TEST (history_crest_over_time_reads_sine_square_and_silence)
     // A square wave at full scale: its RMS is its peak, so no crest at all.
     const auto square = framesWith (100, [] (int, FrameStats& f) {
         f.samplePeakDb = 0.0f;
-        f.energy (Signal::stereo, kAllRanges) = 0.0f;
+        f.peakWindowRmsDb = 0.0f;
     });
     CHECK_NEAR (history::crestDb (square[0]), 0.0, 0.01);
     CHECK (history::analyseCrest (square.data(), 100).crest == history::Crest::low);
@@ -2210,7 +2210,7 @@ TEST (history_crest_over_time_reads_sine_square_and_silence)
             return;
         }
         f.samplePeakDb = -4.0f;
-        f.energy (Signal::stereo, kAllRanges) = -14.0f; // 10 dB
+        f.peakWindowRmsDb = -14.0f; // 10 dB
     });
     const auto mixedReport = history::analyseCrest (mixed.data(), 100);
     CHECK (mixedReport.have && mixedReport.crest == history::Crest::typical);
@@ -2221,7 +2221,7 @@ TEST (history_crest_over_time_reads_sine_square_and_silence)
     const auto at = [] (float crestDb) {
         return framesWith (100, [crestDb] (int, FrameStats& f) {
             f.samplePeakDb = 0.0f;
-            f.energy (Signal::stereo, kAllRanges) = -crestDb;
+            f.peakWindowRmsDb = -crestDb;
         });
     };
     const auto squashed = at (history::kCrestLowDb - 2.0f);
@@ -3248,6 +3248,29 @@ TEST (delivery_targets_are_one_list_with_the_offset_to_each)
     CHECK_NEAR (o[2].offsetDb, 1.7, 1e-4);  // -18: louder
     CHECK_NEAR (o[3].offsetDb, -0.3, 1e-4); // -16
     CHECK_NEAR (o[4].offsetDb, 6.7, 1e-4);  // -23
+}
+
+TEST (clip_window_mean_square_covers_the_same_samples_as_its_peaks)
+{
+    // The frame's crest factor divides the peak of a window by the mean square of that same window, so the two must be drained
+    // together: two blocks at different levels in one window average over both, and the next window starts from nothing.
+    const int n = 1000;
+    const auto block = [n] (float amplitude) {
+        std::vector<float> b (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+            b[static_cast<size_t> (i)] = amplitude * static_cast<float> (std::sin (2.0 * kPi * 997.0 * i / 48000.0));
+        return b;
+    };
+    ClipMeter m;
+    m.prepare();
+    const auto loud = block (0.5f), quiet = block (0.25f);
+    m.process (loud.data(), loud.data(), n);
+    m.process (quiet.data(), quiet.data(), n);
+    const auto w = m.take();
+    CHECK_NEAR (w.samplePeak, 0.5, 0.01);
+    CHECK_NEAR (w.meanSquare, (0.125 + 0.03125) / 2.0, 0.003); // a sine of amplitude A has a mean square of A^2 / 2
+    const auto next = m.take();
+    CHECK (next.meanSquare == 0.0f && next.samplePeak == 0.0f); // drained: the next window has nothing yet
 }
 
 TEST (clip_meter_crest_factor_is_peak_over_rms)
