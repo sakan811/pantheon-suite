@@ -56,6 +56,7 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         {
             case AutoThresh::Result::set:
                 info (std::string ("AUTO THRESH set THRESH to ") + db + " dB: about 3.5 dB of reduction on average while the sound played.");
+                info ("MIX blends the compressed path back out: back off with MIX, or edit THRESH by hand.");
                 break;
             case AutoThresh::Result::silent:
                 info ("AUTO THRESH heard no sound in four seconds: THRESH is unchanged. Play the track, then press it again.");

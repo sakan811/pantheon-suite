@@ -10,7 +10,7 @@ It changes nothing but the level and what you listen to.
 
 ![Hermes Level](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary, short-term and integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. Under the readings, AUTO TRIM is set to its -14 streaming target with the -1 dBTP ceiling off. At the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit). The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary, short-term and integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. Under the readings, AUTO TRIM is set to its -14 streaming target with the -1 dBTP ceiling off; TRIM 0 beside it sets TRIM back to 0 dB. At the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit). The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
 
 ## What it does
 

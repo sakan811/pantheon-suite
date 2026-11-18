@@ -67,9 +67,15 @@ HermesEditor::HermesEditor (HermesProcessor& p)
         autoTrimSetTo = readParams (proc.apvts).trimDb;
         autoTrimPeakLimited = r.peakLimited;
     };
+    trimZeroButton.setTooltip ("Sets TRIM back to 0 dB, the level the sound arrived at. One undo step: UNDO takes back the change.");
+    trimZeroButton.onClick = [this]
+    {
+        ui::beginUndoStep (proc.apvts, "TRIM 0");
+        setValue (proc.apvts, id::trim, 0.0f);
+    };
     restartButton.onClick = [this] { proc.engine.restartReference(); };
     resetButton.onClick = [this] { proc.engine.resetMeters(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &autoTrimButton, &autoReset, &autoPeak, &autoTarget, &presetBox, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &trim, &referenceTrim, &listen, &polarity, &reference, &levelMatch, &loadButton, &restartButton, &resetButton, &autoTrimButton, &trimZeroButton, &autoReset, &autoPeak, &autoTarget, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
@@ -117,9 +123,11 @@ void HermesEditor::resized()
     autoTarget.setBounds (auto_.removeFromTop (26));
     auto_.removeFromTop (6);
     auto autoRow = auto_.removeFromTop (26);
-    autoTrimButton.setBounds (autoRow.removeFromLeft (80));
-    autoRow.removeFromLeft (6);
-    autoPeak.setBounds (autoRow.removeFromLeft (80));
+    autoTrimButton.setBounds (autoRow.removeFromLeft (62));
+    autoRow.removeFromLeft (4);
+    trimZeroButton.setBounds (autoRow.removeFromLeft (48));
+    autoRow.removeFromLeft (4);
+    autoPeak.setBounds (autoRow.removeFromLeft (52));
     row.removeFromLeft (14);
     auto column = row.removeFromLeft (170).withTrimmedTop (4);
     listenLabel = { column.getX() + 2, column.getY(), 100, 10 };

@@ -29,7 +29,7 @@ public:
     ui::Knob trim, referenceTrim;
     ui::Choice autoTarget, listen;
     ui::Toggle polarity, reference, levelMatch, autoReset, autoPeak;
-    juce::TextButton loadButton { "LOAD" }, restartButton { "RESTART" }, resetButton { "RESET" }, autoTrimButton { "AUTO TRIM" };
+    juce::TextButton loadButton { "LOAD" }, restartButton { "RESTART" }, resetButton { "RESET" }, autoTrimButton { "AUTO TRIM" }, trimZeroButton { "TRIM 0" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { hermes::guideTitle(), hermes::guideText() };
     juce::TextButton& guide() noexcept { return guideButton; }

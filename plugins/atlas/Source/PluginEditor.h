@@ -44,6 +44,7 @@ public:
     std::array<std::unique_ptr<Strip>, atlas::kBands> strips;
     juce::TextButton clearButton { "ALL BANDS" };
     juce::TextButton learnAllButton { "LEARN ALL" }, targetButton { "TARGET" };
+    bool learnedAll = false; // LEARN ALL was pressed: the strip says how to back it off (kept until the next press)
     // TARGET with the text of the clipboard (a curve another plugin of the repository copied): false, and a message on the display, when it holds none.
     bool useTarget (const juce::String& clipboardText);
     ui::GuideButton guideButton { atlas::guideTitle(), atlas::guideText() };
