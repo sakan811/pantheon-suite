@@ -8,6 +8,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <themis/Audition.h>
+#include <themis/EventLog.h>
 #include <themis/Listen.h>
 #include <themis/LoudnessMonitor.h>
 #include <themis/LowCrestMeter.h>
@@ -58,6 +59,7 @@ public:
     void resetAnalyzer()
     {
         analyzer.requestReset(); // also restarts the clip totals and the history graphs
+        resetCount.fetch_add (1, std::memory_order_relaxed); // the event log is cleared by the analysis thread once audio has been measured again
         lowCrest.requestReset();
         scope.requestReset();
         loudness.requestReset();
@@ -99,6 +101,10 @@ public:
 
     // Everything the master plan is made of, read from the measurements (message thread).
     themis::MasterInputs masterInputs() const;
+
+    // The event log since the reset (clip, true-peak maximum, loudness excursion), copied under its lock (message thread). It is fed by
+    // the analysis thread about every 15 ms, so it is complete while the editor is closed too.
+    themis::events::EventLog eventLogCopy() const;
 
     // Thread-safe read of the long-term spectrum. Returns false until enough audio has been analysed.
     bool readSpectrum (themis::BandArray& out) const;
@@ -165,23 +171,26 @@ private:
     class AnalysisThread : public juce::Thread
     {
     public:
-        AnalysisThread (themis::TonalAnalyzer& a, const themis::LoudnessMonitor& m) : juce::Thread ("Themis analysis"), analyzer (a), loudness (m) {}
+        AnalysisThread (ThemisProcessor& p, themis::TonalAnalyzer& a, const themis::LoudnessMonitor& m) : juce::Thread ("Themis analysis"), owner (p), analyzer (a), loudness (m) {}
         void run() override
         {
             while (!threadShouldExit())
             {
                 analyzer.setShortTermLufs (loudness.shortTermForHistory()); // the frames this pump pushes carry the loudness
                 analyzer.pump();
+                owner.observeEvents();
                 wait (15);
             }
         }
 
     private:
+        ThemisProcessor& owner;
         themis::TonalAnalyzer& analyzer;
         const themis::LoudnessMonitor& loudness;
     };
 
     void setParameterValue (const juce::String& id, float plainValue);
+    void observeEvents(); // analysis thread, after each pump: reads the meters and feeds eventLog
     int deliveryIndex() const;
     const params::LoudnessTarget& deliveryTarget() const;
     void stopAnalysis();
@@ -210,6 +219,11 @@ private:
     std::atomic<bool> prepared { false };
     bool wasPlaying = false;       // audio thread: the host was playing at the previous block
     int64_t expectedPosition = -1; // audio thread: where that block ended on the host's timeline (-1: unknown)
+
+    std::atomic<uint32_t> resetCount { 0 }; // bumped by resetAnalyzer() (any thread)
+    uint32_t eventsResetCount = 0;          // analysis thread: the reset the event log has been cleared for
+    themis::events::EventLog eventLog;      // written by the analysis thread, copied by the editor; both under eventLock
+    mutable juce::CriticalSection eventLock;
 
     mutable juce::CriticalSection curveLock;
     themis::TargetCurve customCurve;

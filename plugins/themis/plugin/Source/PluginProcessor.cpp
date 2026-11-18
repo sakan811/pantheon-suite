@@ -58,7 +58,7 @@ void ThemisProcessor::prepareToPlay (double sr, int)
                 syncReferenceRate();
         });
     }
-    analysisThread = std::make_unique<AnalysisThread> (analyzer, loudness);
+    analysisThread = std::make_unique<AnalysisThread> (*this, analyzer, loudness);
     analysisThread->startThread();
 }
 
@@ -357,6 +357,7 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.deliveryName = delivery.shortName;
     readClip (in.clip);
     in.maxShortTermLufs = loudness.maxShortTerm();
+    in.loudnessRangeLu = loudness.loudnessRange();
     // The mono sum counts as measured once its time has passed, even when it is silent (the channels cancel): hasData() would hide that case.
     in.mono = themis::monoloud::compare (loudness.integrated(), loudness.hasData(), monoLoudness.integrated(),
                                          monoLoudness.seconds() >= themis::LoudnessMonitor::kMinSeconds);
@@ -385,6 +386,37 @@ themis::MasterInputs ThemisProcessor::masterInputs() const
     in.spectrum.resize (themis::SpectrumHistory::kCapacity);
     in.spectrum.resize (static_cast<size_t> (spectrumHistory().copyRecent (in.spectrum.data(), themis::SpectrumHistory::kCapacity)));
     return in;
+}
+
+themis::events::EventLog ThemisProcessor::eventLogCopy() const
+{
+    const juce::ScopedLock sl (eventLock);
+    return eventLog;
+}
+
+// Analysis thread, once per pump. Reads what the meters publish (never the audio) and feeds the event log. Nothing is read while a
+// reset is pending (readClip reports no data then), and the log is cleared the first time audio is measured after a reset.
+void ThemisProcessor::observeEvents()
+{
+    themis::ClipTotals clip;
+    if (!readClip (clip))
+        return;
+    themis::events::Reading r;
+    r.seconds = loudness.seconds();
+    r.clipped = clip.clipEvents > 0 || clip.overSamples > 0;
+    r.truePeakDb = clip.truePeakDb;
+    r.ceilingDb = paramReader.truePeakCeilingDb();
+    r.haveLoudness = loudness.hasData();
+    r.shortTermLufs = loudness.shortTerm();
+    r.targetLufs = deliveryTarget().lufs;
+
+    const juce::ScopedLock sl (eventLock);
+    if (const uint32_t generation = resetCount.load (std::memory_order_relaxed); generation != eventsResetCount)
+    {
+        eventsResetCount = generation;
+        eventLog.clear();
+    }
+    eventLog.observe (r);
 }
 
 bool ThemisProcessor::readClip (themis::ClipTotals& out) const

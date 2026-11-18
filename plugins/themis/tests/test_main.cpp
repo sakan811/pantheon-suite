@@ -10,6 +10,7 @@
 #include <themis/ClipMeter.h>
 #include <themis/EqFit.h>
 #include <themis/EqMove.h>
+#include <themis/EventLog.h>
 #include <themis/FrameHistory.h>
 #include <themis/Fundamental.h>
 #include <themis/HistoryChecks.h>
@@ -2999,6 +3000,168 @@ TEST (the_plan_is_copied_as_text)
     CHECK (planAsText (quiet, advise (quiet)).find ("Status: ready") != std::string::npos);
     quiet.analysedSeconds = 1.0;
     CHECK (planAsText (quiet, advise (quiet)).find ("still measuring") != std::string::npos);
+}
+
+using namespace events;
+
+static Reading reading (double seconds, float truePeakDb = -20.0f, float shortTermLufs = -20.0f)
+{
+    Reading r;
+    r.seconds = seconds;
+    r.truePeakDb = truePeakDb;
+    r.ceilingDb = -1.0f;
+    r.haveLoudness = true;
+    r.shortTermLufs = shortTermLufs;
+    r.targetLufs = -14.0f;
+    return r;
+}
+
+TEST (event_log_keeps_the_first_entries_and_counts_the_rest)
+{
+    EventLog log;
+    for (size_t i = 0; i < kCapacity + 6; ++i)
+        log.add ({ static_cast<double> (i), Kind::clip, 0.0f });
+    CHECK (log.entries().size() == kCapacity);
+    CHECK (log.overflowCount() == 6);
+    CHECK (log.entries().front().seconds == 0.0 && log.entries().back().seconds == static_cast<double> (kCapacity - 1));
+    log.clear();
+    CHECK (log.entries().empty() && log.overflowCount() == 0);
+}
+
+TEST (event_log_logs_the_first_clip_once)
+{
+    EventLog log;
+    Reading r = reading (1.0);
+    log.observe (r);
+    CHECK (log.entries().empty());
+    r = reading (1.2);
+    r.clipped = true;
+    r.truePeakDb = -1.5f; // under the ceiling, so only the clip is logged
+    log.observe (r);
+    log.observe (r);
+    r.seconds = 9.0;
+    log.observe (r);
+    CHECK (log.entries().size() == 1);
+    CHECK (log.entries()[0].kind == Kind::clip && log.entries()[0].seconds == 1.2 && log.entries()[0].valueDb == -1.5f);
+    log.clear();
+    log.observe (r); // a reset re-arms the rule
+    CHECK (log.entries().size() == 1);
+}
+
+TEST (event_log_logs_a_true_peak_above_the_ceiling_only_when_it_rises)
+{
+    EventLog log;
+    log.observe (reading (2.0, -1.5f)); // under the ceiling (-1 dBTP)
+    CHECK (log.entries().empty());
+    log.observe (reading (3.0, -0.9f)); // the first one above it
+    CHECK (log.entries().size() == 1 && log.entries()[0].kind == Kind::truePeak);
+    log.observe (reading (4.0, -0.7f)); // rose only 0.2 dB
+    CHECK (log.entries().size() == 1);
+    const float third = -0.9f + kPeakStepDb; // exactly one step above the logged peak: logged
+    log.observe (reading (5.0, third));
+    CHECK (log.entries().size() == 2 && log.entries()[1].seconds == 5.0 && log.entries()[1].valueDb == third);
+}
+
+TEST (event_log_logs_a_loudness_excursion_once_it_has_held)
+{
+    EventLog log;
+    const float above = excursionLevelLufs (-14.0f) + 0.5f; // 2 LU over the target, just past the zone's edge
+    log.observe (reading (10.0, -20.0f, above));
+    log.observe (reading (11.0, -20.0f, above));
+    CHECK (log.entries().empty());
+    log.observe (reading (10.0 + kExcursionHoldSeconds - 0.1, -20.0f, above));
+    CHECK (log.entries().empty());
+    log.observe (reading (10.0 + kExcursionHoldSeconds, -20.0f, above));
+    CHECK (log.entries().size() == 1 && log.entries()[0].kind == Kind::loudness);
+    CHECK (log.entries()[0].seconds == 10.0 && log.entries()[0].valueDb == above);
+    log.observe (reading (20.0, -20.0f, above));
+    log.observe (reading (21.0, -20.0f, -20.0f));
+    log.observe (reading (22.0, -20.0f, above));
+    log.observe (reading (23.0, -20.0f, above));
+    CHECK (log.entries().size() == 1);
+    Reading silent = reading (30.0, -20.0f, above);
+    silent.haveLoudness = false;
+    log.observe (silent);
+    CHECK (log.entries().size() == 1);
+}
+
+TEST (event_log_reading_the_same_thing_twice_adds_nothing)
+{
+    EventLog log;
+    Reading r = reading (4.0, -0.2f, excursionLevelLufs (-14.0f) + 1.0f);
+    r.clipped = true;
+    for (int i = 0; i < 5; ++i)
+    {
+        log.observe (r);
+        r.seconds += 0.5;
+    }
+    // clip once, peak once, the excursion is pending until its hold passes (2.0 s of readings here: not yet)
+    CHECK (log.entries().size() == 2);
+}
+
+TEST (the_report_adds_the_readings_and_the_event_log)
+{
+    auto in = cleanMaster();
+    in.maxShortTermLufs = -10.5f;
+    in.loudnessRangeLu = 6.25f;
+    in.clip.clipEvents = 12;
+    in.clip.clipSamples = 60;
+    in.clip.overSamples = 3;
+    in.clip.truePeakLeftDb = -1.6f;
+    in.clip.truePeakRightDb = -2.1f;
+    in.haveBlockDynamics = true;
+    in.blockDynamicsDb = 9.5f;
+    in.mono.have = true;
+    in.mono.monoLufs = -15.0f;
+    in.mono.deltaLu = -1.0f;
+    in.havePhase = true;
+    in.phase.have = true;
+    in.phase.flaggedBands = 2;
+    in.phase.worstBand = 30;
+    in.phase.worstLossDb = 7.5f;
+    in.translation.monoLossDb = 1.25f;
+    in.translation.lowMonoLossDb = 2.0f;
+    in.translation.worstBand = 40;
+    in.translation.worstBandLossDb = 4.0f;
+    const auto advice = advise (in);
+    EventLog log;
+    Reading clip = reading (12.5, -0.5f);
+    clip.clipped = true;
+    log.observe (clip);
+    Reading loud = reading (40.0, -0.5f, excursionLevelLufs (-14.0f) + 1.0f);
+    log.observe (loud);
+    loud.seconds = 43.0;
+    log.observe (loud);
+    for (int i = 0; i < 70; ++i)
+        log.add ({ 50.0 + i, Kind::truePeak, -0.3f });
+    const auto text = reportAsText (in, advice, log);
+    CHECK (text.rfind (planAsText (in, advice), 0) == 0);
+    CHECK (text.find ("Integrated loudness -14.0 LUFS, +0.0 LU against Streaming (-14 LUFS); short-term maximum -10.5 LUFS") != std::string::npos);
+    CHECK (text.find ("Loudness range (LRA) 6.2 LU") != std::string::npos);
+    CHECK (text.find ("True peak -1.5 dBTP (left -1.6, right -2.1) against the ceiling -1.0 dBTP") != std::string::npos);
+    CHECK (text.find ("Clips: 12 flat-topped clips (60 samples), 3 samples at 0 dBFS") != std::string::npos);
+    CHECK (text.find ("Block dynamics 9.5 dB") != std::string::npos);
+    CHECK (text.find ("Mono sum (L + R) / 2 integrated -15.0 LUFS, -1.0 LU") != std::string::npos);
+    CHECK (text.find ("Phase check: 2 band(s) cancel in a mono sum") != std::string::npos);
+    CHECK (text.find ("Mono fold worst band " + hzText (BandGrid::centreHz (40)) + ", -4.0 dB") != std::string::npos);
+    CHECK (text.find ("  0:12.5  CLIP") != std::string::npos);
+    CHECK (text.find ("  0:40.0  LOUD") != std::string::npos);
+    CHECK (log.overflowCount() > 0 && text.find ("  and " + std::to_string (log.overflowCount()) + " more") != std::string::npos);
+}
+
+TEST (the_report_leaves_out_what_has_no_data)
+{
+    MasterInputs in;
+    in.analysedSeconds = 1.0;
+    const auto advice = advise (in);
+    const auto text = reportAsText (in, advice, EventLog {});
+    CHECK (text.find ("Integrated loudness") == std::string::npos);
+    CHECK (text.find ("Mono sum") == std::string::npos);
+    CHECK (text.find ("Phase check") == std::string::npos);
+    CHECK (text.find ("Mono fold") == std::string::npos);
+    CHECK (text.find ("Clips:") == std::string::npos);
+    CHECK (text.find ("nothing measured yet") != std::string::npos);
+    CHECK (text.find ("Event log") != std::string::npos && text.find ("  none") != std::string::npos);
 }
 
 TEST (advisor_speaks_for_each_stereo_problem)

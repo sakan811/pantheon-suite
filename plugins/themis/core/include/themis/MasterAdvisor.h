@@ -7,6 +7,7 @@
 #include "Audition.h"
 #include "ClipMeter.h"
 #include "DeliveryTargets.h"
+#include "EventLog.h"
 #include "Harshness.h"
 #include "HistoryChecks.h"
 #include "Loudness.h"
@@ -75,6 +76,7 @@ struct MasterInputs
 
     bool haveLoudness = false;
     float integratedLufs = LoudnessMeter::kSilence;
+    float loudnessRangeLu = 0.0f; // LRA (EBU Tech 3342), read by the report only when haveLoudness
     float targetLufs = delivery::kStreamingLufs; // the delivery the master is for
     std::string deliveryName = "Streaming";
 
@@ -624,6 +626,97 @@ inline std::string planAsText (const MasterInputs& in, const MasterAdvice& advic
         if (!item.why.empty())
             out += "   " + item.why + "\n";
     }
+    return out;
+}
+
+// The check report as plain text, for a note or a session log: the plan (planAsText, unchanged), then every reading that has
+// data, then the event log. Each number comes from its owner; a reading with no data is left out, never printed as zero.
+inline std::string reportAsText (const MasterInputs& in, const MasterAdvice& advice, const events::EventLog& log)
+{
+    std::string out = planAsText (in, advice);
+    out += "\nReadings\n";
+    int lines = 0;
+    const auto line = [&] (const std::string& text) {
+        out += "  " + text + "\n";
+        ++lines;
+    };
+    if (in.haveLoudness)
+    {
+        line (format ("Integrated loudness %.1f LUFS, %+.1f LU against %s (%.0f LUFS); short-term maximum %.1f LUFS",
+                      static_cast<double> (in.integratedLufs), static_cast<double> (in.integratedLufs - in.targetLufs), in.deliveryName.c_str(),
+                      static_cast<double> (in.targetLufs), static_cast<double> (in.maxShortTermLufs)));
+        line (format ("Loudness range (LRA) %.1f LU", static_cast<double> (in.loudnessRangeLu)));
+    }
+    if (in.clip.have)
+    {
+        line (format ("True peak %+.1f dBTP (left %+.1f, right %+.1f) against the ceiling %.1f dBTP; sample peak %+.1f dBFS",
+                      static_cast<double> (in.clip.truePeakDb), static_cast<double> (in.clip.truePeakLeftDb), static_cast<double> (in.clip.truePeakRightDb),
+                      static_cast<double> (in.truePeakCeilingDb), static_cast<double> (in.clip.samplePeakDb)));
+        if (in.haveLoudness)
+            line (format ("Peak-to-loudness ratio (PLR) %.1f dB", static_cast<double> (master::plrDb (in.clip.truePeakDb, in.integratedLufs))));
+        line (format ("Clips: %llu flat-topped clips (%llu samples), %llu samples at 0 dBFS",
+                      static_cast<unsigned long long> (in.clip.clipEvents), static_cast<unsigned long long> (in.clip.clipSamples),
+                      static_cast<unsigned long long> (in.clip.overSamples)));
+        if (in.clip.haveCrest())
+            line (format ("Crest factor, full band %.1f dB", static_cast<double> (in.clip.crestDb())));
+    }
+    if (in.haveCrest)
+        line (format ("Crest factor, low end %.1f dB", static_cast<double> (in.lowCrestDb)));
+    if (in.mono.have)
+    {
+        if (in.mono.monoSilent)
+            line ("Mono sum (L + R) / 2 is silent while the stereo programme is not");
+        else
+            line (format ("Mono sum (L + R) / 2 integrated %.1f LUFS, %+.1f LU against the stereo programme%s",
+                          static_cast<double> (in.mono.monoLufs), static_cast<double> (in.mono.deltaLu), in.mono.worthALook ? "; worth a look" : ""));
+    }
+    if (in.haveBlockDynamics)
+        line (format ("Block dynamics %.1f dB (Themis' own measure, not a standard)", static_cast<double> (in.blockDynamicsDb)));
+    if (in.haveSilence)
+        line (format ("Silence: %.1f s before the sound, %.1f s after it", in.leadingSilenceSeconds, in.trailingSilenceSeconds));
+    if (in.havePhase && in.phase.have)
+    {
+        if (in.phase.flaggedBands == 0)
+            line ("Phase check: no band cancels in a mono sum");
+        else
+            line (format ("Phase check: %d band(s) cancel in a mono sum; worst %s at -%.1f dB", in.phase.flaggedBands,
+                          in.phase.worstBand >= 0 ? hzText (BandGrid::centreHz (in.phase.worstBand)).c_str() : "-",
+                          static_cast<double> (in.phase.worstLossDb)));
+    }
+    if (in.translation.haveFold)
+    {
+        line (format ("Mono fold: %.1f dB lost overall, %.1f dB below %.0f Hz", static_cast<double> (in.translation.monoLossDb),
+                      static_cast<double> (in.translation.lowMonoLossDb), translation::kLowEndHz));
+        if (in.translation.worstBand >= 0)
+            line (format ("Mono fold worst band %s, -%.1f dB", hzText (BandGrid::centreHz (in.translation.worstBand)).c_str(),
+                          static_cast<double> (in.translation.worstBandLossDb)));
+    }
+    if (lines == 0)
+        out += "  nothing measured yet\n";
+
+    out += "\nEvent log (position in seconds of audio since the reset)\n";
+    if (log.entries().empty())
+        out += "  none\n";
+    for (const auto& e : log.entries())
+    {
+        const int minutes = static_cast<int> (e.seconds / 60.0);
+        const std::string at = format ("%d:%04.1f", minutes, e.seconds - 60.0 * minutes);
+        const double value = static_cast<double> (e.valueDb);
+        switch (e.kind)
+        {
+            case events::Kind::clip:
+                out += format ("  %s  CLIP  first flat top or sample at 0 dBFS, true peak %+.1f dBTP\n", at.c_str(), value);
+                break;
+            case events::Kind::truePeak:
+                out += format ("  %s  PEAK  new true-peak maximum above the ceiling, %+.1f dBTP\n", at.c_str(), value);
+                break;
+            case events::Kind::loudness:
+                out += format ("  %s  LOUD  short-term loudness above the target, %.1f LUFS at the start\n", at.c_str(), value);
+                break;
+        }
+    }
+    if (log.overflowCount() > 0)
+        out += format ("  and %llu more\n", static_cast<unsigned long long> (log.overflowCount()));
     return out;
 }
 } // namespace themis
