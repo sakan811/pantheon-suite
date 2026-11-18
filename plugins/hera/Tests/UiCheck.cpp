@@ -8,6 +8,8 @@
 #include "Check.h"
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
+#include <algorithm>
+#include <array>
 
 using namespace hera;
 using test::check;
@@ -351,7 +353,7 @@ int main()
         check (! tooLong, "every note fits a line of the strip");
     }
 
-    // AUTO THRESH: the button sits in the header inside the editor; a press sets THRESH once from the sound, as one undo step, and nothing else moves.
+    // AUTO SETUP: the button sits in the header inside the editor; a press sets RATIO, ATTACK, RELEASE and THRESH from the sound, as one undo step, and nothing else moves.
     {
         HeraProcessor q;
         q.setPlayConfigDetails (2, 2, 48000.0, 512);
@@ -360,10 +362,10 @@ int main()
         auto& editor = ui::innerOf<HeraEditor> (*holder);
 
         const auto autoR = editor.autoThresh().getBounds();
-        check (editor.autoThresh().isVisible() && editor.getLocalBounds().contains (autoR), "AUTO THRESH is on screen, inside the editor");
+        check (editor.autoThresh().isVisible() && editor.getLocalBounds().contains (autoR), "AUTO SETUP is on screen, inside the editor");
         check (! autoR.intersects (editor.presetBox.getBounds()) && ! autoR.intersects (editor.lookahead.getBounds()) && ! autoR.intersects (editor.guideButton.getBounds())
                    && ! autoR.intersects (editor.undoControls().getBounds()) && ! autoR.intersects (editor.abControls().getBounds()),
-               "AUTO THRESH overlaps neither the preset box, LOOK-AHEAD, GUIDE, UNDO / REDO nor A / B");
+               "AUTO SETUP overlaps neither the preset box, LOOK-AHEAD, GUIDE, UNDO / REDO nor A / B");
 
         // Feeds `blocks` blocks of the sample `at (index)` to the processor, as a host would (512 samples a block).
         const auto feed = [&q] (int blocks, auto&& at)
@@ -405,7 +407,9 @@ int main()
         pumpUntil ([&] { return ! waiting(); });
         check (editor.autoThresh().getButtonText() == "NO AUDIO" && std::fabs (readParams (q.apvts).thresholdDb + 18.0f) < 1e-3f,
                "four seconds of silence: THRESH stays at -18 dB and the button says NO AUDIO");
-        check (ui::hasNote (editor.notes(), "AUTO THRESH heard no sound", ui::Severity::info), "... and the strip says that nothing was heard");
+        check (ui::hasNote (editor.notes(), "AUTO SETUP heard no sound", ui::Severity::info), "... and the strip says that nothing was heard");
+        check (std::fabs (readParams (q.apvts).ratio - 2.0f) < 1e-3f && std::fabs (readParams (q.apvts).attackMs - 10.0f) < 0.01f && std::fabs (readParams (q.apvts).releaseMs - 150.0f) < 0.1f,
+               "... and RATIO, ATTACK and RELEASE stay at 2:1, 10 ms and 150 ms");
 
         // A programme of loud bursts over a quiet tone (0 dB for 100 ms of each second, -30 dB for the rest), with MIX, MAKEUP and the rest set.
         setValue (q.apvts, id::ratio, 4.0f);
@@ -429,24 +433,33 @@ int main()
         pumpUntil ([&] { return ! waiting(); });
         pumpUntil ([&] { return thresholdInTree (readParams (q.apvts).thresholdDb); });
         const float set = readParams (q.apvts).thresholdDb;
-        check (editor.autoThresh().getButtonText() == "THRESH SET" && set < -10.0f && set > -40.0f, fmt ("loud bursts: one press sets THRESH to %.1f dB", set));
-        check (ui::hasNote (editor.notes(), "AUTO THRESH set THRESH to", ui::Severity::info), "the strip says what it set");
+        const auto now = readParams (q.apvts);
+        check (editor.autoThresh().getButtonText() == "DONE" && set < -10.0f && set > -40.0f, fmt ("loud bursts: one press sets THRESH to %.1f dB", set));
+        check (now.ratio > 2.6f && now.ratio < 3.0f && now.attackMs > 15.0f && now.attackMs < 17.5f && now.releaseMs > 205.0f && now.releaseMs < 230.0f,
+               fmt ("... and the same press sets RATIO %.1f:1, ATTACK %.1f ms and RELEASE %.0f ms from how peaky the bursts are (about 13 dB)", (double) now.ratio, (double) now.attackMs, (double) now.releaseMs));
+        check (ui::hasNote (editor.notes(), "AUTO SETUP set RATIO", ui::Severity::info), "the strip says what it set");
 
+        const std::array<juce::AudioProcessorParameter*, 4> pressed { q.apvts.getParameter (id::threshold), q.apvts.getParameter (id::ratio),
+                                                                      q.apvts.getParameter (id::attack), q.apvts.getParameter (id::release) };
         bool othersSame = true;
         std::size_t i = 0;
         for (auto* p : q.getParameters())
         {
-            if (p != q.apvts.getParameter (id::threshold) && p->getValue() != before[i])
+            const bool setByPress = std::find (pressed.begin(), pressed.end(), p) != pressed.end();
+            if (! setByPress && p->getValue() != before[i])
                 othersSame = false;
             ++i;
         }
-        check (othersSame && std::fabs (readParams (q.apvts).mix - 0.5f) < 1e-3f, "every other control is as it was: MIX stays at 50%, MAKEUP, AUTO MAKEUP, RATIO and KNEE too");
+        check (othersSame && std::fabs (now.mix - 0.5f) < 1e-3f && std::fabs (now.makeupDb - 3.0f) < 1e-3f && std::fabs (now.kneeDb - 6.0f) < 1e-3f,
+               "every other control is as it was: MIX stays at 50%, MAKEUP, AUTO MAKEUP and KNEE too");
 
-        // One UNDO takes THRESH back, and nothing else was an undo step.
+        // One UNDO takes all four back, and nothing else was an undo step.
         q.undo.undo();
         pumpUntil ([&] { return thresholdInTree (-18.0f); });
-        check (std::fabs (readParams (q.apvts).thresholdDb + 18.0f) < 1e-3f && std::fabs (readParams (q.apvts).mix - 0.5f) < 1e-3f && ! q.undo.canUndo(),
-               "one UNDO takes THRESH back to -18 dB and leaves MIX at 50%: the press was one step");
+        const auto back = readParams (q.apvts);
+        check (std::fabs (back.thresholdDb + 18.0f) < 1e-3f && std::fabs (back.ratio - 4.0f) < 1e-3f && std::fabs (back.attackMs - 10.0f) < 0.01f
+                   && std::fabs (back.releaseMs - 150.0f) < 0.1f && std::fabs (back.mix - 0.5f) < 1e-3f && ! q.undo.canUndo(),
+               "one UNDO takes THRESH, RATIO, ATTACK and RELEASE back (-18 dB, 4:1, 10 ms, 150 ms) and leaves MIX at 50%: the press was one step");
     }
 
     return test::finish ("HeraUiCheck");

@@ -55,8 +55,9 @@ HeraEditor::HeraEditor (HeraProcessor& p)
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
-    autoThreshButton.setTooltip ("Play the track: for four seconds this listens to the sound and sets THRESH once, so that at the current RATIO and KNEE the sound is turned down by about "
-                                 "3.5 dB on average while it plays (silence is not counted). Only THRESH changes, as one undo step. Press it again to measure another passage.");
+    autoThreshButton.setTooltip ("Play the track: for four seconds this listens to the sound and sets a starting point from it: RATIO, ATTACK and RELEASE from how peaky it is, "
+                                 "and THRESH so that the sound is turned down by about 3.5 dB on average (silence is not counted). All four change together, as one undo step. "
+                                 "Every control stays editable, and UNDO takes all four back.");
     autoThreshButton.onClick = [this] { startAutoThresh(); };
     addAndMakeVisible (autoThreshButton);
     startTimerHz (kTimerHz);
@@ -132,6 +133,8 @@ AdviceInput HeraEditor::adviceInput() const
     in.scListen = proc.engine.scListen.load();
     in.autoThreshAsked = autoAsked;
     in.autoThresh = autoAnswer;
+    in.autoSet = autoSet;
+    in.autoCrestDb = autoCrestDb;
     return in;
 }
 
@@ -261,7 +264,7 @@ void HeraEditor::timerCallback()
         }
     }
     else if (autoStatusTicks > 0 && --autoStatusTicks == 0)
-        autoThreshButton.setButtonText ("AUTO THRESH");
+        autoThreshButton.setButtonText ("AUTO SETUP");
     repaint();
 }
 
@@ -278,25 +281,35 @@ void HeraEditor::startAutoThresh()
     autoThreshButton.setButtonText ("LISTENING");
 }
 
-// The answer: THRESH is set once through the host's gesture, inside one undo step. Only the answer `set` moves it; the rest leave it as it was.
+// The answer: RATIO, ATTACK, RELEASE and THRESH are set through the host's gestures, inside one undo step. Only the answer `set` moves them; the
+// rest leave them all as they were. THRESH is answered for the RATIO the setup chose, so the 3.5 dB holds at the RATIO it is set with.
 void HeraEditor::finishAutoThresh()
 {
     autoTicks = 0;
     const auto p = readParams (proc.apvts);
-    autoAnswer = proc.engine.autoThreshAnswer (p.ratio, p.kneeDb);
+    autoCrestDb = proc.engine.autoCrestDb();
+    autoSet = hera::autoSetupFor (autoCrestDb);
+    autoAnswer = proc.engine.autoThreshAnswer (autoSet.ratio, p.kneeDb);
     proc.engine.autoThreshCancel();
     autoAsked = true;
-    const char* text = "AUTO THRESH";
+    const char* text = "AUTO SETUP";
     switch (autoAnswer.result)
     {
         case hera::AutoThresh::Result::set:
         {
-            ui::beginUndoStep (proc.apvts, "AUTO THRESH");
-            auto* t = proc.apvts.getParameter (id::threshold);
-            t->beginChangeGesture();
-            t->setValueNotifyingHost (t->convertTo0to1 (autoAnswer.thresholdDb));
-            t->endChangeGesture();
-            text = "THRESH SET";
+            ui::beginUndoStep (proc.apvts, "AUTO SETUP");
+            const auto setPlain = [this] (const juce::String& pid, float value)
+            {
+                auto* param = proc.apvts.getParameter (pid);
+                param->beginChangeGesture();
+                param->setValueNotifyingHost (param->convertTo0to1 (value));
+                param->endChangeGesture();
+            };
+            setPlain (id::ratio, autoSet.ratio);
+            setPlain (id::attack, autoSet.attackMs);
+            setPlain (id::release, autoSet.releaseMs);
+            setPlain (id::threshold, autoAnswer.thresholdDb);
+            text = "DONE";
             break;
         }
         case hera::AutoThresh::Result::silent: text = "NO AUDIO"; break;

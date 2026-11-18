@@ -7,7 +7,7 @@
 #include <pantheon/ui/Presets.h>
 
 // Starting points for the jobs a compressor is most often used for. A preset sets every control: what it does not list is back at its default. The
-// thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves, or press AUTO THRESH to set it from the sound.
+// thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves, or press AUTO SETUP to set it from the sound.
 namespace hera
 {
 inline const std::vector<ui::Preset>& presets()

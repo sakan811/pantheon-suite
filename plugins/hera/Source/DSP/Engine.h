@@ -63,6 +63,36 @@ inline double reductionDb (double levelDb, double thresholdDb, double ratio, dou
 // What AUTO makeup adds: what the transfer curve takes from a signal at 0 dBFS, so full scale in is full scale out.
 inline double autoMakeupDb (double thresholdDb, double ratio, double kneeDb) noexcept { return std::fmin (kMaxMakeupDb, reductionDb (0.0, thresholdDb, ratio, kneeDb)); }
 
+// AUTO SETUP: the crest factor of a sound (its peak minus its RMS, dB) from its peak and mean square; 0 for nothing.
+inline double crestFactorDb (double peak, double meanSquare) noexcept
+{
+    if (peak <= 0.0 || meanSquare <= 0.0)
+        return 0.0;
+    return 20.0 * std::log10 (peak) - 10.0 * std::log10 (meanSquare);
+}
+
+// AUTO SETUP: the starting RATIO, ATTACK and RELEASE for a programme with this crest factor. A dense one (a mix that is already compressed or
+// limited, crest near kCrestDenseDb) gets the gentle end: 2:1, an attack of 10 ms, and a long 300 ms release, so the gain does not chase every
+// peak it has nothing to protect from. A dynamic one (drums, a sparse track, crest near kCrestDynamicDb) gets 4:1, an attack of 25 ms so the hit
+// gets through, and a 100 ms release, so the gain is back between the hits. In between it is linear. The anchors are where full mixes sit (about
+// 10 to 14 dB) and where drums and sparse tracks start. The values are on the controls' steps.
+inline constexpr double kCrestDenseDb = 8.0, kCrestDynamicDb = 20.0;
+struct AutoSetup
+{
+    float ratio = 2.0f, attackMs = 10.0f, releaseMs = 300.0f;
+};
+inline AutoSetup autoSetupFor (double crestDb) noexcept
+{
+    if (! std::isfinite (crestDb))
+        crestDb = kCrestDenseDb;
+    const double t = std::clamp ((crestDb - kCrestDenseDb) / (kCrestDynamicDb - kCrestDenseDb), 0.0, 1.0);
+    AutoSetup s;
+    s.ratio = (float) (std::round ((2.0 + 2.0 * t) * 10.0) / 10.0);       // RATIO steps of 0.1
+    s.attackMs = (float) (std::round ((10.0 + 15.0 * t) * 10.0) / 10.0);  // ATTACK steps of 0.1 ms
+    s.releaseMs = (float) std::round (300.0 - 200.0 * t);                 // RELEASE steps of 1 ms
+    return s;
+}
+
 // AUTO THRESH: the THRESH that turns the sound down by kAutoThreshTargetDb on average while it plays, at the RATIO and KNEE set.
 // Why an average over the level distribution and not a peak or a single percentile: the user hears the average reduction, so the
 // answer is the threshold whose law, applied to every audible moment of the listening, gives that average. A burst is then one bin of
@@ -225,6 +255,8 @@ public:
             autoHist.clear();
             autoListened = 0;
             autoGrSum = 0.0;
+            autoSq = 0.0;
+            autoPeak = 0.0;
         }
         const bool listening = autoState.load (std::memory_order_acquire) == (int) AutoState::listening;
         if (listening) // the settings the listening runs with: the follower's ballistics depend on them
@@ -300,7 +332,11 @@ public:
                 }
                 deepest = std::fmax (deepest, gr);
                 if (i < listenFor && levelDb >= kAutoSilenceDb) // AUTO THRESH: what the follower really took off, over the same audible frames as the histogram
+                {
                     autoGrSum += gr;
+                    autoSq += now[c] * now[c];                     // AUTO SETUP: the crest factor of the same frames
+                    autoPeak = std::fmax (autoPeak, std::fabs (now[c]));
+                }
                 const double gain = gr == 0.0 ? 1.0 : std::exp (-gr * 0.11512925464970229);
                 wet[c] = dry[c] * gain * makeup;
             }
@@ -352,6 +388,11 @@ public:
     void autoThreshStart() noexcept { autoState.store ((int) AutoState::requested, std::memory_order_release); }
     void autoThreshCancel() noexcept { autoState.store ((int) AutoState::idle, std::memory_order_release); }
     AutoState autoThreshState() const noexcept { return (AutoState) autoState.load (std::memory_order_acquire); }
+    // AUTO SETUP: the crest factor of the audible sound the listening heard (0 when nothing was audible). Read it once `done` is seen.
+    double autoCrestDb() const noexcept
+    {
+        return crestFactorDb (autoPeak, autoHist.total > 0.0 ? autoSq / autoHist.total : 0.0);
+    }
     // The answer for the RATIO and KNEE now. Call it when the state is `done`. The ballistics the listening really had (the follower's average
     // reduction minus the law's average for the same settings) are taken off the target first.
     AutoThresh autoThreshAnswer (double ratio, double kneeDb) const noexcept
@@ -393,6 +434,7 @@ private:
     LevelHistogram autoHist;                              // what the listening heard
     int autoListened = 0;                                 // frames listened to so far in it
     double autoGrSum = 0.0;                               // the follower's reduction summed over the audible frames of it
+    double autoSq = 0.0, autoPeak = 0.0;                  // the sound's square and peak over the same frames (AUTO SETUP's crest factor)
     double autoListenThr = -18.0, autoListenRatio = 2.0, autoListenKnee = 6.0; // the settings it ran with (the last block's)
     std::array<Channel, 2> ch;
 };

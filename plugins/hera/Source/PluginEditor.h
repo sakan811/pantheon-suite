@@ -38,8 +38,9 @@ public:
     float heldReductionDb() const noexcept { return *std::max_element (history.begin(), history.end()); }
     juce::TextButton& autoThresh() noexcept { return autoThreshButton; } // for UiCheck
 
-    // AUTO THRESH: one press listens to four seconds of the sound and sets THRESH once (one undo step); see Engine.h.
-    juce::TextButton autoThreshButton { "AUTO THRESH" };
+    // AUTO SETUP (the engine's listening is AUTO THRESH): one press listens to four seconds of the sound and sets RATIO, ATTACK, RELEASE and THRESH
+    // together, as one undo step; see Engine.h.
+    juce::TextButton autoThreshButton { "AUTO SETUP" };
 
 private:
     void timerCallback() override;
@@ -48,6 +49,8 @@ private:
     void finishAutoThresh();
 
     hera::AutoThresh autoAnswer;           // the last answer, shown in the strip until the next press
+    hera::AutoSetup autoSet;               // the RATIO, ATTACK and RELEASE that answer set (kept with it)
+    double autoCrestDb = 0.0;              // the crest factor the listening heard, for the strip
     bool autoAsked = false;                // whether there is an answer to show
     int autoTicks = 0;                     // timer ticks left in the listening (a timeout when no sound plays, as with a stopped transport)
     int autoStatusTicks = 0;               // ticks left before the button's result text goes back to its name
