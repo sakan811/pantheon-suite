@@ -160,8 +160,31 @@ MainComponent::MainComponent (bool withAudioDevice)
         roll.repaint();
     };
 
-    setupKnob (amountKnob, "Amount", 0.0, 100.0, 1.0, 100.0, " %", 0, "How far Correct all pulls every note towards the scale. 100 = onto the note, 50 = halfway.");
-    amountKnob.onChange = [this] (double v) { correctAmount = v; };
+    setupKnob (amountKnob, "Amount", 0.0, 100.0, 1.0, 100.0, " %", 0,
+               "How far Correct all pulls every note towards the scale. 100 = onto the note, 50 = halfway. Right after Correct all, moving it applies "
+               "Correct all again at the new amount (one undo step per move) until a note is edited by hand.");
+    // While the last Correct all is live, AMOUNT re-applies it from the notes before it. The state before a drag is taken on its first change, so the
+    // whole drag is one undo step (a typed value is a gesture too, from ValueKnob).
+    amountKnob.onGestureStart = [this] { amountUndo.reset(); };
+    amountKnob.onChange = [this] (double v)
+    {
+        correctAmount = v;
+        if (! session.correctLive())
+            return;
+        if (! amountUndo.has_value())
+            amountUndo = session.state();
+        session.recorrect ((float) (v / 100.0));
+        refreshInspector();
+        roll.repaint();
+    };
+    amountKnob.onGestureEnd = [this]
+    {
+        if (amountUndo.has_value() && ! (session.state() == *amountUndo))
+            session.recordUndo (*amountUndo);
+        amountUndo.reset();
+        refreshInspector();
+        roll.repaint();
+    };
 
     correctAllButton.setTooltip ("Pull every note towards the scale by AMOUNT. What was done to individual notes is kept.");
     detectKeyButton.setTooltip ("Find the key of the melody and set KEY and SCALE (major or its relative minor).");
@@ -922,6 +945,7 @@ AdviceInput MainComponent::adviceInput() const
     in.hasAudio = session.isAnalysed();
     in.playingOriginal = ! playback.corrected.load();
     in.unsaved = session.dirty();
+    in.amountLive = session.correctLive();
     in.outputPeakDb = session.isAnalysed() ? 20.0 * std::log10 (std::max (1.0e-6, (double) session.outputPeak())) : -120.0;
     for (const auto& n : session.notes)
     {
