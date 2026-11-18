@@ -36,6 +36,15 @@ class HistoryPanel : public juce::Component, public juce::TooltipClient
 public:
     using Value = std::function<float (const themis::FrameStats&, int column)>; // a value without themis::hasLevel() means "no value"
 
+    // The painted hit areas (tabs, range chips, legend entries) at the panel's current size, for the smoke test's control audit.
+    std::vector<juce::Rectangle<float>> hitAreas() const
+    {
+        std::vector<juce::Rectangle<float>> areas;
+        for (const auto& h : hits)
+            areas.push_back (h.area);
+        return areas;
+    }
+
     struct Series
     {
         const char* name;
@@ -246,6 +255,7 @@ private:
     static constexpr double kSpanSeconds = 60.0;
     static constexpr float kLegendWidth = 142.0f;
     static constexpr float kTitleRow = 20.0f, kLegendRow = 16.0f, kVerdictRow = 32.0f, kAxisLabels = 14.0f;
+    static constexpr float kVerdictWordWidth = 46.0f; // the level word beside the verdict's lamp (gui::levelMark)
 
     struct Hit
     {
@@ -491,11 +501,19 @@ private:
         const auto detailArea = right.isEmpty() ? juce::Rectangle<float>() : row.removeFromRight (std::min (190.0f, row.getWidth() * 0.4f));
         if (verdict.text.isNotEmpty())
         {
+            // The lamp, and the level word after it: the verdict's colour is never its only coding.
+            float textInset = 8.0f;
             if (verdict.lamp)
+            {
                 ui::hw::drawLamp (g, { row.getX() + 9.0f, row.getCentreY() }, 3.6f, colours::forLevel (verdict.level));
+                g.setFont (ui::labelFont (gui::kLevelWordFontHeight));
+                g.setColour (colours::forLevelText (verdict.level));
+                g.drawText (gui::levelMark (verdict.level), row.withTrimmedLeft (18.0f).withWidth (kVerdictWordWidth).toNearestInt(), juce::Justification::centredLeft);
+                textInset = 18.0f + kVerdictWordWidth;
+            }
             g.setColour (colours::text);
             g.setFont (ui::font (11.5f));
-            g.drawFittedText (verdict.text, row.withTrimmedLeft (verdict.lamp ? 20.0f : 8.0f).reduced (0.0f, 2.0f).toNearestInt(), juce::Justification::centredLeft, 2, 1.0f);
+            g.drawFittedText (verdict.text, row.withTrimmedLeft (textInset).reduced (0.0f, 2.0f).toNearestInt(), juce::Justification::centredLeft, 2, 1.0f);
         }
         else if (numFrames > 0)
         {

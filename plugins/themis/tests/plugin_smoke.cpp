@@ -192,6 +192,77 @@ static std::vector<themis::FrameStats> recentFrames (const ThemisProcessor& proc
     return frames;
 }
 
+// ---- the control audit and the contrast of the text (the editor at its design size, 100 %) ----
+// A control is every visible, enabled component that takes a mouse click, plus the chips and tabs the panels paint (they are not
+// components). FAILS only below the floor: narrower than 20 px or lower than 12 px (the AUDITION panel's S/M buttons are the
+// smallest hardware-layout controls). Below the 24 x 24 px target of WCAG 2.5.8 is listed as INFO, not as a failure.
+static constexpr int kControlFloorWidth = 20, kControlFloorHeight = 12, kControlTargetPx = 24;
+// WCAG 2.x contrast: FAIL below the floor for any text used for numbers or captions, INFO below the AA level for normal text.
+static constexpr double kContrastFloor = 3.0, kContrastAA = 4.5;
+
+struct AuditedControl
+{
+    juce::String kind, label;
+    juce::Rectangle<int> area; // in the editor's coordinates
+};
+
+// Visible up to the editor (which is never put on a desktop here, so its own flag is not asked), and enabled.
+static bool shownAndEnabled (const juce::Component& c, const juce::Component& root)
+{
+    for (auto* p = &c; p != nullptr && p != &root; p = p->getParentComponent())
+        if (!p->isVisible())
+            return false;
+    return c.isEnabled();
+}
+
+static juce::String kindOfControl (const juce::Component& c)
+{
+    if (dynamic_cast<const ui::Toggle*> (&c) != nullptr) return "toggle";
+    if (dynamic_cast<const ui::Choice*> (&c) != nullptr) return "choice";
+    if (dynamic_cast<const juce::Button*> (&c) != nullptr) return "button";
+    if (dynamic_cast<const juce::ComboBox*> (&c) != nullptr) return "combo";
+    if (dynamic_cast<const juce::Slider*> (&c) != nullptr) return "slider";
+    if (dynamic_cast<const ui::Knob*> (&c) != nullptr) return "knob";
+    if (dynamic_cast<const ui::ResizeGrips*> (&c) != nullptr) return "grip";
+    return {};
+}
+
+static void collectControls (juce::Component& c, const juce::Component& root, std::vector<AuditedControl>& out)
+{
+    const auto kind = kindOfControl (c);
+    if (kind.isNotEmpty() && shownAndEnabled (c, root))
+    {
+        auto* button = dynamic_cast<juce::Button*> (&c);
+        auto* combo = dynamic_cast<juce::ComboBox*> (&c);
+        juce::String label = button != nullptr ? button->getButtonText() : combo != nullptr ? combo->getText() : c.getName();
+        if (label.isEmpty())
+            if (auto* tip = dynamic_cast<juce::SettableTooltipClient*> (&c))
+                label = tip->getTooltip();
+        out.push_back ({ kind, label, root.getLocalArea (&c, c.getLocalBounds()) });
+    }
+    for (auto* child : c.getChildren())
+        collectControls (*child, root, out);
+}
+
+// A chip or tab the panel paints: its area is in the panel's coordinates, so it is moved into the editor's.
+static void pushPainted (const char* kind, const char* panelName, juce::Rectangle<int> area, const juce::Component& root,
+                         const juce::Component& panel, std::vector<AuditedControl>& out)
+{
+    out.push_back ({ kind, panelName, root.getLocalArea (&panel, area) });
+}
+
+static double relativeLuminance (juce::Colour c)
+{
+    const auto lin = [] (float v) { return v <= 0.03928f ? v / 12.92f : std::pow ((v + 0.055f) / 1.055f, 2.4f); };
+    return 0.2126 * lin (c.getFloatRed()) + 0.7152 * lin (c.getFloatGreen()) + 0.0722 * lin (c.getFloatBlue());
+}
+
+static double contrastRatio (juce::Colour a, juce::Colour b)
+{
+    const double la = relativeLuminance (a), lb = relativeLuminance (b);
+    return (std::max (la, lb) + 0.05) / (std::min (la, lb) + 0.05);
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -950,6 +1021,62 @@ int main (int argc, char** argv)
             }
             auto img = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
             CHECK (img.isValid() && img.getWidth() == kEditorWidth && img.getHeight() == kEditorHeight);
+            // The control audit (the editor at its design size, before the window is resized): every control's size, and the text contrast.
+            {
+                std::vector<AuditedControl> controls;
+                collectControls (*editor, *editor, controls);
+                for (auto* child : editor->getChildren())
+                {
+                    if (auto* plan = dynamic_cast<AdvicePanel*> (child))
+                        for (const auto& chip : plan->chipAreas())
+                            pushPainted ("chip", "MASTER PLAN", chip, *editor, *plan, controls);
+                    if (auto* panel = dynamic_cast<gui::HistoryPanel*> (child))
+                        for (const auto& area : panel->hitAreas())
+                            pushPainted ("tab/chip/legend", "GRAPH PANEL", area.toNearestInt(), *editor, *panel, controls);
+                }
+                int belowFloor = 0;
+                std::vector<AuditedControl> small;
+                for (const auto& c : controls)
+                {
+                    if (c.area.getWidth() < kControlFloorWidth || c.area.getHeight() < kControlFloorHeight)
+                        ++belowFloor;
+                    if (c.area.getWidth() < kControlTargetPx || c.area.getHeight() < kControlTargetPx)
+                        small.push_back (c);
+                }
+                std::printf ("    control audit at 100 %% (%dx%d): %d controls, %d below the %dx%d floor\n", editor->getWidth(), editor->getHeight(),
+                             static_cast<int> (controls.size()), belowFloor, kControlFloorWidth, kControlFloorHeight);
+                CHECK (belowFloor == 0, "%d controls are narrower than %d px or lower than %d px", belowFloor, kControlFloorWidth, kControlFloorHeight);
+                std::printf ("    INFO: %d controls below the WCAG 2.5.8 target of %dx%d px (not a failure):\n", static_cast<int> (small.size()), kControlTargetPx, kControlTargetPx);
+                for (const auto& c : small)
+                    std::printf ("      %4dx%-3d %-12s %-40s at %d,%d\n", c.area.getWidth(), c.area.getHeight(), c.kind.toRawUTF8(),
+                                 c.label.isEmpty() ? "(unnamed)" : c.label.toRawUTF8(), c.area.getX(), c.area.getY());
+
+                // Contrast: the text colours Themis draws numbers and captions in, against the surface they sit on.
+                struct Pair { const char* use; juce::Colour text, surface; };
+                const Pair pairs[] = {
+                    { "silkscreen labels on the faceplate", colours::text, colours::panel },
+                    { "engraved captions on the faceplate", colours::dim, colours::panel },
+                    { "amber read-outs on the glass", colours::amber, colours::glass },
+                    { "teal graph line on the glass", colours::accent, colours::glass },
+                    { "dim labels on the glass", colours::dim, colours::glass },
+                    { "silkscreen text on the glass", colours::text, colours::glass },
+                    { "good verdict text on the glass", colours::forLevel (themis::Level::good), colours::glass },
+                    { "warn verdict text on the glass", colours::forLevel (themis::Level::warn), colours::glass },
+                    { "bad verdict text on the glass", colours::forLevel (themis::Level::bad), colours::glass },
+                    { "good level word on the faceplate", colours::forLevelText (themis::Level::good), colours::panel },
+                    { "warn level word on the faceplate", colours::forLevelText (themis::Level::warn), colours::panel },
+                    { "bad level word on the faceplate", colours::forLevelText (themis::Level::bad), colours::panel },
+                };
+                std::printf ("    text contrast (WCAG 2.x, relative luminance; floor %.1f:1, AA %.1f:1):\n", kContrastFloor, kContrastAA);
+                for (const auto& p : pairs)
+                {
+                    const double ratio = contrastRatio (p.text, p.surface);
+                    std::printf ("      %5.2f:1  %-36s %s on %s\n", ratio, p.use, p.text.toDisplayString (false).toRawUTF8(), p.surface.toDisplayString (false).toRawUTF8());
+                    CHECK (ratio >= kContrastFloor, "%s is %.2f:1, below the floor", p.use, ratio);
+                    if (ratio < kContrastAA)
+                        std::printf ("      INFO: below %.1f:1 (known, see the README's Limitations)\n", kContrastAA);
+                }
+            }
             if (argc > 1)
                 CHECK (writePng (img, argv[1]));
             for (auto* child : editor->getChildren())

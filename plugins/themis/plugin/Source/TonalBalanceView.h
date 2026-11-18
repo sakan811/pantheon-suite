@@ -95,10 +95,14 @@ public:
         auto area = getLocalBounds().toFloat();
         ui::hw::drawModule (g, area);
 
-        auto strips = area.removeFromBottom (2.0f * kStripHeight);
-        broadbandStrip = strips.removeFromTop (kStripHeight).reduced (8.0f, 4.0f);
+        // Two groups of readouts, each a caption band (gui::drawGroupCaption) over its row of cells. The row keeps the kit's cell
+        // layout (title and glass), so the plot gives up only the caption bands.
+        auto strips = area.removeFromBottom (2.0f * (gui::kGroupCaptionHeight + kCellRowHeight));
+        const auto toneBand = strips.removeFromTop (gui::kGroupCaptionHeight + kCellRowHeight);
+        const auto translationBand = strips;
+        broadbandStrip = toneBand.withTrimmedTop (gui::kGroupCaptionHeight).reduced (8.0f, 0.0f);
         const auto strip = broadbandStrip;
-        translationStrip = strips.reduced (8.0f, 4.0f);
+        translationStrip = translationBand.withTrimmedTop (gui::kGroupCaptionHeight).reduced (8.0f, 0.0f);
         screen = area.reduced (10.0f, 10.0f);
         plot = screen.reduced (38.0f, 10.0f).withTrimmedBottom (14.0f);
 
@@ -123,6 +127,8 @@ public:
         }
         drawPhaseRegion (g);
         ui::hw::drawGlassOverlay (g, screen);
+        gui::drawGroupCaption (g, toneBand.withHeight (gui::kGroupCaptionHeight).withTrimmedLeft (8.0f), gui::kToneGroupCaption);
+        gui::drawGroupCaption (g, translationBand.withHeight (gui::kGroupCaptionHeight).withTrimmedLeft (8.0f), gui::kTranslationGroupCaption);
         drawBroadband (g, strip);
         drawTranslation (g, translationStrip);
         drawHover (g);
@@ -178,7 +184,8 @@ private:
     static bool differs (const T& a, const T& b) { return std::memcmp (&a, &b, sizeof (T)) != 0; }
 
     static constexpr float kTopDb = 12.0f, kBottomDb = -30.0f;
-    static constexpr float kStripHeight = ui::MeterCell::kStripHeight;
+    // A row of cells: the kit's title and glass, with a little air under them.
+    static constexpr float kCellRowHeight = ui::MeterCell::kTitleHeight + ui::MeterCell::kWindowHeight + 4.0f;
     static constexpr float kFoldStripHeight = 5.0f; // the mono-fold strip along the bottom of the plot (and the phase region outline around it)
 
     // Display slope of 4.5 dB/oct, a common choice for spectrum analysers. The analysis is constant-Q
@@ -351,7 +358,8 @@ private:
             delta /= n;
             tol /= n;
 
-            const auto c = colours::forLevel (themis::translation::toleranceLevel (static_cast<float> (delta), static_cast<float> (tol)));
+            const auto level = themis::translation::toleranceLevel (static_cast<float> (delta), static_cast<float> (tol));
+            const auto c = colours::forLevel (level);
             const auto bar = cell.drawTrack (g);
             const float centre = bar.getCentreX();
             const float half = bar.getWidth() * 0.5f;
@@ -359,6 +367,7 @@ private:
             ui::MeterCell::fillSpan (g, bar, centre - half / 3.0f, centre + half / 3.0f, colours::accent.withAlpha (0.35f)); // in-tolerance zone
             ui::MeterCell::drawMarker (g, bar, centre + pos, c);
             cell.drawReadout (g, gui::signedDb (static_cast<float> (delta)), c);
+            gui::drawLevelWord (g, cell, themis::kEnergyRanges[r].name, level);
         }
     }
 
@@ -371,7 +380,8 @@ private:
         using themis::lowcrest::kZoneHiDb;
         using themis::lowcrest::kZoneLoDb;
 
-        cell.drawTitle (g, "LOW CREST");
+        const juce::String title = "LOW CREST";
+        cell.drawTitle (g, title);
         if (!haveCrest)
         {
             cell.drawEmpty (g);
@@ -384,11 +394,13 @@ private:
         };
         ui::MeterCell::fillSpan (g, bar, xForCrest (kZoneHiDb), xForCrest (kZoneLoDb), colours::accent.withAlpha (0.35f)); // typical zone
 
-        const auto c = colours::forLevel (themis::lowcrest::level (lowCrestDb));
+        const auto level = themis::lowcrest::level (lowCrestDb);
+        const auto c = colours::forLevel (level);
         ui::MeterCell::drawMarker (g, bar, xForCrest (lowCrestDb), c);
 
         const juce::String note = lowCrestDb > kZoneHiDb ? "  dynamic" : lowCrestDb < kZoneLoDb ? "  compressed" : "";
         cell.drawReadout (g, juce::String (lowCrestDb, 1) + " dB" + note, c);
+        gui::drawLevelWord (g, cell, title, level);
     }
 
     // Darkens the frequencies the selected device cannot reproduce (more than kRangeFloorDb below its passband).
@@ -454,6 +466,7 @@ private:
         ui::MeterCell::fillSpan (g, bar, xAt (badAt), bar.getRight(), colours::bad.withAlpha (0.25f));
         ui::MeterCell::drawMarker (g, bar, xAt (value), colours::forLevel (level));
         cell.drawReadout (g, text, colours::forLevel (level));
+        gui::drawLevelWord (g, cell, title, level);
     }
 
     // Second readout row: how the balance is likely to translate (device loss vs the target, mono compatibility).
@@ -490,9 +503,14 @@ private:
             drawMeter (g, cell (2), "LOW-END MONO", report.lowMonoLossDb, tr::kLowMonoWarnDb, tr::kLowMonoBadDb, report.lowMonoLevel,
                        "-" + juce::String (report.lowMonoLossDb, 1) + " dB < " + juce::String (juce::roundToInt (tr::kLowEndHz)) + " Hz");
             if (report.worstBand >= 0)
-                cell (3).drawNote (g, "WORST BAND",
+            {
+                const auto level = tr::bandMonoLevel (report.worstBand, report.worstBandLossDb);
+                const juce::String title = "WORST BAND";
+                cell (3).drawNote (g, title,
                                    gui::hzText (themis::BandGrid::centreHz (report.worstBand)) + "  -" + juce::String (report.worstBandLossDb, 1) + " dB",
-                                   colours::forLevel (tr::bandMonoLevel (report.worstBand, report.worstBandLossDb)));
+                                   colours::forLevel (level));
+                gui::drawLevelWord (g, cell (3), title, level);
+            }
             else
                 cell (3).drawNote (g, "WORST BAND", "-", colours::dim);
         }
@@ -531,7 +549,8 @@ private:
             return;
         }
         constexpr float kLowDb = -9.0f, kHighDb = 3.0f; // scale ends
-        cell.drawTitle (g, "CLIPPING");
+        const juce::String title = "CLIPPING";
+        cell.drawTitle (g, title);
         const auto bar = cell.drawTrack (g);
         const auto xAt = [&] (float db) { return bar.getX() + bar.getWidth() * (juce::jlimit (kLowDb, kHighDb, db) - kLowDb) / (kHighDb - kLowDb); };
         const float warnDb = std::min (ceilingDb, clip::kTruePeakBadDb);
@@ -545,6 +564,7 @@ private:
         cell.drawReadout (g, juce::String (clipTotals.truePeakDb, 1) + " dBTP  "
                                  + (clipTotals.clipEvents > 0 ? count + " clips" : clipTotals.overSamples > 0 ? juce::String ("over 0 dB") : juce::String ("clean")),
                           c);
+        gui::drawLevelWord (g, cell, title, level);
     }
 
     juce::String clipTooltip() const
@@ -595,7 +615,9 @@ private:
     // Does a mono sum lose more than uncorrelated channels would, and why.
     void drawPhase (juce::Graphics& g, const ui::MeterCell& cell) const
     {
-        cell.drawNote (g, "PHASE CHECK", phaseVerdict (phase), colours::forLevel (phase.level));
+        const juce::String title = "PHASE CHECK";
+        cell.drawNote (g, title, phaseVerdict (phase), colours::forLevel (phase.level));
+        gui::drawLevelWord (g, cell, title, phase.level);
     }
 
     juce::String phaseTooltip() const

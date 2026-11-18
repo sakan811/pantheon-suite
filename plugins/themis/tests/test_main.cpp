@@ -4043,6 +4043,8 @@ TEST (plan_verdict_is_one_word_from_the_counts_and_the_measuring_state)
     CHECK (std::string (verdictWord (Verdict::clear)) == "CLEAR");
     CHECK (std::string (verdictWord (Verdict::measuring)) == "MEASURING");
     CHECK (std::string (verdictWord (Verdict::noSignal)) == "NO SIGNAL");
+    // The level word beside a colour (the plan text and the screen's level words): a colour alone is never the only coding.
+    CHECK (std::string (plan::levelWord (Level::good)) == "OK" && std::string (plan::levelWord (Level::warn)) == "CHECK" && std::string (plan::levelWord (Level::bad)) == "FIX");
     CHECK (countText ({ 3, 5 }) == "3 TO FIX  -  5 TO CHECK");
     CHECK (countText ({ 2, 0 }) == "2 TO FIX");
     CHECK (countText ({ 0, 4 }) == "4 TO CHECK");

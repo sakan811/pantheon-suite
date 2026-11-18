@@ -112,6 +112,8 @@ public:
         clear.setBounds (titleBounds.removeFromRight (46).reduced (0, 1));
         alertBounds = titleBounds.withTrimmedLeft (juce::roundToInt (juce::GlyphArrangement::getStringWidth (ui::labelFont(), "AUDITION")) + 12);
 
+        // A button fills its row but for a 1 px gap under it (12 px high: the smallest a control may be, see plugin_smoke's audit).
+        const auto button = [] (juce::Rectangle<int> slot) { return slot.reduced (1, 0).withTrimmedBottom (1); };
         // Fit the three groups (a label row each, then one row per source) into what is left.
         const int labelRows = static_cast<int> (groups.size()), rows = themis::kNumSources + 2;
         const int rowH = juce::jlimit (13, 24, (r.getHeight() - labelRows * kLabelHeight) / rows);
@@ -122,19 +124,19 @@ public:
             if (group.count == 0) // COMPARE: the streaming preview, then the reference
             {
                 auto row = r.removeFromTop (rowH);
-                preview.setBounds (row.removeFromRight (kButtonWidth * 2).reduced (1, 1));
+                preview.setBounds (button (row.removeFromRight (kButtonWidth * 2)));
                 previewName = row;
                 row = r.removeFromTop (rowH);
-                ab.setBounds (row.removeFromRight (kButtonWidth).reduced (1, 1));
-                load.setBounds (row.removeFromRight (kButtonWidth).reduced (1, 1));
+                ab.setBounds (button (row.removeFromRight (kButtonWidth)));
+                load.setBounds (button (row.removeFromRight (kButtonWidth)));
                 refName = row;
                 continue;
             }
             for (int n = 0; n < group.count; ++n, ++i)
             {
                 auto row = r.removeFromTop (rowH);
-                mute[static_cast<size_t> (i)].setBounds (row.removeFromRight (kButtonWidth).reduced (1, 1));
-                solo[static_cast<size_t> (i)].setBounds (row.removeFromRight (kButtonWidth).reduced (1, 1));
+                mute[static_cast<size_t> (i)].setBounds (button (row.removeFromRight (kButtonWidth)));
+                solo[static_cast<size_t> (i)].setBounds (button (row.removeFromRight (kButtonWidth)));
                 nameBounds[static_cast<size_t> (i)] = row;
             }
         }

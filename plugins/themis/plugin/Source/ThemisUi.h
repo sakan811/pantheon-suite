@@ -25,6 +25,14 @@ inline juce::Colour forLevel (themis::Level l)
     return l == themis::Level::good ? good : l == themis::Level::warn ? warn : bad;
 }
 
+// The colour a level is written in on the faceplate. The plain fix red is 3.9:1 there, under the 4.5:1 AA level for small text, so the
+// words use this brighter red (4.7:1 on the faceplate, 6.4:1 on the glass); the lamps and the bars keep the plain colour.
+inline const juce::Colour badText { 0xfff06a5e };
+inline juce::Colour forLevelText (themis::Level l)
+{
+    return l == themis::Level::bad ? badText : forLevel (l);
+}
+
 // The lamp of the plan's verdict word (the word says it too: a colour is never the only coding). Measuring states are unlit.
 inline juce::Colour forVerdict (themis::plan::Verdict v)
 {
@@ -51,6 +59,53 @@ inline void drawEngravedRule (juce::Graphics& g, juce::Line<float> line)
     g.drawLine (line, 1.0f);
     g.setColour (juce::Colours::white.withAlpha (0.07f));
     g.drawLine (line.getStartX() + 1.0f, line.getStartY(), line.getEndX() + 1.0f, line.getEndY(), 1.0f);
+}
+
+// The readout cells' two groups: a silkscreen caption over each row, with an engraved rule running on from it. Row 1 is the tonal
+// balance and its dynamics, row 2 how the balance translates and the stereo and peak checks.
+inline constexpr const char* kToneGroupCaption = "TONE AND DYNAMICS";
+inline constexpr const char* kTranslationGroupCaption = "TRANSLATION, STEREO AND PEAKS";
+inline constexpr float kGroupCaptionHeight = 12.0f, kGroupCaptionFontHeight = 9.0f;
+
+// The level word beside a lamp or a colour (the words are the core's, so the plan text and the screen say the same). One function
+// for every place the screen shows a level.
+inline const char* levelMark (themis::Level l) { return themis::plan::levelWord (l); }
+inline constexpr float kLevelWordFontHeight = 10.0f, kCellTitleFontHeight = 10.0f, kLevelWordGap = 6.0f; // the kit sets the cell titles at this size
+
+// The width of a line of text in a font (JUCE's own measure, as the glyph arrangement lays it out).
+inline float textWidth (const juce::Font& font, const juce::String& text)
+{
+    juce::GlyphArrangement glyphs;
+    glyphs.addLineOfText (font, text, 0.0f, 0.0f);
+    return glyphs.getBoundingBox (0, -1, false).getWidth();
+}
+
+// The level word on the title line of a readout cell, right-aligned (the title is left-aligned on the same line). The kit draws the
+// title without fitting it, so the word is left out when the two would overlap: the cell's colour and read-out still say it.
+inline void drawLevelWord (juce::Graphics& g, const ui::MeterCell& cell, const juce::String& title, themis::Level level)
+{
+    const auto line = cell.area.withHeight (ui::MeterCell::kTitleHeight);
+    const auto font = ui::labelFont (kLevelWordFontHeight);
+    const float wordWidth = textWidth (font, levelMark (level));
+    if (textWidth (ui::labelFont (kCellTitleFontHeight), title.toUpperCase()) + kLevelWordGap + wordWidth > line.getWidth())
+        return;
+    g.setFont (font);
+    g.setColour (colours::forLevelText (level));
+    g.drawText (levelMark (level), line.toNearestInt(), juce::Justification::centredRight);
+}
+
+// A group caption: the silkscreen words, then the engraved rule from just after them to the right edge of the band.
+inline void drawGroupCaption (juce::Graphics& g, juce::Rectangle<float> band, const char* text)
+{
+    const auto font = ui::labelFont (kGroupCaptionFontHeight);
+    juce::GlyphArrangement glyphs;
+    glyphs.addLineOfText (font, text, 0.0f, 0.0f);
+    const float textWidth = glyphs.getBoundingBox (0, -1, false).getWidth();
+    g.setFont (font);
+    g.setColour (colours::text);
+    g.drawText (text, band.toNearestInt(), juce::Justification::centredLeft);
+    const float y = band.getCentreY() + 1.0f, x0 = band.getX() + textWidth + 6.0f;
+    drawEngravedRule (g, { x0, y, band.getRight(), y });
 }
 
 // The two words of the plugin's name. The full name ("Themis Verdict") is set once, in CMakeLists.txt (PLUGIN_NAME), and
