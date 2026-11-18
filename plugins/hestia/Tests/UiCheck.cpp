@@ -529,5 +529,55 @@ int main()
             check (false, "the saved session is readable as XML");
     }
 
+    std::printf ("\nAUTO ROLE: ROLE from the track's name, one UNDO step, and a name with no role word is said so\n");
+    {
+        HestiaProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<HestiaEditor> (*holder);
+        editor.setVisible (true);
+        const auto pumpUntil = [] (auto&& done) {
+            for (int waited = 0; ! done() && waited < 2000; waited += 10)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            return done();
+        };
+        setValue (q.apvts, id::role, (float) (int) Role::bass);
+        for (int i = 0; i < 40; ++i) // the editor's timer writes the change to the tree: let it, before the step below starts
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+        q.undo.clearUndoHistory();
+
+        const auto autoR = editor.autoRoleButton().getBounds();
+        check (editor.getLocalBounds().contains (autoR) && ! autoR.intersects (editor.roleBox.getBounds()) && autoR.getBottom() <= editor.roleBox.getY(),
+               "AUTO ROLE is inside the editor, on the Role label's line, clear of the box");
+
+        const auto before = readParams (q.apvts);
+        q.engine.setTrackName ("Kick_01");
+        editor.autoRoleButton().onClick();
+        pumpUntil ([&] { return readParams (q.apvts).role == Role::kick; });
+        check (readParams (q.apvts).role == Role::kick, "AUTO ROLE on the track 'Kick_01' sets ROLE to Kick");
+        check (readParams (q.apvts).carveDb == before.carveDb && readParams (q.apvts).group == before.group && readParams (q.apvts).importance == before.importance,
+               "... and nothing else is changed");
+        // The editor's timer writes the change into the state tree, and that is the step UNDO takes back: let it settle first.
+        for (int i = 0; i < 40; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+        editor.undoControls().undo();
+        pumpUntil ([&] { return readParams (q.apvts).role == Role::bass; });
+        check (readParams (q.apvts).role == Role::bass, "one UNDO takes the AUTO ROLE back (ROLE is Bass again)");
+
+        q.engine.setTrackName ("Track 1");
+        editor.autoRole();
+        check (readParams (q.apvts).role == Role::bass, "a name with no role word leaves ROLE as it is");
+        check (ui::hasNote (editor.notes(), "AUTO ROLE found no role word in the track name \"Track 1\"", ui::Severity::info), "... and the strip says so");
+
+        q.engine.setTrackName ("Kick_01");
+        editor.autoRole();
+        check (! ui::hasNote (editor.notes(), "AUTO ROLE found no role word", ui::Severity::info), "a match after a miss clears the note");
+
+        q.engine.setTrackName ("");
+        editor.autoRole();
+        check (ui::hasNote (editor.notes(), "the host gave this track no name", ui::Severity::info), "a track with no name is said to have none");
+    }
+
     return test::finish ("UI CHECK");
 }

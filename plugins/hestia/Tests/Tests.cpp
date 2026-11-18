@@ -5,7 +5,9 @@
 
 #include "Check.h"
 #include "DSP/Engine.h"
+#include "RoleGuess.h"
 #include <cstring>
+#include <optional>
 #include <functional>
 #include <vector>
 
@@ -755,6 +757,49 @@ int main()
         check (! mate.engine.broadcastPending(), "... once");
         check (! sender.engine.broadcastPending() && ! stranger.engine.broadcastPending() && ! later.engine.broadcastPending(),
                "the sender, a stem of another mix and an instance made after the copy are not");
+    }
+
+    // ---- [14] AUTO ROLE: the role a track's name suggests ----------------------------------------------------------------------------------------
+    std::printf ("[14] AUTO ROLE: the role the track's name suggests\n");
+    {
+        const auto expect = [] (const char* name, std::optional<Role> want) {
+            const auto got = roleFromName (name);
+            const bool same = got.has_value() == want.has_value() && (! got || *got == *want);
+            check (same, fmt ("\"%s\" -> %s", name, got ? roleName (*got) : "no role"));
+        };
+        expect ("Kick_01", Role::kick);
+        expect ("KICK", Role::kick);
+        expect ("kick-01", Role::kick);
+        expect ("01_Kick", Role::kick);
+        expect ("KD", Role::kick);
+        expect ("Bass DI", Role::bass);
+        expect ("Sub 808", Role::bass);
+        expect ("Bass Drum", Role::kick);
+        expect ("Lead Vox", Role::leadVocal);
+        expect ("LEAD VOX dbl", Role::leadVocal);
+        expect ("LeadVox", Role::leadVocal);
+        expect ("BV 2", Role::backVocal);
+        expect ("Vox BV", Role::backVocal);
+        expect ("Back Vox", Role::backVocal);
+        expect ("Gtr Rhythm", Role::guitar);
+        expect ("Hi-Hat", Role::cymbals);
+        expect ("Snare Top", Role::drums);
+        expect ("Keys", Role::keys);
+        expect ("Piano L", Role::keys);
+        expect ("Pad", Role::pad);
+        expect ("Synth Pad", Role::pad);
+        expect ("Synth", Role::leadSynth);
+        expect ("Strings", Role::strings);
+        expect ("FX Riser", Role::fx);
+        expect ("Master", Role::fullRange);
+        expect ("Kick Drum", Role::kick);
+        expect ("Track 1", std::nullopt);
+        expect ("Audio 03", std::nullopt);
+        expect ("Bassoon", std::nullopt);
+        expect ("Kickstart", std::nullopt);
+        expect ("Lead", std::nullopt);
+        expect ("Backing", std::nullopt);
+        expect ("", std::nullopt);
     }
 
     return test::finish ("HestiaTests");

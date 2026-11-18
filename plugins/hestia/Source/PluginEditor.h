@@ -26,7 +26,7 @@ public:
     ui::Choice roleBox, mixBox, scRoleBox;
     ui::Knob importance, distance, carve, reach, attack, release, outKnob, scImportance;
     ui::Toggle holdButton;
-    juce::TextButton deltaButton { "DELTA" }, copyButton { "COPY TO MIX" };
+    juce::TextButton deltaButton { "DELTA" }, copyButton { "COPY TO MIX" }, autoRoleControl { "AUTO ROLE" };
     ui::PresetBox presetBox;
     ui::GuideButton guideButton { hestia::guideTitle(), hestia::guideText() };
     hestia::gui::SpaceView view;
@@ -36,6 +36,8 @@ public:
     ui::AbButtons& abControls() noexcept { return abButtons; }
     juce::TextButton& guide() noexcept { return guideButton; }
     void copyToMix(); // what the COPY TO MIX button does (the checks call it too)
+    void autoRole();  // AUTO ROLE: ROLE from the track's name, one UNDO step; says so when the name has no role word
+    juce::TextButton& autoRoleButton() noexcept { return autoRoleControl; }
     std::vector<ui::Note> notes() const { return hestia::adviceFor (adviceInput()); } // what the strip under the knobs says, for the checks
 
 private:
@@ -48,6 +50,7 @@ private:
     juce::Rectangle<int> nameplate, presetLabel, roleLabel, mixLabel, scPanel, scLabel, knobPanel, noteStrip;
     float inLevel = 0.0f;
     int sentTo = -1, sentTicks = 0; // what COPY TO MIX did last, shown in the strip for a few seconds
+    bool autoRoleMissed = false;    // the last AUTO ROLE found no role word in the track's name
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HestiaEditor)
 };
