@@ -211,7 +211,7 @@ public:
             const auto& item = advice.items[static_cast<size_t> (row)];
             juce::SystemClipboard::copyTextToClipboard (gui::linkText (item.moves, nullptr, item.limiter, item.width));
             if (onCopied)
-                onCopied ("Copied: paste it in " + gui::linkDestination (item.moves, item.limiter, item.width) + " (PASTE on its " + (item.moves.empty() ? "panel)." : "band panel)."));
+                onCopied (copyStatus (item));
             return;
         }
         if (row < 0 || !advice.items[static_cast<size_t> (row)].hear.active())
@@ -254,7 +254,9 @@ public:
         const auto& item = advice.items[static_cast<size_t> (hoverRow)];
         if (hoverCopy)
             return juce::String (item.moves.empty() ? "Copy the limiter setting that makes this change" : "Copy the band(s) that make this change") + ", to paste in "
-                   + gui::linkDestination (item.moves, item.limiter, item.width) + ". The amounts come from the measurement; judge the result by ear (SNAP first, to compare before and after).";
+                   + gui::linkDestination (item.moves, item.limiter, item.width) + ". "
+                   + (item.width.active() ? "A width item hands the same cut twice: paste it in Iris or Apollo or in Castor, one of them, not both. " : juce::String())
+                   + "The amounts come from the measurement; judge the result by ear (SNAP first, to compare before and after).";
         juce::String text = juce::String (item.headline) + "\n\n" + juce::String (item.why);
         if (item.hear.active())
             text += "\n\nClick to hear it: solo " + juce::String (themis::soloText (item.hear)) + ". Click again to release.";
@@ -266,8 +268,19 @@ private:
     themis::plan::Verdict verdictNow = themis::plan::Verdict::measuring;
     static constexpr int kRowHeight = 58, kMoreHeight = 14, kChipWidth = 40;
     static constexpr int kLevelWordWidth = 40; // the level word at the end of a headline's first line (gui::levelMark)
-    // What the chips of a row do, in one line under the title (COPY reaches Iris and Apollo for equaliser bands, Hephaestus for a fill band, Aegis for a limiter).
-    static constexpr const char* kLegend = "HEAR: solo only this problem. COPY: send the fix to Iris, Apollo, Hephaestus or Aegis. SNAP: remember the plan to compare later.";
+    // What the chips of a row do, in one line under the title (COPY reaches Iris and Apollo for equaliser bands, Hephaestus for a fill band,
+    // Aegis for a limiter and Castor for a width line).
+    static constexpr const char* kLegend = "HEAR: solo only this problem. COPY: send to Iris, Apollo, Hephaestus, Aegis or Castor. SNAP: remember the plan to compare later.";
+
+    // The status line after COPY. A width item hands the same cut twice (a side bell for Iris or Apollo, a width line for Castor),
+    // so the status says to paste one of them, not both.
+    static juce::String copyStatus (const themis::Advice& item)
+    {
+        if (item.width.active())
+            return "Copied: paste it in Iris or Apollo (a side bell) OR in Castor (its header PASTE), one of them, not both: each cuts the same side.";
+        return "Copied: paste it in " + gui::linkDestination (item.moves, item.limiter, item.width) + " (PASTE on its "
+               + (item.moves.empty() ? "panel)." : "band panel).");
+    }
 
     int visibleRows() const
     {
