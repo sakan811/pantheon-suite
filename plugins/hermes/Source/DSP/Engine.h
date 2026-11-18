@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Loudness.h"
+#include <array>
 #include <atomic>
 #include <pantheon/dsp/TruePeak.h>
 #include <vector>
@@ -19,7 +20,11 @@ inline constexpr float kMaxTrimDb = 24.0f;
 inline constexpr double kMatchLimitDb = 24.0;
 inline constexpr double kCrossfadeMs = 20.0;
 inline constexpr int kTick = 64;
-constexpr double kAutoTrimLufs = -14.0; // what AUTO TRIM brings the integrated loudness to: the level streaming services play at
+// What AUTO TRIM brings the integrated loudness to, by the choice of its parameter (the index): -14 for streaming (what the streaming services play at),
+// -16 for a stereo podcast and -19 for a mono one (the podcast figures), -23 for broadcast (EBU R128). The README has the sources.
+inline constexpr std::array<double, 4> kAutoTrimTargets { -14.0, -16.0, -19.0, -23.0 };
+// The true-peak ceiling of AUTO TRIM's peak option: -1 dBTP, what the streaming and podcast specs and EBU R128 ask.
+inline constexpr double kAutoTrimPeakDb = -1.0;
 
 struct EngineParams
 {
@@ -30,6 +35,8 @@ struct EngineParams
     bool levelMatch = true;     // bring the reference to the loudness of the sound
     float referenceTrimDb = 0.0f;
     bool resetOnPlay = false;   // read by the processor, not the engine: clear the meters when the host starts playing
+    int autoTarget = 0;         // read by AUTO TRIM only (an index of kAutoTrimTargets)
+    bool autoPeak = false;      // read by AUTO TRIM only: stop at the true-peak ceiling if that comes first
 };
 
 // A track to compare with: decoded and brought to the sample rate of the session by whoever loads it (the editor's thread), its loudness measured by the same meter.
@@ -52,11 +59,30 @@ inline double measureIntegrated (const std::vector<float>& l, const std::vector<
 
 // The trim that brings the integrated loudness (read after the current trim) to the target: `trimDb + target - integrated`, within the trim's range.
 // Nothing measured yet (under the absolute gate): the trim as it is.
-inline float autoTrimDb (float trimDb, double integratedLufs, double targetLufs = kAutoTrimLufs) noexcept
+// The trim AUTO TRIM sets. The loudness gain is `target - integrated` (both read after the current trim). With the peak option it is the smaller of that and the
+// headroom to the ceiling, `ceiling - truePeak`, so a quiet sound with a high crest stops at the ceiling and says so (`peakLimited`). Nothing read yet: the trim as it is.
+struct AutoTrim
+{
+    float trimDb;
+    bool peakLimited;
+};
+inline AutoTrim autoTrim (float trimDb, double integratedLufs, double targetLufs, double truePeakDb, bool peakOption, double ceilingDb = kAutoTrimPeakDb) noexcept
 {
     if (! (integratedLufs > kAbsoluteGateLufs))
-        return trimDb;
-    return (float) std::clamp ((double) trimDb + targetLufs - integratedLufs, (double) -kMaxTrimDb, (double) kMaxTrimDb);
+        return { trimDb, false };
+    double gain = targetLufs - integratedLufs;
+    bool peakLimited = false;
+    if (peakOption && truePeakDb > -150.0 && ceilingDb - truePeakDb < gain)
+    {
+        gain = ceilingDb - truePeakDb;
+        peakLimited = true;
+    }
+    return { (float) std::clamp ((double) trimDb + gain, (double) -kMaxTrimDb, (double) kMaxTrimDb), peakLimited };
+}
+
+inline float autoTrimDb (float trimDb, double integratedLufs, double targetLufs = kAutoTrimTargets[0]) noexcept
+{
+    return autoTrim (trimDb, integratedLufs, targetLufs, -200.0, false).trimDb;
 }
 
 class Engine

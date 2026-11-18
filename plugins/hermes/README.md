@@ -10,17 +10,17 @@ It changes nothing but the level and what you listen to.
 
 ![Hermes Level](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary, short-term and integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. At the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit). The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary, short-term and integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. Under the readings, AUTO TRIM is set to its -14 streaming target with the -1 dBTP ceiling off. At the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit). The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
 
 ## What it does
 
 | | |
 |---|---|
-| **Trim** | -24 to +24 dB, 0 by default; **Polarity** inverts both channels. The meters read the sound after them. **AUTO TRIM** sets TRIM once, so that the integrated loudness reads -14 LUFS (it adds `-14 - integrated` to the current trim, within the range; nothing happens before the meter has read anything). |
+| **Trim** | -24 to +24 dB, 0 by default; **Polarity** inverts both channels. The meters read the sound after them. **AUTO TRIM** sets TRIM once, so that the integrated loudness reads the target chosen by **AUTO TRIM TO**: -14 (streaming), -16 (stereo podcast), -19 (mono podcast) or -23 LUFS (broadcast). It adds `target - integrated` to the current trim, within the range; nothing happens before the meter has read anything. With **-1 dBTP** on, it takes the smaller of that and the headroom to a true peak of -1 dBTP, and a note says when the peak is what stopped it. The targets are the figures of the sources in "Delivery targets" below. The choice and the ceiling are saved with the session and are not part of a preset. |
 | **Listen** | *Stereo* (as it is), *Mono* (`(L + R) / 2` in both: what a mono speaker plays), *Left* and *Right* (one channel in both), *Side* (`(L - R) / 2` in both: what differs between the channels), *Swap*. A check: the meters still read the whole sound. |
 | **Meters** | **Momentary** (400 ms) and **short-term** (3 s) loudness in LUFS; **integrated** loudness (gated, since RESET); **range** in LU; the **true peak** in dBTP and the sample peak in dBFS; and a graph of the last minute. **RESET** clears the integrated loudness, the range and the peaks; **AUTO RESET** (off by default, saved with the session) does it each time the host starts playing. |
 | **Reference** | **LOAD** a track (WAV, AIFF, FLAC, OGG, MP3 where the system can read it; at most 10 minutes, kept in memory), **REF (B)** to hear it instead of your sound (A) with a 20 ms crossfade, **LEVEL MATCH** to bring it to the integrated loudness of your sound, **REF TRIM** (+-12 dB) to add to that, **RESTART**, and a click or drag on the progress bar to play from there. It loops, and plays on while you listen to A. The file's path is kept in the session. |
-| **Presets** | Eight listening setups (Normal, Mono Check, Side Only, Left Only, Right Only, Swap Check, Reference A/B, Reference As Is). A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY, REF TRIM and AUTO RESET are kept. LISTEN and REF are saved with the session: choose Normal before a bounce. |
+| **Presets** | Eight listening setups (Normal, Mono Check, Side Only, Left Only, Right Only, Swap Check, Reference A/B, Reference As Is). A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY, REF TRIM, AUTO RESET and the AUTO TRIM settings are kept. LISTEN and REF are saved with the session: choose Normal before a bounce. |
 | **Undo and A/B** | **UNDO / REDO** (Cmd+Z and Shift+Cmd+Z; Ctrl+Z and Ctrl+Y on other systems; while the editor has the keyboard focus) take back changes to the controls one step at a time: a change to a control, AUTO TRIM and a preset load are one step each, while loading a reference file is not. **A / B** holds two complete settings, keeping TRIM, POLARITY, REF TRIM and AUTO RESET as presets do: choosing B the first time copies A, and each switch after that keeps what you have set in the one you leave and loads the other, as one undo step; only the active slot is saved in the session, not the two settings (a reopened session's other slot starts empty). |
 
 ## How it works
@@ -33,6 +33,14 @@ It changes nothing but the level and what you listen to.
 5. **The reference** is decoded whole, brought to the session's sample rate (Lagrange interpolation), made stereo if it is mono, and its integrated loudness measured by the same meter. LEVEL MATCH reads the sound's integrated
    loudness every 64 samples and sets the reference's gain to `sound - reference` (at most 24 dB), smoothed over 5 ms.
 
+## Delivery targets
+
+The targets AUTO TRIM offers, with the figures they follow (checked in 2026; a specification changes, so check the current one before a delivery):
+
+- **-14 LUFS (streaming):** the playback level of the large streaming services, with a true peak of -1 dBTP advised, lower for very loud masters ([Spotify loudness normalisation](https://support.spotify.com/ca-en/artists/article/loudness-normalization/)).
+- **-16 LKFS (stereo podcast), ±1 dB, true peak -1 dBFS:** Apple's podcast audio requirements ([Apple Podcasts audio requirements](https://podcasters.apple.com/support/audio-requirements)). **-19 LKFS (mono podcast)** is the common figure for a mono programme, from third-party guidance, not from that page ([Auphonic](https://auphonic.com/blog/2020/06/09/loudness-normalization-mono-productions/)).
+- **-23 LUFS (broadcast), ±0.5 LU, true peak -1 dBTP:** EBU R128 and its measurement by ITU-R BS.1770 ([EBU R 128](https://tech-qual.ebu.ch/files/live/sites/tech/files/shared/r/r128v5_0.pdf)). ATSC A/85 (-24 LKFS, a true peak of -2 dBTP, for US television) is not offered.
+
 ## Measured (`HermesTests`, 48 kHz)
 
 - A stereo 1 kHz sine at -23 dBFS reads -23.04 LUFS integrated, momentary and short-term (EBU Tech 3341: -23.0 +-0.1); the same within 0.038 LU at 44.1, 88.2, 96 and 192 kHz.
@@ -44,11 +52,12 @@ It changes nothing but the level and what you listen to.
 - TRIM +6 dB is +6.00 dB; POLARITY, MONO, LEFT, RIGHT, SIDE and SWAP are exact (the formulas above, bit for bit); with nothing set the output is the input, bit for bit, with no delay.
 - The reference: a -14 dBFS sine reads -14.04 LUFS; with LEVEL MATCH the reference and a -26.7 LUFS sound are heard at the same loudness (the reference brought -12.7 dB); without it the reference is heard as it is (-14.04 LUFS);
   REF TRIM +3 dB adds exactly +3.00 dB. Switching A and B four times in a tone gives no step over what the tone has (0.0131 against 0.0131): a crossfade, no click.
-- AUTO TRIM: a -26.7 LUFS sound trimmed by it and played again reads -14.00 LUFS. Seeking to 50% of the reference puts it at 0.500 of the track, and a shorter reference swapped in while the position is past its end plays from inside it.
+- AUTO TRIM: a -26.7 LUFS sound trimmed by it and played again reads -14.00 LUFS. With the -1 dBTP ceiling, a -20 LUFS sound whose true peak is -6 dBTP gets +5 dB, not +6: the peak is what stops it. Twenty seconds of clicks at -6 dBFS (every 100 ms) read -36.73 LUFS, and with the ceiling on, AUTO TRIM sets +5.0 dB, and the true peak reads -1.00 dBTP after it. Each target is a plain loudness gain (`-19` is +1 dB from -20 LUFS, `-23` is -3 dB). Seeking to 50% of the reference puts it at 0.500 of the track, and a shorter reference swapped in while the position is past its end plays from inside it.
 - The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit, with a reference playing. NaN and infinity in the input are silence.
 
 ## Limits
 
+- **AUTO TRIM with the -1 dBTP ceiling can stop short of its target**: it then sets the headroom and the strip says so ("AUTO TRIM stopped at the -1 dBTP ceiling"); it is a sound with peaks well above its loudness, not a louder master. Use Aegis to get the loudness and the peak together.
 - **The meters are not a limiter.** They say what to do (the true peak over -1 dBTP, the loudness over -9 LUFS); they do not do it. Use Aegis for the peak.
 - **The integrated loudness needs time**, and LEVEL MATCH needs the integrated loudness: until the meter has read a few seconds of sound there is nothing to match to (the reference is then heard as it is).
   Press RESET at the start of a new passage.

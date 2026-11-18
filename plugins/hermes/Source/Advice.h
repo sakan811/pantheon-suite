@@ -19,6 +19,7 @@ struct AdviceInput
     double integratedLufs = -200.0;
     double truePeakDb = -200.0;
     double rangeLu = 0.0;
+    bool autoTrimPeakLimited = false; // the last AUTO TRIM stopped at the peak ceiling, and TRIM is still where it set it
 };
 
 constexpr double kLoudTargetLufs = -9.0;      // above this a master is louder than any streaming service plays it
@@ -48,6 +49,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         info ("Under -24 LUFS integrated: quiet for a finished master (broadcast is -23, streaming about -14).");
     if (in.rangeLu > 0.0 && in.rangeLu < 3.0)
         info ("A loudness range under 3 LU is very flat: heavily compressed, or a single steady sound.");
+    if (in.autoTrimPeakLimited)
+        info ("AUTO TRIM stopped at the -1 dBTP ceiling, short of its loudness target: the true peak would be over it.");
     if (p.levelMatch && in.referenceLoaded)
         info ("LEVEL MATCH brings the reference to your sound's integrated loudness: let the meter run a while first.");
     return ui::ordered (std::move (notes));
@@ -60,7 +63,7 @@ inline const char* guideText()
     return "FOR\n"
            "Gain staging and checking: TRIM sets the level (and POLARITY the sign), LISTEN checks the sound in mono, one channel, the sides only, or with the channels swapped. "
            "The meters read BS.1770 / EBU R128 loudness: MOMENTARY (400 ms), SHORT-TERM (3 s), INTEGRATED (gated, since RESET) and the loudness range, and the true peak "
-           "(the peaks between the samples, in dBTP). AUTO TRIM sets TRIM so the integrated loudness reads -14 LUFS (play the passage first); AUTO RESET starts the meters again whenever the host starts playing. "
+           "(the peaks between the samples, in dBTP). AUTO TRIM sets TRIM so the integrated loudness reads the target you choose (-14 LUFS for streaming; play the passage first), and can stop at the -1 dBTP peak ceiling; AUTO RESET starts the meters again whenever the host starts playing. "
            "UNDO / REDO take back changes to the controls (Cmd+Z, Shift+Cmd+Z; Ctrl+Z, Ctrl+Y on other systems), and A / B holds two settings to switch between while you listen.\n\n"
            "REFERENCE\n"
            "LOAD a finished track and press REF to hear it instead of yours; with LEVEL MATCH it is brought to the loudness of your sound, so you compare the tone and not the level. "
