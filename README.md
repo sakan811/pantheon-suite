@@ -19,11 +19,12 @@ under the AGPL-3.0-or-later. It holds source only: no binaries or downloads.
 | [Nemesis Hush](plugins/nemesis/README.md) | A de-esser: a band detector, split-band or wideband, absolute or relative detection, and a listen switch to find the s. |
 | [Themis Verdict](plugins/themis/README.md) | A mastering check suite: tonal balance, translation, phase, clipping, loudness and a plan of what to do next. |
 
-There is also one standalone app:
+There are also two standalone apps:
 
 | App | What it is |
 |---|---|
 | [Orpheus Pitch Editor](apps/orpheus/README.md) | An offline pitch editor for solo vocals: the notes of a recording on a piano roll, drag them or correct them to a scale, export the result. |
+| [Olympus Session Host](apps/olympus/README.md) | Hosts the suite's plugins: the stems of a song, a chain of plugins on each, saved as a project and rendered back as stems; with an MCP server so an agent can place the chains. |
 
 [shared/ui](shared/ui) holds the hardware-style interface kit (metal faceplates, glass displays, lamps, knobs) that all the
 plugins and the app draw with, and [shared/dsp](shared/dsp) the DSP more than one of them uses (biquads, the spectrum analyzer, the true-peak reader). The rules for working across plugins, and what is not yet in line, are in [CLAUDE.md](CLAUDE.md).
@@ -33,5 +34,5 @@ or click its read-out and type a value (Enter applies it, Esc cancels). A number
 `-3 dB`, `0.5 s`); a switch takes the name of a position, or enough of it to tell it apart (`inf` for Infinite).
 
 Each plugin keeps its own README, build commands and
-contributor rules in `plugins/<name>/` (the app, in `apps/orpheus/`); this file only lists what is in the repository. CI lives in
+contributor rules in `plugins/<name>/` (the apps, in `apps/orpheus/` and `apps/olympus/`); this file only lists what is in the repository. CI lives in
 [.github/](.github) and runs per plugin.

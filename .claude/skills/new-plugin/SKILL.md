@@ -19,7 +19,7 @@ Make plugin `$ARGUMENTS`. The seven newest plugins were all made this way; the r
    version. `<NAME>_INSTALL_AFTER_BUILD` is an option that defaults to OFF. No other company's product is named in the UI or in source comments. The engine allocates nothing in `process()`, replaces NaN and
    infinity by 0, and is bit-exact when it does nothing. Every number in the README is measured by a test.
 5. **Outside the folder.** Copy `.github/workflows/nemesis.yml` to `<name>.yml` and rename only the names and paths (leave the pinned action SHAs alone). Add the plugin to the lists it belongs in: the root
-   `README.md`, `NOTICE.md` where it lists plugins, and the root `CLAUDE.md` (the shared/ui list, the CI paragraph, any `shared/dsp` consumer list). `grep -rIl Nemesis --exclude-dir=build --exclude-dir=third_party .`
+   `README.md`, `NOTICE.md` where it lists plugins, `suiteNames()` in `apps/olympus/Source/Catalog.h` (the session host only loads the plugins named there; its test fails until you add the product name), and the root `CLAUDE.md` (the shared/ui list, the CI paragraph, any `shared/dsp` consumer list). `grep -rIl Nemesis --exclude-dir=build --exclude-dir=third_party .`
    shows every place a plugin is named.
 6. **Check.** `scripts/build.sh <name> check snap`, then look at `docs/screenshot.png` (the plugin's CLAUDE.md says a UI change is not done until you have) and embed it in the README after "Name origin" with a caption that says what it shows (the root CLAUDE.md's "Documentation shows the plugin"). For the AU, VST3 and `auval`, use the
    `install-and-validate` skill.

@@ -10,7 +10,7 @@ The same rule as in the plugins applies here: every fact lives in one place, the
 shared/ui/       the hardware-style interface kit (JUCE GUI only, header-only), target `pantheon_ui`
 shared/dsp/      DSP that more than one plugin uses (header-only, namespace `pdsp`), target `pantheon_dsp`
 plugins/<name>/  one self-contained plugin each: its own CMakeLists.txt, core/, tests, README, CLAUDE.md
-apps/<name>/     one self-contained standalone application each (no plugin formats, no host): the same files as a plugin; today Orpheus, the pitch editor
+apps/<name>/     one self-contained standalone application each (no plugin formats of its own): the same files as a plugin; today Orpheus, the pitch editor, and Olympus, the session host
 .github/         CI for the whole repository (workflows run per plugin with `working-directory`)
 ```
 
@@ -18,6 +18,9 @@ apps/<name>/     one self-contained standalone application each (no plugin forma
   of them need the same code, it moves to `shared/` first and both use it from there.
 - `shared/` knows nothing about any plugin: no plugin types, parameters, verdicts or words in it. What a plugin adds on top
   (its name, its number formats, its verdict colours) lives in that plugin; Themis' is `plugin/Source/ThemisUi.h`.
+- **An app may host the suite's built plugins, at run time only.** Olympus loads the `.vst3` bundles of `plugins/` by their file name and links none of their code, so the compile-time rule above stands (no CMake dependency on a
+  plugin) and a plugin is never changed for the app. Hosting is limited to the suite's own plugins (`suiteNames()` in `apps/olympus/Source/Catalog.h`, which a test compares with the plugins' product names, so a new plugin must be added there);
+  an app that loads anyone else's plugin needs a decision first (licence review: see apps/olympus/README.md "Where it finds the plugins").
 - A plugin or app builds from its own folder with the commands in its README (`cmake -S . -B build` there); it pulls `shared/` in
   by relative path. There is no root CMake project: each plugin fetches its own JUCE, all at the one version in [cmake/Juce.cmake](cmake/Juce.cmake)
   (see below).
@@ -64,7 +67,7 @@ code-checker ┘   (edits)   (the diff)      (completeness)     (only on request
 
 ## shared/ui
 
-- All the plugins and apps draw with it (Themis, Hephaestus, Harmonia, Iris, Atlas, Hestia, Aegis, Apollo, Hera, Castor, Nemesis, Dionysus, Hermes, Orpheus); nothing in one draws its own panel, lamp, knob, button,
+- All the plugins and apps draw with it (Themis, Hephaestus, Harmonia, Iris, Atlas, Hestia, Aegis, Apollo, Hera, Castor, Nemesis, Dionysus, Hermes, Orpheus, Olympus); nothing in one draws its own panel, lamp, knob, button,
   selector or nameplate. What a plugin adds on top is small and lives in it (`ThemisUi.h`, `HephaestusUi.h`, `HarmoniaUi.h`, `IrisUi.h`, `AtlasUi.h`, `HestiaUi.h`, `AegisUi.h`, `ApolloUi.h`, `HeraUi.h`, `CastorUi.h`, `NemesisUi.h`, `DionysusUi.h`, `HermesUi.h`: its
   words, its verdict, mode or placement colours). A plugin's own namespaces must not be called `ui`, which is the kit's.
 - It owns every pixel of the interface: [Hardware.h](shared/ui/include/pantheon/ui/Hardware.h) (`colours::`, fonts, `ui::hw`
@@ -132,7 +135,7 @@ Delete an item here when it is done; this list is the only place that says what 
 
 - **Installing on build.** Both set `COPY_PLUGIN_AFTER_BUILD TRUE` unconditionally, so building a plugin target copies it into
   `~/Library/Audio/Plug-Ins`. Themis makes this an option (`THEMIS_INSTALL_AFTER_BUILD`), which CI relies on.
-- **CI** builds and tests Themis (macOS and Linux), runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)), and the tests, the editor check and the VST3 build on Linux for Atlas ([atlas.yml](.github/workflows/atlas.yml)), Hestia ([hestia.yml](.github/workflows/hestia.yml)), Aegis, Apollo, Hera, Castor, Nemesis, Dionysus and Hermes (one workflow each, named after the plugin) and Orpheus ([orpheus.yml](.github/workflows/orpheus.yml)). Iris, Atlas, Hestia, the seven newest plugins and Orpheus have no macOS job yet (universal binary, AU and `auval` for the plugins); only Iris and Hephaestus have a `HostCheck` (Hephaestus' is in no workflow); Atlas, Hestia and the seven newest were built on macOS by hand on 2026-11-13 (VST3 and AU) and `auval -v` passes for the nine AUs, which no workflow repeats; the workflows of Atlas, Hestia, Orpheus and the seven newest have not run yet (their checks were run by hand on Linux: tests, editor check, VST3 build and screenshot); and Hephaestus and Harmonia are in no workflow.
+- **CI** builds and tests Themis (macOS and Linux), runs Iris' `IrisTests`, `IrisUiCheck` and `IrisHostCheck` on Linux ([iris.yml](.github/workflows/iris.yml)), and the tests, the editor check and the VST3 build on Linux for Atlas ([atlas.yml](.github/workflows/atlas.yml)), Hestia ([hestia.yml](.github/workflows/hestia.yml)), Aegis, Apollo, Hera, Castor, Nemesis, Dionysus and Hermes (one workflow each, named after the plugin) Orpheus ([orpheus.yml](.github/workflows/orpheus.yml)) and Olympus ([olympus.yml](.github/workflows/olympus.yml); tests, window check, the app and the MCP server, no real plugin). Iris, Atlas, Hestia, the seven newest plugins, Orpheus and Olympus have no macOS job yet (universal binary, AU and `auval` for the plugins); only Iris and Hephaestus have a `HostCheck` (Hephaestus' is in no workflow); Atlas, Hestia and the seven newest were built on macOS by hand on 2026-11-13 (VST3 and AU) and `auval -v` passes for the nine AUs, which no workflow repeats; the workflows of Atlas, Hestia, Orpheus, Olympus and the seven newest have not run yet (their checks were run by hand on Linux: tests, editor check, VST3 build and screenshot); and Hephaestus and Harmonia are in no workflow.
 - **Presets in Atlas, Hephaestus and Iris are their own code** (a list, `applyPreset`, the program methods and a combo box each, written before `shared/ui/.../Presets.h` existed); the eight plugins that came after use the kit's. Move them onto it when one of the three is next touched.
 - **The spectrogram and its finder in Iris and Themis.** `ui::Spectrogram` and `pdsp::IssueFinder` are in `shared/` for all three, but only Atlas uses them. Iris still has its own
   `ResonanceFinder` (the same idea as the finder's peaks, on its own grid) and no spectrogram or JUMPS markers; Themis has its own spectrogram (`core/.../Spectrogram.h`, `HistoryViews.h`, on its `BandGrid`) with no markers.
