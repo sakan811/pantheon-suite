@@ -10,7 +10,7 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 
 ![Nemesis Hush](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB and RELEASE 40 ms. LISTEN, DELTA and FIND (dimmed: LISTEN is off) are under the selectors; UNDO / REDO sit in the header's top strip, above the labels: UNDO is lit and REDO dimmed, as after a change; SET THRESH is in the header, beside LOOK-AHEAD. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-1.2 dB now) and rests at 0 between them. Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB, RATIO Inf (the knob between RANGE and RELEASE, here at its default: the law as it was) and RELEASE 40 ms. LISTEN, DELTA and FIND (dimmed: LISTEN is off) are under the selectors; UNDO / REDO sit in the header's top strip, above the labels: UNDO is lit and REDO dimmed, as after a change; SET THRESH is in the header, beside LOOK-AHEAD. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-2.0 dB at the moment of the render) and rests at 0 between them. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -20,6 +20,7 @@ quiet and loud passages, and can play you the band it listens to, so you can fin
 | **Width** | Q 0.5 to 5, 1.5 by default: how wide the band is (higher is narrower). |
 | **Thresh** | -60 to 0 dB, -30 by default. *Absolute:* the level of the band (peak of a sine, dBFS) above which it is turned down. *Relative:* how far under the whole sound the band may be. |
 | **Range** | 0 to 24 dB, 8 by default: the most it takes off. |
+| **Ratio** | 1:1 to Inf, Inf by default. Above THRESH each dB over it takes off `1 - 1/ratio` dB: 4:1 takes off 0.75 dB per dB over, a gentler reduction than the band held at THRESH (Giannoulis, Massberg and Reiss, JAES 2012). Inf holds the band at THRESH, the de-esser as it was before RATIO. |
 | **Release** | 5 to 300 ms, 40 by default. The attack is fixed at 0.3 ms. |
 | **Mode** | *Split-band:* only the band is turned down (the rest of the voice is not touched). *Wideband:* the whole sound is turned down. |
 | **Detection** | *Absolute* or *Relative* (see Thresh). |
@@ -38,13 +39,14 @@ The display shows the response of the band the detector hears and the reduction 
 1. **Detect.** Each channel goes through a constant-0-dB band-pass at FREQ and WIDTH (an RBJ biquad). Its peak envelope takes a peak at once and lets it fall over 2 ms (so the gain does not ripple
    with the waveform); the louder channel decides, so both channels get one gain and the image does not move.
 2. **Level.** *Absolute:* the envelope in dB. *Relative:* the envelope in dB minus the level of the whole sound (a 30 ms mean square, read as the peak of a sine).
-3. **Reduction.** Infinite ratio: it holds the band at the threshold, with a 6 dB soft knee, up to RANGE. A one-pole follower (0.3 ms attack, RELEASE) smooths it; at rest (under 0.001 dB with nothing to reduce) it is let go to exactly 0.
+3. **Reduction.** The overshoot over THRESH is multiplied by the slope `1 - 1/ratio` (RATIO), with a 6 dB soft knee of the same slope, up to RANGE. At Inf the slope is exactly 1: the band is held at the threshold, as the first release did. A one-pole follower (0.3 ms attack, RELEASE) smooths it; at rest (under 0.001 dB with nothing to reduce) it is let go to exactly 0.
 4. **Apply.** *Split-band:* `output = input - (1 - gain) x band`, so the band is turned down by the gain and the rest is not touched, and with a gain of exactly 1 the output is exactly the input. *Wideband:* `input x gain`.
    LISTEN outputs the band.
 
 ## Measured (`NemesisTests`, 48 kHz)
 
 - A sibilant (a 6.5 kHz tone) at -20 dBFS over a -30 dB threshold is turned down by 9.95 dB (the law: 10, it holds the band at the threshold); RANGE 6 dB stops the reduction at 6.00 dB.
+- RATIO: `reductionDb` of 10 dB over with slope 0.5 (2:1) is 5.00 dB, and with slope 1 (Inf) it is 10.00 dB. A sibilant 10 dB over a -30 dB threshold at 2:1 settles at 4.98 dB of reduction (the law: 5). At Inf the output is the default's, bit for bit, in split-band (the sibilant -12.0 dB) and in wideband (-11.9 dB), on noise with sibilant bursts.
 - Split-band: with a vowel (300 Hz, -12 dBFS) and a sibilant (6.5 kHz, -16 dBFS) the vowel changes by -0.00 dB and the sibilant by -12.0 dB (RANGE 12). Wideband: both by -12.0 dB.
 - A tone at 1.5 kHz as loud as the sibilant is not touched (-0.000 dB): the detector listens to the band.
 - DELTA: the output plus DELTA is the input to 1e-8 in split-band and wideband (the delta reaches 0.19 and 0.26 for a -12 dBFS sibilant); with nothing turned down it is exactly silent.

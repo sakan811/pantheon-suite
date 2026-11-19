@@ -16,7 +16,8 @@ constexpr int headerHeight = 84;
 constexpr int cellWidth = 112;
 constexpr int cellHeight = 108;
 constexpr int kTimerHz = 30;
-constexpr int kWidth = 864, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
+// Six knobs and the mode column need 938 px of the 944 inside the margins: 968 is the first multiple of 8 that holds them (the display takes the height).
+constexpr int kWidth = 968, kHeight = ui::editorHeightFor (kWidth); // 16:10, the kit's shape
 constexpr int displayHeight = kHeight - (headerHeight + 10 + 8 + cellHeight + 8 + ui::kNoteStripHeight + 12); // the display takes what the rest leaves
 }
 
@@ -26,6 +27,8 @@ NemesisEditor::NemesisEditor (NemesisProcessor& p)
       width (p.apvts, id::q, "WIDTH", "How wide the band is (Q: higher is narrower). Narrow takes only the hiss; wide takes more of the voice with it.", ui::Knob::Layout::below),
       threshold (p.apvts, id::threshold, "THRESH", "ABSOLUTE: the level of the band above which it is turned down (dBFS). RELATIVE: how far under the whole sound the band may be before it is turned down.", ui::Knob::Layout::below),
       range (p.apvts, id::range, "RANGE", "The most it takes off. Under 10 dB sounds natural; more makes a lisp.", ui::Knob::Layout::below),
+      ratio (p.apvts, id::ratio, "RATIO", "The slope above THRESH: at 4:1 each dB over the threshold takes off 0.75 dB, a gentler reduction than the band held at THRESH. "
+                                          "Inf holds it there, as the de-esser did before RATIO.", ui::Knob::Layout::below),
       release (p.apvts, id::release, "RELEASE", "How fast the gain comes back after an s (63% of the way in this time). The attack is fixed at 0.3 ms.", ui::Knob::Layout::below),
       mode (p.apvts, id::mode, "SPLIT-BAND: only the band is turned down; the rest of the voice is not touched.\nWIDEBAND: the whole sound is turned down, as with a compressor."),
       detection (p.apvts, id::detection, "ABSOLUTE: THRESH is a level in dBFS: it has to be set for each recording.\nRELATIVE: the band is compared with the whole sound, so one setting works for quiet and loud passages."),
@@ -38,7 +41,7 @@ NemesisEditor::NemesisEditor (NemesisProcessor& p)
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &release, &mode, &detection, &lookahead, &presetBox, &listen, &delta, &findButton, &setThreshButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &freq, &width, &threshold, &range, &ratio, &release, &mode, &detection, &lookahead, &presetBox, &listen, &delta, &findButton, &setThreshButton, &guideButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     setThreshButton.setTooltip ("Listens to a second and a half of your sound and sets THRESH where its loudest few percent of the s begin: a starting point. FREQ is not moved; "
@@ -93,7 +96,7 @@ void NemesisEditor::resized()
     historyArea = display;
     bounds.removeFromTop (8);
     auto knobs = bounds.removeFromTop (cellHeight);
-    for (auto* k : { &freq, &width, &threshold, &range, &release })
+    for (auto* k : { &freq, &width, &threshold, &range, &ratio, &release })
         k->setBounds (knobs.removeFromLeft (cellWidth));
     knobs.removeFromLeft (14);
     auto column = knobs.withTrimmedTop (4);

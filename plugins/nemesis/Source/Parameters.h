@@ -12,7 +12,8 @@ namespace nemesis
 namespace id
 {
 inline const juce::String freq { "freq" }, q { "q" }, threshold { "thresh" }, range { "range" }, release { "release" }, mode { "mode" }, detection { "detect" }, listen { "listen" }, lookahead { "lookahead" },
-    delta { "delta" }; // version 3 (lookahead is 2): hear what is turned down, off
+    delta { "delta" }, // version 3 (lookahead is 2): hear what is turned down, off
+    ratio { "ratio" }; // version 4 (delta is 3): above the threshold, Inf (the law as it was)
 }
 
 inline const juce::StringArray modeNames { "Split-band", "Wideband" };
@@ -51,6 +52,11 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     // Added after the first release: version 2, so a session saved before it has no value and gets the default (Off, the plug-in as it was).
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames, d.lookahead));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::delta, 3 }, "Delta", d.delta));
+    // Added after DELTA: version 4, so a session saved before it gets Inf, the de-esser as it was.
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::ratio, 4 }, "Ratio", NormalisableRange<float> (1.0f, kInfiniteRatio, 0.1f), d.ratio,
+                                                         Attr()
+                                                             .withStringFromValueFunction ([] (float v, int) { return v >= kInfiniteRatio ? String ("Inf") : String (v, 1) + ":1"; })
+                                                             .withValueFromStringFunction ([] (const String& s) { return s.containsIgnoreCase ("inf") ? kInfiniteRatio : s.trim().getFloatValue(); })));
     return { p.begin(), p.end() };
 }
 
@@ -63,6 +69,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.q = v (id::q);
     e.thresholdDb = v (id::threshold);
     e.rangeDb = v (id::range);
+    e.ratio = std::clamp (v (id::ratio), 1.0f, kInfiniteRatio);
     e.releaseMs = v (id::release);
     e.mode = (Mode) std::clamp ((int) v (id::mode), 0, kNumModes - 1);
     e.detection = (Detection) std::clamp ((int) v (id::detection), 0, kNumDetections - 1);

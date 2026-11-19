@@ -491,5 +491,53 @@ int main()
         check (r.setCount.load() == 1 && r.setStatus.load() == (int) SetStatus::stopped && ! r.setting.load(), "a reset in the middle of the pass answers `stopped`");
     }
 
+    // [11] RATIO: each dB over the threshold takes off (1 - 1/ratio) dB; Inf (kInfiniteRatio) is the law as it was, bit for bit.
+    std::printf ("\n[11] Ratio\n");
+    {
+        const double law = reductionDb (10.0, 0.0, 24.0, 0.5);
+        check (std::fabs (law - 5.0) < 1e-12, fmt ("reductionDb (10 dB over, range 24, slope 0.5 = 2:1) = %.2f dB (the law: 5)", law));
+        check (reductionDb (10.0, 0.0, 24.0, 1.0) == 10.0 && reductionDb (10.0, 0.0, 24.0) == 10.0, "with slope 1 (Inf) the reduction is the overshoot: 10 dB over gives 10 dB, the old law");
+
+        // A sibilant 10 dB over a -30 dB threshold, split-band, at 2:1: it settles at 5 dB of reduction.
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.rangeDb = 24.0f;
+        p.ratio = 2.0f;
+        const auto in = tones ({ { 6500.0, -20.0 } }, n);
+        Engine e;
+        e.prepare (kFs);
+        const auto out = run (e, in, p);
+        const double held = -changeAt (in, out, 6500.0);
+        check (std::fabs (held - 5.0) < 0.3, fmt ("RATIO 2:1: a sibilant 10 dB over the threshold is turned down by %.2f dB (the law: 5, half the overshoot)", held));
+
+        // The default is Inf and it is the law as it was: a default EngineParams and one with the ratio set to Inf give the same output, bit for bit, in both modes,
+        // on noise with sibilant bursts (and the reduction is really at work in it).
+        std::mt19937 gen (13);
+        std::uniform_real_distribution<float> white (-1.0f, 1.0f);
+        Stereo mix { std::vector<float> (2 * 48000), std::vector<float> (2 * 48000) };
+        for (size_t i = 0; i < mix.l.size(); ++i)
+        {
+            const bool s = i % 24000 >= 4800 && i % 24000 < 10560; // 120 ms of 6.5 kHz every half second
+            const float hiss = 0.02f * white (gen) + (s ? 0.3f * (float) std::sin (2.0 * M_PI * 6500.0 * (double) i / kFs) : 0.0f);
+            mix.l[i] = hiss + 0.1f * (float) std::sin (2.0 * M_PI * 300.0 * (double) i / kFs);
+            mix.r[i] = 0.5f * hiss + 0.1f * (float) std::sin (2.0 * M_PI * 300.0 * (double) i / kFs);
+        }
+        for (const Mode m : { Mode::splitBand, Mode::wideband })
+        {
+            EngineParams unset, infinite;
+            unset.mode = infinite.mode = m;
+            unset.rangeDb = infinite.rangeDb = 12.0f;
+            infinite.ratio = kInfiniteRatio;
+            Engine a, b;
+            a.prepare (kFs);
+            b.prepare (kFs);
+            const auto ref = run (a, mix, unset);
+            const auto got = run (b, mix, infinite);
+            const bool acted = changeAt (mix, ref, 6500.0) < -3.0;
+            check (ref.l == got.l && ref.r == got.r && acted, fmt ("%s: RATIO at Inf gives the output of the default, bit for bit (the sibilant is turned down by %.1f dB)",
+                                                                  m == Mode::splitBand ? "SPLIT-BAND" : "WIDEBAND", -changeAt (mix, ref, 6500.0)));
+        }
+    }
+
     return test::finish ("NemesisTests");
 }

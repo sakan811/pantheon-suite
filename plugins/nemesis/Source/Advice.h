@@ -57,7 +57,7 @@ inline const char* guideText()
 {
     return "FOR\n"
            "Taming the s, sh and t of a voice (sibilance): it listens to a band (FREQ and WIDTH), and when the band is louder than THRESH it turns it down, "
-           "by up to RANGE. SPLIT-BAND turns down only that band, so the rest of the voice is not touched; WIDEBAND turns the whole sound down.\n\n"
+           "by up to RANGE, and RATIO sets how hard above THRESH (Inf holds the band at THRESH; 4:1 turns down three quarters of each dB over it, a gentler reduction). SPLIT-BAND turns down only that band, so the rest of the voice is not touched; WIDEBAND turns the whole sound down.\n\n"
            "FINDING IT\n"
            "Switch LISTEN on and move FREQ until you hear the hiss of the s: that is the band the detector hears. FIND does it for you: with LISTEN on, play a passage with s in it and press FIND; it listens for a second and a half and sets FREQ to the strongest place between 4 and 10 kHz. "
            "SET THRESH (in the header) listens to a second and a half of the sound and sets THRESH where its loudest few percent of s begin: a starting point, for a passage with s in it. "

@@ -22,7 +22,7 @@ public:
 
     static constexpr int kHistory = 240;
 
-    ui::Knob freq, width, threshold, range, release;
+    ui::Knob freq, width, threshold, range, ratio, release;
     ui::Choice mode, detection, lookahead;
     ui::PresetBox presetBox;
     ui::Toggle listen, delta;
