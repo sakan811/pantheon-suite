@@ -27,6 +27,7 @@ public:
     juce::TextButton& guide() noexcept { return guideButton; }   // for the checks
     ui::UndoButtons& undoControls() noexcept { return undoButtons; } // UNDO / REDO, for the checks
     ui::AbButtons& abControls() noexcept { return abButtons; }       // A / B, for the checks
+    ui::Knob& pasteAmount() noexcept { return pasteAmountKnob; }     // PASTE AMOUNT, for the checks
     std::vector<ui::Note> notes() const { return iris::adviceFor (adviceInput()); } // what the strip under the panels says, for the checks
 
 private:
@@ -59,6 +60,7 @@ private:
 
     // Output and saturation.
     ui::Knob driveKnob, outKnob;
+    ui::Knob pasteAmountKnob; // how much of a PASTE's gain comes in; in the band panel, under the knobs (see layoutBandPanel)
     ui::Choice styleBox, modeBox, phaseBox;
 
     juce::ComboBox presetBox;

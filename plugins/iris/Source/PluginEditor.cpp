@@ -33,6 +33,9 @@ IrisEditor::IrisEditor (IrisProcessor& p)
       driveKnob (p.apvts, id::drive, "DRIVE", "Where SAT starts to bite: the knee sits this far below full scale, on what a boost adds. "
                                                "Small signals stay linear. Past the boost's own level it limits the boost.", ui::Knob::Layout::below),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after the equaliser and Gain Match.", ui::Knob::Layout::below),
+      pasteAmountKnob (p.apvts, id::pasteAmount, "PASTE AMOUNT", "How much of a pasted band's gain PASTE takes: 100 % as copied, 50 % half of it, 0 % "
+                                                                  "flat. Frequency and width are not changed. It applies when PASTE is clicked; "
+                                                                  "bands already placed are not changed.", ui::Knob::Layout::beside),
       styleBox (p.apvts, id::style, "The curve SAT uses.\nTape: smooth, odd harmonics.\nTube: asymmetric, adds even harmonics (the 2nd).\nConsole: open and gentle."),
       modeBox (p.apvts, id::mode, "CLEAN: a plain equaliser, no harmonics, whatever the level.\nSAT: what a boosting band adds is passed through a soft curve, so a loud "
                                   "boost warms up (see Drive and Style). Cuts stay clean. SAT works in the Zero Latency phase mode only."),
@@ -169,7 +172,7 @@ IrisEditor::IrisEditor (IrisProcessor& p)
     };
 
     for (auto* c : std::initializer_list<juce::Component*> { &presetBox, &modeBox, &deltaButton, &matchButton, &clearMetersButton, &learnRefButton, &matchEqButton,
-                                                             &driveKnob, &outKnob, &styleBox, &phaseBox })
+                                                             &driveKnob, &outKnob, &pasteAmountKnob, &styleBox, &phaseBox })
         addAndMakeVisible (c);
 
     // The first band that exists is the one to show.
@@ -359,6 +362,10 @@ void IrisEditor::layoutBandPanel()
 
     soloBandButton.setBounds (panel.getRight() - 14 - 84, knobY + 22, 84, 28);
     soloCurveButton.setBounds (panel.getRight() - 14 - 84, knobY + 58, 84, 28);
+
+    // PASTE AMOUNT: the band panel's top row (PASTE, GUIDE, CLEAR ALL), chips and knob row are full, so it sits in the strip under the
+    // knobs, left, where it is the one control for the bands PASTE adds.
+    pasteAmountKnob.setBounds (panel.getX() + 14, knobY + cellHeight + 2, 180, 38);
 
     // Dynamics panel.
     const auto dyn = panelBounds[(size_t) Panel::dynamics];
