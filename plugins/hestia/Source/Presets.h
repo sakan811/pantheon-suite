@@ -8,7 +8,8 @@
 
 // A starting point for each kind of stem: its role and how much it matters, how deep the cut may go and how far back it sits. A preset leaves the mix letter, the
 // sidechain's role and importance, OUTPUT and HOLD alone (they belong to the session, not to the stem); what it does not list is back at its default. The roles are
-// rules of thumb: move IMPORTANCE by ear.
+// rules of thumb: move IMPORTANCE by ear. SPREAD is a setting of the stem (like CARVE and DEPTH), not of the session: no preset lists it, so a preset sets it
+// back to 0%, and the presets sound as they did before it existed.
 namespace hestia
 {
 inline const std::vector<ui::Preset>& presets()

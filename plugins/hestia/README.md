@@ -14,7 +14,7 @@ room for all of them. (CMake targets, namespaces and plugin codes use the short 
 
 ![Hestia Space](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A lead vocal (this instance, teal) in a mix with a kick, a bass and a guitar, each fed a programme, on mix H. The curves are the stems' spectra; the strip of colours under them says which stem owns each band, and the amber bars are how far this instance cuts there (CARVE 9 dB, REACH 12 dB): it gives way to the kick and the bass below about 350 Hz and is untouched where it owns the band. DEPTH is 12%; the map on the right is the stems' distances. The strip warns that cutting 9 dB in a band can leave a stem hollow. The track names the host gave (Lead Vox, Kick In, Bass DI, Gtr Rhythm) are what the legend and the depth map call the stems; HOLD and COPY TO MIX are in the header (HOLD off). AUTO ROLE, above the ROLE box, sets the role from the track's name (here Lead Vox, which gives Lead Vocal). Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). A lead vocal (this instance, teal) in a mix with a kick, a bass and a guitar, each fed a programme, on mix H. The curves are the stems' spectra; the strip of colours under them says which stem owns each band, and the amber bars are how far this instance cuts there (CARVE 9 dB, REACH 12 dB): it gives way to the kick and the bass below about 350 Hz and is untouched where it owns the band. DEPTH is 12%; the map on the right is the stems' distances. The strip warns that cutting 9 dB in a band can leave a stem hollow. The track names the host gave (Lead Vox, Kick In, Bass DI, Gtr Rhythm) are what the legend and the depth map call the stems; HOLD and COPY TO MIX are in the header (HOLD off). AUTO ROLE, above the ROLE box, sets the role from the track's name (here Lead Vox, which gives Lead Vocal). SPREAD, in the knob row between REACH and ATTACK, is at 0% (off), so the cuts shown are the ones without it. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -28,6 +28,7 @@ room for all of them. (CMake targets, namespaces and plugin codes use the short 
 | **Depth** | 0 to 100%, 0 (the front) by default: how far back the stem sits. At 100%: a high shelf at 5 kHz of -9 dB (the air), -4 dB of level, 30% of the sides gone, and four early reflections on each channel (6 to 37 ms, summed and darkened, at a gain of 0.45). A stem at the back also has up to 35% less claim, so it gives way to the ones in front. At 0% it is the input bit for bit. |
 | **Sidechain** | A second input (off until the host routes a track to it). The track on it is heard by Hestia as one more stem of the mix, with the **SC role** and **SC importance** you set; it is only listened to, never heard. Use it for a track that has no Hestia on it (any other chain, any other vendor's plugins) or that you cannot put one on. |
 | **Reach** | 0 to 36 dB, 12 by default: how much quieter than this stem another can be and still be given room. 0 dB: only when it is as loud or louder. |
+| **Spread** | 0 to 100%, 0 by default (off): how much a loud band also counts in the bands next to it, as the ear hears masking. Each band's power reaches its neighbours (six bands either way) with a weight that falls by 25 dB per Bark going down in frequency and 10 dB per Bark going up, the Bark scale being Traunmüller's approximation. Both slopes are **fixed approximations** (after Lynch et al., Eurospeech 1997: about 25 dB per band below and 10 dB above; the upper slope really depends on level, which is not modelled), named `kSpreadDownDbPerBark` and `kSpreadUpDbPerBark` in `Source/DSP/Engine.h`. It moves where the other stems give way, not what they claim: roles, importance and the bus are unchanged. At 0% the loop is not run at all, so the stem is what it was. It costs a little CPU (see Measured). |
 | **Attack / Release** | How fast a cut comes in (30 ms) and goes out (250 ms). |
 | **Output** | Gain after the cut. |
 | **Hold** | Freezes the cut where it is now: every band keeps the cut it has, whatever the other stems do, until HOLD is switched off. The stem is still measured and published, so the others still see it. A parameter (automatable, saved, kept by presets); off by default. |
@@ -47,8 +48,9 @@ not a separate analysis.
 1. Each instance measures its input in thirty third-octave bands (a fourth-order band-pass per band, mean square, 50 ms; no FFT, so no block and
    no delay) and publishes the levels, its role and its importance to a small table of 32 slots that lives in the plugin binary. All the
    instances a host loads from that binary into one process share the table.
-2. Every 64 samples, each instance reads the other stems of its mix that are live (published in the last 500 ms) and, for each band, asks of each
-   one: is its claim there bigger than mine (by 0.5 or more it takes all of it), is it there at all (-80 to -60 dB), and is it within REACH of
+2. Every 64 samples, each instance reads the other stems of its mix that are live (published in the last 500 ms) and, with SPREAD above 0, spreads
+   each stem's bands to the bands next to them (the levels the rule reads, its own and the others'; what is published is the measured input). For each
+   band, it asks of each one: is its claim there bigger than mine (by 0.5 or more it takes all of it), is it there at all (-80 to -60 dB), and is it within REACH of
    my level. What those take, combined as shares of the band, times CARVE, is the cut wanted in that band. The track on the sidechain is measured
    the same way and is one more of the stems it asks about.
 3. The cut follows that with the ATTACK and RELEASE, and is made by thirty peaking bells in series, minimum phase, no delay. The bells overlap, so
@@ -74,6 +76,17 @@ not a separate analysis.
   again. Two guitars on one tone, one at 80%: the near one is untouched, the far one gives up 2.6 dB more (2.7 expected from its 28% smaller claim).
 - Sidechain: a vocal with a bass on the sidechain on the same tone is cut by 5.9 dB, the same as with a bass stem on the bus (5.9 dB); with the sidechain
   silent, disconnected, or the mix Off, the stem passes bit for bit; a disconnected sidechain ends its cut and its level on the display.
+- SPREAD, with a vocal playing one tone at -50 dB on band 17 (1.25 kHz) and a bass that hears only the vocal (the bass's cut, after 2.5 s): with SPREAD at 100%
+  the cut one band up goes from 4.79 to 5.55 dB and one band down from 4.79 to 4.81 dB; the own band takes the full 6.00 dB. The masking reaches upward
+  further: one band up gains 0.77 dB, one band down 0.01 dB. More than six bands away the cut is the same to 1e-9 at this level. At -12 dB the bank's own
+  leakage reaches about ten bands out, so the spread reads it and bands seven to ten away move by up to 0.42 dB (see Limits); more than ten do not move.
+  A run that never sets SPREAD and one that sets it to 0 agree sample for sample; at 100% the output changes (by up to 0.0002 on a sample of a noise
+  programme). The output is the same bit for bit for blocks of 1, 7, 64, 100, 512 and 4096 samples at 100%. One band up the weight is 0.0316 (-15.0 dB,
+  1.50 Bark), one band down 0.000272 (-35.7 dB, 1.43 Bark). In `HestiaUiCheck` the default is 0%, the knob is in the row, and a bass one band above a
+  vocal's tone is cut 4.79 dB at 0% and 5.55 dB at 100%, through the processor.
+- Cost of SPREAD (`-O2`, 48 kHz, a rough benchmark outside the plugin, 20 s of audio): with four stems on the bus the engine goes from 0.78 s to 1.00 s of CPU
+  (0.97% to 1.25% of a core per stem); with 32 stems, the most the bus holds, from 21.0 s to 32.2 s, about 0.56 of a core more for the whole mix. A single
+  stem with nobody to see it is 0.17 s either way.
 - The output is the same bit for bit for blocks of 1, 7, 64, 100, 512 and 4096 samples, with a neighbour on the bus and a depth of 60%, and with a sidechain
   and a depth of 50%.
 - A stem alone in its mix, or in mix Off, or with CARVE 0 and DEPTH 0, passes bit for bit.
@@ -103,6 +116,12 @@ not a separate analysis.
   an order the host chooses), so what one reads of the others is as it stands, not a fixed value; the result for one stem is the same for any
   block size when the others do not change (test [8]) but not bit for bit across runs of a whole session.
 - **Third-octave resolution.** The cut is smooth over about a third of an octave; it cannot notch a single narrow resonance.
+- **SPREAD uses fixed slopes and six bands.** The 25 and 10 dB per Bark are approximations, and the upper one does not depend on level as it does in
+  the ear. The spread reads each band's power only from the six bands either side of it, which is a banded sum (it is what keeps the cost fixed), but the
+  bank's own leakage is part of what it reads: a loud tone reaches about ten bands through the bank, so the spread moves bands seven to ten away from it
+  by up to 0.42 dB at -12 dB. A quiet tone (-50 dB) does not leak past six bands into the rule, and there nothing beyond six moves. On a single tone the
+  effect is small (0.77 dB one band up, 0.01 dB one band down).
+- **SPREAD is per stem, and COPY TO MIX does not copy it.** A preset sets it back to 0%, since no preset lists it.
 - **Stereo and mono.** The same cut is made on both channels; there is no per-channel or mid/side cut.
 - **Plugin binaries.** Each plugin format (VST3, AU) and each build has its own table: a VST3 and an AU of Hestia in one session do not see each other.
 
