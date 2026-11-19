@@ -73,7 +73,7 @@ private:
     PitchGraph graph;
     NoteKeyboard keyboard;
     ui::Choice rangeBox, keyBox, scaleBox;
-    ui::Toggle bypassButton, autoKeyButton;
+    ui::Toggle bypassButton, autoKeyButton, leapButton;
     juce::TextButton detectButton { "Detect key" };
     juce::TextButton resetButton { "RESET" };
     ui::UndoButtons undoButtons { proc.undo, *this };

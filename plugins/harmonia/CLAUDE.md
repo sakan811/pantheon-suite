@@ -26,7 +26,7 @@ build/HarmoniaDevTool_artefacts/Release/HarmoniaDevTool snapshot docs/screenshot
 ```
 Source/dsp/AutoTuneEngine.h   the engine: detect -> decide + smooth -> PSOLA; EngineParams, VoiceRange, HopInfo history for the display, key learning; fixed look-ahead
 Source/dsp/PitchDetector.h    YIN on a low-passed copy of the voice, searched at about 24 kHz and refined at the full rate
-Source/dsp/PitchCorrector.h   the target note, Speed / Strength / Natural / Note Hold, in cents from C zero; called once per analysis hop
+Source/dsp/PitchCorrector.h   the target note, Speed / Strength / Natural / Note Hold (and its opt-in LEAP HOLD), in cents from C zero; called once per analysis hop
 Source/dsp/KeyTracker.h       Auto key: a pitch-class histogram that forgets in seconds of singing, matched to major and minor profiles
 Source/dsp/Scales.h           note masks (12 bits, bit 0 = C), the scale table, key names
 Source/dsp/Kernels.h, Rings.h SIMD-friendly sums (kLanes independent partial sums), the mirror ring buffer
@@ -59,12 +59,14 @@ The editor's keyboard, the engine and the notes all read it; do not rebuild a ma
 
 **Key detection is a handshake.** The editor (message thread, the only writer) says what it wants (`learnWanted`) and bumps `learnSequence`; `processBlock` acts once per change, on the last wish, so a start and a stop between two blocks cannot cancel or reorder, and a stop with nothing started does nothing; it publishes a result only if about a second of confident singing was heard (`learnedAmount() >= 150`); the editor takes it once with `takeKeyResult`. Listening starts in `processBlock`, so with a host that is not running audio nothing starts: the editor waits a second after Detect, says the host is not running audio and withdraws the request (`blocksRun()` counts the blocks). Nothing here blocks or allocates.
 
+**LEAP HOLD is opt-in and Off by default.** It keeps the Note Hold in full for a jump of a semitone or less from the held note and shrinks it between a semitone and a whole tone (`kLeapStartCents`, `kLeapCents`, `kLeapMinFraction` in `PitchCorrector.h`; a design choice, see the README's Limitations). A one-semitone step must behave exactly as with it Off. With it Off the corrector must stay bit-identical to the one before it existed: check any change to the hold path against that (dsp_test 7d3 pins the on/off numbers; compare the per-hop output with `leapHold` left at its default).
+
 **Voice range follows the tuning.** `VoiceRange` limits are for A4 = 440 Hz and move with the Tuning knob (`setVoiceRange (index, refA4)`); each top sits a whole tone above the usual top note so that note still tracks with a wide vibrato (dsp_test 7b4). A detection more than an octave away from where the voice just was is a glitch and
 passes unless it persists.
 
 **Real time.** `AutoTuneEngine::process` allocates and locks nothing; everything is sized in `prepare()`. The editor reads atomics and the history ring only.
 
-**Parameters.** Ids (`ids::`, `note0` ... `note11`) are stored in sessions and automation: never rename or remove one, nor reorder the choice lists (key names, `kScales`). All are `ParameterID` version 1; a new one needs a higher version, a place in `readParams()` and in the editor.
+**Parameters.** Ids (`ids::`, `note0` ... `note11`) are stored in sessions and automation: never rename or remove one, nor reorder the choice lists (key names, `kScales`). All are `ParameterID` version 1 except `leap` (LEAP HOLD), which is version 2: a new one needs a higher version, a place in `readParams()` and in the editor.
 `bypass` is the host's bypass parameter (`getBypassParameter()`).
 
 ## Where each thing lives
