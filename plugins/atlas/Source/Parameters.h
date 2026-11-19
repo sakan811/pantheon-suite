@@ -23,6 +23,7 @@ struct BandIds
     juce::String listen; // what its compressor listens to: its own band, or the sidechain's (version 2)
     juce::String direction; // downward (turns down what is loud) or upward (lifts what is quiet) (version 3)
     juce::String autoThreshold, autoRelease; // AUTO THRESH and AUTO RELEASE (version 5)
+    juce::String knee; // the soft knee's width (version 6)
 };
 
 inline const BandIds& bandIds (int band)
@@ -33,7 +34,7 @@ inline const BandIds& bandIds (int band)
         for (int i = 0; i < kBands; ++i)
         {
             const auto name = [i] (const char* what) { return "b" + juce::String (i + 1) + "_" + what; };
-            t[(size_t) i] = { name ("on"), name ("ch"), name ("thresh"), name ("ratio"), name ("attack"), name ("release"), name ("makeup"), name ("match"), name ("listen"), name ("dir"), name ("autothr"), name ("autorel") };
+            t[(size_t) i] = { name ("on"), name ("ch"), name ("thresh"), name ("ratio"), name ("attack"), name ("release"), name ("makeup"), name ("match"), name ("listen"), name ("dir"), name ("autothr"), name ("autorel"), name ("knee") };
         }
         return t;
     }();
@@ -122,6 +123,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         p.push_back (std::make_unique<AudioParameterBool> (ParameterID { bandIds (i).autoThreshold, 5 }, "Band " + String (i + 1) + " Auto Threshold", false));
     for (int i = 0; i < kBands; ++i)
         p.push_back (std::make_unique<AudioParameterBool> (ParameterID { bandIds (i).autoRelease, 5 }, "Band " + String (i + 1) + " Auto Release", false));
+    // KNEE of every band (version 6), after everything else. 6 dB is the knee the compressor always had, so an old session sounds the same.
+    for (int i = 0; i < kBands; ++i)
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { bandIds (i).knee, 6 }, "Band " + String (i + 1) + " Knee", NormalisableRange<float> (0.0f, 24.0f, 0.1f), (float) kKneeDb,
+                                                            Attr().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; })));
     return { p.begin(), p.end() };
 }
 
@@ -156,6 +161,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
         b.upward = v (ids.direction) > 0.5f;
         b.autoThreshold = v (ids.autoThreshold) > 0.5f;
         b.autoRelease = v (ids.autoRelease) > 0.5f;
+        b.kneeDb = v (ids.knee);
     }
     return e;
 }
@@ -204,12 +210,12 @@ inline void setValue (juce::AudioProcessorValueTreeState& s, const juce::String&
 }
 
 // The ids of a band's settings in one list (the order is `BandValues`'s).
-inline std::array<const juce::String*, 12> bandIdList (const BandIds& a)
+inline std::array<const juce::String*, 13> bandIdList (const BandIds& a)
 {
-    return { &a.on, &a.channels, &a.threshold, &a.ratio, &a.attack, &a.release, &a.makeup, &a.match, &a.listen, &a.direction, &a.autoThreshold, &a.autoRelease };
+    return { &a.on, &a.channels, &a.threshold, &a.ratio, &a.attack, &a.release, &a.makeup, &a.match, &a.listen, &a.direction, &a.autoThreshold, &a.autoRelease, &a.knee };
 }
 
-using BandValues = std::array<float, 12>;
+using BandValues = std::array<float, 13>;
 
 inline BandValues readBand (juce::AudioProcessorValueTreeState& s, int slot)
 {
@@ -245,7 +251,7 @@ inline void copyBands (juce::AudioProcessorValueTreeState& s, const std::vector<
         writeBand (s, m.second, before[(size_t) m.first]);
 }
 
-// THRESH, RATIO, ATTACK and RELEASE of one band to every other band there is (not its channels, direction, makeup or on/off: those are per band by nature).
+// THRESH, RATIO, ATTACK, RELEASE and KNEE of one band to every other band there is (not its channels, direction, makeup or on/off: those are per band by nature).
 inline void copyDynamicsToAll (juce::AudioProcessorValueTreeState& s, int fromSlot)
 {
     const auto l = layoutOf (s);
@@ -256,7 +262,7 @@ inline void copyDynamicsToAll (juce::AudioProcessorValueTreeState& s, int fromSl
         if (to == fromSlot)
             continue;
         const auto& b = bandIds (to);
-        for (const auto& pair : { std::pair<const juce::String*, const juce::String*> { &a.threshold, &b.threshold }, { &a.ratio, &b.ratio }, { &a.attack, &b.attack }, { &a.release, &b.release } })
+        for (const auto& pair : { std::pair<const juce::String*, const juce::String*> { &a.threshold, &b.threshold }, { &a.ratio, &b.ratio }, { &a.attack, &b.attack }, { &a.release, &b.release }, { &a.knee, &b.knee } })
             if (auto* param = s.getParameter (*pair.first))
                 setValue (s, *pair.second, param->convertFrom0to1 (param->getValue()));
     }

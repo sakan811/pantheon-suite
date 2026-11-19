@@ -1253,6 +1253,72 @@ void testBeginner()
 
 } // namespace
 
+// ----------------------------------------------------------------------------------------------
+// KNEE, the width W of the soft knee around THRESH (Giannoulis, Massberg, Reiss, JAES 2012): the law's shape is the one testCompression checks,
+// and only the width changes. The default is 6 dB, the knee the compressor had before the parameter.
+void testKnee()
+{
+    std::printf ("\n[18] The soft knee per band: the width W around THRESH, 0 is a hard knee\n");
+
+    // The gain computer at a knee of 0: the hard line, over the threshold only, and no division by the width.
+    bool finite = true;
+    for (double level = -60.0; level <= 0.0; level += 0.37)
+        finite = finite && std::isfinite (reductionDb (level, -30.0, 0.75, 0.0)) && std::isfinite (boostDb (level, -30.0, 0.5, 0.0));
+    check (std::fabs (reductionDb (-29.0, -30.0, 0.75, 0.0) - 0.75) < 1.0e-12 && reductionDb (-30.5, -30.0, 0.75, 0.0) == 0.0
+               && reductionDb (-30.0, -30.0, 0.75, 0.0) == 0.0 && std::fabs (reductionDb (-10.0, -30.0, 0.75, 0.0) - 15.0) < 1.0e-12 && finite,
+           fmt ("knee 0 (hard): 0.75 dB at 1 dB over the threshold, 0 at 0.5 dB under it (a 6 dB knee gives %.3f there), finite over the whole range", reductionDb (-30.5, -30.0, 0.75, 6.0)));
+
+    // Continuity: at T - W/2 the law is 0 and at T + W/2 it is the hard line (slope x W/2), and the value does not step at either edge.
+    double worst = 0.0;
+    for (double w : { 2.0, 6.0, 12.0 })
+        for (double edge : { -30.0 - w * 0.5, -30.0 + w * 0.5 })
+        {
+            const double at = reductionDb (edge, -30.0, 0.75, w);
+            for (double d : { -1.0e-7, 1.0e-7 })
+                worst = std::max (worst, std::fabs (reductionDb (edge + d, -30.0, 0.75, w) - at));
+        }
+    check (worst < 1.0e-6 && std::fabs (reductionDb (-24.0, -30.0, 0.75, 12.0) - 0.75 * 6.0) < 1.0e-12 && reductionDb (-36.0, -30.0, 0.75, 12.0) == 0.0,
+           fmt ("W = 2, 6 and 12 dB: the law is continuous at T - W/2 and T + W/2 (largest step %.1e dB within 1e-7 dB of an edge); at 12 dB, 6 dB over the threshold it is 4.50 dB", worst));
+
+    // The default argument is the old knee, bit for bit.
+    bool same = true;
+    for (double level = -60.0; level <= 0.0; level += 0.37)
+        same = same && reductionDb (level, -30.0, 0.75) == reductionDb (level, -30.0, 0.75, 6.0) && boostDb (level, -30.0, 0.5) == boostDb (level, -30.0, 0.5, 6.0);
+    check (same, "the gain computer's default knee is 6 dB: the same numbers as before the parameter, bit for bit");
+
+    // A tone just under the threshold is taken down by a wide knee and not by a hard one; a tone far over it is taken down the same.
+    const auto kneeOf = [] (double kneeDb)
+    {
+        auto p = midrangeOnly (-30.0, 4.0);
+        p.bands[3].kneeDb = kneeDb;
+        return p;
+    };
+    const auto takenBy = [] (const EngineParams& p, double ampDb)
+    {
+        const auto in = sine (1000.0, std::pow (10.0, ampDb / 20.0), second);
+        const auto bandIn = runSolo (allOff(), 1u << 3, in, in), bandOut = runSolo (p, 1u << 3, in, in);
+        const double levelDb = toDb (amplitudeAt (bandIn.l, 1000.0, second / 2, second / 4));
+        return std::make_pair (levelDb, levelDb - toDb (amplitudeAt (bandOut.l, 1000.0, second / 2, second / 4))); // (level in the band, dB taken off)
+    };
+    const auto under12 = takenBy (kneeOf (12.0), -31.0), under0 = takenBy (kneeOf (0.0), -31.0);
+    const double lawUnder = reductionDb (under12.first, -30.0, 0.75, 12.0);
+    check (under12.second > under0.second + 0.3 && under0.second < 0.02 && std::fabs (under12.second - lawUnder) < 0.3,
+           fmt ("a tone at -31 dB (%.2f in the band, about 2 dB under THRESH): taken down %.2f dB with a 12 dB knee (the law gives %.2f), %.2f dB with a hard one",
+                under12.first, under12.second, lawUnder, under0.second));
+    const auto over12 = takenBy (kneeOf (12.0), -10.0), over0 = takenBy (kneeOf (0.0), -10.0);
+    check (std::fabs (over12.second - over0.second) < 0.05,
+           fmt ("a tone at -10 dB (%.2f in the band, 20 dB over): %.2f dB with a 12 dB knee, %.2f dB with a hard one (within 0.05)", over12.first, over12.second, over0.second));
+
+    // The default knee: a run that never sets the field is the run with 6 dB set, bit for bit, and it does compress.
+    const auto input = noise (7, 0.5, second);
+    auto never = midrangeOnly (-30.0, 4.0);
+    auto six = midrangeOnly (-30.0, 4.0);
+    six.bands[3].kneeDb = 6.0;
+    const auto a = run (never, input, input), b = run (six, input, input), off = run (allOff(), input, input);
+    check (a.l == b.l && a.r == b.r && maxDiff (a.l, off.l, 0, second) > 0.05,
+           fmt ("knee 6 dB is the default: the output is the same as a band that never set it, bit for bit (the band does compress: the largest change is %.2f in sample value)", maxDiff (a.l, off.l, 0, second)));
+}
+
 int main()
 {
     std::printf ("Atlas DSP tests (48 kHz)\n");
@@ -1274,5 +1340,6 @@ int main()
     testAuto();
     testIssueFinder();
     testBeginner();
+    testKnee();
     return test::finish ("AtlasTests");
 }

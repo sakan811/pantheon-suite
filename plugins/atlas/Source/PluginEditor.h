@@ -28,11 +28,11 @@ public:
         juce::TextButton solo { "SOLO" }, delta { "DELTA" };
         juce::TextButton learn { "LEARN" }, toAll { "TO ALL" }; // set THRESH, RATIO, ATTACK and RELEASE from four seconds of the band; copy THRESH, RATIO, ATTACK, RELEASE to every band
         ui::Choice channels, listen, direction; // what the compressor works on; what it listens to (its own band or the sidechain's); whether it turns down or lifts
-        ui::Knob threshold, ratio, attack, release, makeup;
+        ui::Knob threshold, ratio, attack, release, makeup, knee; // KNEE: the width of the soft knee around THRESH
         std::unique_ptr<ui::Knob> crossover; // the edge to the next band; the top band has none
         std::vector<juce::Component*> components()
         {
-            std::vector<juce::Component*> all { &on, &match, &solo, &delta, &learn, &toAll, &autoThr, &autoRel, &channels, &listen, &direction, &threshold, &ratio, &attack, &release, &makeup };
+            std::vector<juce::Component*> all { &on, &match, &solo, &delta, &learn, &toAll, &autoThr, &autoRel, &channels, &listen, &direction, &threshold, &ratio, &attack, &release, &makeup, &knee };
             if (crossover != nullptr)
                 all.push_back (crossover.get());
             return all;

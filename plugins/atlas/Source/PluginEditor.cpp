@@ -11,7 +11,7 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int stripHeight = 536; // the six knobs are three across and two down
+constexpr int stripHeight = 620; // the seven knobs are three across and three down (the display gives up the third row)
 constexpr int toolbarHeight = 26;
 constexpr int stripGap = 8;
 constexpr int stripWidth = 264;
@@ -43,11 +43,15 @@ AtlasEditor::Strip::Strip (AtlasProcessor& p, int band)
                  "Downward: turns the band down while it is over THRESH (an ordinary compressor).\nUpward: lifts the band while it is under THRESH, by (1 - 1 / ratio) dB for every dB it is "
                  "under, up to 12 dB, and leaves what is more than 30 dB under it alone (noise, silence). ATTACK is how fast the lift gives way to a louder band; RELEASE how "
                  "fast it comes back. It makes what is there louder; it cannot add what is missing."),
-      threshold (p.apvts, bandIds (band).threshold, "THRESH", "The level (peak, in dB) of the band above which it is turned down. The knee is 6 dB wide.", ui::Knob::Layout::below),
+      threshold (p.apvts, bandIds (band).threshold, "THRESH", "The level (peak, in dB) of the band above which it is turned down. KNEE is how gradually it bends there.", ui::Knob::Layout::below),
       ratio (p.apvts, bandIds (band).ratio, "RATIO", "How many dB the band has to rise past the threshold for 1 dB more to come out.", ui::Knob::Layout::below),
       attack (p.apvts, bandIds (band).attack, "ATTACK", "How fast the gain goes down.", ui::Knob::Layout::below),
       release (p.apvts, bandIds (band).release, "RELEASE", "How fast the gain comes back.", ui::Knob::Layout::below),
-      makeup (p.apvts, bandIds (band).makeup, "MAKEUP", "Gain after the band's compressor.", ui::Knob::Layout::below)
+      makeup (p.apvts, bandIds (band).makeup, "MAKEUP", "Gain after the band's compressor.", ui::Knob::Layout::below),
+      knee (p.apvts, bandIds (band).knee, "KNEE",
+            "The width of the soft knee, in dB, centred on THRESH: the gain comes in across it instead of all at once at THRESH. 0 is a hard knee (nothing under "
+            "THRESH, the full RATIO over it); 6 dB is the default. Wider is gentler. An upward band bends its lift the same way.",
+            ui::Knob::Layout::below)
 {
     if (band < kCrossovers)
         crossover = std::make_unique<ui::Knob> (p.apvts, id::crossover[(size_t) band], "XOVER",
@@ -242,10 +246,10 @@ void AtlasEditor::layoutStrips()
         r.removeFromTop (6);
         const int cell = r.getWidth() / 3;
         // The edge knob belongs to the strip only while the split above the band is the strip's own (the editor keeps it so).
-        ui::Knob* knobs[] = { &s.threshold, &s.ratio, &s.attack, &s.release, &s.makeup, l.splitAbove[(size_t) b] == l.slot[(size_t) b] ? s.crossover.get() : nullptr };
+        ui::Knob* knobs[] = { &s.threshold, &s.ratio, &s.attack, &s.release, &s.makeup, l.splitAbove[(size_t) b] == l.slot[(size_t) b] ? s.crossover.get() : nullptr, &s.knee };
         for (auto* c : s.components())
             c->setVisible (c != s.crossover.get());
-        for (int k = 0; k < 6; ++k)
+        for (int k = 0; k < 7; ++k)
             if (knobs[k] != nullptr)
             {
                 knobs[k]->setVisible (true);

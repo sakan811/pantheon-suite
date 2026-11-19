@@ -23,8 +23,10 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 5 + 2 * kCrossovers + 12 * kBands,
-           fmt ("%d parameters: phase, oversampling, output, look-ahead, mix, the %d splits (frequency and on) and 12 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
+    check (proc.getParameters().size() == 5 + 2 * kCrossovers + 13 * kBands,
+           fmt ("%d parameters: phase, oversampling, output, look-ahead, mix, the %d splits (frequency and on) and 13 for each of %d bands", proc.getParameters().size(), kCrossovers, kBands));
+    check (std::fabs (readParams (proc.apvts).bands[0].kneeDb - 6.0) < 1.0e-9 && std::fabs (readParams (proc.apvts).bands[5].kneeDb - 6.0) < 1.0e-9,
+           "KNEE starts at 6 dB on every band: a session from before it sounds as it did");
     check (channelNames.size() == kNumChannelModes && oversamplingNames.size() == kNumOsModes && lookaheadNames().size() == kNumLookahead && listenNames.size() == 2 && directionNames.size() == 2, "the choice lists match the engine's modes");
     for (int k = 0; k < kCrossovers; ++k)
         check (std::fabs (proc.apvts.getRawParameterValue (id::crossover[(size_t) k])->load() - (float) pdsp::bands::crossoverHz (k)) < 0.5f,
@@ -78,6 +80,26 @@ int main()
         check (editor.getWidth() > 900 && editor.strips[5]->bounds.getRight() <= editor.getWidth() && editor.strips[5]->crossover == nullptr && editor.strips[0]->crossover != nullptr,
                "six strips fit the window; every band but the top one has the knob of its upper edge");
         check (editor.strips[2]->channels.getNumItems() == kNumChannelModes, "a strip's channel selector has the parameter's seven items");
+        {
+            // KNEE is a knob of the strip, bound to the band's own parameter, inside the strip and clear of the other knobs.
+            auto& s = *editor.strips[0];
+            std::vector<juce::Component*> knobs { &s.threshold, &s.ratio, &s.attack, &s.release, &s.makeup, &s.knee };
+            if (s.crossover != nullptr)
+                knobs.push_back (s.crossover.get());
+            bool clear = s.knee.isVisible() && s.bounds.contains (s.knee.getBounds());
+            for (size_t i = 0; i < knobs.size(); ++i)
+            {
+                clear = clear && knobs[i]->isVisible() && s.bounds.contains (knobs[i]->getBounds());
+                for (size_t j = i + 1; j < knobs.size(); ++j)
+                    clear = clear && ! knobs[i]->getBounds().intersects (knobs[j]->getBounds());
+            }
+            check (clear && s.knee.getWidth() > 40 && s.knee.getHeight() > 60,
+                   fmt ("the strip has a KNEE knob (%dx%d) inside it that overlaps none of its other knobs", s.knee.getWidth(), s.knee.getHeight()));
+            setValue (proc.apvts, bandIds (0).knee, 12.0f);
+            const bool reads = std::fabs (readParams (proc.apvts).bands[0].kneeDb - 12.0) < 1.0e-3;
+            setValue (proc.apvts, bandIds (0).knee, 6.0f);
+            check (reads && std::fabs (readParams (proc.apvts).bands[0].kneeDb - 6.0) < 1.0e-3, "the KNEE parameter of band 1 reaches the engine's band (12 dB, then back to 6)");
+        }
 
         editor.strips[1]->solo.triggerClick();
         editor.strips[3]->solo.triggerClick();

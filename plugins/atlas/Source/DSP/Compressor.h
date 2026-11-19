@@ -34,6 +34,7 @@ struct BandParams
     bool sidechain = false; // its compressor listens to the same band of the sidechain input instead of its own (itself again when none is connected)
     bool autoThreshold = false; // THRESH is how far under the band's own slow level the threshold sits, not an absolute level (the engine follows the level)
     bool autoRelease = false;   // RELEASE is the middle of a range: a hit is let go faster, a held stretch slower (see GainFollower::stepAuto)
+    double kneeDb = 6.0;        // KNEE: the width of the soft knee around THRESH, 0 is a hard knee (the default is the 6 dB the compressor always had)
 };
 
 // AUTO THRESH: the level the threshold follows is the band's mean square over this long, counted only while the band is not silent.
@@ -50,26 +51,31 @@ inline constexpr double kKneeDb = 6.0;
 inline constexpr double kUpwardMaxBoostDb = 12.0, kUpwardGateDb = 30.0, kUpwardFadeDb = 10.0;
 
 // The gain computer: how many dB are taken off at a level (peak, dB). Past the threshold the level rises by 1 / ratio dB per dB,
-// through a 6 dB soft knee. `slope` is 1 - 1 / ratio.
-inline double reductionDb (double levelDb, double thresholdDb, double slope) noexcept
+// through a soft knee `kneeDb` wide (Giannoulis, Massberg, Reiss, JAES 2012: the knee width W, centred on the threshold). `slope` is 1 - 1 / ratio.
+// A knee of 0 is a hard knee: the explicit branch, so nothing divides by the width.
+inline double reductionDb (double levelDb, double thresholdDb, double slope, double kneeDb = kKneeDb) noexcept
 {
     const double over = levelDb - thresholdDb;
-    if (over >= kKneeDb * 0.5)
+    if (kneeDb <= 0.0)
+        return over >= 0.0 ? slope * over : 0.0;
+    if (over >= kneeDb * 0.5)
         return slope * over;
-    if (over > -kKneeDb * 0.5)
-        return slope * (over + kKneeDb * 0.5) * (over + kKneeDb * 0.5) / (2.0 * kKneeDb);
+    if (over > -kneeDb * 0.5)
+        return slope * (over + kneeDb * 0.5) * (over + kneeDb * 0.5) / (2.0 * kneeDb);
     return 0.0;
 }
 
 // How many dB an upward compressor adds at a level (peak, dB): the mirror of reductionDb.
-inline double boostDb (double levelDb, double thresholdDb, double slope) noexcept
+inline double boostDb (double levelDb, double thresholdDb, double slope, double kneeDb = kKneeDb) noexcept
 {
     const double under = thresholdDb - levelDb;
     double boost = 0.0;
-    if (under >= kKneeDb * 0.5)
+    if (kneeDb <= 0.0)
+        boost = under >= 0.0 ? slope * under : 0.0;
+    else if (under >= kneeDb * 0.5)
         boost = slope * under;
-    else if (under > -kKneeDb * 0.5)
-        boost = slope * (under + kKneeDb * 0.5) * (under + kKneeDb * 0.5) / (2.0 * kKneeDb);
+    else if (under > -kneeDb * 0.5)
+        boost = slope * (under + kneeDb * 0.5) * (under + kneeDb * 0.5) / (2.0 * kneeDb);
     boost = std::min (boost, kUpwardMaxBoostDb);
     return boost * std::clamp ((kUpwardGateDb + kUpwardFadeDb - under) / kUpwardFadeDb, 0.0, 1.0);
 }
@@ -97,6 +103,7 @@ struct GainFollower
     double thresholdDb = 0.0, slope = 0.0, attack = 1.0, release = 1.0;
     double floorSq = 1.0; // the squared level under which the gain computer asks for nothing (the bottom of the knee): no logarithm below it
     double ceilSq = 1.0, gateSq = 0.0; // upward: the squared level over which it asks for nothing (the top of the knee), and under which (the gate)
+    double kneeDb = kKneeDb; // the soft knee's width (BandParams::kneeDb)
     bool upward = false;
     double detector = 1.0; // the level's smoothing coefficient
     bool on = false;
@@ -115,9 +122,10 @@ struct GainFollower
         releaseFast = 1.0 - std::exp (-1.0 / (std::max (p.releaseMs * kAutoFast, 0.01) * 0.001 * sampleRate));
         releaseSlow = 1.0 - std::exp (-1.0 / (std::max (p.releaseMs * kAutoSlow, 0.01) * 0.001 * sampleRate));
         memoryCoef = 1.0 - std::exp (-1.0 / (kAutoMemorySeconds * sampleRate));
-        floorSq = std::pow (10.0, (p.thresholdDb - kKneeDb * 0.5) / 10.0);
+        kneeDb = std::max (p.kneeDb, 0.0);
+        floorSq = std::pow (10.0, (p.thresholdDb - kneeDb * 0.5) / 10.0);
         upward = p.upward;
-        ceilSq = std::pow (10.0, (p.thresholdDb + kKneeDb * 0.5) / 10.0);
+        ceilSq = std::pow (10.0, (p.thresholdDb + kneeDb * 0.5) / 10.0);
         gateSq = std::pow (10.0, (p.thresholdDb - kUpwardGateDb - kUpwardFadeDb) / 10.0);
     }
 
@@ -128,9 +136,9 @@ struct GainFollower
         if (on)
         {
             if (! upward)
-                wanted = levelSq > floorSq ? reductionDb (10.0 * std::log10 (levelSq), thresholdDb, slope) : 0.0;
+                wanted = levelSq > floorSq ? reductionDb (10.0 * std::log10 (levelSq), thresholdDb, slope, kneeDb) : 0.0;
             else if (levelSq < ceilSq && levelSq > gateSq)
-                wanted = -boostDb (10.0 * std::log10 (levelSq), thresholdDb, slope);
+                wanted = -boostDb (10.0 * std::log10 (levelSq), thresholdDb, slope, kneeDb);
         }
         return wanted;
     }
