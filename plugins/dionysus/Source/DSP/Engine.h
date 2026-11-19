@@ -42,6 +42,7 @@ struct EngineParams
     bool autoGain = true;
     int oversampling = 1;        // index into kOversamplingFactor
     float lowCutHz = 20.0f;      // a high-pass on the saturated path only (before the curve); at 20 or below it is not run. The dry sound is not filtered
+    bool adaa = false;           // antiderivative anti-aliasing of the curve: acts at 1x only (at 2x, 4x and 8x the oversampler does the work, and this is ignored)
 };
 
 class Engine
@@ -64,6 +65,7 @@ public:
             c.lowShelf.reset();
             c.highShelf.reset();
             c.dry.fill (0.0);
+            c.adaa = {};
         }
         head = 0;
         compFor = {};
@@ -118,6 +120,7 @@ public:
         const bool lowCutOn = p.lowCutHz > 20.5f;
         const bool deltaOn = delta.load (std::memory_order_relaxed);
         const bool toneOn = tone != 0.0, dcOn = bias != 0.0 || shapeNow == Shape::diode;
+        const bool adaaOn = p.adaa && index == 0;   // ADAA is the 1x path's; the oversampled paths are left as they are
         if (! started)
         {
             drive = driveT;
@@ -149,7 +152,14 @@ public:
                     s.lowCut.reset();
                 const double driven = xs * drive; // what reaches the curve
                 drivenPeak = std::max (drivenPeak, (float) std::fabs (driven));
-                double y = s.os.process (driven, [&] (double v) { return saturate (shapeNow, v, bias); });
+                double y;
+                if (adaaOn)
+                    y = saturateAdaa (shapeNow, s.adaa, driven, bias);
+                else
+                {
+                    s.adaa.primed = false; // off: the next time it is on, it starts from silence again
+                    y = s.os.process (driven, [&] (double v) { return saturate (shapeNow, v, bias); });
+                }
                 if (dcOn)
                     y = s.dc.process (y);
                 else
@@ -188,6 +198,7 @@ private:
         Oversampler os;
         pdsp::Biquad lowCut, dc, lowShelf, highShelf;
         std::array<double, kMaxLatency + 1> dry {}; // the first latency + 1 are used
+        AdaaState adaa;                             // the 1x path's ADAA: the previous working point and its antiderivative
     };
 
     // AUTO GAIN is a loop over a cycle of the curve (256 tanh / sin): measure it when the shape, the drive or the bias moves, not on every block.

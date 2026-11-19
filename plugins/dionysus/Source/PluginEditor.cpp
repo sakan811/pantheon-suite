@@ -36,11 +36,14 @@ DionysusEditor::DionysusEditor (DionysusProcessor& p)
                     "Runs the curve at 2, 4 or 8 times the sample rate, so the harmonics above half the rate do not fold back as tones that were never there. Adds a delay (the host compensates) "
                     "and processor load; the dry sound is delayed to match. Changing it while playing restarts the saturator."),
       autoGain (p.apvts, id::autoGain, "AUTO GAIN", "Keeps the loudness of the sound the same whatever DRIVE is (measured on a sine at -12 dBFS), so you judge the tone, not the level."),
+      adaa (p.apvts, id::adaa, "ADAA",
+            "Antiderivative anti-aliasing at 1x: the curve is averaged over each sample step, so the tones a hard curve folds back (clip, fold, transformer) are quieter. "
+            "It also dulls the top of the whole sound a little (a gentle lowpass: -2 dB at 10 kHz), so it is not the default. Ignored at 2x, 4x and 8x (the oversampler does that). It adds no latency."),
       presetBox (p, presets(), "Everything is set by a preset, oversampling included."),
       proc (p)
 {
     setLookAndFeel (&look);
-    for (auto* c : std::initializer_list<juce::Component*> { &drive, &bias, &tone, &lowCut, &mix, &out, &shape, &oversampling, &autoGain, &deltaButton, &setDriveButton, &presetBox, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &drive, &bias, &tone, &lowCut, &mix, &out, &shape, &oversampling, &autoGain, &adaa, &deltaButton, &setDriveButton, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     deltaButton.setClickingTogglesState (true);
     deltaButton.setTooltip ("Listen to only what the saturator adds (output minus input, delayed like it). Not saved with the project, and it ends when the window closes.");
@@ -99,9 +102,11 @@ void DionysusEditor::resized()
     column.removeFromTop (12);
     oversampling.setBounds (column.removeFromTop (26).removeFromLeft (140));
     auto toggles = knobs.removeFromLeft (120);
-    autoGain.setBounds (toggles.withTrimmedTop (4).withHeight (26));
-    deltaButton.setBounds (toggles.withTrimmedTop (36).withHeight (26).withTrimmedRight (30));
-    setDriveButton.setBounds (toggles.withTrimmedTop (68).withHeight (26).withTrimmedRight (30));
+    const auto toggleRow = [&] (int i) { return toggles.withTrimmedTop (27 * i).withHeight (24); }; // four rows of 24 at a pitch of 27
+    autoGain.setBounds (toggleRow (0));
+    adaa.setBounds (toggleRow (1));
+    deltaButton.setBounds (toggleRow (2).withTrimmedRight (30));
+    setDriveButton.setBounds (toggleRow (3).withTrimmedRight (30));
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
 }
 

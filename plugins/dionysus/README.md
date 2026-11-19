@@ -10,7 +10,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 
 ![Dionysus Warmth](docs/screenshot.png)
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). The tape curve at +16 dB of drive with BIAS +25%, TONE +20%, LOW CUT off, MIX 85%, 4x oversampling and AUTO GAIN on. On the left, the curve the signal goes through (input across, output up); on the right, the harmonics it makes from a sine at -12 dBFS, odd ones amber and even ones teal (the bias is what brings the even ones). The strip explains the bias' DC blocker and the delayed dry sound under 100% MIX. On the far right, the **drive level** meter: the level that reaches the curve (a 0.25 sine times +16 dB, +4.0 dB here: red above 0 dB, where the curves turn over) and the CLIP lamp (the output reached 0 dBFS; off here). Regenerate with the command under "Development".*
+*Headless render of the editor (the hardware-style interface shared with the other plugins). The tape curve at +16 dB of drive with BIAS +25%, TONE +20%, LOW CUT off, MIX 85%, 4x oversampling and AUTO GAIN on. On the left, the curve the signal goes through (input across, output up); on the right, the harmonics it makes from a sine at -12 dBFS, odd ones amber and even ones teal (the bias is what brings the even ones). The strip explains the bias' DC blocker and the delayed dry sound under 100% MIX. On the far right, the **drive level** meter: the level that reaches the curve (a 0.25 sine times +16 dB, +4.0 dB here: red above 0 dB, where the curves turn over) and the CLIP lamp (the output reached 0 dBFS; off here). The ADAA switch under AUTO GAIN is off; at 4x it would be ignored anyway. Regenerate with the command under "Development".*
 
 ## What it does
 
@@ -28,6 +28,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 | **Output** | -24 to +12 dB, after everything. |
 | **Auto gain** | On by default: the gain that brings the RMS of a sine at -12 dBFS back to what it was before the curve (the AC part: the DC is taken off). |
 | **Oversampling** | Off, 2x, 4x or 8x: half-band, linear phase (a 65-tap stage and then 33-tap stages), delay 0, 32, 40 or 44 samples. |
+| **ADAA** | Off by default, and at 1x only: antiderivative anti-aliasing of the curve (Parker, Zavalishin, Le Bivic, DAFx 2016): each sample is the curve averaged over its step, which cuts the tones a hard curve folds back (Clip, Fold, Transformer) with no delay. In the linear region it is a one-zero lowpass (-2 dB at 10 kHz), so the top of the whole sound dulls a little. Ignored at 2x, 4x and 8x. The display shows the static curve, without it. |
 | **Presets** | Eight starting points (Init, Tape Warmth, Tube Glow, Transformer Thick, Parallel Grit, Bass Harmonics, Fold Fuzz, Hard Clip Edge). A preset sets every control, oversampling included; what it does not list goes back to its default (Parallel Grit sets LOW CUT to 120 Hz). |
 
 ## How it works
@@ -35,7 +36,7 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 1. DRIVE is a gain (smoothed over 5 ms) before the curve; the curve runs at the oversampled rate; the signal comes back through the half-band filters.
 2. Each half-band stage is a windowed-sinc (Blackman) filter, with the gain of 2 on the way up that makes up for the inserted zeros; the delay of a round trip is a whole number of samples, so the dry sound is
    delayed by exactly the same.
-3. The curve's harmonic display is not drawn from a measurement: it is one cycle of a sine at -12 dBFS pushed through the same `saturate()` function the engine runs, read by a DFT. The tests check that
+3. The curve's harmonic display is not drawn from a measurement: it is one cycle of a sine at -12 dBFS pushed through the same `saturate()` function the engine runs, read by a DFT. At 1x with ADAA on the engine runs the averaged form instead (`saturateAdaa()`), and the display stays the static curve. The tests check that
    the engine, measured at 8x, gives the same harmonics.
 
 ## Measured (`DionysusTests`, 48 kHz)
@@ -55,7 +56,10 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 
 - Aliasing: a 7 kHz sine at -6 dBFS, hard-clipped with 24 dB of drive: its 5th harmonic (35 kHz) folds back to 13 kHz at -12.2 dB at 1x, -44.5 at 2x, -54.8 at 4x and -57.0 dB at 8x. The level of the fundamental is the same at all four (-6.519 dB).
 - MIX 0% is the input delayed by 0, 32, 40 and 44 samples for 1x, 2x, 4x and 8x, bit for bit; an impulse through the saturated path peaks exactly the reported latency later (44 at 8x).
-- AUTO GAIN: a sine at -12 dBFS comes out as loud as it went in, for every curve at 6, 18 and 30 dB of drive, within 0.008 dB (RMS).
+- AUTO GAIN: a sine at -12 dBFS comes out as loud as it went in, for every curve at 6, 18 and 30 dB of drive, within 0.008 dB (RMS). With ADAA on at 1x it is within 0.18 dB (AUTO GAIN is measured on the static curve).
+- ADAA (1x only): the antiderivative of each curve has the curve as its slope to within 7e-10 at 2000 points in [-6, 6] (the diode's is 0.49 ln cosh(x / 0.7)). A 7 kHz sine hard-clipped with 24 dB of drive: its 13 kHz alias is -12.2 dB at 1x and -23.3 dB with ADAA, 11.1 dB lower (fold 5.3 dB lower, transformer 10.8 dB lower); the fundamental moves from +2.09 to +1.75 dB.
+- ADAA in the linear region is a one-zero lowpass: a quiet sine through the clip at 1x comes out -0.02 dB at 1 kHz and -2.01 dB at 10 kHz, as |cos (pi f / fs)| says (the test checks it).
+- With ADAA on, silence in is exactly 0 out for every curve at BIAS 60%. With it off, the output is that of a run that never sets it, bit for bit; at 2x, 4x and 8x with it on, the output is that of it off, bit for bit.
 - TONE +100%: 100 Hz -6.0 dB, 8 kHz +6.0 dB (a tilt of 12.0 dB); at 0 it is flat.
 - LOW CUT 500 Hz: a 50 Hz tone through the saturated path is -40.0 dB; at MIX 0% it is untouched (+0.00 dB), at 50% -6.1 dB (half of it is the dry sound); at 20 Hz (Off) the sound is as it was, bit for bit.
 - DELTA plus the input delayed by 32 samples is the output (largest difference 7.5e-09); the 3rd harmonic of a hard-clipped tone is as loud in DELTA as in the output (0.000 dB); at MIX 0% it is silence, exactly.
@@ -67,7 +71,8 @@ a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **a
 
 - **It is not a clipper or a limiter for loudness** (Aegis limits). A drive of 24 dB or more is distortion, not warmth, and loud sounds better: compare at the same level (AUTO GAIN does that).
 - **Without oversampling, hard curves alias.** Clip, Fold and Transformer at 12 dB of drive or more make tones that were never there; the half-band filters have a transition band, so a harmonic just over half the sample rate is only partly removed
-  even at 8x.
+  even at 8x. ADAA at 1x removes part of it, not all: 11 dB on the clipped sine above, where 2x gives 32 dB (-44.5 dB against -12.2 dB at 1x).
+- **ADAA is 1x only, and it is not free.** It is ignored at 2x, 4x and 8x. It is a first-order method, so on the whole sound it is a lowpass (-2 dB at 10 kHz, from the linear region, not just the drive's harmonics); it is off by default for that reason.
 - **Oversampling delays the sound** (up to 44 samples) and costs CPU; switching it while playing restarts the saturator (it clicks).
 - **LOW CUT filters the saturated path only.** At 100% MIX that is the whole sound, so it takes the lows out of it; lower MIX to keep them (the dry sound is not filtered). It is a 2nd-order filter, so its phase differs from the dry sound's around the cutoff.
 - Each channel is saturated on its own, so a hard-panned sound stays where it is; the two channels' harmonics are not linked.

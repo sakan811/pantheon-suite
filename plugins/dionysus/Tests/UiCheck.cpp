@@ -22,7 +22,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 9, fmt ("%d parameters: drive, curve, bias, tone, mix, output, auto gain, oversampling and low cut", proc.getParameters().size()));
+    check (proc.getParameters().size() == 10, fmt ("%d parameters: drive, curve, bias, tone, mix, output, auto gain, oversampling, low cut and ADAA", proc.getParameters().size()));
     check (shapeNames.size() == kNumShapes && oversamplingNames.size() == kNumOversampling, "the choice lists match the engine's");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.driveDb - 12.0f) < 0.01f && d.shape == Shape::tape && std::fabs (d.bias) < 1e-4f && std::fabs (d.tone) < 1e-4f && d.mix > 0.999f && d.autoGain && d.oversampling == 1 && d.lowCutHz <= 20.5f,
@@ -170,7 +170,7 @@ int main()
             editor.deltaButton.triggerClick();
             juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
             check (q.engine.delta.load() && ui::hasNote (editor.notes(), "DELTA is on", ui::Severity::warning), "DELTA turns the engine's monitor on, and a warning says you do not hear your track");
-            check (q.getParameters().size() == 9 && ! (bool) q.apvts.state.getProperty ("delta", false), "DELTA is not a parameter and not in the state: it is never saved or automated");
+            check (q.getParameters().size() == 10 && ! (bool) q.apvts.state.getProperty ("delta", false), "DELTA is not a parameter and not in the state: it is never saved or automated");
             q.engine.delta = false;
         }
         check (! q.engine.delta.load(), "closing the editor ends DELTA: monitoring never outlives its window");
@@ -226,6 +226,34 @@ int main()
         }
         check (std::fabs (readParams (q.apvts).driveDb - 12.0f) < 0.15f && editor.setDriveButton.getButtonText() == "DRIVE SET",
                fmt ("SET DRIVE on a -12 dBFS sine at +24 dB sets DRIVE to %.1f dB (12.0) and says DRIVE SET", readParams (q.apvts).driveDb));
+    }
+
+    // ADAA: a toggle in the toggle column, off in a new instance, a note while it is set above 1x, and it is kept with the session.
+    {
+        DionysusProcessor q;
+        q.setPlayConfigDetails (2, 2, 48000.0, 512);
+        q.prepareToPlay (48000.0, 512);
+        check (! readParams (q.apvts).adaa, "ADAA is off in a new instance: the curve as it was");
+        std::unique_ptr<juce::AudioProcessorEditor> holder (q.createEditor());
+        auto& editor = ui::innerOf<DionysusEditor> (*holder);
+        editor.setVisible (true);
+        const auto overlaps = [&] (const juce::Component& c) { return c.getBounds().intersects (editor.adaa.getBounds()); };
+        check (editor.adaa.getRight() <= editor.getWidth() && editor.adaa.getBottom() <= editor.getHeight() && ! overlaps (editor.autoGain) && ! overlaps (editor.deltaButton)
+                   && ! overlaps (editor.setDriveButton) && ! overlaps (editor.oversampling) && editor.adaa.getTooltip().isNotEmpty(),
+               "the ADAA toggle sits in the toggle column with a tooltip, overlapping nothing");
+        editor.adaa.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (readParams (q.apvts).adaa, "the ADAA toggle sets the parameter");
+        check (ui::hasNote (editor.notes(), "ADAA acts at 1x only", ui::Severity::info), "at the default 2x a note says ADAA acts at 1x only");
+        setValue (q.apvts, id::oversampling, 0.0f);
+        check (! ui::hasNote (editor.notes(), "ADAA acts at 1x only", ui::Severity::info), "at 1x there is no such note");
+        for (const auto& n : editor.notes())
+            check ((int) n.text.size() <= ui::kMaxNoteChars, fmt ("a note fits the strip (%d characters)", (int) n.text.size()));
+        juce::MemoryBlock saved;
+        q.getStateInformation (saved);
+        DionysusProcessor other;
+        other.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (readParams (other.apvts).adaa && readParams (other.apvts).oversampling == 0, "ADAA on at 1x is saved with the session");
     }
 
     // Presets: each applies, has a name and a one-line purpose, the chosen one is kept with the session, and the box is in the header.

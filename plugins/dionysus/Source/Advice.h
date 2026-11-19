@@ -45,6 +45,8 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         info ("LOW CUT filters the saturated path only; at MIX 100% that is the whole sound. Lower MIX to keep the lows.");
     if (p.mix > 0.001f && p.mix < 0.999f && p.oversampling > 0)
         info ("With MIX under 100% the dry sound is delayed to match the oversampler: nothing combs.");
+    if (p.adaa && p.oversampling > 0)
+        info ("ADAA acts at 1x only: at 2x, 4x and 8x it is ignored, and the oversampler does the work.");
     if (p.oversampling > 0 && in.latencyMs > 0.0)
         info ("Oversampling delays the sound by " + std::to_string ((int) (in.latencyMs + 0.5)) + " ms (the host compensates it). It is off at 1x.");
     return ui::ordered (std::move (notes));
@@ -63,6 +65,7 @@ inline const char* guideText()
            "The curve shows what each level in becomes; the bars show the harmonics a -12 dBFS sine gets, in dB under the sound that went in. The meter on the right is the level that reaches the curve (the sound times DRIVE): 0 dB is where the curves turn over, above it is hard saturation; its lamp lights when the output reaches 0 dBFS. DELTA plays only what the saturator adds.\n\n"
            "NOT FOR\n"
            "Not a limiter or a clipper for loudness (Aegis limits), and not a tool to fix a bad recording. Use OVERSAMPLING for hard curves: without it the "
-           "harmonics above half the sample rate fold back as tones that were never there.";
+           "harmonics above half the sample rate fold back as tones that were never there. At 1x, ADAA (the switch) softens that folding with no delay and little "
+           "processor load; it is smoothing, not a substitute for OVERSAMPLING, and it is ignored above 1x.";
 }
 } // namespace dionysus

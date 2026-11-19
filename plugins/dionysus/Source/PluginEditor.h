@@ -8,7 +8,7 @@
 #include "UI/DionysusUi.h"
 #include <pantheon/ui/Advice.h>
 
-// The curve and the harmonics it makes on glass, six knobs, the curve and oversampling selectors and AUTO GAIN. Everything drawn is the shared kit's (shared/ui).
+// The curve and the harmonics it makes on glass, six knobs, the curve and oversampling selectors, AUTO GAIN and ADAA. Everything drawn is the shared kit's (shared/ui).
 class DionysusEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -20,7 +20,7 @@ public:
 
     ui::Knob drive, bias, tone, lowCut, mix, out;
     ui::Choice shape, oversampling;
-    ui::Toggle autoGain;
+    ui::Toggle autoGain, adaa;
     juce::TextButton deltaButton { "DELTA" };
     juce::TextButton setDriveButton { "SET DRIVE" }; // one second of programme, then DRIVE is set from it (one parameter change)
     ui::PresetBox presetBox;
