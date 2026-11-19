@@ -24,7 +24,7 @@ public:
     static constexpr int kPoints = 1536; // samples the goniometer keeps
 
     std::array<std::unique_ptr<ui::Knob>, castor::kBands> widths;
-    ui::Knob midKnob, sideKnob, monoKnob, balanceKnob, outKnob;
+    ui::Knob midKnob, sideKnob, monoKnob, balanceKnob, outKnob, mixKnob;
     ui::Choice listen;
     juce::TextButton minButton { "MIN --" }; // the lowest correlation since it was last clicked
     float correlationMinHold() const noexcept { return minHold; }

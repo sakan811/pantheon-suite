@@ -239,5 +239,60 @@ int main()
         check (e.correlationMin.load() > 0.9f, "setting it back to 1 starts the minimum again");
     }
 
+    // [9] MIX.
+    std::printf ("\n[9] Mix\n");
+    {
+        std::mt19937 gen (9);
+        std::uniform_real_distribution<float> white (-0.5f, 0.5f);
+        Stereo in { std::vector<float> (48000), std::vector<float> (48000) };
+        for (auto& v : in.l) v = white (gen);
+        for (auto& v : in.r) v = white (gen);
+        EngineParams p;
+        p.width.fill (0.0f); // mono: the strongest change there is
+        p.sideDb = 3.0f;
+        p.outDb = 0.0f;
+        Engine wetE, dryE, halfE;
+        wetE.prepare (kFs); dryE.prepare (kFs); halfE.prepare (kFs);
+        const auto wet = run (wetE, in, p);
+        EngineParams dryP = p;
+        dryP.mix = 0.0f;
+        const auto dry = run (dryE, in, dryP);
+        EngineParams halfP = p;
+        halfP.mix = 0.5f;
+        const auto half = run (halfE, in, halfP);
+        check (dry.l == in.l && dry.r == in.r, "MIX 0%: the input, bit for bit, whatever the widths");
+        double worst = 0.0;
+        for (size_t i = 0; i < in.l.size(); ++i)
+        {
+            worst = std::fmax (worst, std::fabs (half.l[i] - 0.5 * (in.l[i] + wet.l[i])));
+            worst = std::fmax (worst, std::fabs (half.r[i] - 0.5 * (in.r[i] + wet.r[i])));
+        }
+        check (worst < 1e-6, fmt ("MIX 50%%: the mean of the input and the processed sound (largest difference %.1e)", worst));
+        EngineParams oneP = p;
+        oneP.mix = 1.0f;
+        Engine oneE;
+        oneE.prepare (kFs);
+        check (run (oneE, in, oneP).l == wet.l, "MIX 100% is the processed sound itself");
+        // MIX is applied before BALANCE: at 0% a balance of -1 (left only) still turns the right channel off.
+        EngineParams balP = dryP;
+        balP.balance = -1.0f;
+        Engine balE;
+        balE.prepare (kFs);
+        const auto bal = run (balE, in, balP);
+        check (bal.l == in.l && std::all_of (bal.r.begin(), bal.r.end(), [] (float v) { return std::fabs (v) < 1e-9f; }), "MIX 0% then BALANCE hard left: the left is the input, the right is silent (the blend comes before BALANCE)");
+        // A change of MIX is smoothed: no step in the output.
+        Engine moveE;
+        moveE.prepare (kFs);
+        EngineParams m0 = p;
+        const auto start = run (moveE, Stereo { std::vector<float> (4800, 0.3f), std::vector<float> (4800, -0.3f) }, m0);
+        m0.mix = 0.0f;
+        const auto moved = run (moveE, Stereo { std::vector<float> (4800, 0.3f), std::vector<float> (4800, -0.3f) }, m0, 64);
+        double step = 0.0;
+        for (size_t i = 1; i < moved.l.size(); ++i)
+            step = std::fmax (step, std::fabs (moved.l[i] - moved.l[i - 1]));
+        check (step < 0.01 && std::fabs (moved.l.back() - 0.3) < 0.01, fmt ("MIX 100%% to 0%% in one move: the largest step between two samples is %.4f (smoothed over 10 ms)", step));
+        (void) start;
+    }
+
     return test::finish ("CastorTests");
 }

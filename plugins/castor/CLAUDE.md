@@ -42,7 +42,7 @@ per sample (10 ms) and snapped to their target within 1e-9, so "100%" is exactly
 With `engaged == 0` nothing touches the sample: `l = l0`.
 
 **The rest is differences and gains that are exactly neutral.** `dM = (midGain - 1) x m`, `dS = (sideGain - 1) x s`, and MONO BELOW `dS = HP (s + dS) - s` (only while it is on; the filter is reset while it is off): zero when
-neutral, so `l = l0 + 0 + 0`. BALANCE and OUTPUT multiply by `leftGain x outGain`, exactly 1.0 at rest. Never rebuild left and right from the mid and the side (`m + s` is not `l` to the last bit).
+neutral, so `l = l0 + 0 + 0`. MIX (`mixGain`, smoothed over 10 ms, snapped to its target) blends `l0 + mix x (processed - l0)` only while it is below 1 (at 100% the processed sound is taken as it is, bit for bit), before BALANCE and OUTPUT. BALANCE and OUTPUT multiply by `leftGain x outGain`, exactly 1.0 at rest. Never rebuild left and right from the mid and the side (`m + s` is not `l` to the last bit).
 
 **LISTEN is applied by the processor, after the goniometer's tap** (`applyListen`: Mono and Side put one signal in both channels), so the cloud and the correlation read the sound and not the check; on a mono bus it is not applied and BALANCE is set to 0 before the engine (it would only turn the one channel down). `correlationMin` is the lowest per-block reading since the editor last took it; the editor keeps the minimum (`minHold`) and clears it on the MIN button.
 
@@ -54,7 +54,7 @@ neutral, so `l = l0 + 0 + 0`. BALANCE and OUTPUT multiply by `leftGain x outGain
 
 **Undo and PASTE.** The processor declares `juce::UndoManager undo` before `apvts` (`ui::UndoButtons` in the header; every control change is one UNDO step, and a preset is one step too). PASTE (`pasteFromThemis` in `Parameters.h`) reads the `width` line of `pdsp::link` that Themis writes for a width item, and the side `lowcut` band (`place=side`) of the low-end mono item, which sets MONO BELOW to its frequency (clamped to the range; its slope is not read). Every band the width line names and MONO BELOW are set in one undo step, the others are left alone, and text with neither changes nothing and says so in the strip. The width line has no `amount` key (`encodeWidth` / `decodeWidth` in `shared/dsp/BandLink.h`), so each band's percent is taken as it is. A lowcut on the stereo is not MONO BELOW.
 
-**Parameters.** Ids (`castor::id`: `width1` ... `width6`, `mid`, `side`, `mono`, `balance`, `out`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `listen` (version 2, Stereo: a session saved before it opens as it did; presets reset it, it is not kept); a new one
+**Parameters.** Ids (`castor::id`: `width1` ... `width6`, `mid`, `side`, `mono`, `balance`, `out`, `listen`, `mix`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `listen` (version 2, Stereo: a session saved before it opens as it did; presets reset it, it is not kept) and `mix` (version 3, 100%: presets set it back to 100%); a new one
 needs a higher version, an entry in `readParams()` and a place in the editor. The width ids follow the order of `pdsp::bands::kBands`.
 
 ## DRY: where each thing lives

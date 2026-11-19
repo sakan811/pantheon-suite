@@ -30,6 +30,7 @@ CastorEditor::CastorEditor (CastorProcessor& p)
       monoKnob (p.apvts, id::monoBelow, "MONO BELOW", "Takes the sides away below this frequency (a 24 dB/oct high-pass on them), so the bass is in the middle: safe for mono, club systems and vinyl. Off at 20 Hz.", ui::Knob::Layout::below),
       balanceKnob (p.apvts, id::balance, "BALANCE", "Turns one channel down (not a pan: the loudness changes).", ui::Knob::Layout::below),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything.", ui::Knob::Layout::below),
+      mixKnob (p.apvts, id::mix, "MIX", "100%: the processed sound. Less: it is blended with the sound as it came in (before BALANCE and OUTPUT), so you can hear how much of the change you want. There is no delay in Castor, so the blend does not comb.", ui::Knob::Layout::below),
       listen (p.apvts, id::listen, "A check on what you hear (the goniometer and the correlation still show the sound):\nStereo: as it is.\nMono: the sum of both channels, what a mono speaker plays. What fades or changes here is a phase problem.\nSide: only what differs between the channels. Set it back to Stereo before you bounce."),
       presetBox (p, presets(), "BALANCE and OUTPUT are kept; the widths, MID, SIDE and MONO BELOW are set."),
       undoButtons (p.undo, *this),
@@ -44,7 +45,7 @@ CastorEditor::CastorEditor (CastorProcessor& p)
                                                          ui::Knob::Layout::below);
         addAndMakeVisible (*widths[(size_t) b]);
     }
-    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &listen, &minButton, &presetBox, &guideButton, &pasteButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &mixKnob, &listen, &minButton, &presetBox, &guideButton, &pasteButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     pasteButton.setTooltip ("Take what Themis copied from its master plan: the side width of each band a width item names (COPY on a width item; the others stay as they are), "
@@ -98,7 +99,7 @@ void CastorEditor::resized()
     body.removeFromTop (8);
     otherLabel = body.removeFromTop (16).withTrimmedLeft (4);
     row = body.removeFromTop (cellHeight);
-    for (auto* k : { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob })
+    for (auto* k : { &midKnob, &sideKnob, &monoKnob, &balanceKnob, &outKnob, &mixKnob })
         k->setBounds (row.removeFromLeft (cellWidth));
     noteStrip = bounds.withTrimmedTop (8).withHeight (ui::kNoteStripHeight);
 }

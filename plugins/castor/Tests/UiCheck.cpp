@@ -22,7 +22,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == kBands + 6, fmt ("%d parameters: a width for each of %d bands, mid, side, mono below, balance, output and listen", proc.getParameters().size(), kBands));
+    check (proc.getParameters().size() == kBands + 7, fmt ("%d parameters: a width for each of %d bands, mid, side, mono below, balance, output, listen and mix", proc.getParameters().size(), kBands));
     const auto d = readParams (proc.apvts);
     bool defaultsOk = std::fabs (d.midDb) < 1e-4f && std::fabs (d.sideDb) < 1e-4f && d.monoBelowHz <= kMonoOffHz + 0.01f && std::fabs (d.balance) < 1e-4f && std::fabs (d.outDb) < 1e-4f;
     for (float w : d.width)
