@@ -2,8 +2,9 @@
 
 Olympus Session Host: a JUCE standalone app (macOS, builds on Linux for CI) that holds the stems of a song, a chain of the suite's own plugins on each, and writes the stems out; plus an MCP server over the same
 session so an agent can place the chains. See `README.md` for what it does; this file is what you need to change it safely. It is an **app**, so it lives in `apps/`; the dependency rule of the root CLAUDE.md
-applies (`apps/*` -> `shared/*`, never a plugin or another app). It **hosts** plugins, but only at run time: it loads built VST3 bundles and links none of their code, so no dependency on `plugins/*` exists in
-CMake. The one place it knows about the plugins is `suiteNames()` in `Source/Catalog.h` (their product names), which a test compares with every `plugins/*/CMakeLists.txt`.
+applies (`apps/*` -> `shared/*`, never a plugin or another app). It **hosts** plugins, but only at run time: it loads VST3 bundles (and Audio Units on macOS) that its scan finds, and links none of their code, so no dependency on `plugins/*` exists in
+CMake. Third-party plugins are scanned at run time; that was decided by the user. The one place it knows about the suite's own plugins is `suiteNames()` in `Source/Catalog.h` (their product
+names), which a test compares with every `plugins/*/CMakeLists.txt`, and which the "suite only" setting (`scanSuiteOnly`) keeps.
 
 ## Build and verify
 
@@ -23,10 +24,10 @@ OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests     
 ## Layout
 
 ```
-Source/Catalog.h      the suite's plugin names, finding built .vst3 bundles by file name (only those are opened), making instances; internal plugins for tests
+Source/Catalog.h      the scan (juce::KnownPluginList + PluginDirectoryScanner: VST3 bundles of the folders, AU on macOS; dead-man's pedal, blacklist), the cache (loadCache/saveCache), names and resolve, making instances; internal plugins for tests
 Source/Session.h      tracks, chains, fader/mute/solo, real-time processBlock with latency compensation, offline renderStems, project XML, describe() (JSON for the server)
 Source/Mcp.h          the MCP server: JSON-RPC lines in and out, the 19 tools, parameters by id/name/index
-Source/Settings.h     plugin folders and the last project, in one file shared by the window and the server
+Source/Settings.h     plugin folders, scanSuiteOnly and the last project, in one file shared by the window and the server; the plugin cache and the scan's pedal sit beside it
 Source/Advice.h       the GUIDE text and the notes at the foot (rules only; the kit draws them)
 Source/Main.cpp       the app and its 16:10 window;  Source/McpMain.cpp  the server's main
 Source/UI/            MainComponent (the window, the audio source, actions), TrackRow / TrackList / WaveStrip / LampButton / SlotButton / PluginWindow
@@ -45,7 +46,8 @@ Tests/                Tests.cpp (session, render, project, server), UiCheck.cpp,
 - **Plugins must be created and edited on the message thread.** The window and the server run on it; the render thread of the progress window only calls `processBlock`.
 - **Everything is drawn from the kit** (`shared/ui`): `LampButton` exists only because the kit's look-and-feel lights every switch in one colour; if the kit grows per-button colours, use them and delete it. The window is 16:10 (`kDesignWidth` a multiple of 8).
 - **Adding a plugin to the suite** means adding its product name to `suiteNames()` (a test fails until you do).
-- AU is not hosted (JUCE finds AUs through the system registry, which would load every installed one); say so wherever hosting is described.
+- Audio Units are hosted on macOS only (`JUCE_PLUGINHOST_AU`, set under `if(APPLE)`): the scan finds them through the system registry, so it loads each one to read it, under the dead-man's pedal. A VST3 and an AU of one name: the VST3 is kept.
+- The scan reads plugins on the message thread and blocks it while it runs; a plugin that hangs in its read is caught only by the next run (the pedal). Say so wherever scanning is described.
 
 ## Not done yet (do not describe it as done)
 

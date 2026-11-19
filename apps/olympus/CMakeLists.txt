@@ -22,6 +22,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/ui ${CMAKE_BINARY_DIR}
 # Every Olympus target needs the plugin-hosting switches; the rest are the repository's own (cmake/Juce.cmake).
 set(OLYMPUS_DEFINITIONS ${PANTHEON_JUCE_DEFINITIONS} JUCE_PLUGINHOST_VST3=1 JUCE_PLUGINHOST_LADSPA=0 JUCE_MODAL_LOOPS_PERMITTED=1)
 set(OLYMPUS_LIBRARIES juce::juce_audio_utils juce::juce_audio_processors juce::juce_audio_formats)
+# Audio Units are hosted on macOS only (found through the system registry; see Source/Catalog.h).
+if(APPLE)
+    list(APPEND OLYMPUS_DEFINITIONS JUCE_PLUGINHOST_AU=1)
+endif()
 
 # ---------------------------------------------------------------------------------------
 # The app (standalone, not a plugin)

@@ -18,9 +18,7 @@ apps/<name>/     one self-contained standalone application each (no plugin forma
   of them need the same code, it moves to `shared/` first and both use it from there.
 - `shared/` knows nothing about any plugin: no plugin types, parameters, verdicts or words in it. What a plugin adds on top
   (its name, its number formats, its verdict colours) lives in that plugin; Themis' is `plugin/Source/ThemisUi.h`.
-- **An app may host the suite's built plugins, at run time only.** Olympus loads the `.vst3` bundles of `plugins/` by their file name and links none of their code, so the compile-time rule above stands (no CMake dependency on a
-  plugin) and a plugin is never changed for the app. Hosting is limited to the suite's own plugins (`suiteNames()` in `apps/olympus/Source/Catalog.h`, which a test compares with the plugins' product names, so a new plugin must be added there);
-  an app that loads anyone else's plugin needs a decision first (licence review: see apps/olympus/README.md "Where it finds the plugins").
+- **An app may host plugins, at run time only.** Olympus hosts any VST3 (and any Audio Unit on macOS) its scan finds, loads them at run time and links none of their code, so the compile-time rule above stands (no CMake dependency on a plugin). Third-party plugins are scanned at run time: the user decided this. `suiteNames()` (in `apps/olympus/Source/Catalog.h`, the suite's product names) still exists and a test still compares it with the plugins' product names, so a new plugin must be added there; the "suite only" setting narrows the scan to them. See apps/olympus/README.md "Where it finds the plugins".
 - A plugin or app builds from its own folder with the commands in its README (`cmake -S . -B build` there); it pulls `shared/` in
   by relative path. There is no root CMake project: each plugin fetches its own JUCE, all at the one version in [cmake/Juce.cmake](cmake/Juce.cmake)
   (see below).
