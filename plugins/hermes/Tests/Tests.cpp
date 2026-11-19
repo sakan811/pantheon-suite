@@ -128,6 +128,16 @@ int main()
         const auto longer = feed (join ({ silence (4.0), sine (1000.0, -20.0, 3.0) }));
         check (step.momentary() > -20.5 && step.shortTerm() < -23.0 && std::fabs (longer.shortTerm() + 20.0) < 0.15,
                fmt ("a step from silence to -20: after 0.5 s the momentary is %.2f and the short-term %.1f; after 3 s the short-term is %.2f", step.momentary(), step.shortTerm(), longer.shortTerm()));
+        // The maxima since the reset (EBU Tech 3341): a loud passage then a quiet one keeps the loud one's reading; a window that is not full does not count.
+        const auto peaks = feed (join ({ sine (1000.0, -20.0, 5.0), sine (1000.0, -30.0, 5.0) }));
+        check (std::fabs (peaks.maxMomentary() + 20.04) < 0.1 && std::fabs (peaks.maxShortTerm() + 20.04) < 0.1 && peaks.momentary() < -29.0,
+               fmt ("5 s at -20 then 5 s at -30: max momentary %.2f and max short-term %.2f (-20.04 expected) while the momentary now reads %.2f", peaks.maxMomentary(), peaks.maxShortTerm(), peaks.momentary()));
+        check (feed (sine (1000.0, -20.0, 0.3)).maxMomentary() < -150.0 && feed (sine (1000.0, -20.0, 2.0)).maxShortTerm() < -150.0, "a window that is not full yet (0.3 s, 2 s) gives no maximum");
+        {
+            auto m = feed (sine (1000.0, -20.0, 5.0));
+            m.reset();
+            check (m.maxMomentary() < -150.0 && m.maxShortTerm() < -150.0, "a reset clears both maxima");
+        }
         // Loudness range.
         const auto lra = feed (join ({ sine (1000.0, -20.0, 20.0), sine (1000.0, -30.0, 20.0) }));
         check (std::fabs (lra.range() - 10.0) < 1.0, fmt ("20 s at -20 and 20 s at -30: a loudness range of %.2f LU (EBU Tech 3342: 10 +-1)", lra.range()));

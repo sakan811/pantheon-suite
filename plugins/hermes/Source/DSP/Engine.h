@@ -203,6 +203,8 @@ public:
         }
         momentary.store ((float) meter.momentary(), std::memory_order_relaxed);
         shortTerm.store ((float) meter.shortTerm(), std::memory_order_relaxed);
+        maxMomentary.store ((float) meter.maxMomentary(), std::memory_order_relaxed);
+        maxShortTerm.store ((float) meter.maxShortTerm(), std::memory_order_relaxed);
         integrated.store ((float) meter.integrated(), std::memory_order_relaxed);
         range.store ((float) meter.range(), std::memory_order_relaxed);
         truePeakDb.store (truePeakMax > 1e-9 ? (float) (20.0 * std::log10 (truePeakMax)) : -200.0f, std::memory_order_relaxed);
@@ -212,7 +214,7 @@ public:
     }
 
     // What the editor reads (LUFS, LU and dB; -200 is "nothing yet").
-    std::atomic<float> momentary { -200.0f }, shortTerm { -200.0f }, integrated { -200.0f }, range { 0.0f }, truePeakDb { -200.0f }, samplePeakDb { -200.0f };
+    std::atomic<float> momentary { -200.0f }, shortTerm { -200.0f }, maxMomentary { -200.0f }, maxShortTerm { -200.0f }, integrated { -200.0f }, range { 0.0f }, truePeakDb { -200.0f }, samplePeakDb { -200.0f };
     std::atomic<float> referencePosition { 0.0f }, referenceMatchDb { 0.0f };
 
 private:

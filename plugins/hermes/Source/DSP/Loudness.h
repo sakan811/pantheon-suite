@@ -65,7 +65,7 @@ public:
         counted = 0;
         gated = {};
         ranged = {};
-        momentaryNow = shortTermNow = -200.0;
+        momentaryNow = shortTermNow = maxMomentaryNow = maxShortTermNow = -200.0;
     }
 
     // One stereo sample. (Left and right weigh 1.0 each; a mono sound is both.)
@@ -84,13 +84,22 @@ public:
         momentaryNow = toLufs (meanOfLast (kSubBlocksMomentary));
         shortTermNow = toLufs (meanOfLast (kSubBlocksShortTerm));
         if (filled >= kSubBlocksMomentary)
+        {
             add (gated, momentaryNow, fromLufs (momentaryNow)); // the gating blocks of the integrated loudness: 400 ms, every 100 ms
+            maxMomentaryNow = std::max (maxMomentaryNow, momentaryNow);
+        }
         if (filled >= kSubBlocksShortTerm)
+        {
             add (ranged, shortTermNow, fromLufs (shortTermNow));
+            maxShortTermNow = std::max (maxShortTermNow, shortTermNow);
+        }
     }
 
     double momentary() const noexcept { return momentaryNow; }
     double shortTerm() const noexcept { return shortTermNow; }
+    // The highest reading of a full window since the last reset (EBU Tech 3341 asks for both; -200: none yet). A window that is not full yet does not count, as for the integrated loudness.
+    double maxMomentary() const noexcept { return maxMomentaryNow; }
+    double maxShortTerm() const noexcept { return maxShortTermNow; }
 
     // The gated mean of the blocks since the last reset: blocks over -70 LUFS, then over 10 LU under the mean of those.
     double integrated() const noexcept
@@ -182,7 +191,7 @@ private:
         h.power[(size_t) bin] += power;
     }
 
-    double fs = 48000.0, accumulated = 0.0, momentaryNow = -200.0, shortTermNow = -200.0;
+    double fs = 48000.0, accumulated = 0.0, momentaryNow = -200.0, shortTermNow = -200.0, maxMomentaryNow = -200.0, maxShortTermNow = -200.0;
     int subLength = 4800, counted = 0, filled = 0, head = 0;
     std::array<double, kSubBlocksShortTerm> ring {};
     std::array<Channel, 2> ch;
