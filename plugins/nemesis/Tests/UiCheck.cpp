@@ -24,7 +24,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 10, fmt ("%d parameters: frequency, width, threshold, range, release, mode, detection, listen, look-ahead and delta", proc.getParameters().size()));
+    check (proc.getParameters().size() == 11, fmt ("%d parameters: frequency, width, threshold, range, release, mode, detection, listen, look-ahead, delta and ratio", proc.getParameters().size()));
     check (lookaheadNames.size() == kNumLookaheads, "the look-ahead list matches the engine's");
     check (modeNames.size() == kNumModes && detectionNames.size() == kNumDetections, "the choice lists match the engine's");
     const auto d = readParams (proc.apvts);
@@ -66,6 +66,11 @@ int main()
         editor.setVisible (true);
         check (editor.mode.getNumItems() == kNumModes && editor.detection.getNumItems() == kNumDetections, "the selectors have the parameters' items");
         check (editor.getWidth() > 700 && editor.release.getRight() < editor.mode.getX() && editor.listen.getBottom() < editor.getHeight(), "the controls fit the window");
+        check (editor.ratio.isVisible() && editor.ratio.getBounds().getRight() <= editor.release.getX() && editor.ratio.getX() >= editor.range.getRight() &&
+                   ! editor.ratio.getBounds().intersects (editor.range.getBounds()) && ! editor.ratio.getBounds().intersects (editor.release.getBounds()),
+               "RATIO is a knob of its own, between RANGE and RELEASE");
+        check (std::fabs (readParams (proc.apvts).ratio - kInfiniteRatio) < 1e-4f && proc.apvts.getParameter (id::ratio)->getCurrentValueAsText() == "Inf",
+               "RATIO's default is Inf (the law as it was), and it reads Inf");
         editor.listen.triggerClick();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         check (readParams (proc.apvts).listen && ui::hasNote (editor.notes(), "LISTEN is on", ui::Severity::warning), "LISTEN sets the parameter, and a note says you hear only the band");

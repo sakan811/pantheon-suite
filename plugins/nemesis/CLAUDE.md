@@ -48,6 +48,8 @@ With `delaySamples == 0` the ring returns the input, so the engine is bit-identi
 
 **The envelope has a 2 ms fall** (`kEnvelopeFallMs`): the band's output swings through zero every half cycle, and a detector fed with `|band|` per sample made the follower ripple. Do not remove it.
 
+**The ratio scales the law, it does not replace it.** `slopeOf (ratio)` is `1 - 1/ratio` and `reductionDb` multiplies the overshoot and the knee by it (the knee stays continuous with the line above). At `kInfiniteRatio` (21, "Inf") the slope is exactly 1.0, so the law is the one of the first release bit for bit (test [11]); the default is Inf.
+
 **At rest the gain is exactly 1** (`kRestDb`): a reduction under it, with nothing to reduce, is set to exactly 0, and `gr == 0` gives a gain of exactly 1.
 
 **RELATIVE** subtracts the broadband level (30 ms mean square of the input, `x 2` for the peak of a sine) from the band level in dB, so a sound 30 dB quieter has the same relative level (test [6]).
@@ -57,7 +59,7 @@ block-size dependence only exists while a knob moves).
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
-**Parameters.** Ids (`nemesis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off), and `delta`, version 3 (off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`nemesis::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off), `delta`, version 3 (off), and `ratio`, version 4 (Inf: the law as it was); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `modeNames` and `detectionNames` is the order of `Mode` and `Detection`.
 
 ## DRY: where each thing lives

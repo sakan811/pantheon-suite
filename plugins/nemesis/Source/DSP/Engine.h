@@ -22,6 +22,7 @@ inline constexpr double kAttackMs = 0.3;       // fixed: a sibilant is over in t
 inline constexpr double kEnvelopeFallMs = 2.0; // the detector's peak hold between the cycles of the band
 inline constexpr double kBodyMs = 30.0;        // the broadband level RELATIVE detection compares with
 inline constexpr double kKneeDb = 6.0;
+inline constexpr float kInfiniteRatio = 21.0f; // RATIO's top, shown as "Inf": the slope is exactly 1 there, the law as it was before RATIO
 inline constexpr double kRestDb = 1e-3;        // a reduction under this, with nothing to reduce, is let go to exactly 0
 inline constexpr double kFloorDb = -120.0;
 
@@ -56,6 +57,7 @@ struct EngineParams
     float q = 1.5f;             // the width of what is listened to (and, in SPLIT-BAND, of what is turned down)
     float thresholdDb = -30.0f; // absolute: dBFS of the band; relative: dB of the band under the whole sound
     float rangeDb = 8.0f;       // the most it takes off
+    float ratio = kInfiniteRatio; // above the threshold: 4 means 4 dB over gives 3 dB off (1 to kInfiniteRatio, which is Inf)
     float releaseMs = 40.0f;
     Mode mode = Mode::splitBand;
     Detection detection = Detection::absolute;
@@ -64,17 +66,25 @@ struct EngineParams
     int lookahead = 0;          // an index into kLookaheadMs: the sound is delayed by it, the detector is not
 };
 
-// The reduction for a level `over` the threshold: it holds the band at the threshold (infinite ratio), softly over a knee, up to the range.
-inline double reductionDb (double levelDb, double thresholdDb, double rangeDb) noexcept
+// The slope of the law for a ratio: 1 - 1/ratio, so each dB over the threshold gives that much reduction. Inf (kInfiniteRatio and up) is exactly 1, and a
+// ratio under 1 is read as 1 (no reduction at all), never a negative slope. Giannoulis, Massberg and Reiss, JAES 2012: a finite ratio is the gentler reduction.
+inline double slopeOf (float ratio) noexcept
+{
+    return ratio >= kInfiniteRatio ? 1.0 : 1.0 - 1.0 / std::fmax ((double) ratio, 1.0);
+}
+
+// The reduction for a level `over` the threshold: `slope` of the overshoot (1 holds the band at the threshold: an infinite ratio), softly over a knee of the
+// same slope, up to the range. The knee is continuous with the line above it at the top of the knee, so the slope changes nothing but the gradient.
+inline double reductionDb (double levelDb, double thresholdDb, double rangeDb, double slope = 1.0) noexcept
 {
     const double over = levelDb - thresholdDb;
     double r;
     if (2.0 * over < -kKneeDb)
         r = 0.0;
     else if (2.0 * std::fabs (over) <= kKneeDb)
-        r = (over + 0.5 * kKneeDb) * (over + 0.5 * kKneeDb) / (2.0 * kKneeDb);
+        r = slope * (over + 0.5 * kKneeDb) * (over + 0.5 * kKneeDb) / (2.0 * kKneeDb);
     else
-        r = over;
+        r = slope * over;
     return std::clamp (r, 0.0, std::fmax (rangeDb, 0.0));
 }
 
@@ -144,6 +154,7 @@ public:
             }
         }
         const double releaseCoef = coefOf (p.releaseMs);
+        const double slope = slopeOf (p.ratio);
         if (findRequest.exchange (false, std::memory_order_relaxed))
         {
             for (int k = 0; k < kFindBins; ++k)
@@ -190,7 +201,7 @@ public:
                 levelDb -= 10.0 * std::log10 (std::fmax (body, 1e-12) * 2.0); // the whole sound, read as the peak of a sine
             if (setActive)
                 feedSet (level, body);
-            const double wanted = reductionDb (levelDb, p.thresholdDb, p.rangeDb);
+            const double wanted = reductionDb (levelDb, p.thresholdDb, p.rangeDb, slope);
             gr += (wanted - gr) * (wanted > gr ? attackCoef : releaseCoef);
             if (gr < kRestDb && wanted == 0.0)
                 gr = 0.0; // at rest exactly: a gain of 1 is exactly 1
