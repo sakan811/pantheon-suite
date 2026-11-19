@@ -58,7 +58,7 @@ private:
     bool autoTrimPeakLimited = false; // the last AUTO TRIM stopped at the peak ceiling
     float autoTrimSetTo = 0.0f;       // the TRIM it set: the note goes when TRIM is changed
     std::array<float, kHistory> momentaryHistory, shortTermHistory;
-    float momentary = -200.0f, shortTerm = -200.0f, integrated = -200.0f, range = 0.0f, truePeak = -200.0f, samplePeak = -200.0f, position = 0.0f;
+    float momentary = -200.0f, shortTerm = -200.0f, maxMomentary = -200.0f, maxShortTerm = -200.0f, integrated = -200.0f, range = 0.0f, truePeak = -200.0f, samplePeak = -200.0f, position = 0.0f;
     int ticks = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HermesEditor)

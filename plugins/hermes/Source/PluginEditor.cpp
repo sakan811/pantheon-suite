@@ -34,7 +34,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
       polarity (p.apvts, id::polarity, "POLARITY", "Inverts both channels. It sounds the same alone and different against other tracks."),
       reference (p.apvts, id::reference, "REF (B)", "Hear the reference instead of your sound (A). The switch is a short crossfade, and the reference plays on while you listen to A."),
       levelMatch (p.apvts, id::levelMatch, "LEVEL MATCH", "Brings the reference to the integrated loudness of your sound, so you compare the tone and not the level. Let the meter run first: until it has read a few seconds there is nothing to match."),
-      autoReset (p.apvts, id::resetOnPlay, "AUTO RESET", "Clears the integrated loudness, the range and the peaks each time the host starts playing, so every pass is measured from its start. Off by default; it is kept with the session."),
+      autoReset (p.apvts, id::resetOnPlay, "AUTO RESET", "Clears the integrated loudness, the range, the maxima and the peaks each time the host starts playing, so every pass is measured from its start. Off by default; it is kept with the session."),
       autoPeak (p.apvts, id::autoPeak, "-1 dBTP", "AUTO TRIM also stops at a true peak of -1 dBTP: when the peaks reach that first, it sets TRIM to the headroom and a note says the target was not reached. Off by default; it is kept with the session."),
       presetBox (p, presets(), "LISTEN and the reference are set; TRIM, POLARITY and REF TRIM are kept."),
       undoButtons (p.undo, *this),
@@ -46,7 +46,7 @@ HermesEditor::HermesEditor (HermesProcessor& p)
     shortTermHistory.fill (gui::kNothing - 1.0f);
     loadButton.setTooltip ("Choose a track to compare with (WAV, AIFF, FLAC, OGG or MP3 where the system can read it; at most 10 minutes). It is kept in the session.");
     restartButton.setTooltip ("Takes the reference back to its start. It loops, and plays on whether it is heard or not. Click or drag on the bar below to play from there.");
-    resetButton.setTooltip ("Clears the integrated loudness, the loudness range and the peaks, and starts again.");
+    resetButton.setTooltip ("Clears the integrated loudness, the loudness range, the maxima and the peaks, and starts again.");
     loadButton.onClick = [this]
     {
         chooser = std::make_unique<juce::FileChooser> ("Choose a reference track", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3");
@@ -234,6 +234,11 @@ void HermesEditor::paint (juce::Graphics& g)
         {
             const auto c = juce::Rectangle<float> (inner.getX() + cw * (float) (i % 2), inner.getY() + ch * (float) (i / 2), cw, ch);
             hw::drawLabel (g, cells[i].name, c.toNearestInt().withHeight (12).translated (4, 2), juce::Justification::left, colours::dim, 8.5f);
+            if (i < 2) // the highest full-window reading since RESET, as EBU Tech 3341 asks for it
+            {
+                const float top = i == 0 ? maxMomentary : maxShortTerm;
+                hw::drawLabel (g, "MAX " + (top < gui::kNothing ? juce::String ("--") : juce::String (top, 1)), c.toNearestInt().withHeight (12).translated (-4, 2), juce::Justification::right, colours::dim, 8.5f);
+            }
             g.setFont (ui::lcdFont (i < 3 ? 19.0f : 16.0f));
             g.setColour (cells[i].alarm ? colours::bad : colours::amber);
             g.drawText (cells[i].value, c.withTrimmedTop (16.0f).reduced (4.0f, 0.0f), juce::Justification::centredLeft);
@@ -291,6 +296,8 @@ void HermesEditor::timerCallback()
 {
     momentary = proc.engine.momentary.load();
     shortTerm = proc.engine.shortTerm.load();
+    maxMomentary = proc.engine.maxMomentary.load();
+    maxShortTerm = proc.engine.maxShortTerm.load();
     integrated = proc.engine.integrated.load();
     range = proc.engine.range.load();
     truePeak = proc.engine.truePeakDb.load();
