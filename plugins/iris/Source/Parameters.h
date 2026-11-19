@@ -21,6 +21,7 @@ namespace id
     inline const juce::String drive { "drive" };
     inline const juce::String style { "style" };
     inline const juce::String phase { "phase" };     // 0 = Zero Latency, 1 = Linear, 2 = Linear HQ (version 3: it came after the crossover)
+    inline const juce::String pasteAmount { "pasteAmount" }; // 0..100 %: how much of a pasted band's gain PASTE takes; 100 = as copied (version 2, session-wide)
 
     // xo1 ... xo4 were the four crossovers of the first layout (the five regions); xo0, the sub / bass split at the front, came after
     // them, so a session saved before it has the other four exactly where they were.
@@ -79,7 +80,7 @@ inline constexpr float defaultFreq (int band) noexcept
 // Session-wide controls: presets leave these alone.
 inline bool isGlobalParameter (const juce::String& paramId)
 {
-    if (paramId == id::out || paramId == id::match || paramId == id::phase)
+    if (paramId == id::out || paramId == id::match || paramId == id::phase || paramId == id::pasteAmount)
         return true;
     return std::any_of (id::crossover.begin(), id::crossover.end(), [&] (const juce::String& x) { return paramId == x; });
 }
@@ -111,6 +112,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         return r;
     };
     const auto signedDb = [] (float v, int) { return (v > 0.04f ? "+" : "") + String (v, 1) + " dB"; };
+    const auto percentText = [] (float v, int) { return String (juce::roundToInt (v)) + " %"; };
     const auto plainDb = [] (float v, int) { return String (v, 1) + " dB"; };
     const auto msText = [] (float v, int) { return v < 10.0f ? String (v, 1) + " ms" : (v < 1000.0f ? String (roundToInt (v)) + " ms" : String (v / 1000.0f, 2) + " s"); };
     const auto msValue = [] (const String& s)
@@ -120,8 +122,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         return t.containsIgnoreCase ("ms") || ! t.containsIgnoreCase ("s") ? v : v * 1000.0f;
     };
 
-    // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover, version 2; the phase mode, 3;
-    // what a dynamic band listens to, 4; a dynamic band's automatic times, 5.
+    // Every parameter carries version 1 (the first layout), except what came later: the sub / bass crossover and the paste amount, version 2;
+    // the phase mode, 3; what a dynamic band listens to, 4; a dynamic band's automatic times, 5.
     const auto F = [&] (const String& pid, const String& name, NormalisableRange<float> r, float def, Attr a, int version = 1)
     {
         p.push_back (std::make_unique<Float> (ParameterID { pid, version }, name, r, def, a));
@@ -145,6 +147,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     for (int k = 0; k < numCrossovers; ++k)
         F (id::crossover[(size_t) k], "Region Split " + String (k + 1), freq (800.0f), (float) defaultCrossoverHz[(size_t) k],
            Attr().withStringFromValueFunction (hzText).withValueFromStringFunction (hzValue), k == 0 ? 2 : 1);
+    // Read by pasteBands only (the moment PASTE is clicked), so it is not automatable: a lane would do nothing when played back.
+    // 100 % is the copied gain, so a session from before it, and every paste that is not turned down, is unchanged.
+    F (id::pasteAmount, "Paste Amount", { 0.0f, 100.0f, 1.0f }, 100.0f, Attr().withStringFromValueFunction (percentText).withAutomatable (false), 2);
 
     // Bands
     for (int i = 0; i < maxBands; ++i)
@@ -406,6 +411,8 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
     if (! pdsp::link::decode (text.toStdString(), bands))
         return slots; // unusable text: no undo step
     ui::beginUndoStep (s, "Paste bands");
+    // PASTE AMOUNT scales every pasted gain (frequency and width stay as copied). At 100 the factor is exactly 1.
+    const float amount = std::clamp (s.getRawParameterValue (id::pasteAmount)->load(), 0.0f, 100.0f) / 100.0f;
     using K = pdsp::LinkBand::Kind;
     for (const auto& b : bands)
     {
@@ -416,7 +423,9 @@ inline std::vector<int> pasteBands (juce::AudioProcessorValueTreeState& s, const
         }
         const auto type = b.kind == K::lowShelf ? BandType::lowShelf : b.kind == K::highShelf ? BandType::highShelf
                         : b.kind == K::lowCut ? BandType::lowCut : b.kind == K::highCut ? BandType::highCut : BandType::bell;
-        const int slot = placeBand (s, type, b.freq, b.gainDb * b.amount); // amount: how much of the gain to take
+        // b.amount: how much of the gain the text asks for; `amount`: how much of it PASTE AMOUNT takes. A 0 dB result is placed as it is
+        // today for b.amount 0 (a bell or shelf at 0 dB is the identity, see CLAUDE.md), so the two agree.
+        const int slot = placeBand (s, type, b.freq, b.gainDb * b.amount * amount);
         if (slot < 0)
         {
             ++skipped;

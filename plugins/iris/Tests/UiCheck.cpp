@@ -137,7 +137,9 @@ int main()
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
 
     std::printf ("\nParameters\n");
-    check (proc.getParameters().size() == 6 + numCrossovers + 16 * maxBands, fmt ("%d parameters: %d global (six settings and the %d region crossovers) and 16 for each of %d bands", proc.getParameters().size(), 6 + numCrossovers, numCrossovers, maxBands));
+    check (proc.getParameters().size() == 7 + numCrossovers + 16 * maxBands, fmt ("%d parameters: %d global (seven settings, PASTE AMOUNT among them, and the %d region crossovers) and 16 for each of %d bands", proc.getParameters().size(), 7 + numCrossovers, numCrossovers, maxBands));
+    check (value (proc, id::pasteAmount) == 100.0f, "PASTE AMOUNT starts at 100 % (the gain as copied)");
+    check (! proc.apvts.getParameter (id::pasteAmount)->isAutomatable(), "PASTE AMOUNT is not automatable: it is read only when PASTE is clicked");
     bool presetsOk = true;
     for (auto& preset : presets())
         for (auto& [pid, v] : preset.values)
@@ -288,6 +290,16 @@ int main()
         made->setVisible (true);
         pump (150);
 
+        // PASTE AMOUNT has a place of its own: inside the editor, and no other visible control on screen overlaps it.
+        {
+            const auto paste = editor.pasteAmount().getBounds();
+            bool clear = editor.pasteAmount().isVisible() && editor.getLocalBounds().contains (paste);
+            for (auto* c : editor.getChildren())
+                if (c != &editor.pasteAmount() && c->isVisible() && c->getBounds().intersects (paste))
+                    clear = false;
+            check (clear, fmt ("PASTE AMOUNT is drawn inside the editor and overlaps no other visible control (%d, %d, %d x %d)", paste.getX(), paste.getY(), paste.getWidth(), paste.getHeight()));
+        }
+
         auto* add = findButton (editor, "ADD BAND");
         auto* remove = findButton (editor, "REMOVE");
         check (add != nullptr && add->isVisible() && remove != nullptr && ! remove->isVisible(), "a free slot offers ADD BAND and no REMOVE");
@@ -360,6 +372,52 @@ int main()
         const auto halved = pasteBands (half.apvts, "pantheon-bands 1\nbell freq=270 gain=-2.0 q=1.00 place=mid amount=0.5", skipped);
         check (halved.size() == 1 && std::fabs (value (half, bandIds (halved[0]).gain) + 1.0f) < 0.06f,
                "amount=0.5 halves a pasted gain: -2.0 dB comes in at -1.0 dB");
+    }
+
+    std::printf ("\nPaste amount\n");
+    {
+        const char* text = "pantheon-bands 1\nbell freq=270 gain=-2.0 q=1.00 place=mid";
+        const auto pasteAt = [&] (IrisProcessor& p, float percent, int& skippedOut)
+        {
+            setParameterValue (p.apvts, id::pasteAmount, percent);
+            return pasteBands (p.apvts, text, skippedOut);
+        };
+        int skipped = 0;
+
+        IrisProcessor full;
+        const auto asCopied = pasteAt (full, 100.0f, skipped);
+        check (asCopied.size() == 1 && std::fabs (value (full, bandIds (asCopied[0]).gain) + 2.0f) < 0.06f,
+               fmt ("100 %%: the gain comes in as copied (%.2f dB)", asCopied.empty() ? 0.0f : value (full, bandIds (asCopied[0]).gain)));
+
+        IrisProcessor half;
+        const auto halfSlots = pasteAt (half, 50.0f, skipped);
+        check (halfSlots.size() == 1 && std::fabs (value (half, bandIds (halfSlots[0]).gain) + 1.0f) < 0.06f,
+               fmt ("50 %%: -2.0 dB comes in at %.2f dB, half", halfSlots.empty() ? 0.0f : value (half, bandIds (halfSlots[0]).gain)));
+        check (halfSlots.size() == 1 && std::fabs (value (half, bandIds (halfSlots[0]).freq) - 270.0f) < 1.0f
+                   && std::fabs (value (half, bandIds (halfSlots[0]).q) - 1.0f) < 0.02f && bandPlacement (half.apvts, halfSlots[0]) == Placement::mid,
+               "50 %: the frequency, width and placement are as copied");
+
+        IrisProcessor amountText;
+        setParameterValue (amountText.apvts, id::pasteAmount, 50.0f);
+        const auto scaled = pasteBands (amountText.apvts, "pantheon-bands 1\nbell freq=270 gain=-2.0 q=1.00 place=mid amount=0.5", skipped);
+        check (scaled.size() == 1 && std::fabs (value (amountText, bandIds (scaled[0]).gain) + 0.5f) < 0.06f,
+               "the band's own amount and PASTE AMOUNT multiply: amount=0.5 at 50 % takes a quarter, -2.0 dB comes in at -0.5 dB");
+
+        IrisProcessor none;
+        const auto zeroSlots = pasteAt (none, 0.0f, skipped);
+        check (zeroSlots.size() == 1 && std::fabs (value (none, bandIds (zeroSlots[0]).gain)) < 0.06f && isBandOn (none.apvts, zeroSlots[0]),
+               "0 %: the band still comes in, at 0 dB (a flat bell, as amount=0 gives today)");
+
+        // Bands already placed are not touched by the knob: only the next PASTE uses it.
+        setParameterValue (half.apvts, id::pasteAmount, 0.0f);
+        check (halfSlots.size() == 1 && std::fabs (value (half, bandIds (halfSlots[0]).gain) + 1.0f) < 0.06f,
+               "moving PASTE AMOUNT leaves a band already placed where it was");
+
+        // A preset does not reset it: it is a session control, listed with the global parameters.
+        IrisProcessor preset;
+        setParameterValue (preset.apvts, id::pasteAmount, 40.0f);
+        applyPreset (preset.apvts, 1);
+        check (std::fabs (value (preset, id::pasteAmount) - 40.0f) < 0.01f, "a preset leaves PASTE AMOUNT alone");
     }
 
     std::printf ("\nReference and match\n");
