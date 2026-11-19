@@ -24,7 +24,7 @@ public:
     static constexpr int kHistory = 300;
 
     ui::Knob threshold, ratio, attack, release, hold, knee, makeup, mix, link, hpf;
-    ui::Choice detector, lookahead;
+    ui::Choice detector, lookahead, topology;
     ui::PresetBox presetBox;
     ui::Toggle autoRelease, autoMakeup, key, levelMatch;
     juce::TextButton deltaButton { "DELTA" }, listenButton { "SC LISTEN" };
@@ -58,7 +58,7 @@ private:
     HeraProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, curveArea, historyArea, detectorLabel, presetLabel, lookaheadLabel, latencyLabel, noteStrip;
+    juce::Rectangle<int> nameplate, curveArea, historyArea, detectorLabel, topologyLabel, presetLabel, lookaheadLabel, latencyLabel, noteStrip;
     std::array<float, kHistory> history {}; // the reduction in dB (positive), oldest first
     float shownReduction = 0.0f, inDb = -90.0f;
 

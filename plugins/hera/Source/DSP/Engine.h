@@ -16,6 +16,12 @@ namespace hera
 enum class Detector { peak, rms };
 inline constexpr int kNumDetectors = 2;
 
+// TOPOLOGY: feed-forward reads the input (the gain is what the input asks for); feedback reads the sound after the gain, the previous output sample
+// (Giannoulis, Massberg, Reiss, JAES 2012, on the detector's placement). In feedback the gain is steady at reductionDb (level - gain) and so
+// reduces less than the ratio says (see steadyFeedbackReductionDb), and look-ahead is not used, because the output is not known early.
+enum class Topology { feedForward, feedback };
+inline constexpr int kNumTopologies = 2;
+
 inline constexpr float kMaxMakeupDb = 24.0f;
 inline constexpr float kSlowAttackFactor = 20.0f; // the slow follower of AUTO release has an ATTACK this many times longer (and its own fixed release, below)
 inline constexpr float kFastAutoReleaseMs = 50.0f, kSlowAutoReleaseMs = 600.0f;
@@ -47,6 +53,7 @@ struct EngineParams
     bool external = false;     // listen to the sidechain input
     int lookahead = 0;         // an index into kLookaheadMs: the sound is delayed by it, the detector is not
     bool match = false;        // LEVEL MATCH: the level the compressor and MAKEUP add or take away is taken off again (slowly), so an A/B is not judged by loudness
+    Topology topology = Topology::feedForward; // feedback: the detector hears the previous output sample (after the gain, before MAKEUP and MIX); look-ahead is 0 then
 };
 
 // The gain computer: how many dB the level is turned down, in a soft knee of `kneeDb` around the threshold. Positive.
@@ -62,8 +69,38 @@ inline double reductionDb (double levelDb, double thresholdDb, double ratio, dou
     return slope * over;
 }
 
-// What AUTO makeup adds: what the transfer curve takes from a signal at 0 dBFS, so full scale in is full scale out.
-inline double autoMakeupDb (double thresholdDb, double ratio, double kneeDb) noexcept { return std::fmin (kMaxMakeupDb, reductionDb (0.0, thresholdDb, ratio, kneeDb)); }
+// The feedback topology's steady state: the detector hears the output, so the reduction is the law at the level that comes out, gr = reductionDb (level - gr).
+// With no knee that is gr = slope / (1 + slope) x (level - threshold), slope = 1 - 1/ratio: 4:1 gives 0.43 dB per dB over THRESH, not 0.75 (not compensated).
+// The right side rises with gr at a rate of at least 1 and the law's own rate is at most slope, so there is one root: a bisection finds it (the transfer curve
+// and AUTO use it too). Positive, like reductionDb.
+inline double steadyFeedbackReductionDb (double levelDb, double thresholdDb, double ratio, double kneeDb) noexcept
+{
+    const double top = reductionDb (levelDb, thresholdDb, ratio, kneeDb); // the output is never louder than the input: the reduction is no more than the law's at the input
+    if (top <= 0.0)
+        return 0.0;
+    double lo = 0.0, hi = top;
+    for (int i = 0; i < 60; ++i)
+    {
+        const double mid = 0.5 * (lo + hi);
+        if (mid - reductionDb (levelDb - mid, thresholdDb, ratio, kneeDb) < 0.0)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return 0.5 * (lo + hi);
+}
+
+// The reduction the chosen topology gives at a steady level.
+inline double topologyReductionDb (double levelDb, double thresholdDb, double ratio, double kneeDb, bool feedback) noexcept
+{
+    return feedback ? steadyFeedbackReductionDb (levelDb, thresholdDb, ratio, kneeDb) : reductionDb (levelDb, thresholdDb, ratio, kneeDb);
+}
+
+// What AUTO makeup adds: what the transfer curve takes from a signal at 0 dBFS, so full scale in is full scale out (in feedback, what its steady state takes).
+inline double autoMakeupDb (double thresholdDb, double ratio, double kneeDb, bool feedback = false) noexcept
+{
+    return std::fmin (kMaxMakeupDb, topologyReductionDb (0.0, thresholdDb, ratio, kneeDb, feedback));
+}
 
 // AUTO SETUP: the crest factor of a sound (its peak minus its RMS, dB) from its peak and mean square; 0 for nothing.
 inline double crestFactorDb (double peak, double meanSquare) noexcept
@@ -139,14 +176,14 @@ struct AutoThresh
 };
 
 // The law's reduction (dB) averaged over the audible histogram at this THRESH, RATIO and KNEE: the reduction at the centre of each bin, weighted by its count.
-inline double reductionAverageDb (const LevelHistogram& h, double thresholdDb, double ratio, double kneeDb) noexcept
+inline double reductionAverageDb (const LevelHistogram& h, double thresholdDb, double ratio, double kneeDb, bool feedback = false) noexcept
 {
     if (h.total <= 0.0)
         return 0.0;
     double sum = 0.0;
     for (int b = 0; b < LevelHistogram::kBins; ++b)
         if (h.count[(size_t) b] > 0.0)
-            sum += h.count[(size_t) b] * reductionDb (LevelHistogram::kLowestDb + b + 0.5, thresholdDb, ratio, kneeDb);
+            sum += h.count[(size_t) b] * topologyReductionDb (LevelHistogram::kLowestDb + b + 0.5, thresholdDb, ratio, kneeDb, feedback);
     return sum / h.total;
 }
 
@@ -154,7 +191,7 @@ inline double reductionAverageDb (const LevelHistogram& h, double thresholdDb, d
 // target at this RATIO and KNEE. `ballisticsDb` is what the real follower adds on top of the law's average (the release tail after a burst holds
 // the quiet sound down too): the listening measures it, so the target the law must reach is kAutoThreshTargetDb less that. `minTotal`: the audible
 // channel samples the listening needs before it says anything.
-inline AutoThresh autoThresholdFor (const LevelHistogram& h, double ratio, double kneeDb, double minTotal, double ballisticsDb) noexcept
+inline AutoThresh autoThresholdFor (const LevelHistogram& h, double ratio, double kneeDb, double minTotal, double ballisticsDb, bool feedback = false) noexcept
 {
     AutoThresh r;
     if (h.total < minTotal)
@@ -168,7 +205,7 @@ inline AutoThresh autoThresholdFor (const LevelHistogram& h, double ratio, doubl
     for (int step = 0; step <= 600; ++step)
     {
         const double t = step == 0 ? 0.0 : -0.1 * step; // not -0.0: the value is shown
-        if (reductionAverageDb (h, t, ratio, kneeDb) >= lawTarget)
+        if (reductionAverageDb (h, t, ratio, kneeDb, feedback) >= lawTarget)
         {
             r.result = AutoThresh::Result::set;
             r.thresholdDb = (float) t;
@@ -182,13 +219,13 @@ inline AutoThresh autoThresholdFor (const LevelHistogram& h, double ratio, doubl
 class Engine
 {
 public:
-    void prepare (double sampleRate, int lookaheadIndex = 0)
+    void prepare (double sampleRate, int lookaheadIndex = 0, Topology topology = Topology::feedForward)
     {
         fs = sampleRate;
         ringSize = (int) std::ceil (0.001 * (double) kLookaheadMs.back() * fs) + 2;
         for (auto& c : ch)
             c.ring.assign ((size_t) ringSize, 0.0);
-        delaySamples = delayOf (lookaheadIndex);
+        delaySamples = topology == Topology::feedback ? 0 : delayOf (lookaheadIndex); // feedback uses no look-ahead: the output is not known early
         latencySamples = delaySamples;
         rmsCoef = 1.0 - std::exp (-1.0 / (0.001 * kRmsMs * fs));
         matchEnergyK = 1.0 - std::exp (-1.0 / (0.6 * fs));
@@ -221,7 +258,9 @@ public:
     void process (float* left, float* right, int n, const EngineParams& p, const float* keyL = nullptr, const float* keyR = nullptr) noexcept
     {
         const bool useKey = p.external && keyL != nullptr;
-        if (const int wanted = delayOf (p.lookahead); wanted != delaySamples)
+        const bool feedback = p.topology == Topology::feedback;
+        // Feedback reads its own output, which is not known early: no look-ahead there (the setting is kept for feed-forward).
+        if (const int wanted = feedback ? 0 : delayOf (p.lookahead); wanted != delaySamples)
         {
             // A new look-ahead restarts the delay line (a short gap), as every plugin of the repository does with a setting that moves its latency.
             delaySamples = wanted;
@@ -240,7 +279,7 @@ public:
         const int holdSamples = (int) std::lround (0.001 * (double) std::clamp (p.holdMs, 0.0f, kMaxHoldMs) * fs);
         const double aSlow = coefOf (p.attackMs * kSlowAttackFactor), rSlow = coefOf (kSlowAutoReleaseMs), rAutoFast = coefOf (kFastAutoReleaseMs);
         const double ratio = std::fmax (p.ratio, 1.0);
-        const double makeupTarget = std::pow (10.0, ((double) p.makeupDb + (p.autoMakeup ? autoMakeupDb (p.thresholdDb, ratio, p.kneeDb) : 0.0)) / 20.0);
+        const double makeupTarget = std::pow (10.0, ((double) p.makeupDb + (p.autoMakeup ? autoMakeupDb (p.thresholdDb, ratio, p.kneeDb, feedback) : 0.0)) / 20.0);
         const double mixTarget = std::clamp ((double) p.mix, 0.0, 1.0);
         const double smooth = 1.0 - std::exp (-1.0 / (0.005 * fs));
         if (! started)
@@ -267,6 +306,7 @@ public:
             autoListenThr = p.thresholdDb;
             autoListenRatio = ratio;
             autoListenKnee = p.kneeDb;
+            autoListenFeedback = feedback;
         }
         const int listenFor = listening ? std::min (n, std::max (autoLimit - autoListened, 0)) : 0;
         const double sqrt2 = std::sqrt (2.0);
@@ -294,7 +334,9 @@ public:
             double level[2], heard[2];
             for (int c = 0; c < 2; ++c)
             {
-                const double k = hpfOn ? ch[(size_t) c].hpf.process (key[c]) : key[c];
+                // Feedback: without a sidechain the detector hears this channel's previous output, after the gain (KEY with a key connected is still the key).
+                const double source = feedback && ! useKey ? ch[(size_t) c].fb : key[c];
+                const double k = hpfOn ? ch[(size_t) c].hpf.process (source) : source;
                 heard[c] = k;
                 if (p.detector == Detector::peak)
                 {
@@ -348,6 +390,7 @@ public:
                     autoPeak = std::fmax (autoPeak, std::fabs (now[c]));
                 }
                 const double gain = gr == 0.0 ? 1.0 : std::exp (-gr * 0.11512925464970229);
+                s.fb = dry[c] * gain; // what the feedback detector hears next sample: the sound after the gain, before MAKEUP and MIX
                 wet[c] = dry[c] * gain * makeup;
             }
             const bool pure = mix >= 1.0 - 1e-12;
@@ -405,12 +448,13 @@ public:
     }
     // The answer for the RATIO and KNEE now. Call it when the state is `done`. The ballistics the listening really had (the follower's average
     // reduction minus the law's average for the same settings) are taken off the target first.
-    AutoThresh autoThreshAnswer (double ratio, double kneeDb) const noexcept
+    AutoThresh autoThreshAnswer (double ratio, double kneeDb, bool feedback = false) const noexcept
     {
+        // The listening's own topology gives the ballistics; the answer is for the topology set now.
         double ballistics = 0.0;
         if (autoHist.total > 0.0)
-            ballistics = autoGrSum / autoHist.total - reductionAverageDb (autoHist, autoListenThr, autoListenRatio, autoListenKnee);
-        return autoThresholdFor (autoHist, ratio, kneeDb, 2.0 * kAutoMinSeconds * fs, ballistics);
+            ballistics = autoGrSum / autoHist.total - reductionAverageDb (autoHist, autoListenThr, autoListenRatio, autoListenKnee, autoListenFeedback);
+        return autoThresholdFor (autoHist, ratio, kneeDb, 2.0 * kAutoMinSeconds * fs, ballistics, feedback);
     }
 
     std::atomic<float> reductionMeter { 0.0f }; // the deepest reduction since the editor last asked, in dB
@@ -426,6 +470,7 @@ private:
         pdsp::Biquad hpf;
         double ms = 0.0, env = 0.0, fast = 0.0, slow = 0.0;
         int hold = 0;             // samples the gain still waits before it releases
+        double fb = 0.0;          // the last sound after the gain (before MAKEUP and MIX): what a feedback detector hears next; 0 at rest
         std::vector<double> ring; // the sound of the last look-ahead, for the delay
     };
 
@@ -447,6 +492,7 @@ private:
     double autoGrSum = 0.0;                               // the follower's reduction summed over the audible frames of it
     double autoSq = 0.0, autoPeak = 0.0;                  // the sound's square and peak over the same frames (AUTO SETUP's crest factor)
     double autoListenThr = -18.0, autoListenRatio = 2.0, autoListenKnee = 6.0; // the settings it ran with (the last block's)
+    bool autoListenFeedback = false;                                             // and its topology
     std::array<Channel, 2> ch;
 };
 } // namespace hera

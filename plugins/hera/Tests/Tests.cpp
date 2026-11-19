@@ -685,5 +685,224 @@ int main()
         check (oa.l == ob.l, "HOLD gives the same output for any block size");
     }
 
+    // [13] TOPOLOGY: feedback detects its own output after the gain, so the same settings turn the sound down less than feed-forward does, it has no
+    // look-ahead, and the default is feed-forward, bit for bit as it always was.
+    std::printf ("\n[13] Topology: feed-forward and feedback\n");
+    {
+        EngineParams ff;
+        ff.thresholdDb = -24.0f;
+        ff.ratio = 4.0f;
+        ff.kneeDb = 0.0f;
+        ff.attackMs = 1.0f;
+        ff.releaseMs = 50.0f;
+        check (EngineParams().topology == Topology::feedForward, "the default topology is feed-forward");
+
+        // Feed-forward: slope x over, as the law says.
+        double ffPeak = 0.0;
+        for (const Detector d : { Detector::peak, Detector::rms })
+        {
+            ff.detector = d;
+            const double r = -gainOf (ff, -6.0);
+            if (d == Detector::peak)
+                ffPeak = r;
+            check (std::fabs (r - 13.5) < 0.2, fmt ("feed-forward, %s: a sine at -6 dBFS over -24 dB at 4:1 is turned down %.2f dB (slope x over: 13.50)", d == Detector::peak ? "peak" : "RMS", r));
+        }
+
+        // Feedback: the steady state is gr = slope / (1 + slope) x over, which is 0.33 dB per dB at 2:1 and 0.43 at 4:1 (feed-forward: 0.50 and 0.75).
+        check (std::fabs (steadyFeedbackReductionDb (-6.0, -24.0, 4.0, 0.0) - 0.75 / 1.75 * 18.0) < 1e-6,
+               fmt ("the steady state, solved from the law, is %.4f dB at 4:1 over -24 dB (the closed form: 0.75 / 1.75 x 18 = 7.7143)", steadyFeedbackReductionDb (-6.0, -24.0, 4.0, 0.0)));
+        check (steadyFeedbackReductionDb (0.0, -24.0, 1000.0, 0.0) < 12.0, fmt ("at 1000:1 the feedback steady state is %.2f dB of 24 over: it never reaches half the overshoot", steadyFeedbackReductionDb (0.0, -24.0, 1000.0, 0.0)));
+        EngineParams fb = ff;
+        fb.topology = Topology::feedback;
+        double fbPeak4 = 0.0;
+        for (const float ratio : { 2.0f, 4.0f })
+            for (const Detector d : { Detector::peak, Detector::rms })
+            {
+                fb.ratio = ratio;
+                fb.detector = d;
+                const double slope = 1.0 - 1.0 / ratio, want = slope / (1.0 + slope) * 18.0;
+                const double got = -gainOf (fb, -6.0);
+                if (ratio == 4.0f && d == Detector::peak)
+                    fbPeak4 = got;
+                check (std::fabs (got - want) < 0.3, fmt ("feedback, %s, %.1f:1 over -24 dB: a sine at -6 dBFS is turned down %.2f dB in steady state (slope / (1 + slope) x over: %.2f)",
+                                                           d == Detector::peak ? "peak" : "RMS", (double) ratio, got, want));
+            }
+        check (fbPeak4 < ffPeak - 5.0, fmt ("the same 4:1 settings: feedback turns the sine down %.2f dB, feed-forward %.2f dB: the feedback law is not the feed-forward one", fbPeak4, ffPeak));
+
+        // A +20 dB step (-30 to -10 dBFS over THRESH -20, 4:1, ATTACK 5 ms, peak): the gain has not closed in the first millisecond after the attack, so that
+        // millisecond is above the steady level. The steady levels are the laws' (-14.3 dBFS in feedback, -17.5 in feed-forward).
+        {
+            const int onset = 14400, loudEnd = onset + 24000; // 0.3 s quiet, then 0.5 s loud
+            Stereo step = sine (1000.0, -30.0, onset);
+            const Stereo loud = sine (1000.0, -10.0, loudEnd - onset);
+            step.l.insert (step.l.end(), loud.l.begin(), loud.l.end());
+            step.r = step.l;
+            EngineParams s = ff;
+            s.thresholdDb = -20.0f;
+            s.attackMs = 5.0f;
+            s.releaseMs = 100.0f;
+            s.detector = Detector::peak;
+            const auto measure = [&] (Topology t)
+            {
+                EngineParams q = s;
+                q.topology = t;
+                Engine e;
+                e.prepare (kFs);
+                const auto out = run (e, step, q);
+                return std::array<double, 3> { db (peakOf (out.l, onset, onset + 48)), db (peakOf (out.l, onset + 240, onset + 288)), db (peakOf (out.l, loudEnd - 4800, loudEnd)) };
+            };
+            const auto fbS = measure (Topology::feedback), ffS = measure (Topology::feedForward);
+            check (std::fabs (fbS[2] - (-14.29)) < 0.3 && std::fabs (ffS[2] - (-17.5)) < 0.3,
+                   fmt ("the steady levels after the step: feedback %.2f dBFS (the law: -14.29), feed-forward %.2f dBFS (the law: -17.50)", fbS[2], ffS[2]));
+            // The overshoot (the attack not yet closed) is above the steady level in both, and feedback's is the smaller: the loop limits it, because the
+            // level it hears falls as the gain comes down.
+            check (fbS[1] > fbS[2] && fbS[1] - fbS[2] < ffS[1] - ffS[2],
+                   fmt ("+20 dB step: the first millisecond after the 5 ms attack is above the steady level, feedback by %.2f dB and feed-forward by %.2f dB (feedback %.2f dBFS after the attack, %.2f steady; the first ms of the step %.2f dBFS, feed-forward %.2f)",
+                        fbS[1] - fbS[2], ffS[1] - ffS[2], fbS[1], fbS[2], fbS[0], ffS[0]));
+        }
+
+        // Block size: the same output for any block, feedback is sample by sample too. The look-ahead is set and not used.
+        for (const bool autoRel : { true, false })
+        {
+            std::mt19937 gen (17);
+            std::uniform_real_distribution<float> white (-1.0f, 1.0f);
+            Stereo in { std::vector<float> (60000), std::vector<float> (60000) };
+            for (size_t i = 0; i < in.l.size(); ++i)
+            {
+                const float beat = (i / 6000) % 2 == 0 ? 0.8f : 0.1f;
+                in.l[i] = beat * white (gen);
+                in.r[i] = beat * white (gen);
+            }
+            EngineParams q = fb;
+            q.thresholdDb = -20.0f;
+            q.autoRelease = autoRel;
+            q.detector = autoRel ? Detector::rms : Detector::peak;
+            q.mix = 0.7f;
+            q.link = 0.6f;
+            q.hpfHz = 90.0f;
+            q.makeupDb = 3.0f;
+            q.lookahead = 3;
+            Engine a;
+            a.prepare (kFs, 0, Topology::feedback);
+            const auto ref = run (a, in, q, 512);
+            bool same = true;
+            for (const int block : { 1, 7, 64, 333, 4096 })
+            {
+                Engine b;
+                b.prepare (kFs, 0, Topology::feedback);
+                const auto out = run (b, in, q, block);
+                same = same && out.l == ref.l && out.r == ref.r;
+            }
+            check (same, fmt ("feedback (%s), blocks of 1, 7, 64, 333 and 4096 samples give the output of 512, bit for bit, with LOOK-AHEAD set", autoRel ? "AUTO release" : "peak detector, plain release"));
+        }
+
+        // LOOK-AHEAD is not used in feedback: the output is that of no look-ahead, bit for bit, and the engine reports no latency.
+        {
+            std::mt19937 gen (23);
+            std::uniform_real_distribution<float> white (-0.5f, 0.5f);
+            Stereo in { std::vector<float> (24000), std::vector<float> (24000) };
+            for (auto& v : in.l) v = white (gen);
+            for (auto& v : in.r) v = white (gen);
+            EngineParams none = fb;
+            none.thresholdDb = -12.0f;
+            EngineParams with = none;
+            with.lookahead = 3;
+            Engine a, b;
+            a.prepare (kFs, 0, Topology::feedback);
+            b.prepare (kFs, 3, Topology::feedback);
+            const auto oa = run (a, in, none), ob = run (b, in, with);
+            check (oa.l == ob.l && oa.r == ob.r && a.latencySamples.load() == 0 && b.latencySamples.load() == 0,
+                   "feedback with LOOK-AHEAD 5 ms set: the output is the one without it, bit for bit, and the latency is 0");
+        }
+
+        // The default: a parameter set that never names the topology is feed-forward, the same as one that names it, bit for bit (with look-ahead and MIX).
+        {
+            std::mt19937 gen (29);
+            std::uniform_real_distribution<float> white (-0.5f, 0.5f);
+            Stereo in { std::vector<float> (24000), std::vector<float> (24000) };
+            for (auto& v : in.l) v = white (gen);
+            for (auto& v : in.r) v = white (gen);
+            EngineParams unset;
+            unset.thresholdDb = -20.0f;
+            unset.lookahead = 3;
+            unset.mix = 0.7f;
+            EngineParams named = unset;
+            named.topology = Topology::feedForward;
+            Engine a, b;
+            a.prepare (kFs, 3);
+            b.prepare (kFs, 3, Topology::feedForward);
+            const auto oa = run (a, in, unset), ob = run (b, in, named);
+            check (oa.l == ob.l && oa.r == ob.r && a.latencySamples.load() == (int) std::lround (0.005 * kFs), "feed-forward by default: the same output as when it is named, bit for bit, with the look-ahead as it was");
+        }
+
+        // Rest: a silent input gives silence, and after a loud passage the gain is back at exactly 1 (as in [2]).
+        {
+            Stereo zeros { std::vector<float> (48000, 0.0f), std::vector<float> (48000, 0.0f) };
+            EngineParams rest = fb;
+            rest.thresholdDb = -6.0f;
+            Engine e;
+            e.prepare (kFs, 0, Topology::feedback);
+            const auto silent = run (e, zeros, rest);
+            check (peakOf (silent.l, 0, silent.l.size()) == 0.0 && peakOf (silent.r, 0, silent.r.size()) == 0.0, "feedback with silence in: silence out, exactly");
+            Engine f;
+            f.prepare (kFs, 0, Topology::feedback);
+            run (f, sine (200.0, -1.0, 24000), rest);
+            const auto quiet = sine (200.0, -30.0, 48000 * 4);
+            const auto out = run (f, quiet, rest);
+            check (std::equal (out.l.begin() + 48000 * 3, out.l.end(), quiet.l.begin() + 48000 * 3), "feedback: three seconds after a loud passage the gain is back at exactly 1: the quiet tone is the input, bit for bit");
+        }
+
+        // KEY with a sidechain connected: the detector reads the key as in feed-forward (feedback is for the track's own sound), so the output is the same.
+        {
+            const int n = 48000;
+            EngineParams k = ff;
+            k.external = true;
+            const auto quietIn = sine (300.0, -40.0, n), key = sine (80.0, -6.0, n);
+            Engine ef, eb;
+            ef.prepare (kFs);
+            eb.prepare (kFs, 0, Topology::feedback);
+            EngineParams kb = k;
+            kb.topology = Topology::feedback;
+            const auto outF = run (ef, quietIn, k, 512, &key), outB = run (eb, quietIn, kb, 512, &key);
+            check (outF.l == outB.l && outF.r == outB.r, "feedback with KEY and a key connected: the detector reads the key, so the output is feed-forward's, bit for bit");
+            // KEY on with nothing connected listens to the track itself, which is feedback: a loud tone is then turned down less than in feed-forward.
+            Engine nf, nb;
+            nf.prepare (kFs);
+            nb.prepare (kFs, 0, Topology::feedback);
+            const auto loud = sine (1000.0, -6.0, n);
+            const double ratioF = db (peakOf (run (nf, loud, k).l, n - 4800, n)) - db (peakOf (loud.l, n - 4800, n));
+            const double ratioB = db (peakOf (run (nb, loud, kb).l, n - 4800, n)) - db (peakOf (loud.l, n - 4800, n));
+            check (ratioB > ratioF + 3.0, fmt ("KEY on with nothing connected: feedback listens to the track and turns a loud tone down %.1f dB; feed-forward %.1f dB", -ratioB, -ratioF));
+        }
+
+        // AUTO THRESH answers for the topology it is asked about: in feedback a steady tone is turned down 3.5 dB on average at the THRESH it sets.
+        {
+            EngineParams lp;
+            lp.ratio = 4.0f;
+            lp.kneeDb = 6.0f;
+            lp.thresholdDb = -18.0f;
+            lp.topology = Topology::feedback;
+            const Stereo steady = sine (1000.0, -20.0, 48000 * 5);
+            Engine e;
+            e.prepare (kFs, 0, Topology::feedback);
+            e.autoThreshStart();
+            run (e, steady, lp);
+            const auto answer = e.autoThreshAnswer (lp.ratio, lp.kneeDb, true);
+            EngineParams set = lp;
+            set.thresholdDb = answer.thresholdDb;
+            const double red = -gainOf (set, -20.0);
+            check (answer.result == AutoThresh::Result::set && std::fabs (red - 3.5) < 0.3,
+                   fmt ("AUTO THRESH in feedback: a steady tone at -20 dB is set to THRESH %.1f dB and turned down %.2f dB (aimed at 3.5)", (double) answer.thresholdDb, red));
+        }
+
+        // AUTO makeup in feedback is what the feedback steady state takes at 0 dBFS, so a full-scale tone still comes out at full scale.
+        {
+            EngineParams mk = ff;
+            mk.topology = Topology::feedback;
+            mk.autoMakeup = true;
+            check (std::fabs (gainOf (mk, 0.0)) < 0.3, fmt ("feedback, AUTO makeup: a full-scale tone comes out at %+.2f dBFS", gainOf (mk, 0.0)));
+        }
+    }
+
     return test::finish ("HeraTests");
 }
