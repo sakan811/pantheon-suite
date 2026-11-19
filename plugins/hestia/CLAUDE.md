@@ -31,7 +31,7 @@ Source/DSP/        no GUI dependencies, no JUCE; covered by Tests/Tests.cpp
   Analysis.h         LevelBank: thirty fourth-order band-passes and their mean squares -> dB per band
   Carver.h           the cut: thirty peaking bells in series, and the inverse of their overlap
   Depth.h            the distance cues (cuesFor(): air, level, width, room) and EarlyReflections (eight taps up to 37 ms)
-  Engine.h           the signal path and the rule (pressureOn()), the tick, the sidechain stem, the monitor, the output gain
+  Engine.h           the signal path and the rule (pressureOn()), SPREAD (spreadWeight, the banded table, spreadLevels), the tick, the sidechain stem, the monitor, the output gain
 Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
 Source/Advice.h      the notes of the strip under the knobs and the GUIDE text; plain C++, no JUCE
 Source/RoleGuess.h   AUTO ROLE: the role a track name suggests (its keyword list and priorities), and `autoRoleOnName` (the rule the processor runs by itself); plain C++, the roles are `DSP/Roles.h`'s
@@ -78,6 +78,8 @@ and to rest) and `Carver::process` runs only the active ones; `Engine::tick` set
 (`airOn`, only while the depth is above 0). A bell that is the identity has no state, so starting from rest when it is wanted again is right. Tests [4], [5], [10] and [13] pin it:
 run `HestiaTests` also with `-march=native` (the g++ one-liner above with `-O3 -march=native`, and `-ffast-math`): they must pass in all three.
 
+**SPREAD changes the levels the rule reads, not the claims or the bus.** `Engine::tick` spreads each band's power to the six bands either side (`spreadLevels`, a banded sum over the table `spreadW` that `prepare()` fills once from `spreadWeight`) for its own level and for every other stem's, inside `if (! p.hold)`, after the gather and after `bus.publish`: the bus keeps what was measured, so no instance's SPREAD changes what another sees. It runs only when `p.spread > 0`; at 0 the code is the code that was, bit for bit (test [18]). The two slopes (`kSpreadDownDbPerBark` 25, `kSpreadUpDbPerBark` 10) are fixed approximations, say so wherever they are described; the reach is six bands per *source*, and the bank's leakage is itself a source (test [17] pins that a loud tone moves bands seven to ten away). Do not extend the reach or iterate the spread (one step, from the levels as they were): the cost is 13 weights a band and that is what keeps it bounded. The spread is a stem setting, so no preset lists it (a preset sets it back to 0%); it is not copied by COPY TO MIX.
+
 **Depth is cues, not a room.** `cuesFor(distance)` gives a high shelf at `kAirHz` (to -9 dB), a level (to -4 dB), a loss of the side signal (to 30%) and the gain of the
 first reflections (0.45); `EarlyReflections` is four taps on each channel, summed through a one-pole at 3.5 kHz, each heard once. Nothing feeds back, so there is no tail and
 nothing to decay; keep it so (test [13] checks 45 ms after an impulse is silence), and keep the direct sound undelayed. All of it is exactly nothing at distance 0: the shelf is not run (`airOn`), and the width loss and the room gain are ramped to exactly 0 (the delay line runs all the time and its output is multiplied by that 0, so it adds exactly nothing). The room is fed the stem *after* the carve and *before* the shelf. The distance moves to its target over a few ticks (`distanceNow`) and the
@@ -114,14 +116,14 @@ over a tick through `deltaMix`; the output is `wet - deltaMix x dry`, `wet` bein
 
 **UNDO and A / B** (`shared/ui` Undo.h, AbCompare.h). The processor declares `undo` before `apvts` and hands it over; `ab` comes after `apvts` with `hestia::keepsParameter`. A preset (`setCurrentProgram`) and COPY TO MIX (`handleAsyncUpdate`, its four settings) each begin one undo step. `ab.loadFrom` runs before `replaceState` in `setStateInformation`, so a session from before A / B opens on A. UiCheck's "Undo and A / B" block pins the placement, the steps, the keys, the slots and the abSlot round trip.
 
-**Parameters.** Ids (`hestia::id`) are stored in sessions and automation: never rename or remove one once a release has them (`carve` was `depth` before the Depth knob existed and the plugin had not been released; the user-facing names are Carve for the cut and Depth for the distance, the ids `carve` and `distance`). All are `ParameterID` version 1 except `hold`, version 2 (off; kept by presets); a new one needs
+**Parameters.** Ids (`hestia::id`) are stored in sessions and automation: never rename or remove one once a release has them (`carve` was `depth` before the Depth knob existed and the plugin had not been released; the user-facing names are Carve for the cut and Depth for the distance, the ids `carve` and `distance`). All are `ParameterID` version 1 except `hold`, version 2 (off; kept by presets) and `spread`, version 3 (0%, off; not kept by presets, see SPREAD above); a new one needs
 a higher version, an entry in `readParams()` and a place in the editor. The order of the roles (`Role`, `roleNames()`) and of the mixes (`mixNames`: the
 index is the group, 0 off) is stored in sessions: add at the end, never reorder.
 
 ## DRY: where each thing lives
 
 - the bands, the roles and their claims -> `Roles.h` (the engine, the display and the tests read them); the anchors are the only place a role is defined
-- the rule and its constants -> `Engine.h` (`pressureOn`, `kDominanceSpan`, `kPresenceLoDb` / `kPresenceHiDb`); the depth's cues and constants -> `Depth.h` (`cuesFor`, `kAirHz`, `kAirMaxCutDb`, `kLevelMaxCutDb`, `kWidthMaxLoss`, `kReflectMax`, `kDistanceYield`)
+- the rule and its constants -> `Engine.h` (`pressureOn`, `kDominanceSpan`, `kPresenceLoDb` / `kPresenceHiDb`); SPREAD's slopes, reach and weights -> `Engine.h` (`kSpreadDownDbPerBark`, `kSpreadUpDbPerBark`, `kSpreadBands`, `spreadWeight`); the depth's cues and constants -> `Depth.h` (`cuesFor`, `kAirHz`, `kAirMaxCutDb`, `kLevelMaxCutDb`, `kWidthMaxLoss`, `kReflectMax`, `kDistanceYield`)
 - parameter ranges, defaults, choice lists -> `Parameters.h`; the defaults -> `EngineParams`
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor fills `AdviceInput` (`adviceInput()`) and
   draws the notes with `ui::drawNoteStrip`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's Advice

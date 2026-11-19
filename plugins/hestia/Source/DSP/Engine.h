@@ -31,6 +31,7 @@ struct EngineParams
     float outDb = 0.0f;
     Role scRole = Role::fullRange; // what the sidechain input is (a track with no Hestia on it), as a role...
     float scImportance = 0.5f;     // ... and how much it matters
+    float spread = 0.0f;           // SPREAD, 0 to 1: how much each band's power also counts in the bands next to it; 0 is off and the loop is not run
 };
 
 // Where a stem's claim stops being enough: another stem's claim has to be this much bigger for it to take the whole carve.
@@ -49,6 +50,33 @@ inline float pressureOn (float mineClaim, float otherClaim, float myLevelDb, flo
     const float reach = std::fmax (reachDb, 0.1f);
     const float audible = std::clamp ((otherLevelDb - myLevelDb + reach) / reach, 0.0f, 1.0f);
     return dominance * presence * audible;
+}
+
+// SPREAD: a loud band also masks the bands next to it. The power of band j reaches band i with the weight below: it falls by a slope in dB per Bark
+// of distance, steeper downward in frequency (a masker reaching a lower band) than upward. The two slopes are fixed APPROXIMATIONS, after Lynch et al.
+// (Eurospeech 1997: about 25 dB per band below, 10 dB per band above). The upper slope really depends on level, which is not modelled.
+inline constexpr float kSpreadDownDbPerBark = 25.0f;
+inline constexpr float kSpreadUpDbPerBark = 10.0f;
+// The reach of the spread, in bands either way. Beyond it nothing is added, so a band that far away is exactly as it was (a banded sum: 13 weights a band).
+inline constexpr int kSpreadBands = 6;
+inline constexpr int kSpreadTaps = 2 * kSpreadBands + 1;
+using SpreadTable = std::array<std::array<float, kSpreadTaps>, kBands>;
+
+// Traunmuller's approximation of the Bark scale (the critical-band rate of Zwicker), in Bark.
+inline double barkOf (double hz) noexcept
+{
+    return 26.81 * hz / (1960.0 + hz) - 0.53;
+}
+
+// The share of a masker's power in band `masker` that reaches band `target`: 1 in its own band, falling with the Bark distance at the slope of
+// the direction it reaches (25 dB per Bark down, 10 dB per Bark up).
+inline float spreadWeight (int masker, int target) noexcept
+{
+    if (masker == target)
+        return 1.0f;
+    const double dz = std::fabs (barkOf (bandCentreHz (target)) - barkOf (bandCentreHz (masker)));
+    const double slope = target < masker ? (double) kSpreadDownDbPerBark : (double) kSpreadUpDbPerBark;
+    return (float) std::pow (10.0, -slope * dz / 10.0);
 }
 
 class Engine
@@ -74,6 +102,12 @@ public:
         scBank.prepare (fs);
         carver.prepare (fs);
         reflections.prepare (fs);
+        for (int i = 0; i < kBands; ++i) // the spread's weights: fixed by the band centres, so computed once here
+            for (int d = 0; d < kSpreadTaps; ++d)
+            {
+                const int j = i + d - kSpreadBands;
+                spreadW[(size_t) i][(size_t) d] = (j < 0 || j >= kBands) ? 0.0f : spreadWeight (j, i);
+            }
         for (auto& a : air)
             a = pdsp::Biquad();
         cut.fill (0.0f);
@@ -190,6 +224,27 @@ private:
 
     static double finite (float x) noexcept { return std::isfinite (x) ? (double) x : 0.0; }
 
+    // One stem's levels in dB, with the power of its neighbours added at `amount` times their weight. Power is taken from the levels as they were
+    // before any band changed (one step, not a chain), and a band at the floor has no power to give. No allocation: the power is a fixed array.
+    static void spreadLevels (std::array<float, kBands>& levelDb, float amount, const SpreadTable& w) noexcept
+    {
+        std::array<float, kBands> power {};
+        for (int k = 0; k < kBands; ++k)
+            power[(size_t) k] = levelDb[(size_t) k] > kFloorDb ? std::pow (10.0f, 0.1f * levelDb[(size_t) k]) : 0.0f;
+        for (int i = 0; i < kBands; ++i)
+        {
+            float reaching = 0.0f;
+            for (int d = 0; d < kSpreadTaps; ++d)
+            {
+                const int j = i + d - kSpreadBands;
+                if (d != kSpreadBands && j >= 0 && j < kBands)
+                    reaching += power[(size_t) j] * w[(size_t) i][(size_t) d];
+            }
+            if (reaching > 0.0f)
+                levelDb[(size_t) i] = std::fmax (10.0f * std::log10 (power[(size_t) i] + amount * reaching), kFloorDb);
+        }
+    }
+
     void tick (const EngineParams& p, std::uint32_t nowMs) noexcept
     {
         // This stem, as it is now.
@@ -240,6 +295,14 @@ private:
         // What each of them takes of each band. Held, the cut stays where it is (and is shown where it is): nothing below is worked out.
         if (! p.hold)
         {
+            // SPREAD: the rule reads each stem as it is heard across the bands (its own and the others', which were gathered fresh above). The bus
+            // keeps the input as it was measured, so the others see the same thing whatever this instance's SPREAD is.
+            if (p.spread > 0.0f)
+            {
+                spreadLevels (own, p.spread, spreadW);
+                for (int j = 0; j < count; ++j)
+                    spreadLevels (others[(size_t) j].level, p.spread, spreadW);
+            }
             const auto mine = claims (p.role, p.importance, distance);
             std::array<float, kBands> target {};
             if (count > 0 && p.carveDb > 0.0f)
@@ -310,6 +373,7 @@ private:
     std::atomic<bool> pendingBroadcast { false };
     std::atomic<int> lastGroup { 0 };
     Ramp gain, widthLoss, reflect, deltaMix;
+    SpreadTable spreadW {};
     float distanceNow = 0.0f, shownDistance = -1.0f;
     int scFed = 0;
     bool scLive = false, airOn = false;

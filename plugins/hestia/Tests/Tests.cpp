@@ -819,5 +819,126 @@ int main()
         expect ("", std::nullopt);
     }
 
+    // ---- [17] SPREAD: a loud band also masks the bands next to it ------------------------------------------------------------------------------------
+    std::printf ("[17] spread: a loud band also masks the bands next to it\n");
+    {
+        // What a bass (no tone of its own) takes from a vocal that plays one tone in band `tone`, as the bass shows it on every band.
+        const auto cutsFor = [] (float spread, double hz, double amp, double seconds)
+        {
+            Bus bus;
+            Stem1 vocal (bus, Role::leadVocal), bass (bus, Role::bass);
+            bass.params.spread = spread; // the victim's spread: it spreads the vocal's levels as the bass hears them
+            std::uint32_t clock = 1000;
+            run ({ &vocal, &bass }, seconds, 256, [&] (int s, long long n) { return s == 0 ? sine (hz, amp, n) : 0.0f; }, clock);
+            std::array<float, kBands> cut {};
+            for (int k = 0; k < kBands; ++k)
+                cut[(size_t) k] = bass.engine.cutShown[(size_t) k].load();
+            return cut;
+        };
+        const int tone = 17;
+        // 0.00316 is -50 dB on the band's centre: the own band is fully present, and the bands next to it are 14 and 26 dB under it (the bank).
+        const auto off = cutsFor (0.0f, bandCentreHz (tone), 0.00316, 2.5);
+        const auto on = cutsFor (1.0f, bandCentreHz (tone), 0.00316, 2.5);
+        const double upOff = -off[(size_t) tone + 1], upOn = -on[(size_t) tone + 1], downOff = -off[(size_t) tone - 1], downOn = -on[(size_t) tone - 1];
+        check (upOn > upOff + 0.05 && downOn > downOff && -on[(size_t) tone] > upOn && -on[(size_t) tone] > downOn,
+               fmt ("SPREAD 100%%: the cut one band up goes from %.2f to %.2f dB and one band down from %.2f to %.2f dB (the own band takes %.2f dB, depth 6): both neighbours larger, both smaller than the own band",
+                    upOff, upOn, downOff, downOn, -on[(size_t) tone]));
+        check (upOn - upOff > downOn - downOff + 0.05,
+               fmt ("the masking reaches upward further: one band up gains %.2f dB, one band down %.2f dB", upOn - upOff, downOn - downOff));
+        // More than six bands away the cut is the same, to 1e-9 (the spread is a banded sum, so a band reads only the six either side of it). That
+        // holds where the tone's own leakage through the bank is inaudible to the rule, as at -50 dB (above, the far bands are not cut at all).
+        double worstFarQuiet = 0.0;
+        for (int k = 0; k < kBands; ++k)
+            if (std::abs (k - tone) > kSpreadBands)
+                worstFarQuiet = std::fmax (worstFarQuiet, std::fabs ((double) on[(size_t) k] - (double) off[(size_t) k]));
+        check (worstFarQuiet < 1e-9, fmt ("at -50 dB, more than six bands away the cut is the same with SPREAD 100%% (worst difference %.1e dB)", worstFarQuiet));
+        // A loud tone (-12 dB) is different: the bank's own leakage reaches ten bands out, and the spread reads the leaked bands next to the
+        // tone, so bands seven to ten away move a little (LIMIT, see the README). Nothing more than ten bands away moves.
+        const auto loudOff = cutsFor (0.0f, bandCentreHz (tone), 0.25, 2.5);
+        const auto loudOn = cutsFor (1.0f, bandCentreHz (tone), 0.25, 2.5);
+        double worstBeyondTen = 0.0, worstSeven = 0.0;
+        for (int k = 0; k < kBands; ++k)
+        {
+            const int d = std::abs (k - tone);
+            const double diff = std::fabs ((double) loudOn[(size_t) k] - (double) loudOff[(size_t) k]);
+            if (d > 10)
+                worstBeyondTen = std::fmax (worstBeyondTen, diff);
+            else if (d > kSpreadBands)
+                worstSeven = std::fmax (worstSeven, diff);
+        }
+        check (worstBeyondTen < 1e-9 && worstSeven < 0.5,
+               fmt ("at -12 dB, more than ten bands away nothing moves (%.1e dB); seven to ten away by up to %.2f dB (the bank's leakage, read by the spread)", worstBeyondTen, worstSeven));
+    }
+
+    // ---- [18] SPREAD: 0 is the engine it was, bit for bit, and the block size changes nothing ----------------------------------------------------
+    std::printf ("[18] spread: off is bit for bit the engine without it; any block size gives the same output\n");
+    {
+        // A run that never sets the field, one that sets it to 0, and one at 100%: the first two agree sample for sample.
+        const auto pair = [] (int mode)
+        {
+            Bus bus;
+            Stem1 vocal (bus, Role::leadVocal), bass (bus, Role::bass);
+            if (mode == 1)
+                vocal.params.spread = bass.params.spread = 0.0f;
+            if (mode == 2)
+                vocal.params.spread = bass.params.spread = 1.0f;
+            std::uint32_t clock = 1000;
+            // The vocal is a tone at -50 dB (a broadband masker would be present everywhere, and the spread would change nothing); the bass hears noise.
+            return run ({ &vocal, &bass }, 1.5, 256, [] (int s, long long n) { return s == 0 ? sine (bandCentreHz (17), 0.00316, n) : 0.1f * noise (n, 7); }, clock);
+        };
+        const auto never = pair (0), zero = pair (1), full = pair (2);
+        check (never.out == zero.out && never.out[0] == zero.out[0], "SPREAD 0 (set to 0) gives the same output, bit for bit, as a run that never sets it");
+        double change = 0.0;
+        for (size_t i = 0; i < never.out[1].size(); ++i)
+            change = std::fmax (change, std::fabs ((double) never.out[1][i] - (double) full.out[1][i]));
+        check (change > 1e-4, fmt ("... and SPREAD 100%% changes the output (by up to %.4f): the test can see it", change));
+
+        // Any host block size, with the spread on and a neighbour on the bus (as test [8]).
+        Bus bus;
+        const int neighbour = bus.claim();
+        float levels[kBands];
+        for (int k = 0; k < kBands; ++k)
+            levels[k] = -20.0f - 0.5f * (float) k;
+        std::vector<std::vector<float>> results;
+        for (int block : { 1, 7, 64, 100, 512, 4096 })
+        {
+            Engine engine (bus);
+            engine.prepare (kFs);
+            EngineParams p;
+            p.role = Role::leadVocal;
+            p.outDb = -3.0f;
+            p.distance = 0.6f;
+            p.spread = 1.0f;
+            std::vector<float> l ((size_t) kFs), r ((size_t) kFs);
+            for (size_t i = 0; i < l.size(); ++i)
+                l[i] = 0.4f * noise ((long long) i) * (i < 20000 ? 1.0f : 0.1f), r[i] = 0.4f * noise ((long long) i, 5);
+            for (size_t start = 0; start < l.size(); start += (size_t) block)
+            {
+                const int n = (int) std::min<size_t> ((size_t) block, l.size() - start);
+                bus.publish (neighbour, 1, Role::bass, 0.5f, 0.0f, levels, 5000);
+                engine.process (l.data() + start, r.data() + start, n, p, 5000);
+            }
+            std::vector<float> out = l;
+            out.insert (out.end(), r.begin(), r.end());
+            results.push_back (std::move (out));
+        }
+        bool same = true;
+        for (size_t i = 1; i < results.size(); ++i)
+            same = same && results[i] == results[0];
+        check (same, "with SPREAD 100%, blocks of 1, 7, 64, 100, 512 and 4096 samples give the very same output, bit for bit");
+    }
+
+    // ---- [19] SPREAD: the weights ------------------------------------------------------------------------------------------------------------------
+    std::printf ("[19] spread: the weights of the Bark slopes\n");
+    {
+        check (spreadWeight (17, 17) == 1.0f, "a band's own weight is 1");
+        const float up = spreadWeight (17, 18), down = spreadWeight (17, 16);
+        const double dzUp = std::fabs (barkOf (bandCentreHz (18)) - barkOf (bandCentreHz (17)));
+        const double dzDown = std::fabs (barkOf (bandCentreHz (16)) - barkOf (bandCentreHz (17)));
+        check (up > down && down > 0.0f, fmt ("one band up the weight is %.4f, one band down %.6f: the masker reaches the band above further", up, down));
+        check (std::fabs (10.0 * std::log10 ((double) up) + kSpreadUpDbPerBark * dzUp) < 1e-3 && std::fabs (10.0 * std::log10 ((double) down) + kSpreadDownDbPerBark * dzDown) < 1e-3,
+               fmt ("one band up is %.2f Bark: -%.1f dB (10 dB per Bark); one band down is %.2f Bark: -%.1f dB (25 dB per Bark)", dzUp, kSpreadUpDbPerBark * dzUp, dzDown, kSpreadDownDbPerBark * dzDown));
+    }
+
     return test::finish ("HestiaTests");
 }

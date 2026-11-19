@@ -35,11 +35,12 @@ int main()
     setValue (proc.apvts, id::mix, 0.0f); // this one is on its own; the pair below meet in mix H
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 12, fmt ("%d parameters: role, mix, importance, carve, reach, attack, release, output, depth, the sidechain's role and importance, and hold", proc.getParameters().size()));
+    check (proc.getParameters().size() == 13, fmt ("%d parameters: role, mix, importance, carve, reach, spread, attack, release, output, depth, the sidechain's role and importance, hold", proc.getParameters().size()));
     check (roleNames().size() == kNumRoles && mixNames.size() == kMaxGroups + 1, "the choice lists match the engine's roles and mixes");
     const auto defaults = readParams (proc.apvts);
     check (defaults.role == Role::fullRange && std::fabs (defaults.carveDb - 6.0f) < 1e-3f && std::fabs (defaults.distance) < 1e-6f && defaults.scRole == Role::fullRange && std::fabs (defaults.importance - 0.5f) < 1e-6f && std::fabs (defaults.outDb) < 1e-3f, // (a stepped range lands within a rounding error of its default, and which way depends on the build)
            "a new instance is Full Range, importance 50%, carve 6 dB, at the front (depth 0%), output 0");
+    check (defaults.spread == 0.0f && proc.apvts.getRawParameterValue (id::spread)->load() == 0.0f, "SPREAD is 0% by default: off, the engine is the one it was");
     {
         HestiaProcessor fresh;
         check (readParams (fresh.apvts).group == kDefaultMix && mixNames[kDefaultMix] == "A", "a new instance is in mix A, so the stems of a session find each other without being set up");
@@ -55,6 +56,9 @@ int main()
         editor.mixBox.setSelectedItemIndex (3, juce::sendNotificationSync);
         check (readParams (proc.apvts).role == Role::bass && readParams (proc.apvts).group == 3, "the selectors set the role and the mix");
         check (editor.getWidth() > 800 && editor.importance.getRight() < editor.getWidth() && editor.release.getBottom() < editor.getHeight(), "the knobs fit the window");
+        check (editor.getLocalBounds().contains (editor.spread.getBounds()) && editor.spread.isVisible() && ! editor.spread.getBounds().intersects (editor.reach.getBounds())
+                   && ! editor.spread.getBounds().intersects (editor.attack.getBounds()) && editor.spread.getBottom() < editor.getHeight(),
+               "the SPREAD knob is in the knob row, inside the window and clear of its neighbours");
 
         editor.deltaButton.triggerClick();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
@@ -223,6 +227,41 @@ int main()
                fmt ("depth 100%% through the processor: an impulse is %.2f at the front and %.2f at the back, with reflections of %.3f after it", front[10], back[10], reflections));
     }
 
+    // SPREAD reaches the engine: a bass that hears a vocal's tone at -50 dB cuts the band next to it more with SPREAD at 100% than at 0%.
+    {
+        const double tone = bandCentreHz (17);
+        const auto cutNextBand = [&] (float spread)
+        {
+            HestiaProcessor vocal, bass;
+            for (auto* p : { &vocal, &bass })
+            {
+                p->setPlayConfigDetails (2, 2, 48000.0, 512);
+                p->prepareToPlay (48000.0, 512);
+                setValue (p->apvts, id::mix, 8.0f); // H
+            }
+            setValue (vocal.apvts, id::role, (float) (int) Role::leadVocal);
+            setValue (bass.apvts, id::role, (float) (int) Role::bass);
+            setValue (bass.apvts, id::spread, spread);
+            juce::AudioBuffer<float> v (2, 512), b (2, 512);
+            juce::MidiBuffer midi;
+            for (int block = 0; block < 190; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float s = 0.00316f * std::sin ((float) (2.0 * 3.14159265358979 * tone * (double) (block * 512 + i) / 48000.0));
+                    v.setSample (0, i, s); v.setSample (1, i, s);
+                    b.setSample (0, i, 0.0f); b.setSample (1, i, 0.0f);
+                }
+                vocal.processBlock (v, midi);
+                bass.processBlock (b, midi);
+            }
+            return -bass.engine.cutShown[18].load(); // the band one above the tone, in dB of cut
+        };
+        const float off = cutNextBand (0.0f), on = cutNextBand (100.0f);
+        check (on > off + 0.3f,
+               fmt ("SPREAD reaches the engine: a bass one band above a vocal's tone is cut %.2f dB at 0%% and %.2f dB at 100%%", off, on));
+    }
+
     // The window: opens smaller than it is drawn, scales with the corner, remembers the scale with the session.
     {
         HestiaProcessor q;
@@ -389,6 +428,9 @@ int main()
         setValue (q.apvts, id::hold, 0.0f);
         q.setCurrentProgram (indexOf ("Kick"));
         check ((int) raw (id::role) == 0 && std::fabs (raw (id::distance)) < 0.5f, "Kick: the kick role, and DEPTH back at the front (a preset does not inherit the last one)");
+        setValue (q.apvts, id::spread, 100.0f);
+        q.setCurrentProgram (indexOf ("Kick"));
+        check (raw (id::spread) < 0.5f, "no preset lists SPREAD, so a preset sets it back to 0%");
         q.setCurrentProgram (0);
         check ((int) raw (id::role) == 12 && std::fabs (raw (id::importance) - 50.0f) < 0.5f && std::fabs (raw (id::carve) - 6.0f) < 0.05f, "Init is the defaults (Full Range, 50%, 6 dB)");
         const int chosen = indexOf ("Lead Vocal");

@@ -88,6 +88,8 @@ inline const char* guideText()
            "  - IMPORTANCE moves a stem's claim: raise it on the stem that must not lose room, lower it on the one that may.\n"
            "  - CARVE is the most any band is cut, REACH how much quieter than this stem another can be and still be given room, "
            "ATTACK and RELEASE how fast the cut comes in and goes out. DELTA lets you hear exactly what Hestia changes.\n"
+           "  - SPREAD makes a loud band also count in the bands next to it, as the ear hears masking: upward more than downward. At 0% each band "
+           "counts on its own. It moves where the other stems give way, not what they claim.\n"
            "  - HOLD freezes the cut where it is now (this stem is still seen by the others): set it while the mix plays as you want it, and the cut stays "
            "through a section where the others change.\n"
            "  - COPY TO MIX hands this stem's CARVE, REACH, ATTACK and RELEASE to every other Hestia in the same mix, so they are set once.\n"

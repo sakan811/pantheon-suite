@@ -35,6 +35,8 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
       carve (p.apvts, id::carve, "CARVE", "The most any band is cut, when a stem with a bigger claim is playing there as loud as this one.", ui::Knob::Layout::below),
       reach (p.apvts, id::reach, "REACH", "How much quieter than this stem another can be and still be given room. 0 dB: only when it is as loud or louder; "
                                           "wider cuts more.", ui::Knob::Layout::below),
+      spread (p.apvts, id::spread, "SPREAD", "How much a loud band also masks the bands next to it, as the ear hears it (upward more than downward). "
+                                             "0% counts each band on its own, as before. Costs a little CPU: a fixed weight per band, six bands either way.", ui::Knob::Layout::below),
       attack (p.apvts, id::attack, "ATTACK", "How fast a cut comes in.", ui::Knob::Layout::below),
       release (p.apvts, id::release, "RELEASE", "How fast a cut goes out when the other stem stops.", ui::Knob::Layout::below),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after everything."),
@@ -56,7 +58,7 @@ HestiaEditor::HestiaEditor (HestiaProcessor& p)
     autoRoleControl.setTooltip ("Set ROLE from the track's name: a word such as kick, bass, vox, gtr, keys, hat or snare. It sets ROLE and nothing else; "
                                 "everything stays editable, and one UNDO takes it back. If the name has no such word, it says so and ROLE stays as it is.");
     autoRoleControl.onClick = [this] { autoRole(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &view, &roleBox, &mixBox, &scRoleBox, &importance, &distance, &carve, &reach, &attack, &release, &outKnob, &scImportance,
+    for (auto* c : std::initializer_list<juce::Component*> { &view, &roleBox, &mixBox, &scRoleBox, &importance, &distance, &carve, &reach, &spread, &attack, &release, &outKnob, &scImportance,
                                                               &holdButton, &deltaButton, &copyButton, &autoRoleControl, &presetBox, &guideButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
@@ -132,8 +134,8 @@ void HestiaEditor::resized()
     auto cells = knobPanel.reduced (24, 12);
     scPanel = cells.removeFromRight (190);
     cells.removeFromRight (16);
-    const int cell = cells.getWidth() / 6;
-    for (auto* k : { &importance, &distance, &carve, &reach, &attack, &release })
+    const int cell = cells.getWidth() / 7;
+    for (auto* k : { &importance, &distance, &carve, &reach, &spread, &attack, &release })
         k->setBounds (cells.removeFromLeft (cell).withHeight (cellHeight).reduced (10, 0));
     auto sc = scPanel.withTrimmedLeft (12);
     scLabel = { sc.getX() + 2, sc.getY() + 2, sc.getWidth(), 12 };

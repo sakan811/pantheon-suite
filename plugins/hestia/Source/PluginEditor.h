@@ -24,7 +24,7 @@ public:
     void resized() override;
 
     ui::Choice roleBox, mixBox, scRoleBox;
-    ui::Knob importance, distance, carve, reach, attack, release, outKnob, scImportance;
+    ui::Knob importance, distance, carve, reach, spread, attack, release, outKnob, scImportance;
     ui::Toggle holdButton;
     juce::TextButton deltaButton { "DELTA" }, copyButton { "COPY TO MIX" }, autoRoleControl { "AUTO ROLE" };
     ui::PresetBox presetBox;
