@@ -148,7 +148,9 @@ int main()
         check (std::fabs (readParams (q.apvts).trimDb - (-14.0f - measured)) < 0.06f, fmt ("AUTO TRIM sets TRIM to %.1f dB (-14 target, %.1f LUFS read)", readParams (q.apvts).trimDb, measured));
         {
             const float trimmed = readParams (q.apvts).trimDb;
-            for (int waited = 0; std::fabs (q.apvts.getRawParameterValue (id::trim)->load() - trimmed) > 1e-3f && waited < 2000; waited += 10)
+            // The state records a parameter change into the undo manager on its own message-thread timer, not at once: the raw value is set at the click, so wait for the step itself
+            // (waiting only for the value let UNDO run before the step existed on a slow machine).
+            for (int waited = 0; (std::fabs (q.apvts.getRawParameterValue (id::trim)->load() - trimmed) > 1e-3f || ! q.undo.canUndo()) && waited < 2000; waited += 10)
                 juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
             editor.undoControls().undo();
             check (std::fabs (readParams (q.apvts).trimDb) < 1e-3f, "UNDO takes back AUTO TRIM (TRIM back to 0 dB)");
