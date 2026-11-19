@@ -16,6 +16,7 @@
 #include <themis/HistoryChecks.h>
 #include <themis/Limiter.h>
 #include <themis/Listen.h>
+#include <themis/BandCrestMeter.h>
 #include <themis/LowCrestMeter.h>
 #include <themis/Loudness.h>
 #include <themis/LoudnessMonitor.h>
@@ -883,6 +884,79 @@ TEST (low_crest_meter)
     run (d, sine);
     CHECK (d.hasData());
     CHECK_NEAR (d.crestDb(), 3.01, 0.15);
+}
+
+TEST (band_crest_meter)
+{
+    // The per-band crest factor: LowCrestMeter's measure for each of pdsp::bands. Analysed as mid, so a mono sine is the test signal.
+    const double fs = 48000;
+    const int n = static_cast<int> (fs * 8);
+    const auto run = [&] (BandCrestMeter& m, const std::vector<float>& x, int block) {
+        for (int pos = 0; pos < n; pos += block)
+            m.process (x.data() + pos, x.data() + pos, std::min (block, n - pos));
+    };
+    const auto tone = [&] (double hz) {
+        std::vector<float> x (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+            x[static_cast<size_t> (i)] = 0.5f * static_cast<float> (std::sin (2.0 * kPi * hz * i / fs));
+        return x;
+    };
+    // The centre of each band of music (geometric mean of its edges).
+    const auto centreOf = [] (int b) {
+        const auto& band = pdsp::bands::kBands[static_cast<size_t> (b)];
+        return std::sqrt (band.loHz * band.hiHz);
+    };
+    // (a) A sine at the centre of a band reads 3.01 dB in that band. The crossover slopes leak it into the bands near it (a
+    // leaked sine is still a sine, so those read 3.01 dB too, as long as the leak is above the gate: a 1 kHz tone reads in
+    // Bass at -47 dB), and a band three or more away gets nothing.
+    for (int k = 0; k < pdsp::bands::kCount; ++k)
+    {
+        BandCrestMeter m;
+        m.prepare (fs);
+        run (m, tone (centreOf (k)), 512);
+        const auto c = m.crestDb();
+        CHECK_NEAR (c[static_cast<size_t> (k)], 3.01, 0.3);
+        for (int j = 0; j < pdsp::bands::kCount; ++j)
+            if (std::abs (j - k) >= 3)
+                CHECK (c[static_cast<size_t> (j)] == bandcrest::kNothingDb);
+    }
+
+    // (b) A burst (one short decaying cycle of 122 Hz every 0.25 s, in the Bass band) reads a higher crest than a sine there.
+    std::vector<float> burst (static_cast<size_t> (n), 0.0f);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = std::fmod (i / fs, 0.25);
+        burst[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::exp (-t * 40.0) * std::sin (2.0 * kPi * 122.5 * t));
+    }
+    BandCrestMeter sine, bursts;
+    sine.prepare (fs);
+    bursts.prepare (fs);
+    run (sine, tone (122.5), 512);
+    run (bursts, burst, 512);
+    CHECK (bursts.hasData (1) && sine.hasData (1));
+    CHECK (bursts.crestDb()[1] > sine.crestDb()[1] + 3.0);
+
+    // (c) Silence, and a reset, give the "nothing yet" value in every band.
+    BandCrestMeter quiet;
+    quiet.prepare (fs);
+    run (quiet, std::vector<float> (static_cast<size_t> (n), 0.0f), 512);
+    CHECK (!quiet.hasData());
+    for (double c : quiet.crestDb())
+        CHECK (c == bandcrest::kNothingDb);
+    sine.requestReset();
+    CHECK (!sine.hasData());
+    for (double c : sine.crestDb())
+        CHECK (c == bandcrest::kNothingDb);
+
+    // (d) The block size does not change the result (the same samples in the same order).
+    BandCrestMeter big, small;
+    big.prepare (fs);
+    small.prepare (fs);
+    const auto x = burst;
+    run (big, x, 4096);
+    run (small, x, 37);
+    for (int b = 0; b < pdsp::bands::kCount; ++b)
+        CHECK_NEAR (big.crestDb()[static_cast<size_t> (b)], small.crestDb()[static_cast<size_t> (b)], 1e-9);
 }
 
 TEST (closest_built_in_is_the_one_whose_shape_the_curve_has)

@@ -301,11 +301,17 @@ int main (int argc, char** argv)
         CHECK (proc.readLowCrest (crest), "low-end crest meter should have data after 14 s");
         std::printf ("    low-end crest of pink noise: %.2f dB\n", crest);
         CHECK (crest > 6.0f && crest < 16.0f, "noise crest factor should be a plausible 8-14 dB");
+        themis::bandcrest::Crests bands {};
+        CHECK (proc.readBandCrest (bands), "per-band crest should have data after 14 s");
+        for (size_t b = 0; b < bands.size(); ++b)
+            CHECK (bands[b] > 0.0 && bands[b] < 20.0, "every band of pink noise should have a crest factor");
+        std::printf ("    per-band crest of pink noise: %.1f %.1f %.1f %.1f %.1f %.1f dB\n", bands[0], bands[1], bands[2], bands[3], bands[4], bands[5]);
         proc.resetAnalyzer();
         runAudio (proc, 0.1, fs, 512, 0.5f, 1);
         settle();
         CHECK (!proc.readSpectrum (m), "reset should clear the curve");
         CHECK (!proc.readLowCrest (crest), "reset should clear the low-end crest");
+        CHECK (!proc.readBandCrest (bands), "reset should clear the per-band crest");
     }
 
     std::printf ("[1a] audition: Solo / Mute change the output only while engaged; the measurements keep seeing the input\n");

@@ -11,6 +11,7 @@
 #include <themis/EventLog.h>
 #include <themis/Listen.h>
 #include <themis/LoudnessMonitor.h>
+#include <themis/BandCrestMeter.h>
 #include <themis/LowCrestMeter.h>
 #include <themis/MasterAdvisor.h>
 #include <themis/PhaseCancellation.h>
@@ -61,6 +62,7 @@ public:
         analyzer.requestReset(); // also restarts the clip totals and the history graphs
         resetCount.fetch_add (1, std::memory_order_relaxed); // the event log is cleared by the analysis thread once audio has been measured again
         lowCrest.requestReset();
+        bandCrest.requestReset();
         scope.requestReset();
         loudness.requestReset();
         monoLoudness.requestReset();
@@ -147,6 +149,10 @@ public:
     // Low-end (20-250 Hz) crest factor in dB. Returns false until enough audio has been measured.
     bool readLowCrest (float& outDb) const;
 
+    // Crest factor (peak/RMS, dB) of each of the six main bands of music. Returns false until any band has enough audio; a band
+    // without a value reads themis::bandcrest::kNothingDb.
+    bool readBandCrest (themis::bandcrest::Crests& out) const;
+
     // Peaks and clipping of everything that has played since the last reset. Returns false until audio has been measured.
     bool readClip (themis::ClipTotals& out) const;
 
@@ -199,6 +205,7 @@ private:
 
     themis::TonalAnalyzer analyzer;
     themis::LowCrestMeter lowCrest;
+    themis::BandCrestMeter bandCrest;
     themis::StereoScope scope;
     themis::LoudnessMonitor loudness;
     themis::LoudnessMonitor monoLoudness; // the same meter on the mono sum: one more K-weighted pass on the audio thread

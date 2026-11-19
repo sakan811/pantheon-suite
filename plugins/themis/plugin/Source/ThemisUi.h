@@ -67,6 +67,7 @@ inline void drawEngravedRule (juce::Graphics& g, juce::Line<float> line)
 // balance and its dynamics, row 2 how the balance translates and the stereo and peak checks.
 inline constexpr const char* kToneGroupCaption = "TONE AND DYNAMICS";
 inline constexpr const char* kTranslationGroupCaption = "TRANSLATION, STEREO AND PEAKS";
+inline constexpr const char* kBandCrestGroupCaption = "CREST PER BAND (READOUT ONLY)";
 inline constexpr float kGroupCaptionHeight = 12.0f, kGroupCaptionFontHeight = 9.0f;
 
 // The level word beside a lamp or a colour (the words are the core's, so the plan text and the screen say the same). One function
