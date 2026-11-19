@@ -34,7 +34,10 @@ HeraEditor::HeraEditor (HeraProcessor& p)
       hpf (p.apvts, id::hpf, "SC HPF", "A high-pass on what the detector listens to (not on the sound), so the bass does not make the compressor pump. Off at 20 Hz.", ui::Knob::Layout::below),
       detector (p.apvts, id::detector, "Peak: reads each peak, so it is quick and follows transients.\nRMS: reads the average over 10 ms, closer to what the ear hears and gentler on peaks."),
       lookahead (p.apvts, id::lookahead, "The sound is heard this long after the detector has seen it, so the gain is already down when a peak arrives (a fast attack no longer lets the first of it through).\n"
-                                         "It is a delay: the host compensates it. Changing it while playing restarts the compressor (a short gap)."),
+                                         "It is a delay: the host compensates it. Changing it while playing restarts the compressor (a short gap). Not used with Feedback."),
+      topology (p.apvts, id::topology, "Feed-forward: the detector hears the input, so the gain is what the input asks for (the law as written).\n"
+                                       "Feedback: it hears the sound after the gain, as many classic compressors do, so the same settings reduce less (4:1 gives 0.43 dB per dB over THRESH, not 0.75) "
+                                       "and LOOK-AHEAD is not used. Changing it while playing restarts the compressor (a short gap)."),
       presetBox (p, presets(), "Everything is set by a preset: what it does not list goes back to its default. LEVEL MATCH is kept."),
       autoRelease (p.apvts, id::autoRelease, "AUTO REL", "Program-dependent release: a short peak lets go quickly (50 ms), a long loud passage slowly (600 ms). RELEASE is not used."),
       autoMakeup (p.apvts, id::autoMakeup, "AUTO MAKEUP", "Adds what the compression takes from a signal at 0 dBFS, so a full-scale input is full scale out. MAKEUP adds to it."),
@@ -52,7 +55,7 @@ HeraEditor::HeraEditor (HeraProcessor& p)
     listenButton.setClickingTogglesState (true);
     listenButton.setTooltip ("Listen to what the detector hears: the key (this track, or the sidechain with KEY on) after SC HPF. Not saved with the project, and it ends when the window closes.");
     listenButton.onClick = [this] { proc.engine.scListen = listenButton.getToggleState(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &hold, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &levelMatch, &deltaButton, &listenButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &hold, &knee, &makeup, &mix, &link, &hpf, &detector, &topology, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &levelMatch, &deltaButton, &listenButton, &guideButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
@@ -108,6 +111,9 @@ void HeraEditor::resized()
     auto row = bounds.removeFromTop (rowHeight).withTrimmedTop (4).withTrimmedBottom (4);
     detectorLabel = { row.getX() + 2, row.getY() - 11, 80, 10 };
     detector.setBounds (row.removeFromLeft (120));
+    row.removeFromLeft (10);
+    topologyLabel = { row.getX() + 2, row.getY() - 11, 80, 10 };
+    topology.setBounds (row.removeFromLeft (120));
     row.removeFromLeft (14);
     autoRelease.setBounds (row.removeFromLeft (110));
     row.removeFromLeft (10);
@@ -146,6 +152,7 @@ void HeraEditor::paint (juce::Graphics& g)
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Compressor", inDb > -80.0f, 25.0f);
     ui::drawNoteStrip (g, noteStrip, adviceFor (adviceInput()));
     hw::drawLabel (g, "Detector", detectorLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Topology", topologyLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Look-ahead", lookaheadLabel, juce::Justification::left, colours::dim, 9.0f);
     const auto params = readParams (proc.apvts);
@@ -181,12 +188,14 @@ void HeraEditor::paint (juce::Graphics& g)
             g.drawLine (xOf (t), r.getBottom(), xOf (t), r.getY(), 1.0f);
             g.drawLine (r.getX(), yOf (t), r.getRight(), yOf (t), 1.0f);
         }
-        const double makeupDb = params.makeupDb + (params.autoMakeup ? autoMakeupDb (params.thresholdDb, params.ratio, params.kneeDb) : 0.0);
+        // In feedback the curve is the steady state of that topology (what the sound does), not the feed-forward law.
+        const bool feedback = params.topology == Topology::feedback;
+        const double makeupDb = params.makeupDb + (params.autoMakeup ? autoMakeupDb (params.thresholdDb, params.ratio, params.kneeDb, feedback) : 0.0);
         juce::Path curve;
         for (int i = 0; i <= 120; ++i)
         {
             const float dbIn = gui::kCurveMinDb + (gui::kCurveMaxDb - gui::kCurveMinDb) * (float) i / 120.0f;
-            const float dbOut = juce::jlimit (gui::kCurveMinDb, gui::kCurveMaxDb, dbIn - (float) reductionDb (dbIn, params.thresholdDb, params.ratio, params.kneeDb) + (float) makeupDb);
+            const float dbOut = juce::jlimit (gui::kCurveMinDb, gui::kCurveMaxDb, dbIn - (float) topologyReductionDb (dbIn, params.thresholdDb, params.ratio, params.kneeDb, feedback) + (float) makeupDb);
             i == 0 ? curve.startNewSubPath (xOf (dbIn), yOf (dbOut)) : curve.lineTo (xOf (dbIn), yOf (dbOut));
         }
         g.setColour (colours::amber);
@@ -290,7 +299,7 @@ void HeraEditor::finishAutoThresh()
     const auto p = readParams (proc.apvts);
     autoCrestDb = proc.engine.autoCrestDb();
     autoSet = hera::autoSetupFor (autoCrestDb);
-    autoAnswer = proc.engine.autoThreshAnswer (autoSet.ratio, p.kneeDb);
+    autoAnswer = proc.engine.autoThreshAnswer (autoSet.ratio, p.kneeDb, p.topology == Topology::feedback);
     proc.engine.autoThreshCancel();
     autoAsked = true;
     const char* text = "AUTO SETUP";

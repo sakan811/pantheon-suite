@@ -12,11 +12,13 @@ namespace hera
 namespace id
 {
 inline const juce::String threshold { "thresh" }, ratio { "ratio" }, attack { "attack" }, release { "release" }, knee { "knee" }, makeup { "makeup" }, mix { "mix" },
-                          link { "link" }, hpf { "hpf" }, hold { "hold" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" }, lookahead { "lookahead" }, match { "match" };
+                          link { "link" }, hpf { "hpf" }, hold { "hold" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" }, lookahead { "lookahead" }, match { "match" },
+                          topology { "topology" };
 }
 
 inline const juce::StringArray detectorNames { "Peak", "RMS" };
 inline const juce::StringArray lookaheadNames { "Off", "1 ms", "2 ms", "5 ms", "10 ms" }; // kLookaheadMs, in order
+inline const juce::StringArray topologyNames { "Feed-forward", "Feedback" };              // Topology, in order
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 {
@@ -65,6 +67,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::match, 3 }, "Level Match", d.match));
     // Version 4: HOLD, 0 ms (no hold) in a session saved before it, which is how it always sounded.
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::hold, 4 }, "Hold", skewed (0.0f, kMaxHoldMs, 1.0f, 50.0f), d.holdMs, Attr().withStringFromValueFunction (ms).withValueFromStringFunction (msValue)));
+    // Version 5: TOPOLOGY, Feed-forward in a session saved before it, which is how it always sounded.
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::topology, 5 }, "Topology", topologyNames, (int) d.topology));
     return { p.begin(), p.end() };
 }
 
@@ -89,6 +93,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookaheads - 1);
     e.match = v (id::match) > 0.5f;
     e.holdMs = v (id::hold);
+    e.topology = (Topology) std::clamp ((int) v (id::topology), 0, kNumTopologies - 1);
     return e;
 }
 

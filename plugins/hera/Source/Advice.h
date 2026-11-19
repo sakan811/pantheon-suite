@@ -85,6 +85,18 @@ inline std::vector<ui::Note> adviceFor (const AdviceInput& in)
         info ("LEVEL MATCH is on: the loudness it adds or takes away is matched away, so louder cannot win.");
     if (p.autoMakeup && p.makeupDb > 0.0f)
         info ("AUTO makeup is on: MAKEUP adds to it.");
+    if (p.topology == Topology::feedback)
+    {
+        char text[160];
+        std::snprintf (text, sizeof text, "Feedback: each dB over THRESH takes %.2f dB off at %.1f:1, Feed-forward %.2f; it never reaches 0.5 dB.",
+                       steadyFeedbackReductionDb (p.thresholdDb + 1.0, p.thresholdDb, p.ratio, 0.0), (double) p.ratio,
+                       reductionDb (p.thresholdDb + 1.0, p.thresholdDb, p.ratio, 0.0));
+        info (text);
+        if (p.lookahead > 0)
+            info ("Feedback does not use LOOK-AHEAD: the output is not known early. The setting is kept for Feed-forward.");
+        if (p.external && in.sidechainConnected)
+            info ("Feedback is for the track's own sound: with KEY and a sidechain connected the detector reads the key.");
+    }
     return ui::ordered (std::move (notes));
 }
 
@@ -95,7 +107,8 @@ inline const char* guideText()
     return "FOR\n"
            "Compressing a whole track or a bus: it turns the sound down while it is over THRESH, by RATIO, so the loud and the quiet come closer. "
            "Slow ATTACK keeps the punch, fast takes it away; RELEASE sets how it lets go (AUTO follows the programme), after HOLD has kept the gain down for a set time. With MIX under 100% "
-           "the compressed sound is blended with the dry one (parallel compression).\n\n"
+           "the compressed sound is blended with the dry one (parallel compression). TOPOLOGY Feedback takes the gain from the sound after the compression, as many classic compressors do: "
+           "the same settings reduce less (at most 0.5 dB per dB over THRESH), and LOOK-AHEAD is not used.\n\n"
            "SIDECHAIN\n"
            "The detector can listen to a high-passed copy (SC HIGH-PASS) so the bass does not trigger it, or to another track routed to the sidechain input (KEY). SC LISTEN plays what the detector hears (after the high-pass) instead of the track.\n\n"
            "JUDGING IT\n"

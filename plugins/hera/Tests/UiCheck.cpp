@@ -24,9 +24,10 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 16, fmt ("%d parameters: ten knobs, the detector, three switches, the look-ahead and LEVEL MATCH", proc.getParameters().size()));
+    check (proc.getParameters().size() == 17, fmt ("%d parameters: ten knobs, the detector, the topology, three switches, the look-ahead and LEVEL MATCH", proc.getParameters().size()));
     check (lookaheadNames.size() == kNumLookaheads, "the look-ahead list matches the engine's");
     check (detectorNames.size() == kNumDetectors, "the choice list matches the engine's detectors");
+    check (topologyNames.size() == kNumTopologies && readParams (proc.apvts).topology == Topology::feedForward, "the topology list matches the engine's, and a new instance is Feed-forward");
     const auto d = readParams (proc.apvts);
     check (std::fabs (d.thresholdDb + 18.0f) < 1e-3f && std::fabs (d.ratio - 2.0f) < 1e-3f && std::fabs (d.attackMs - 10.0f) < 0.01f && std::fabs (d.releaseMs - 150.0f) < 0.1f &&
                std::fabs (d.kneeDb - 6.0f) < 1e-3f && d.mix > 0.999f && d.link > 0.999f && d.detector == Detector::rms && ! d.autoRelease && ! d.autoMakeup && ! d.external && d.lookahead == 0 && ! d.match && proc.getLatencySamples() == 0,
@@ -67,6 +68,9 @@ int main()
         editor.setVisible (true);
         check (editor.detector.getNumItems() == kNumDetectors, "the detector selector has the parameter's items");
         check (editor.getWidth() > 800 && editor.hpf.getRight() <= editor.getWidth() && editor.key.getBottom() < editor.getHeight(), "the knobs and switches fit the window");
+        check (editor.topology.getNumItems() == kNumTopologies && editor.detector.getRight() < editor.topology.getX() && editor.topology.getRight() < editor.autoRelease.getX()
+                   && editor.topology.getRight() < editor.getWidth(),
+               "TOPOLOGY sits in the switch row after DETECTOR, overlapping nothing, with the parameter's two items");
         editor.autoRelease.triggerClick();
         editor.key.triggerClick();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
@@ -92,6 +96,92 @@ int main()
         r.setPlayConfigDetails (2, 2, 48000.0, 512);
         r.prepareToPlay (48000.0, 512);
         check (r.getLatencySamples() == 480, "a session opened with LOOK-AHEAD 10 ms tells the host 480 samples at once");
+    }
+
+    // TOPOLOGY: feedback reads its own output, so the same settings turn a tone down less; it has no look-ahead, so the host is told no latency there,
+    // and the look-ahead setting comes back with feed-forward.
+    {
+        // The processor's gain on a -6 dBFS tone at 4:1 over -24 dB (RMS detector, 1 ms attack), in dB: negative.
+        const auto gainThrough = [] (float topologyValue)
+        {
+            HeraProcessor q;
+            q.setPlayConfigDetails (2, 2, 48000.0, 512);
+            q.prepareToPlay (48000.0, 512);
+            setValue (q.apvts, id::threshold, -24.0f);
+            setValue (q.apvts, id::ratio, 4.0f);
+            setValue (q.apvts, id::knee, 0.0f);
+            setValue (q.apvts, id::attack, 1.0f);
+            setValue (q.apvts, id::topology, topologyValue);
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            float peak = 0.0f;
+            for (int block = 0; block < 200; ++block)
+            {
+                for (int i = 0; i < 512; ++i)
+                    for (int c = 0; c < 2; ++c)
+                        buffer.setSample (c, i, 0.5f * std::sin (2.0f * 3.14159265f * 1000.0f * (float) (block * 512 + i) / 48000.0f));
+                q.processBlock (buffer, midi);
+                if (block > 100)
+                    peak = std::max (peak, buffer.getMagnitude (0, 512));
+            }
+            return 20.0f * std::log10 (peak / 0.5f);
+        };
+        const float ffGain = gainThrough (0.0f), fbGain = gainThrough (1.0f);
+        check (std::fabs (ffGain + 13.5f) < 0.3f && std::fabs (fbGain + 7.7f) < 0.3f,
+               fmt ("through the processor, a -6 dBFS tone at 4:1 over -24 dB: feed-forward %.2f dB (the law -13.5), feedback %.2f dB (the steady state -7.7)", ffGain, fbGain));
+
+        // Look-ahead and latency: feedback has none and reports 0, and feed-forward gets its look-ahead, and its latency, back.
+        HeraProcessor t;
+        t.setPlayConfigDetails (2, 2, 48000.0, 512);
+        t.prepareToPlay (48000.0, 512);
+        setValue (t.apvts, id::lookahead, 3.0f); // 5 ms
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        const auto runBlock = [&] (juce::AudioProcessor& p)
+        {
+            buffer.clear();
+            p.processBlock (buffer, midi);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        };
+        runBlock (t);
+        check (t.getLatencySamples() == 240, fmt ("feed-forward with LOOK-AHEAD 5 ms: the host is told %d samples (240)", t.getLatencySamples()));
+        setValue (t.apvts, id::topology, 1.0f);
+        runBlock (t);
+        check (t.getLatencySamples() == 0 && readParams (t.apvts).lookahead == 3, fmt ("changing TOPOLOGY to Feedback: the host is told %d samples (0), and the LOOK-AHEAD setting is kept", t.getLatencySamples()));
+        setValue (t.apvts, id::topology, 0.0f);
+        runBlock (t);
+        check (t.getLatencySamples() == 240, fmt ("back to Feed-forward: the host is told %d samples again (240)", t.getLatencySamples()));
+        setValue (t.apvts, id::topology, 1.0f);
+        runBlock (t);
+        juce::MemoryBlock feedbackState;
+        t.getStateInformation (feedbackState);
+        HeraProcessor reopened;
+        reopened.setStateInformation (feedbackState.getData(), (int) feedbackState.getSize());
+        check (readParams (reopened.apvts).topology == Topology::feedback, "a session saved in Feedback opens in Feedback");
+        HeraProcessor fresh;
+        fresh.setPlayConfigDetails (2, 2, 48000.0, 512);
+        setValue (fresh.apvts, id::lookahead, 3.0f);
+        setValue (fresh.apvts, id::topology, 1.0f);
+        fresh.prepareToPlay (48000.0, 512);
+        check (fresh.getLatencySamples() == 0, "a session that opens in Feedback with LOOK-AHEAD on tells the host 0 samples at once");
+
+        // The notes say what Feedback changes, with its law in numbers, and fit a line of the strip.
+        AdviceInput fbIn;
+        fbIn.params.topology = Topology::feedback;
+        fbIn.params.lookahead = 2;
+        fbIn.params.ratio = 4.0f;
+        fbIn.params.thresholdDb = -20.0f;
+        check (ui::hasNote (adviceFor (fbIn), "Feedback does not use LOOK-AHEAD", ui::Severity::info), "Feedback with LOOK-AHEAD on: a note says the look-ahead is not used");
+        check (ui::hasNote (adviceFor (fbIn), "Feedback: each dB over THRESH takes 0.43 dB off at 4.0:1", ui::Severity::info), "... and the law in numbers: 0.43 dB per dB over THRESH at 4:1");
+        fbIn.params.external = true;
+        fbIn.sidechainConnected = true;
+        check (ui::hasNote (adviceFor (fbIn), "with KEY and a sidechain connected", ui::Severity::info), "KEY with a sidechain connected: a note says the detector reads the key");
+        bool fits = true;
+        for (const auto& note : adviceFor (fbIn))
+            fits = fits && (int) note.text.size() <= ui::kMaxNoteChars;
+        check (fits, "every Feedback note fits a line of the strip");
+        AdviceInput ffIn;
+        check (! ui::hasNote (adviceFor (ffIn), "Feedback", ui::Severity::info), "Feed-forward says nothing about Feedback");
     }
 
     // Presets: each applies, has a name and a one-line purpose, and the chosen one is kept with the session.
@@ -122,7 +212,10 @@ int main()
         check (readParams (q.apvts).autoRelease && readParams (q.apvts).lookahead == 0, "Bus Glue: AUTO release on, and the look-ahead back to Off");
         q.setCurrentProgram (0);
         const auto d0 = readParams (q.apvts);
-        check (std::fabs (d0.thresholdDb + 18.0f) < 1e-3f && ! d0.autoRelease && d0.lookahead == 0 && d0.mix > 0.999f, "Init is the defaults");
+        check (std::fabs (d0.thresholdDb + 18.0f) < 1e-3f && ! d0.autoRelease && d0.lookahead == 0 && d0.mix > 0.999f && d0.topology == Topology::feedForward, "Init is the defaults");
+        setValue (q.apvts, id::topology, 1.0f);
+        q.setCurrentProgram (duck);
+        check (readParams (q.apvts).topology == Topology::feedForward, "a preset puts TOPOLOGY back to Feed-forward when it was Feedback: no preset sets it, so none changes the sound");
         q.setCurrentProgram (duck);
         juce::MemoryBlock saved;
         q.getStateInformation (saved);
@@ -311,7 +404,7 @@ int main()
             editor.listenButton.triggerClick();
             juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
             check (q.engine.scListen.load() && ui::hasNote (editor.notes(), "SC LISTEN is on", ui::Severity::warning), "SC LISTEN turns the engine's monitor on, and a warning says you hear the key");
-            check (q.getParameters().size() == 16 && ! (bool) q.apvts.state.getProperty ("delta", false), "neither is a parameter: they are never saved or automated");
+            check (q.getParameters().size() == 17 && ! (bool) q.apvts.state.getProperty ("delta", false), "neither is a parameter: they are never saved or automated");
         }
         check (! q.engine.delta.load() && ! q.engine.scListen.load(), "closing the editor ends both: monitoring never outlives its window");
         setValue (q.apvts, id::match, 1.0f);

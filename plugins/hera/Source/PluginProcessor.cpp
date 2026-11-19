@@ -24,7 +24,8 @@ bool HeraProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 
 void HeraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    engine.prepare (sampleRate, hera::readParams (apvts).lookahead);
+    const auto p = hera::readParams (apvts);
+    engine.prepare (sampleRate, p.lookahead, p.topology); // feedback has no look-ahead, so its latency is 0 from the start
     bypassDelay.prepare (2, engine.maxLatencySamples()); // the longest look-ahead
     monoRight.assign ((size_t) std::max (samplesPerBlock, 1), 0.0f);
     reportedLatency = engine.latencySamples.load();

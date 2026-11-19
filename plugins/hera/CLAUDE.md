@@ -52,6 +52,9 @@ The bus is the processor's second input, off by default, and `sidechainConnected
 `delaySamples == 0` the ring returns the input itself, so the engine is bit-identical to the one without look-ahead. A change of the setting clears the ring (a short gap) and moves `latencySamples`, which the processor hands to the host on the message thread (`handleAsyncUpdate`, as Apollo does). The list is `kLookaheadMs`;
 its order is the order of `lookaheadNames`, the parameter's choice.
 
+**TOPOLOGY** (`EngineParams::topology`, a choice: Feed-forward is the default). Feedback's detector hears the previous output sample of its own channel, after the gain and before MAKEUP and MIX (`Channel::fb`, `dry x gain`), and only when no sidechain is connected: with KEY and a key connected the detector reads the key, as in feed-forward. Three rules follow, and the README's Limits says the same:
+Feedback **ignores LOOK-AHEAD**: its `delaySamples` is 0, the latency reported is 0, and the setting is kept for feed-forward (`prepare` and `process` both take the topology). **Its law differs and is not compensated**: the steady state is `gr = reductionDb (level - gr)`, solved by `steadyFeedbackReductionDb`, which is `slope / (1 + slope)` of the overshoot (never half of it), and RATIO is not changed for it. Anything that asks what the law does takes the topology: the transfer curve, AUTO makeup (`autoMakeupDb`) and the AUTO THRESH answer (`topologyReductionDb`, `reductionAverageDb`, `autoThresholdFor`). A change of the topology restarts the delay ring like a look-ahead change.
+
 **LEVEL MATCH, DELTA and SC LISTEN.** `match` is a parameter (`EngineParams::match`): the energies of the delayed input and of the output are followed per sample (0.6 s), the gain that equals them (within 12 dB) at 0.15 s, applied after MIX, exactly 1.0 when off (so the idle plug-in stays bit-exact). `Engine::delta` and `Engine::scListen` are atomics the editor sets, not parameters: never saved, ended by the editor's destructor, shown in the notes. SC LISTEN replaces the output with the key after the detector's high-pass (it wins over DELTA); DELTA is output minus the delayed input.
 
 **Bypass keeps the latency.** `processBlockBypassed` delays the main bus by `getLatencySamples()` through `pdsp::BypassDelay` (prepared for `Engine::maxLatencySamples()`); `HeraUiCheck` pins it.
@@ -66,12 +69,12 @@ its order is the order of `lookaheadNames`, the parameter's choice.
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
-**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off), `match`, version 3 (off), and `hold`, version 4 (0 ms); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off), `match`, version 3 (off), `hold`, version 4 (0 ms), and `topology`, version 5 (Feed-forward); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `detectorNames` is the order of `Detector`.
 
 ## DRY: where each thing lives
 
-- the law -> `reductionDb()` in `Engine.h` (the engine, the editor's transfer curve, the tests); what AUTO makeup adds -> `autoMakeupDb()`; what AUTO THRESH answers -> `autoThresholdFor()` and `reductionAverageDb()` in `Engine.h`; the crest factor -> `crestFactorDb()`; what AUTO SETUP sets -> `autoSetupFor()` (all in `Engine.h`)
+- the law -> `reductionDb()` in `Engine.h` (the engine, the editor's transfer curve, the tests); feedback's steady state -> `steadyFeedbackReductionDb()`, and the choice between them -> `topologyReductionDb()`; what AUTO makeup adds -> `autoMakeupDb()`; what AUTO THRESH answers -> `autoThresholdFor()` and `reductionAverageDb()` in `Engine.h`; the crest factor -> `crestFactorDb()`; what AUTO SETUP sets -> `autoSetupFor()` (all in `Engine.h`)
 - parameter ranges, defaults, choice lists -> `Parameters.h` (the editor reads the items from the parameters)
 - what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
   section, and at most `ui::kMaxNoteChars` characters
