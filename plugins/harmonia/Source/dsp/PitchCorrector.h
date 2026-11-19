@@ -11,6 +11,14 @@
 
 namespace harmonia
 {
+// LEAP HOLD (opt-in): the note hold is the full hold up to a semitone (kLeapStartCents) from the held note, shrinks linearly
+// between a semitone and a whole tone (kLeapCents), and stays at kLeapMinFraction of itself beyond. Targets are whole notes, so a
+// one-semitone step gets exactly the hold it gets with LEAP off. This is a design choice, not a standard: the usual retune-speed
+// convention is one fixed time.
+inline constexpr float kLeapStartCents = 100.0f;
+inline constexpr float kLeapCents = 200.0f;
+inline constexpr float kLeapMinFraction = 0.2f;
+
 struct CorrectorParams
 {
     uint16_t noteMask = kAllNotes; // allowed pitch classes (bit 0 = C)
@@ -19,6 +27,7 @@ struct CorrectorParams
     float natural = 0.7f;       // 0..1, how much of the singer's own vibrato/drift is kept
     float refA4 = 440.0f;
     float dwellMs = 70.0f;      // a new note must persist this long before it is adopted (0 = at once); undecided, the voice is left alone
+    bool leapHold = false;      // LEAP HOLD: a jump of a whole tone or more from the held note is adopted sooner (see kLeapStartCents); off = the hold as it always was
 };
 
 // Works in cents-from-C-zero ("midi * 100") internally. Called once per analysis hop.
@@ -186,7 +195,10 @@ public:
                     dwellTimer = 0.0f;
                 }
                 dwellTimer += dt;
-                undecided = dwellTimer * 1000.0f < p.dwellMs;
+                float holdMs = p.dwellMs;
+                if (p.leapHold) // once per hop: the jump from the held note sets how long the hold is
+                    holdMs *= std::clamp (1.0f - (std::fabs (candidate - target) * 100.0f - kLeapStartCents) / (kLeapCents - kLeapStartCents), kLeapMinFraction, 1.0f);
+                undecided = dwellTimer * 1000.0f < holdMs;
             }
             if (! undecided)
             {

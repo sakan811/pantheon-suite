@@ -69,6 +69,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout HarmoniaProcessor::createLay
 
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ids::bypass, 1 }, "Bypass", false));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ids::autoKey, 1 }, "Auto Key", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ids::leap, 2 }, "Leap Hold", false));
 
     return layout;
 }
@@ -91,6 +92,7 @@ HarmoniaProcessor::HarmoniaProcessor()
     pRange = apvts.getRawParameterValue (ids::range);
     pBypass = apvts.getRawParameterValue (ids::bypass);
     pAutoKey = apvts.getRawParameterValue (ids::autoKey);
+    pLeap = apvts.getRawParameterValue (ids::leap);
     for (int i = 0; i < 12; ++i)
         pNote[i] = apvts.getRawParameterValue (ids::note (i));
 
@@ -150,6 +152,7 @@ EngineParams HarmoniaProcessor::readParams() const
     p.corrector.strength = pStrength->load() * 0.01f;
     p.corrector.natural = pNatural->load() * 0.01f;
     p.corrector.dwellMs = pHold->load();
+    p.corrector.leapHold = pLeap->load() >= 0.5f;
     p.corrector.refA4 = pTuning->load();
     p.formantSemitones = pFormant->load();
     p.mix = pBypass->load() >= 0.5f ? 0.0f : 1.0f;

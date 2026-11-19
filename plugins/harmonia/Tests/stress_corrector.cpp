@@ -6,6 +6,7 @@
 //   stress_corrector            run all scenarios and print a table
 //   stress_corrector --csv dir  also write one CSV per scenario (t, in, out, target, truth)
 //   stress_corrector --dwell ms try the note-switch dwell
+//   stress_corrector --leap     run with LEAP HOLD on (the hold shrinks with the jump)
 
 #include "../Source/dsp/PitchCorrector.h"
 #include "TestSignals.h"
@@ -111,7 +112,7 @@ struct Score
     double wrongPct = 0, flips = 0, centreErr = 0, depthRatio = 0, maxJump = 0;
 };
 
-Score run (const Scenario& s, unsigned seed, const char* csvPath, float dwellMs)
+Score run (const Scenario& s, unsigned seed, const char* csvPath, float dwellMs, bool leap)
 {
     const auto frames = render (s, seed);
     PitchCorrector pc;
@@ -121,6 +122,7 @@ Score run (const Scenario& s, unsigned seed, const char* csvPath, float dwellMs)
     cp.retuneMs = 40.0f;
     cp.natural = s.natural;
     cp.dwellMs = dwellMs;
+    cp.leapHold = leap;
 
     FILE* csv = csvPath ? std::fopen (csvPath, "w") : nullptr;
     if (csv)
@@ -177,6 +179,7 @@ int main (int argc, char** argv)
 {
     std::string csvDir;
     float dwellMs = harmonia::CorrectorParams{}.dwellMs;
+    bool leap = false;
     for (int i = 1; i + 1 < argc; ++i)
     {
         if (! std::strcmp (argv[i], "--csv"))
@@ -184,6 +187,9 @@ int main (int argc, char** argv)
         else if (! std::strcmp (argv[i], "--dwell"))
             dwellMs = (float) std::atof (argv[i + 1]);
     }
+    for (int i = 1; i < argc; ++i)
+        if (! std::strcmp (argv[i], "--leap"))
+            leap = true;
 
     const uint16_t chromatic = 0x0FFF;
     const uint16_t cMajor = 0x0AB5;
@@ -211,7 +217,7 @@ int main (int argc, char** argv)
         for (int seed = 1; seed <= seeds; ++seed)
         {
             std::string path = csvDir.empty() ? "" : csvDir + "/" + std::to_string (&s - scenarios.data()) + ".csv";
-            const Score sc = run (s, (unsigned) seed, seed == 1 && ! csvDir.empty() ? path.c_str() : nullptr, dwellMs);
+            const Score sc = run (s, (unsigned) seed, seed == 1 && ! csvDir.empty() ? path.c_str() : nullptr, dwellMs, leap);
             wrong += sc.wrongPct / seeds;
             flips += sc.flips / seeds;
             err += sc.centreErr / seeds;

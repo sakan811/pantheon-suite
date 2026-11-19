@@ -658,6 +658,57 @@ int main()
         check (at - atNoHold < 0.1, "hold delays a real note change by under 100 ms", (at - atNoHold) * 1000.0, "ms");
     }
 
+    // ------------------------------------------------------------------ 7d3. LEAP HOLD
+    std::printf ("7d3. LEAP HOLD (opt-in): the full hold up to a semitone, shorter for a whole tone or more, off = the hold as it was\n");
+    {
+        // Time from a step of the sung pitch (vibrato-free unless asked) to the target sitting within half a semitone of the new note;
+        // -1 if the target never gets there. `changes` counts the target moves during the whole run.
+        auto adoption = [&] (bool leap, double toMidi, double vibCents, int& changes) {
+            harmonia::PitchCorrector pc;
+            pc.prepare (0.004);
+            harmonia::CorrectorParams cp;
+            cp.noteMask = chromatic;
+            cp.dwellMs = 70.0f;
+            cp.retuneMs = 40.0f;
+            cp.leapHold = leap;
+            const double tStep = 1.0;
+            double found = -1.0;
+            changes = 0;
+            float last = -1.0f;
+            for (double t = 0.0; t < 3.0; t += 0.004)
+            {
+                double midi = t < tStep ? 60.0 : toMidi;
+                midi += vibCents / 100.0 * std::sin (2.0 * kPi * 5.0 * t);
+                const auto o = pc.process (true, (float) midiToHz (midi), cp);
+                if (t > 0.5 && last >= 0.0f && o.targetMidi != last)
+                    ++changes;
+                if (found < 0.0 && t >= tStep && std::fabs (o.targetMidi - toMidi) < 0.5)
+                    found = (t - tStep) * 1000.0;
+                last = o.targetMidi;
+            }
+            return found;
+        };
+        int changes = 0;
+        const double whole = adoption (true, 62.0, 0.0, changes);
+        check (whole >= 0.0 && whole < 0.3 * 70.0, "LEAP on: a 2-semitone step is adopted within 0.3 x the hold (21 ms)", whole, "ms");
+        std::printf ("    (about 0.2 x the 70 ms hold = 14 ms of hold, plus the centre's travel to the new note)\n");
+        const double wholeOff = adoption (false, 62.0, 0.0, changes);
+        check (wholeOff >= 70.0, "LEAP off: the same 2-semitone step waits the full hold", wholeOff, "ms");
+        const double semiOn = adoption (true, 61.0, 0.0, changes);
+        const double semiOff = adoption (false, 61.0, 0.0, changes);
+        check (semiOn >= 70.0 && semiOn == semiOff, "LEAP on: a 1-semitone step waits exactly the same full hold as with LEAP off", semiOn, "ms");
+        const double threeOn = adoption (true, 63.0, 0.0, changes);
+        check (threeOn >= 0.0 && threeOn < 0.3 * 70.0, "LEAP on: a 3-semitone step is adopted at the minimum fraction (within 21 ms)", threeOn, "ms");
+        // A 0.5-semitone step of the sung pitch never crosses the hysteresis to a neighbour: the target does not move at all.
+        // That is a hysteresis fact (the target only moves past the midpoint plus the hysteresis), not a dwell fact.
+        const double half = adoption (true, 60.5, 0.0, changes);
+        check (half < 0.0 && changes == 0, "LEAP on: a 0.5-semitone sung step never changes the target (hysteresis, no adoption)", (double) changes, "changes");
+        const double halfOff = adoption (false, 60.5, 0.0, changes);
+        check (halfOff < 0.0 && changes == 0, "LEAP off: the same 0.5-semitone step does not change the target either", (double) changes, "changes");
+        const double wobbleOn = adoption (true, 62.0, 20.0, changes);
+        check (wobbleOn >= 0.0 && wobbleOn < 0.3 * 70.0, "LEAP on: a 2-semitone step under light vibrato is still adopted within 21 ms", wobbleOn, "ms");
+    }
+
     // ------------------------------------------------------------------ 7e. Auto key
     std::printf ("7e. Auto key: finds the key by itself, ignores passing notes, follows a modulation\n");
     {

@@ -64,6 +64,14 @@ static int selftest()
     std::printf ("Processor + parameters\n");
     check (proc.getName() == juce::String (words::kProjectWord) + " " + words::kPluginWord, "the reported name is the nameplate's two words", 0.0);
     check (proc.currentNoteMask() == harmonia::scaleMask (9, harmonia::kMajorScale), "A major mask from parameters", proc.currentNoteMask());
+    {
+        // LEAP HOLD is an opt-in parameter of version 2: off by default (the corrector as it was), and its value reaches the corrector.
+        check (proc.paramValue (ids::leap) < 0.5f, "LEAP HOLD is off by default", proc.paramValue (ids::leap));
+        check (proc.apvts.getParameter (ids::leap) != nullptr && proc.apvts.getParameter (ids::leap)->getName (64) == "Leap Hold", "LEAP HOLD is declared as 'Leap Hold'", 0.0);
+        setParam (proc, ids::leap, 1.0f);
+        check (proc.paramValue (ids::leap) >= 0.5f, "LEAP HOLD on reads back on", proc.paramValue (ids::leap));
+        setParam (proc, ids::leap, 0.0f);
+    }
 
     auto voice = [&] (double midi) {
         return testsig::makeVoice (fs, 2.5, [midi] (double) { return testsig::midiToHz (midi); });

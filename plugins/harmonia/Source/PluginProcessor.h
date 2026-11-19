@@ -24,6 +24,7 @@ inline constexpr const char* tuning = "tuning";
 inline constexpr const char* range = "range";
 inline constexpr const char* bypass = "bypass";
 inline constexpr const char* autoKey = "autokey";
+inline constexpr const char* leap = "leap"; // version 2: added after the others, so older sessions open with it Off
 inline juce::String note (int pitchClass) { return "note" + juce::String (pitchClass); }
 } // namespace ids
 
@@ -133,6 +134,7 @@ private:
     std::atomic<float>* pRange = nullptr;
     std::atomic<float>* pBypass = nullptr;
     std::atomic<float>* pAutoKey = nullptr;
+    std::atomic<float>* pLeap = nullptr;
     std::atomic<float>* pNote[12] {};
 
     std::atomic<bool> learnWanted { false };

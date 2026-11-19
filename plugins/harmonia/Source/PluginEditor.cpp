@@ -39,7 +39,10 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
                     "Hear your vocal untouched (still delayed by the plug-in latency, so it stays in time)."),
       autoKeyButton (p.apvts, ids::autoKey, "Auto key",
                      "Follow the key of the vocal by itself, and change it when the song changes key. "
-                     "Works out the key from the singing, so give it a few seconds of vocal. Major/minor only.")
+                     "Works out the key from the singing, so give it a few seconds of vocal. Major/minor only."),
+      leapButton (p.apvts, ids::leap, "Leap hold",
+                  "LEAP HOLD: a jump of a whole tone or more is adopted sooner. The Note Hold is kept for a semitone or less, and shrinks "
+                  "to a fifth at a whole tone. Costs: a leap of a tone or more can be followed sooner than a wobble, which the hold still guards for a semitone.")
 {
     const float savedScale = juce::jlimit (0.75f, 2.0f, (float) (double) p.apvts.state.getProperty (kScaleProperty, 1.0));
     setLookAndFeel (&laf);
@@ -61,7 +64,7 @@ HarmoniaEditor::HarmoniaEditor (HarmoniaProcessor& p)
             detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
         awaitingKeyResult = false;
     };
-    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton, &resetButton, &guideButton, &undoButtons, &abButtons })
+    for (auto* c : std::initializer_list<juce::Component*> { &rangeBox, &bypassButton, &leapButton, &keyBox, &scaleBox, &autoKeyButton, &detectButton, &resetButton, &guideButton, &undoButtons, &abButtons })
         content.addAndMakeVisible (c);
 
     detectedText = "Not sure of the key? Sing a phrase and let Harmonia find it.";
@@ -148,6 +151,7 @@ void HarmoniaEditor::resized()
 
     rangeBox.setBounds (580 + kWide, 36, 190, 28);
     bypassButton.setBounds (784 + kWide, 36, 76, 28);
+    leapButton.setBounds (560, 36, 96, 28); // the header gap between GUIDE (ends at 544) and VOICE (starts at 700)
     resetButton.setBounds (kLatencyBounds.getRight() + 16, 36, 84, 28);
     guideButton.setBounds (resetButton.getRight() + 10, 36, 76, 28);
     undoButtons.setBounds (kLatencyBounds.getX(), 6, ui::UndoButtons::kWidth, 17); // in the strip above the controls, which the captions leave free

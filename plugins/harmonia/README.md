@@ -43,6 +43,7 @@ line and the key it is meant to be in. (CMake targets, namespaces and plugin cod
 | **Strength** | Amount of correction. 100 % = fully on the note; lower keeps more of your own pitch. |
 | **Natural** | Keeps your own vibrato and expression. 100 % = all of it, 0 % = flattened onto the note. |
 | **Note Hold** | How long the voice has to stay near a new note before Harmonia moves to it (default 70 ms). Stops the correction flickering to a wrong neighbouring note; a real note change is delayed by about that long. 0 = switch at once. Automatable. |
+| **Leap Hold** | Opt-in, **off** by default (with it off Harmonia is exactly as before). The Note Hold is kept in full for a jump of a semitone or less, and shrinks between a semitone and a whole tone, to a fifth of the hold at a whole tone or more: a clear leap is adopted fast, a semitone flicker waits as before. Automatable. |
 | **Formant** | Shifts vocal character without changing pitch. Leave at 0 to keep your own voice. |
 | **Tuning (A4)** | Reference pitch, for songs not tuned to 440 Hz. |
 | **Voice** | Bass/baritone, tenor/alto, soprano or Auto. Narrows the pitch search: faster, never jumps an octave. Each range reaches a whole tone past the usual top note of its voices (G4, F5, C6; Auto covers them all), and moves with **Tuning**. |
@@ -71,6 +72,8 @@ line and the key it is meant to be in. (CMake targets, namespaces and plugin cod
 * **Note hold** (`dwellMs` in [PitchCorrector.h](Source/dsp/PitchCorrector.h)): a new target note has to persist for the hold time before it
   is adopted. While it is undecided the singer is left as sung, so a wobble or detector blip is not dragged to the neighbouring
   note. On the Earth Angel stem this cut brief (<120 ms) note flickers from 134 to 36.
+  With **Leap Hold** on, the hold is multiplied by `clamp (1 - (jump - 100) / 100, 0.2, 1)` cents, the jump being the distance from the held note to the candidate note, once per analysis hop
+  (`kLeapStartCents`, `kLeapCents`, `kLeapMinFraction`): 1 (the full hold) for a semitone or less, 0.2 for a whole tone or more.
 * **Auto key** ([KeyTracker.h](Source/dsp/KeyTracker.h)): a pitch-class histogram of the sung notes that forgets over ~12 s of singing,
   matched against the major/minor key profiles. Glides and notes that sit between two semitones count for less. The followed key
   only changes when another key has beaten it by a clear margin for 4 s, so passing notes and drift do not move it.
@@ -138,7 +141,7 @@ build-tools/tune_wav in.wav out.wav --key A --scale minor --speed 40 --natural 0
 # independent pitch track (t, midi every 5 ms) of any WAV, e.g. to compare input and output
 build-tools/pitch_track in.wav track.csv
 
-# synthetic stress scenarios for the corrector: huge vibrato, drift, sagging notes (--csv dir writes the contours)
+# synthetic stress scenarios for the corrector: huge vibrato, drift, sagging notes (--csv dir writes the contours; --leap turns LEAP HOLD on)
 build-tools/stress_corrector
 
 # follow the key of a WAV by itself (prints when it changes)
@@ -178,6 +181,7 @@ state of that is tracked in the repository's [CLAUDE.md](../../CLAUDE.md)). Run 
 | Formants unchanged when shifting 3 semitones (spectral centroid ratio 1.04; naive resampling gives 1.19) | |
 | ~0.8 % of one core (stereo, 48 kHz; ~1.4 % at 96 kHz). Passes `auval` and `pluginval` at strictness 10 | |
 | Key detection loses nothing when the editor's start and stop reach the audio thread between the same two blocks (the last wish wins), a stop with nothing started gives no result, and Detect with no audio running says the host is not running audio and withdraws (`HarmoniaDevTool selftest`); held MIDI notes become the allowed notes and a host reset drops them; the ALL / NONE / INVERT / SCALE buttons, UNDO / REDO, A / B and the saved window size (`selftest`) | |
+| LEAP HOLD (opt-in, `dsp_test` 7d3, measured on Linux, g++ C++17, synthetic voice): a 2-semitone step is adopted in **20 ms** with it on (about 0.2 x the 70 ms hold plus the centre's travel; 76 ms with it off; the bound is 0.3 x 70 ms = 21 ms), a 3-semitone step in **20 ms**, a 1-semitone step in **76 ms** with it on and off (identical), and a 0.5-semitone sung step never changes the target with it on or off (hysteresis). Off, the corrector is bit-identical to the one before the parameter (18,000 hops compared with the previous source). On `stress_corrector` (5 seeds, `--leap`) the totals go from 12.5 % wrong-note time, 5.2 flips and bias 34.1 c to **12.8 %**, **5.8** and **33.9 c**: only vibrato +-150 cents moves (1.5 % to 1.8 %) | |
 | A NaN or an inf in the input is taken as silence: the output stays finite and a second later the voice is what it would have been without it (`dsp_test`, section 9) | |
 
 ## Limitations
@@ -186,7 +190,8 @@ state of that is tracked in the repository's [CLAUDE.md](../../CLAUDE.md)). Run 
 - **Fixed 46 ms latency.** FL compensates it when mixing, but if you monitor through Harmonia while recording you will hear
   it: record dry and add Harmonia afterwards.
 - **Auto key** handles major/minor only, needs about 6 s of singing before it commits and takes about 4 s to follow a key change.
-- **Note Hold delays a real note change** by about the hold time; set it to 0 to switch at once.
+- **Note Hold delays a real note change** by about the hold time; set it to 0 to switch at once, or turn on **Leap Hold** so a whole-tone leap waits a fifth of it.
+- **Leap Hold is a design choice, not a standard.** The usual retune-speed convention is one fixed time; this shrinks the hold with the jump, between a semitone (100 cents, full hold) and a whole tone (200 cents, a fifth), with the constants named in `PitchCorrector.h`. A semitone flicker keeps its full hold. On the stress suite the wrong-note time is close to the default (12.8 % against 12.5 %, see Measured): the only scenario that moves is vibrato of +-150 cents, by 0.3 points.
 - **A detection more than an octave away** from where the voice just was is treated as a glitch and passes through untouched
   unless it persists.
 
