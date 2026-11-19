@@ -19,7 +19,7 @@ namespace castor
 namespace id
 {
 inline const juce::String mid { "mid" }, side { "side" }, monoBelow { "mono" }, balance { "balance" }, out { "out" },
-    listen { "listen" }; // version 2: a check on what is heard, Stereo by default
+    listen { "listen" }, mix { "mix" }; // version 2: a check on what is heard, Stereo by default
 // width1 ... width6: the sides of each of the six bands of music (pdsp::bands), in percent
 inline const juce::String& width (int band)
 {
@@ -52,6 +52,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
                                                          Attr().withStringFromValueFunction ([] (float v, int) { return v == 0.0f ? String ("C") : (v < 0.0f ? "L " : "R ") + String (roundToInt (std::fabs (v))); })));
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::out, 1 }, "Output", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), d.outDb, Attr().withStringFromValueFunction (db)));
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::listen, 2 }, "Listen", listenNames, (int) d.listen));
+    // Version 3: MIX, 100% (the processed sound) in a session saved before it, which is how it always sounded.
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::mix, 3 }, "Mix", NormalisableRange<float> (0.0f, 100.0f, 1.0f), d.mix * 100.0f, Attr().withStringFromValueFunction (percent)));
     return { p.begin(), p.end() };
 }
 
@@ -69,6 +71,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.monoBelowHz = v (id::monoBelow, d.monoBelowHz);
     e.balance = v (id::balance, d.balance * 100.0f) / 100.0f;
     e.outDb = v (id::out, d.outDb);
+    e.mix = v (id::mix, d.mix * 100.0f) / 100.0f;
     e.listen = (Listen) std::clamp ((int) v (id::listen, 0.0f), 0, kNumListen - 1);
     return e;
 }

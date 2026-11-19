@@ -30,6 +30,7 @@ struct EngineParams
     float monoBelowHz = kMonoOffHz;                        // below this the sides are taken away: the bass is mono
     float balance = 0.0f;                                  // -1 (left only) .. +1 (right only)
     float outDb = 0.0f;
+    float mix = 1.0f;                                      // 0 the input as it came .. 1 the processed sound; blended before BALANCE and OUTPUT
     Listen listen = Listen::stereo;                        // read by the processor (applyListen), not by process()
 };
 
@@ -80,11 +81,12 @@ public:
             widthTarget[(size_t) b] = std::clamp ((double) p.width[(size_t) b], 0.0, (double) kMaxWidth);
         const double midT = std::pow (10.0, std::clamp (p.midDb, -24.0f, 24.0f) / 20.0), sideT = std::pow (10.0, std::clamp (p.sideDb, -24.0f, 24.0f) / 20.0);
         const double leftT = p.balance > 0.0f ? 1.0 - (double) std::min (p.balance, 1.0f) : 1.0, rightT = p.balance < 0.0f ? 1.0 + (double) std::max (p.balance, -1.0f) : 1.0;
+        const double mixT = std::clamp ((double) p.mix, 0.0, 1.0);
         const double outT = std::pow (10.0, std::clamp (p.outDb, -24.0f, 24.0f) / 20.0);
         if (! started)
         {
             width = widthTarget;
-            midGain = midT; sideGain = sideT; leftGain = leftT; rightGain = rightT; outGain = outT;
+            mixGain = mixT; midGain = midT; sideGain = sideT; leftGain = leftT; rightGain = rightT; outGain = outT;
             started = true;
         }
         const double smooth = 1.0 - std::exp (-1.0 / (0.01 * fs));
@@ -109,6 +111,9 @@ public:
             leftGain += (leftT - leftGain) * smooth;
             rightGain += (rightT - rightGain) * smooth;
             outGain += (outT - outGain) * smooth;
+            mixGain += (mixT - mixGain) * smooth;
+            if (std::fabs (mixT - mixGain) < 1e-9)
+                mixGain = mixT; // at rest exactly: 100% is the processed sound itself
 
             const double l0 = std::isfinite (left[i]) ? (double) left[i] : 0.0, r0 = std::isfinite (right[i]) ? (double) right[i] : 0.0;
 
@@ -141,6 +146,11 @@ public:
             const double dM = (midGain - 1.0) * m;
 
             double yl = l + dM + dS, yr = r + dM - dS;
+            if (mixGain < 1.0) // there is no delay in the chain, so the blend does not comb; at 100% the processed sound is taken as it is
+            {
+                yl = l0 + mixGain * (yl - l0);
+                yr = r0 + mixGain * (yr - r0);
+            }
             yl *= leftGain * outGain;
             yr *= rightGain * outGain;
             left[i] = (float) yl;
@@ -161,7 +171,7 @@ public:
     std::atomic<float> correlation { 1.0f }; // of the output, over 0.3 s: +1 mono, 0 wide, -1 out of phase
 
 private:
-    double fs = 48000.0, corrCoef = 0.0001, midGain = 1.0, sideGain = 1.0, leftGain = 1.0, rightGain = 1.0, outGain = 1.0, monoFor = -1.0;
+    double fs = 48000.0, corrCoef = 0.0001, mixGain = 1.0, midGain = 1.0, sideGain = 1.0, leftGain = 1.0, rightGain = 1.0, outGain = 1.0, monoFor = -1.0;
     double ell = 0.0, err = 0.0, elr = 0.0;
     bool started = false;
     std::array<double, kBands> width { 1, 1, 1, 1, 1, 1 };
