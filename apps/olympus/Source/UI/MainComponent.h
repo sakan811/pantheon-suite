@@ -131,7 +131,7 @@ public:
     void seek (juce::int64 sample);
     juce::int64 position() const { return source.position.load(); }
     bool isPlaying() const { return source.playing.load(); }
-    void scanPlugins();
+    void scanPlugins (bool rescan = false);
     void openEditor (int track, int slot);
     int openEditors() const { return (int) windows.size(); }
     void closeEditors();

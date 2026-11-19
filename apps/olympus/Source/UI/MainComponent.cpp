@@ -17,18 +17,23 @@ juce::String timeText (juce::int64 sample, double rate)
     return juce::String (minutes).paddedLeft ('0', 2) + ":" + juce::String (std::fmod (s, 60.0), 2).paddedLeft ('0', 5);
 }
 
-std::vector<float> envelopeOf (const juce::AudioBuffer<float>& audio, int buckets)
+// The peaks of a track's clips merged on its timeline, `buckets` of them (what the row draws).
+std::vector<float> envelopeOf (const Track& track, int buckets)
 {
     std::vector<float> env ((size_t) buckets, 0.0f);
-    const int n = audio.getNumSamples();
-    if (n == 0) return env;
-    for (int b = 0; b < buckets; ++b)
+    const juce::int64 length = track.length();
+    if (length <= 0) return env;
+    juce::AudioBuffer<float> chunk (2, kBlockSize);
+    for (juce::int64 start = 0; start < length; start += kBlockSize)
     {
-        const int from = (int) ((juce::int64) n * b / buckets), to = juce::jmax (from + 1, (int) ((juce::int64) n * (b + 1) / buckets));
-        float peak = 0.0f;
-        for (int ch = 0; ch < audio.getNumChannels(); ++ch)
-            peak = juce::jmax (peak, audio.getMagnitude (ch, from, juce::jmin (to, n) - from));
-        env[(size_t) b] = peak;
+        const int n = (int) juce::jmin ((juce::int64) kBlockSize, length - start);
+        Session::mixClips (track, start, n, chunk);
+        for (int i = 0; i < n; ++i)
+        {
+            const auto b = (size_t) juce::jmin ((juce::int64) buckets - 1, (start + i) * buckets / length);
+            for (int ch = 0; ch < 2; ++ch)
+                env[b] = juce::jmax (env[b], std::abs (chunk.getSample (ch, i)));
+        }
     }
     return env;
 }
@@ -64,7 +69,7 @@ TrackRow::TrackRow (MainComponent& owner, int trackIndex) : index (trackIndex), 
 {
     auto& track = *owner.session.tracks[(size_t) trackIndex];
     addAndMakeVisible (wave);
-    wave.envelope = envelopeOf (track.audio, 240);
+    wave.envelope = envelopeOf (track, 240);
     wave.onSeek = [this] (double f) { main.seek ((juce::int64) (f * (double) main.session.tracks[(size_t) index]->length())); };
 
     nameLabel.setText (track.name, juce::dontSendNotification);
@@ -173,7 +178,10 @@ void TrackRow::paint (juce::Graphics& g)
     auto& track = *main.session.tracks[(size_t) index];
     const auto r = getLocalBounds().reduced (14, 10);
     const auto line2 = juce::Rectangle<int> (r.getX(), r.getY() + 28, 300, 14);
-    ui::hw::drawLabel (g, track.file.getFileName(), line2, juce::Justification::left, colours::dim, 10.0f);
+    // the first clip's file, and how many more there are
+    const juce::String files = track.clips.empty() ? juce::String ("NO CLIPS")
+                                                   : track.clips[0].file.getFileName() + (track.clips.size() > 1 ? "  +" + juce::String ((int) track.clips.size() - 1) : juce::String());
+    ui::hw::drawLabel (g, files, line2, juce::Justification::left, colours::dim, 10.0f);
     juce::String detail = timeText (track.length(), main.session.sampleRate);
     if (track.latency() > 0) detail += "   LATENCY " + juce::String (track.latency()) + " SMP";
     ui::hw::drawLabel (g, detail, line2.translated (0, 15), juce::Justification::left, colours::dim, 10.0f);
@@ -284,7 +292,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     openButton.setTooltip ("Open a saved project (.olympus).");
     saveButton.setTooltip ("Save the project: the tracks, their chains and every plugin's settings. Cmd+S.");
     addButton.setTooltip ("Add stems: audio files, one track each. You can also drop them on the window.");
-    pluginsButton.setTooltip ("Where the suite's built plugins (.vst3) are looked for, and which were found.");
+    pluginsButton.setTooltip ("Where plugins (VST3, and Audio Units on macOS) are looked for, which were found, and a rescan.");
     renderButton.setTooltip ("Write one WAV per audible track, after its chain and fader, and the mix.");
     playButton.setTooltip ("Play from the playhead (space).");
 
@@ -295,7 +303,13 @@ MainComponent::MainComponent (Options options) : opts (options)
         deviceManager.addAudioCallback (&player);
     }
     if (opts.scanPlugins)
-        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->scanPlugins(); });
+    {
+        // the last scan is loaded; the folders are read again only when there is none, or when the user asks (PLUGINS > Rescan plugins)
+        session.catalog.setSuiteOnly (settings.scanSuiteOnly);
+        const bool cached = session.catalog.loadCache (Settings::pluginCacheFile (opts.settingsFile));
+        if (! cached || session.catalog.names().isEmpty())
+            juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->scanPlugins (false); });
+    }
     startTimerHz (30);
 }
 
@@ -312,11 +326,16 @@ MainComponent::~MainComponent()
     setLookAndFeel (nullptr);
 }
 
-void MainComponent::scanPlugins()
+void MainComponent::scanPlugins (bool rescan)
 {
     if (scanning) return;
     scanning = true;
-    session.catalog.scan (settings.searchPath());
+    session.catalog.setSuiteOnly (settings.scanSuiteOnly);
+    ScanOptions options;
+    options.rescan = rescan;
+    options.deadMansPedal = Settings::scanPedalFile (opts.settingsFile);
+    session.catalog.scan (settings.searchPath(), options);
+    session.catalog.saveCache (Settings::pluginCacheFile (opts.settingsFile));
     scanning = false;
     // a project opened before the scan finished: give its missing plugins another try
     repaint();
@@ -352,14 +371,7 @@ void MainComponent::newProject()
 {
     closeEditors();
     source.playing = false;
-    {
-        const juce::ScopedLock sl (session.lock);
-        session.tracks.clear();
-        session.sampleRate = 0.0;
-        session.projectFile = juce::File();
-        session.name = "Untitled";
-        session.dirty = false;
-    }
+    session.newProject ("Untitled");
     seek (0);
     rebuildNow();
 }
@@ -523,11 +535,11 @@ void MainComponent::chooseAndRender()
 void MainComponent::showPluginsMenu()
 {
     juce::PopupMenu menu;
-    menu.addSectionHeader ("Found: " + juce::String (session.catalog.names().size()) + " of the suite's plugins");
+    menu.addSectionHeader ("Found: " + juce::String (session.catalog.names().size()) + " plugins");
     for (auto& n : session.catalog.names()) menu.addItem (n, false, false, nullptr);
     menu.addSeparator();
     menu.addItem ("Look in a folder...", [this] { chooseFolder(); });
-    menu.addItem ("Look again", [this] { scanPlugins(); requestRebuild(); });
+    menu.addItem ("Rescan plugins", [this] { scanPlugins (true); requestRebuild(); });
     if (! settings.pluginFolders.isEmpty())
     {
         menu.addSeparator();
@@ -676,7 +688,7 @@ void MainComponent::paint (juce::Graphics& g)
         g.setColour (colours::dim);
         g.setFont (ui::font (18.0f));
         g.drawText ("Drop the stems here", bodyArea.withTrimmedBottom (30), juce::Justification::centred);
-        ui::hw::drawLabel (g, "Audio files, one track each. Then put the suite's plugins on them.", bodyArea.withTrimmedTop (30), juce::Justification::centred, colours::dim, 11.0f);
+        ui::hw::drawLabel (g, "Audio files, one track each. Then put plugins on them.", bodyArea.withTrimmedTop (30), juce::Justification::centred, colours::dim, 11.0f);
     }
     ui::drawNoteStrip (g, noteStrip, notes());
 }

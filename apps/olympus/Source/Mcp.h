@@ -110,7 +110,7 @@ private:
         const auto trackRef = prop ("string", "Track number (from 0) or name");
         const auto slotRef = prop ("string", "Position in the chain (from 0) or the plugin's name");
         juce::Array<juce::var> list;
-        list.add (tool ("list_plugins", "The suite's plugins that are installed and can be put on a track.", {}));
+        list.add (tool ("list_plugins", "The plugins that are installed (VST3, and Audio Units on macOS) and can be put on a track.", {}));
         list.add (tool ("project_info", "The whole session: tracks, faders, chains, latency.", {}));
         list.add (tool ("new_project", "Empties the session.", { { "name", prop ("string", "Project name") } }));
         list.add (tool ("open_project", "Opens a saved .olympus project.", { { "path", prop ("string", "Absolute path of the project file") } }, { "path" }));
@@ -118,8 +118,9 @@ private:
         list.add (tool ("add_track", "Adds a track from an audio file (every track becomes stereo at the session's sample rate).",
                         { { "file", prop ("string", "Absolute path of the audio file") }, { "name", prop ("string", "Track name (default: the file's name)") } }, { "file" }));
         list.add (tool ("remove_track", "Removes a track.", { { "track", trackRef } }, { "track" }));
-        list.add (tool ("set_track", "Fader (dB), mute, solo or name of a track.",
-                        { { "track", trackRef }, { "gain_db", prop ("number", "Fader in dB") }, { "mute", prop ("boolean", "") }, { "solo", prop ("boolean", "") }, { "name", prop ("string", "") } }, { "track" }));
+        list.add (tool ("set_track", "Fader (dB), pan, mute, solo or name of a track.",
+                        { { "track", trackRef }, { "gain_db", prop ("number", "Fader in dB") }, { "pan", prop ("number", "-1 (left) .. 1 (right)") },
+                          { "mute", prop ("boolean", "") }, { "solo", prop ("boolean", "") }, { "name", prop ("string", "") } }, { "track" }));
         list.add (tool ("add_plugin", "Puts a plugin (at its defaults) in a track's chain.",
                         { { "track", trackRef }, { "plugin", prop ("string", "Plugin name or the start of it") }, { "position", prop ("integer", "Place in the chain (default: the end)") } }, { "track", "plugin" }));
         list.add (tool ("remove_plugin", "Takes a plugin out of a chain.", { { "track", trackRef }, { "slot", slotRef } }, { "track", "slot" }));
@@ -147,17 +148,13 @@ private:
         {
             juce::Array<juce::var> names;
             for (auto& n : session.catalog.names()) names.add (n);
-            return object ({ { "installed", names }, { "note", names.isEmpty() ? "None found: the suite's plugins are built or installed as VST3 bundles; see the Olympus README for the folders searched." : "" } });
+            return object ({ { "installed", names }, { "note", names.isEmpty() ? "None found: plugins are installed as VST3 bundles (or Audio Units on macOS); see the Olympus README for the folders searched." : "" } });
         }
         if (name == "project_info")
             return session.describe();
         if (name == "new_project")
         {
-            session.tracks.clear();
-            session.sampleRate = 0.0;
-            session.projectFile = juce::File();
-            session.name = a["name"].toString().isNotEmpty() ? a["name"].toString() : "Untitled";
-            session.dirty = false;
+            session.newProject (a["name"].toString());
             return session.describe();
         }
         if (name == "open_project")
@@ -227,6 +224,7 @@ private:
             const juce::ScopedLock sl (session.lock);
             auto& t = *session.tracks[(size_t) track];
             if (a.hasProperty ("gain_db")) t.gainDb = (float) (double) a["gain_db"];
+            if (a.hasProperty ("pan")) t.pan = juce::jlimit (-1.0f, 1.0f, (float) (double) a["pan"]);
             if (a.hasProperty ("mute")) t.mute = (bool) a["mute"];
             if (a.hasProperty ("solo")) t.solo = (bool) a["solo"];
             if (a.hasProperty ("name") && a["name"].toString().isNotEmpty()) t.name = a["name"].toString();

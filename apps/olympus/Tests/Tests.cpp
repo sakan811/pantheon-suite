@@ -5,7 +5,9 @@
 // Set OLYMPUS_PLUGIN_DIR to a folder with built plugin bundles to add the check against the real ones.
 
 #include "Check.h"
+#include "Edit.h"
 #include "Mcp.h"
+#include "TempoTests.h"
 #include "TestPlugin.h"
 
 #include <sstream>
@@ -89,6 +91,87 @@ void catalogChecks()
     test::check (s.catalog.names().size() == 2, "names lists what is known");
 }
 
+// A plugin as a scan would describe it (a hand-built description, so no plugin is needed).
+juce::PluginDescription described (const juce::String& name, const juce::String& maker, const juce::String& format, const juce::String& file)
+{
+    juce::PluginDescription d;
+    d.name = name;
+    d.manufacturerName = maker;
+    d.pluginFormatName = format;
+    d.fileOrIdentifier = file;
+    d.category = "Effect";
+    d.version = "1.0";
+    d.uniqueId = name.hashCode() ^ maker.hashCode();
+    d.numInputChannels = d.numOutputChannels = 2;
+    return d;
+}
+
+void catalogCacheChecks()
+{
+    std::printf ("[1b] Catalog: the cache, the suite only, two plugins of one name\n");
+    const auto dir = tempFolder().getChildFile ("catalog-cache");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    // what a scan leaves in the list: two plugins of one name from two makers, a VST3 and an AU of one name, the suite's own, and a blacklisted bundle
+    juce::KnownPluginList scanned;
+    scanned.addType (described ("Dup Plugin", "Acme", "VST3", "/x/Acme Dup.vst3"));
+    scanned.addType (described ("Dup Plugin", "Beta", "VST3", "/x/Beta Dup.vst3"));
+    scanned.addType (described ("Shared Name", "Acme", "VST3", "/x/Shared.vst3"));
+    scanned.addType (described ("Shared Name", "Acme", "AudioUnit", "AudioUnit:Shared"));
+    scanned.addType (described ("Hermes Level", "Pantheon", "VST3", "/x/Hermes Level.vst3"));
+    scanned.addToBlacklist ("/x/Crashed.vst3");
+    const auto first = dir.getChildFile ("plugins.xml");
+    test::check (scanned.createXml()->writeTo (first), "a scan's list is written as the cache");
+
+    Catalog a;
+    test::check (a.loadCache (first), "the cache is read");
+    test::check (a.names().size() == 4 && a.names().contains ("Dup Plugin (Acme)") && a.names().contains ("Dup Plugin (Beta)"), "two plugins of one name are both listed, each with its maker");
+    int sharedCount = 0;
+    bool sharedIsVst3 = true;
+    for (const auto& d : a.descriptions())
+        if (d.name == "Shared Name") { ++sharedCount; sharedIsVst3 = d.pluginFormatName == "VST3"; }
+    test::check (sharedCount == 1 && sharedIsVst3, "a VST3 and an AU of one name: the VST3 is kept");
+    juce::String err;
+    test::check (a.resolve ("Dup Plugin", err).isEmpty() && err.contains ("Acme") && err.contains ("Beta"), "a name two plugins share is refused, both named (" + err + ")");
+    test::check (a.resolve ("Dup Plugin (Beta)", err) == "Dup Plugin (Beta)", "and the one written with its maker is found");
+    test::check (a.resolve ("hermes", err) == "Hermes Level", "the start of a name still finds a plugin");
+    test::check (a.create ("Dup Plugin", 48000.0, 512, err) == nullptr && err.contains ("Acme"), "create refuses the shared name the same way");
+    test::check (a.isSuite ("Hermes Level") && ! a.isSuite ("Dup Plugin (Acme)") && ! a.isSuite ("Shared Name"), "isSuite: the suite's own name, and not the others");
+    test::check (a.suiteFound().size() == 1 && a.suiteFound()[0] == "Hermes Level", "suiteFound lists the suite's plugins that are here");
+    test::check (a.blacklisted().contains ("/x/Crashed.vst3"), "a blacklisted bundle is reported");
+
+    Catalog made;
+    made.addInternal (test::GainPlugin::description ("Test Gain"), [] (double, int) -> std::unique_ptr<juce::AudioPluginInstance> { return nullptr; });
+    made.addInternal (described ("Aegis Ceiling", "Pantheon", "Internal", "Aegis Ceiling"), [] (double, int) -> std::unique_ptr<juce::AudioPluginInstance> { return nullptr; });
+    test::check (made.isSuite ("Aegis Ceiling") && ! made.isSuite ("Test Gain"), "isSuite holds for a made-in-code plugin with a suite name too");
+
+    const auto second = dir.getChildFile ("saved.xml");
+    test::check (a.saveCache (second), "the catalog is saved");
+    Catalog b;
+    test::check (b.loadCache (second) && b.names() == a.names() && b.blacklisted() == a.blacklisted() && b.descriptions().size() == a.descriptions().size(),
+                 "and read back: the same plugins, makers and blacklist");
+
+    b.setSuiteOnly (true);
+    test::check (b.names().size() == 1 && b.names()[0] == "Hermes Level", "suite only: just the suite's own are listed");
+    b.setSuiteOnly (false);
+    test::check (b.names() == a.names(), "and all of them again when it is off");
+
+    const auto junk = dir.getChildFile ("junk.xml");
+    junk.replaceWithText ("not a catalog");
+    Catalog c;
+    test::check (! c.loadCache (junk) && ! c.loadCache (dir.getChildFile ("missing.xml")) && c.names().isEmpty(), "a file that is not a catalog, or is missing, is refused");
+
+    Settings settings;
+    settings.scanSuiteOnly = true;
+    settings.pluginFolders.add ("/x");
+    const auto settingsFile = dir.getChildFile ("settings.xml");
+    settings.save (settingsFile);
+    test::check (Settings::load (settingsFile).scanSuiteOnly && Settings::load (settingsFile).pluginFolders.size() == 1, "the suite-only flag is kept in the settings");
+    test::check (! Settings::load (dir.getChildFile ("none.xml")).scanSuiteOnly, "and it is off by default");
+    test::check (Settings::pluginCacheFile (settingsFile).getParentDirectory() == dir && Settings::scanPedalFile (settingsFile).getParentDirectory() == dir,
+                 "the cache and the scan's pedal sit beside the settings");
+}
+
 void suiteNamesMatchPlugins()
 {
     std::printf ("[2] The suite's names are the plugins' names\n");
@@ -121,9 +204,10 @@ void trackChecks()
     juce::String err;
     test::check (s.addTrack (makeWav ("a.wav", 44100.0, 1, 44100, 0.5f, 440.0), "A", err), "a mono 44.1 kHz file is added");
     test::check (std::abs (s.sampleRate - 44100.0) < 1e-9, "the first track sets the session's rate");
-    test::check (s.tracks[0]->audio.getNumChannels() == 2 && juce::approximatelyEqual (s.tracks[0]->audio.getSample (1, 1000), s.tracks[0]->audio.getSample (0, 1000)), "mono is copied to both channels");
+    const auto& first = *s.tracks[0]->clips[0].audio;
+    test::check (first.getNumChannels() == 2 && juce::approximatelyEqual (first.getSample (1, 1000), first.getSample (0, 1000)), "mono is copied to both channels");
     test::check (s.addTrack (makeWav ("b.wav", 48000.0, 2, 48000, 0.5f, 440.0), "B", err), "a 48 kHz file is added");
-    test::check (std::abs (s.tracks[1]->length() - 44100) <= 2, test::fmt ("and resampled: %d samples (one second at 44.1 kHz)", s.tracks[1]->length()));
+    test::check (std::abs (s.tracks[1]->length() - 44100) <= 2, test::fmt ("and resampled: %d samples (one second at 44.1 kHz)", (int) s.tracks[1]->length()));
     test::check (! s.addTrack (tempFolder().getChildFile ("missing.wav"), "", err) && err.isNotEmpty(), "a file that is not there is refused with a reason");
     test::check (s.findTrack ("b", err) == 1 && s.findTrack (0, err) == 0 && s.findTrack (5, err) < 0, "tracks are found by name and by number");
 }
@@ -268,7 +352,8 @@ void projectChecks()
     {
         Session s;
         test::addTestPlugins (s.catalog);
-        test::check (s.load (moved.getChildFile ("song.olympus"), err) && s.tracks.size() == 1 && s.tracks[0]->length() == 0 && s.warnings.size() == 1, "missing audio: the track stays, silent, with a warning");
+        test::check (s.load (moved.getChildFile ("song.olympus"), err) && s.tracks.size() == 1 && s.tracks[0]->length() == 24000 && s.tracks[0]->clips[0].audio == nullptr && s.warnings.size() == 1,
+                 "missing audio: the track and its clip stay, silent, with a warning");
     }
     {
         Session s;
@@ -365,6 +450,658 @@ void mcpChecks()
     test::check (juce::JSON::toString (juce::JSON::parse (lines[0]), true).indexOfChar ('\n') < 0, "an answer is a single line");
 }
 
+bool close (double a, double b) { return std::abs (a - b) < 1e-4; }
+
+// Two channels of `length` samples of `value`: the audio of a clip made in code.
+std::shared_ptr<juce::AudioBuffer<float>> constantAudio (int length, float value)
+{
+    auto b = std::make_shared<juce::AudioBuffer<float>> (2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        juce::FloatVectorOperations::fill (b->getWritePointer (ch), value, length);
+    return b;
+}
+
+void clipChecks()
+{
+    std::printf ("[10] Clips: gain, fades, summing, offset and length, the pan law\n");
+    Track t;
+    Clip c;
+    c.audio = constantAudio (1000, 0.5f);
+    c.length = 1000;
+    c.gainDb = -6.0f;
+    c.fadeIn = 100;
+    c.fadeOut = 200;
+    t.clips.push_back (c);
+    juce::AudioBuffer<float> dest (2, 1000);
+    Session::mixClips (t, 0, 1000, dest);
+    const float g = juce::Decibels::decibelsToGain (-6.0f) * 0.5f;
+    const auto at = [&dest] (int i) { return dest.getSample (0, i); };
+    test::check (at (0) == 0.0f, "a clip starts from silence (its fade in)");
+    test::check (close (at (50), 0.5 * g), test::fmt ("halfway through the fade in: %.5f, expected %.5f", at (50), 0.5 * g));
+    test::check (close (at (100), g) && close (at (800), g), "full gain between the fades");
+    test::check (close (at (900), 0.5 * g), "halfway through the fade out");
+    test::check (close (at (999), g / 200.0), "and nearly silent at the last sample");
+
+    Track u;
+    Clip a;
+    a.audio = constantAudio (100, 0.25f);
+    a.length = 100;
+    Clip b;
+    b.audio = constantAudio (100, 0.5f);
+    b.start = 50;
+    b.length = 100;
+    u.clips = { a, b };
+    juce::AudioBuffer<float> sum (2, 200);
+    Session::mixClips (u, 0, 200, sum);
+    test::check (close (sum.getSample (0, 25), 0.25) && close (sum.getSample (0, 75), 0.75) && close (sum.getSample (0, 125), 0.5) && sum.getSample (0, 160) == 0.0f,
+                 "two overlapping clips sum, and each stops at its end");
+
+    auto ramp = std::make_shared<juce::AudioBuffer<float>> (2, 1000);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < 1000; ++i)
+            ramp->setSample (ch, i, (float) i * 0.001f);
+    Track v;
+    Clip r;
+    r.audio = ramp;
+    r.start = 100;
+    r.offset = 300;
+    r.length = 50;
+    v.clips.push_back (r);
+    juce::AudioBuffer<float> window (2, 80);
+    Session::mixClips (v, 90, 80, window);
+    test::check (window.getSample (0, 9) == 0.0f && close (window.getSample (0, 10), 0.3) && close (window.getSample (0, 59), 0.349) && window.getSample (0, 60) == 0.0f,
+                 "a clip plays from its offset, for its own length, at its place on the timeline");
+
+    float left = 0.0f, right = 0.0f;
+    Session::panGains (0.0f, left, right);
+    test::check (left == 1.0f && right == 1.0f, "centre: both sides unity");
+    Session::panGains (-1.0f, left, right);
+    test::check (left == 1.0f && right == 0.0f, "hard left: nothing in the right");
+    Session::panGains (1.0f, left, right);
+    test::check (left == 0.0f && right == 1.0f, "hard right: nothing in the left");
+    Session::panGains (-0.5f, left, right);
+    test::check (close (left, 1.0) && close (right, 0.5), "half left: the far side at half");
+
+    tempFolder().getChildFile ("pan").createDirectory();
+    Session p;
+    juce::String err;
+    p.addTrack (makeWav ("pan/sine.wav", 48000.0, 2, 48000, 0.5f, 1000.0), "Pan", err);
+    p.tracks[0]->pan = -1.0f;
+    juce::AudioBuffer<float> out (2, kBlockSize);
+    p.processBlock (out, 0);
+    test::check (out.getMagnitude (1, 0, kBlockSize) == 0.0f && out.getMagnitude (0, 0, kBlockSize) > 0.1f, "a hard-left track puts nothing in the right channel");
+}
+
+void poolChecks()
+{
+    std::printf ("[11] The audio pool: a file is read once and shared, clips, empty tracks\n");
+    tempFolder().getChildFile ("pool").createDirectory();
+    const auto wav = makeWav ("pool/shared.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    Session s;
+    juce::String err;
+    auto first = s.loadPooled (wav, err);
+    auto second = s.loadPooled (wav, err);
+    test::check (first != nullptr && first.get() == second.get(), "loading the same file twice gives one buffer");
+    test::check (s.addTrack (wav, "Shared", err) && s.tracks[0]->clips[0].audio.get() == first.get(), "a track's clip uses the pooled buffer");
+    const int index = s.addClip (0, wav, 1000, err);
+    test::check (index == 1 && s.tracks[0]->clips[1].audio.get() == first.get() && s.tracks[0]->clips[1].start == 1000, "addClip appends a clip at its start, sharing the buffer");
+    test::check (s.addClip (7, wav, 0, err) == -1 && err.isNotEmpty(), "a track that is not there is refused, with the reason");
+    test::check (s.addClip (0, tempFolder().getChildFile ("pool/none.wav"), 0, err) == -1 && err.isNotEmpty(), "a file that is not there is refused, with the reason");
+    test::check (s.addEmptyTrack ("Empty") == 1 && s.tracks[1]->clips.empty() && s.tracks[1]->length() == 0, "an empty track is valid");
+    test::check (s.length() == 5800, "the session is as long as its last clip ends");
+    s.prepare (false);
+    juce::AudioBuffer<float> out (2, kBlockSize);
+    s.processBlock (out, 0);
+    test::check (s.endOfAudio() == 5800 && s.tracks[0]->length() == 5800, "endOfAudio is the same as length");
+}
+
+void markerChecks()
+{
+    std::printf ("[12] Markers: kept sorted, moved, removed\n");
+    Session s;
+    juce::String err;
+    s.addMarker ("late", 300);
+    s.addMarker ("early", 100);
+    s.addMarker ("middle", 200);
+    test::check (s.markers.size() == 3 && s.markers[0].name == "early" && s.markers[2].name == "late", "markers are kept sorted");
+    test::check (s.moveMarker (0, 250, err) && s.markers[0].name == "middle" && s.markers[1].name == "early" && s.markers[1].start == 250,
+                 "a moved marker is put back in order");
+    test::check (s.removeMarker (1, err) && s.markers.size() == 2 && ! s.removeMarker (9, err) && err.isNotEmpty(), "a marker is removed; one that is not there is refused");
+}
+
+void projectV2Checks()
+{
+    std::printf ("[14] Project file v2: clips, markers, tempo, loop, pan and the view settings come back\n");
+    juce::String err;
+    const auto dir = tempFolder().getChildFile ("rt");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("rt/clip.wav", 48000.0, 2, 48000, 0.5f, 330.0);
+    const auto file = dir.getChildFile ("song.olympus");
+    {
+        Session s;
+        s.addTrack (wav, "Vox", err);
+        s.addClip (0, wav, 12000, err);
+        auto& clip = s.tracks[0]->clips[1];
+        clip.offset = 1000;
+        clip.length = 5000;
+        clip.gainDb = -3.0f;
+        clip.fadeIn = 50;
+        clip.fadeOut = 400;
+        s.tracks[0]->pan = 0.25f;
+        s.tracks[0]->gainDb = -2.0f;
+        s.tracks[0]->solo = true;
+        s.addEmptyTrack ("Empty");
+        s.addMarker ("Chorus", 96000);
+        s.addMarker ("Intro", 0);
+        s.tempo.setTempo (4.0, 140.0);
+        s.tempo.setSignature (3, 4);
+        s.loopStart = 1000;
+        s.loopEnd = 30000;
+        s.loopOn = true;
+        s.metronomeOn = true;
+        s.snapOn = false;
+        s.grid = Grid::Eighth;
+        s.masterDb = -2.5f;
+        test::check (s.save (file, err), "a project with clips, markers and a tempo is saved");
+    }
+    Session s;
+    test::check (s.load (file, err), "and loads: " + err);
+    test::check (s.warnings.isEmpty() && s.tracks.size() == 2 && s.tracks[0]->clips.size() == 2 && s.tracks[1]->name == "Empty" && s.tracks[1]->clips.empty(),
+                 "tracks, clips and an empty track are back");
+    const auto& clip = s.tracks[0]->clips[1];
+    test::check (clip.start == 12000 && clip.offset == 1000 && clip.length == 5000 && close (clip.gainDb, -3.0) && clip.fadeIn == 50 && clip.fadeOut == 400 && clip.audio != nullptr,
+                 "a clip keeps its place, its part of the file, its gain and fades");
+    test::check (s.tracks[0]->clips[0].audio.get() == clip.audio.get(), "two clips of one file share the buffer again");
+    test::check (close (s.tracks[0]->pan, 0.25) && close (s.tracks[0]->gainDb, -2.0) && s.tracks[0]->solo, "pan, fader and solo are back");
+    test::check (s.markers.size() == 2 && s.markers[0].name == "Intro" && s.markers[1].name == "Chorus" && s.markers[1].start == 96000, "markers are back, in order");
+    test::check (s.tempo.points.size() == 2 && close (s.tempo.points[1].beat, 4.0) && close (s.tempo.points[1].bpm, 140.0) && s.tempo.numerator == 3 && s.tempo.denominator == 4,
+                 "the tempo points and the time signature are back");
+    test::check (s.loopStart == 1000 && s.loopEnd == 30000 && s.loopOn && s.metronomeOn && ! s.snapOn && s.grid == Grid::Eighth && close (s.masterDb, -2.5),
+                 "the loop, the metronome, snap, the grid and the master are back");
+    test::check (close (s.sampleRate, 48000.0) && close (s.tempo.sampleRate, 48000.0), "the rate is kept, and the tempo has it too");
+}
+
+void legacyChecks()
+{
+    std::printf ("[15] Project file v1: a track with one file loads as one clip\n");
+    juce::String err;
+    const auto dir = tempFolder().getChildFile ("v1");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("v1/old.wav", 48000.0, 2, 24000, 0.5f, 220.0);
+    const auto old = dir.getChildFile ("old.olympus");
+    old.replaceWithText ("<OlympusProject version=\"1\" name=\"old\" sampleRate=\"48000\">"
+                         "<Track name=\"Old\" file=\"old.wav\" path=\"" + wav.getFullPathName() + "\" gainDb=\"-2\" mute=\"0\" solo=\"0\">"
+                         "<Slot plugin=\"Test Gain\" bypass=\"0\" state=\"\"/></Track></OlympusProject>");
+    Session s;
+    test::addTestPlugins (s.catalog);
+    test::check (s.load (old, err), "a version 1 project loads: " + err);
+    test::check (s.tracks.size() == 1 && s.tracks[0]->clips.size() == 1, "its track has one clip");
+    const auto& clip = s.tracks[0]->clips[0];
+    test::check (clip.start == 0 && clip.offset == 0 && clip.length == 24000 && clip.audio != nullptr && clip.file == wav,
+                 "the clip covers the whole file, from sample 0");
+    test::check (close (s.tracks[0]->gainDb, -2.0) && s.tracks[0]->chain.size() == 1 && s.warnings.isEmpty(), "the fader and the chain are read as before");
+    test::check (s.save (dir.getChildFile ("new.olympus"), err), "and it is saved as version 2");
+}
+
+void missingAudioChecks()
+{
+    std::printf ("[16] A missing audio file keeps its clip through save and load\n");
+    juce::String err;
+    const auto dir = tempFolder().getChildFile ("gone");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("gone/g.wav", 48000.0, 2, 12000, 0.5f, 220.0);
+    {
+        Session s;
+        s.addTrack (wav, "G", err);
+        s.tracks[0]->clips[0].start = 3000;
+        s.tracks[0]->clips[0].gainDb = -4.0f;
+        test::check (s.save (dir.getChildFile ("gone.olympus"), err), "saved while the audio is there");
+    }
+    wav.deleteFile();
+    Session s;
+    test::check (s.load (dir.getChildFile ("gone.olympus"), err) && s.tracks.size() == 1 && s.tracks[0]->clips.size() == 1, "the project opens without its audio");
+    const auto& clip = s.tracks[0]->clips[0];
+    test::check (clip.audio == nullptr && clip.length == 12000 && clip.start == 3000 && s.warnings.size() == 1, "the clip stays, silent, with its length and a warning");
+    test::check (s.save (dir.getChildFile ("again.olympus"), err), "and saves again");
+    Session t;
+    test::check (t.load (dir.getChildFile ("again.olympus"), err), "which loads");
+    const auto& back = t.tracks[0]->clips[0];
+    test::check (back.audio == nullptr && back.length == 12000 && back.start == 3000 && close (back.gainDb, -4.0) && back.file == wav,
+                 "with the same place, length, gain and file");
+}
+
+void metronomeChecks()
+{
+    std::printf ("[17] The metronome: a click on every beat, a higher one on the bar, not after its beat\n");
+    Session s;
+    s.sampleRate = 48000.0;
+    s.tempo.sampleRate = 48000.0;
+    s.metronomeOn = true;
+    juce::AudioBuffer<float> block (2, kBlockSize);
+    const auto peak = [&block] (int from, int to) { return block.getMagnitude (0, from, to - from); };
+
+    s.processBlock (block, 0);
+    test::check (peak (0, 960) > 0.1f, test::fmt ("a block that starts on a beat has its click in the first 20 ms (%.3f)", peak (0, 960)));
+    s.processBlock (block, 24000);
+    test::check (peak (0, 960) > 0.1f, "every beat clicks (beat 2 at 120 bpm is sample 24000)");
+    s.processBlock (block, 24000 - 100);
+    test::check (peak (0, 100) == 0.0f && peak (100, kBlockSize) > 0.1f, "a block that starts before a beat gets the click where it falls");
+    s.processBlock (block, 96000);
+    test::check (peak (0, 960) > 0.1f, "the bar clicks too");
+    s.processBlock (block, 5000);
+    test::check (peak (0, kBlockSize) == 0.0f, "between beats, with no click reaching into the block, it is silent");
+    s.metronomeOn = false;
+    s.processBlock (block, 0);
+    test::check (peak (0, kBlockSize) == 0.0f, "off, there is no click");
+}
+
+void headChecks()
+{
+    std::printf ("[18] The playhead the plugins read: tempo, time signature, position in beats, loop\n");
+    Session s;
+    s.sampleRate = 48000.0;
+    s.tempo.sampleRate = 48000.0;
+    s.tempo.setSignature (3, 4);
+    juce::AudioBuffer<float> block (2, kBlockSize);
+    s.processBlock (block, 24000);
+    const auto info = s.head.getPosition().orFallback (juce::AudioPlayHead::PositionInfo());
+    test::check (close (info.getBpm().orFallback (-1.0), 120.0), "the playhead reports the tempo");
+    test::check (close (info.getPpqPosition().orFallback (-1.0), 1.0) && info.getTimeInSamples().orFallback (-1) == 24000, "and its position in beats (1 at sample 24000)");
+    test::check (info.getTimeSignature().hasValue() && info.getTimeSignature()->numerator == 3, "and the time signature");
+    test::check (! info.getIsLooping(), "not looping when the loop is off");
+    s.loopOn = true;
+    s.loopStart = 0;
+    s.loopEnd = 96000;
+    s.processBlock (block, 24000);
+    const auto looped = s.head.getPosition().orFallback (juce::AudioPlayHead::PositionInfo());
+    test::check (looped.getIsLooping() && close (looped.getLoopPoints()->ppqEnd, 4.0), "with the loop on, the loop points are in beats");
+    s.tempo.setTempo (4.0, 60.0);
+    s.processBlock (block, 96000);
+    test::check (close (s.head.getPosition()->getBpm().orFallback (-1.0), 60.0), "a tempo change is reported from its beat on");
+}
+
+void editChecks()
+{
+    std::printf ("[19] Undo state: capture and restore, and a track count that changed is ignored\n");
+    tempFolder().getChildFile ("edit").createDirectory();
+    const auto wav = makeWav ("edit/e.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    Session s;
+    juce::String err;
+    s.addTrack (wav, "A", err);
+    s.addTrack (wav, "B", err);
+    const auto before = s.captureEdit();
+
+    s.tracks[0]->clips[0].start = 5000;
+    s.tracks[0]->gainDb = -4.0f;
+    s.tracks[0]->pan = 0.5f;
+    s.tracks[0]->mute = true;
+    s.masterDb = -6.0f;
+    s.addMarker ("m", 100);
+    s.loopOn = true;
+    s.loopEnd = 9000;
+    s.tempo.setTempo (0.0, 90.0);
+    const auto after = s.captureEdit();
+
+    s.restoreEdit (before);
+    test::check (s.tracks[0]->clips[0].start == 0 && close (s.tracks[0]->gainDb, 0.0) && close (s.tracks[0]->pan, 0.0) && ! s.tracks[0]->mute, "restore puts the clips and the mix back");
+    test::check (close (s.masterDb, 0.0) && s.markers.empty() && ! s.loopOn && close (s.tempo.bpmAtBeat (0.0), 120.0), "and the master, markers, loop and tempo");
+    s.restoreEdit (after);
+    test::check (s.tracks[0]->clips[0].start == 5000 && s.tracks[0]->mute && s.markers.size() == 1 && s.loopOn && close (s.tempo.bpmAtBeat (0.0), 90.0), "restoring the later state works too");
+    s.addEmptyTrack ("C");
+    s.restoreEdit (before);
+    test::check (s.tracks.size() == 3 && s.tracks[0]->clips[0].start == 5000, "a state from another number of tracks is ignored");
+}
+
+void masterChecks()
+{
+    std::printf ("[20] The master gain is in mix.wav, not in the stems\n");
+    tempFolder().getChildFile ("master").createDirectory();
+    Session s;
+    test::addTestPlugins (s.catalog);
+    juce::String err;
+    s.addTrack (makeWav ("master/m.wav", 48000.0, 2, 48000, 0.5f, 440.0), "M", err);
+    s.masterDb = -6.0f;
+    RenderOptions o;
+    o.folder = tempFolder().getChildFile ("stems-master");
+    RenderResult r;
+    test::check (s.renderStems (o, r, err), "render with a master gain: " + err);
+    const auto stem = readWav (o.folder.getChildFile ("01-M.wav"));
+    const auto mix = readWav (o.folder.getChildFile ("mix.wav"));
+    const float g = juce::Decibels::decibelsToGain (-6.0f);
+    test::check (std::abs (stem.getMagnitude (0, 0, 48000) - 0.5f) < 0.002f, "the stem has no master gain");
+    test::check (std::abs (mix.getMagnitude (0, 0, 48000) - 0.5f * g) < 0.002f, test::fmt ("the mix has it (%.4f, expected %.4f)", mix.getMagnitude (0, 0, 48000), 0.5f * g));
+}
+
+void describeChecks()
+{
+    std::printf ("[21] describe(): what the server reports about clips, the timeline and the loop\n");
+    tempFolder().getChildFile ("desc").createDirectory();
+    Session s;
+    juce::String err;
+    s.addTrack (makeWav ("desc/d.wav", 48000.0, 2, 4800, 0.5f, 440.0), "D", err);
+    s.addMarker ("m", 2400);
+    s.loopOn = true;
+    s.loopEnd = 9600;
+    const auto d = s.describe();
+    const auto track = d["tracks"][0];
+    test::check (track["clips"].size() == 1 && close ((double) track["clips"][0]["length_seconds"], 0.1) && ! track.hasProperty ("file"), "a track lists its clips, and has no file of its own");
+    test::check ((bool) track["audio_found"] && close ((double) track["pan"], 0.0), "audio_found and pan");
+    test::check (d["time_signature"].toString() == "4/4" && d["tempo"].size() == 1 && d["markers"].size() == 1 && d["markers"][0]["sample"].toString() == "2400",
+                 "the root has the tempo, the time signature and the markers");
+    test::check (close ((double) d["loop"]["end_seconds"], 0.2) && (bool) d["loop"]["on"] && d.hasProperty ("grid") && d.hasProperty ("master_db"),
+                 "the loop, the grid and the master");
+}
+
+juce::AudioBuffer<float> mixOf (Session& s, int track, juce::int64 from, int n)
+{
+    juce::AudioBuffer<float> b (2, n);
+    Session::mixClips (*s.tracks[(size_t) track], from, n, b);
+    return b;
+}
+
+// The samples [from, to) of both channels are equal in a and b.
+bool sameSamples (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b, int from, int to)
+{
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = from; i < to; ++i)
+            if (std::abs (a.getSample (ch, i) - b.getSample (ch, i)) > 0.0f)
+                return false;
+    return true;
+}
+
+void splitChecks()
+{
+    std::printf ("[22] Editor: a split cuts the clip where asked, and its two pieces play what the clip played\n");
+    tempFolder().getChildFile ("ed").createDirectory();
+    const auto wav = makeWav ("ed/split.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "S", err);
+    s.tracks[0]->clips[0].start = 100;
+    s.tracks[0]->clips[0].offset = 300;
+    s.tracks[0]->clips[0].length = 600;
+    const auto before = mixOf (s, 0, 0, 1000);
+    Editor ed (s);
+    const auto right = ed.splitClip (0, 0, 400, err);
+    const auto& clips = s.tracks[0]->clips;
+    test::check (right.track == 0 && right.clip == 1 && clips.size() == 2, "a split returns the right piece, placed after the left one");
+    test::check (clips[0].start == 100 && clips[0].offset == 300 && clips[0].length == 300, "the left piece keeps the start and the offset");
+    test::check (clips[1].start == 400 && clips[1].offset == 600 && clips[1].length == 300, "the right piece starts at the cut, at the place in the file where the cut falls");
+    test::check (sameSamples (before, mixOf (s, 0, 0, 1000), 0, 1000), "the two pieces play exactly what the clip played");
+    test::check (! ed.splitClip (0, 0, 100, err).valid() && ! ed.splitClip (0, 0, 700, err).valid() && err.isNotEmpty(), "a cut at the start or the end of a clip is refused, with the reason");
+    test::check (! ed.splitClip (0, 9, 200, err).valid() && ! ed.splitClip (4, 0, 200, err).valid(), "a clip or a track that is not there is refused");
+
+    Session f;
+    f.addTrack (wav, "F", err);
+    f.tracks[0]->clips[0].length = 1000;
+    f.tracks[0]->clips[0].fadeIn = 100;
+    f.tracks[0]->clips[0].fadeOut = 200;
+    Editor fe (f);
+    fe.splitClip (0, 0, 400, err);
+    const auto& fc = f.tracks[0]->clips;
+    test::check (fc[0].fadeIn == 100 && fc[0].fadeOut == 0 && fc[1].fadeIn == 0 && fc[1].fadeOut == 200, "the left piece keeps the fade in, the right piece the fade out");
+}
+
+void moveChecks()
+{
+    std::printf ("[23] Editor: moves (clamped at 0, to another track), duplicate and delete\n");
+    tempFolder().getChildFile ("ed").createDirectory();
+    const auto wav = makeWav ("ed/move.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "A", err);
+    s.addTrack (wav, "B", err);
+    Editor ed (s);
+    test::check (ed.moveClip (0, 0, -500, err) && s.tracks[0]->clips[0].start == 0, "a move before 0 is clamped to 0");
+    test::check (ed.moveClip (0, 0, 2000, err) && s.tracks[0]->clips[0].start == 2000, "a clip moves along its track");
+    test::check (! ed.moveClip (0, 5, 0, err) && err.isNotEmpty(), "a clip that is not there is refused, with the reason");
+    const auto moved = ed.moveClipToTrack (0, 0, 1, 700, err);
+    test::check (moved.track == 1 && moved.clip == 1 && s.tracks[0]->clips.empty() && s.tracks[1]->clips[1].start == 700, "a clip goes to another track, appended at its end");
+    test::check (s.tracks[1]->clips[1].audio == s.tracks[1]->clips[0].audio, "and keeps its audio");
+    test::check (! ed.moveClipToTrack (1, 0, 9, 0, err).valid(), "a track that is not there is refused");
+    const auto copy = ed.duplicateClip (1, 0, err);
+    test::check (copy.valid() && copy.clip == 2 && s.tracks[1]->clips[2].start == 4800 && s.tracks[1]->clips[2].length == 4800, "a duplicate is placed right after the original ends");
+    test::check (s.tracks[1]->clips[2].audio == s.tracks[1]->clips[0].audio, "and shares the audio");
+    test::check (ed.deleteClip (1, 2, err) && s.tracks[1]->clips.size() == 2 && ! ed.deleteClip (1, 2, err), "delete removes the clip; a second delete is refused");
+}
+
+void trimChecks()
+{
+    std::printf ("[24] Editor: trims keep the audio where it is on the timeline, and stay inside the source\n");
+    tempFolder().getChildFile ("ed").createDirectory();
+    const auto wav = makeWav ("ed/trim.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "T", err);
+    Editor ed (s);
+    const auto setClip = [&s] (juce::int64 start, juce::int64 offset, juce::int64 length)
+    {
+        auto& c = s.tracks[0]->clips[0];
+        c.start = start;
+        c.offset = offset;
+        c.length = length;
+        c.fadeIn = c.fadeOut = 0;
+    };
+    const auto clip = [&s]() -> const Clip& { return s.tracks[0]->clips[0]; };
+
+    setClip (1000, 500, 2000);
+    const auto before = mixOf (s, 0, 0, 6000);
+    test::check (ed.trimStart (0, 0, 1400, err) && clip().start == 1400 && clip().offset == 900 && clip().length == 1600, "trim start: the start moves, and the offset and the length follow");
+    const auto after = mixOf (s, 0, 0, 6000);
+    test::check (after.getMagnitude (0, 0, 1400) == 0.0f && sameSamples (after, before, 1400, 3000), "the audio stays where it was on the timeline (what is cut is silent)");
+
+    setClip (1000, 500, 2000);
+    test::check (ed.trimStart (0, 0, -100, err) && clip().start == 500 && clip().offset == 0 && clip().length == 2500, "trim start before the start of the source is clamped there");
+    setClip (1000, 500, 2000);
+    test::check (ed.trimStart (0, 0, 99999, err) && clip().start == 2999 && clip().offset == 2499 && clip().length == 1, "trim start past the end is clamped to one sample");
+    setClip (1000, 500, 2000);
+    s.tracks[0]->clips[0].fadeIn = 500;
+    ed.trimStart (0, 0, 2800, err);
+    test::check (clip().length == 200 && clip().fadeIn == 200, "a fade in longer than the new length is shortened");
+
+    setClip (1000, 500, 2000);
+    const auto endBefore = mixOf (s, 0, 0, 6000);
+    test::check (ed.trimEnd (0, 0, 2500, err) && clip().length == 1500, "trim end: the length follows the new end");
+    const auto endAfter = mixOf (s, 0, 0, 6000);
+    test::check (sameSamples (endAfter, endBefore, 0, 2500) && endAfter.getMagnitude (0, 2500, 3500) == 0.0f, "the audio stays where it was, and the clip stops at the new end");
+    setClip (1000, 500, 2000);
+    ed.trimEnd (0, 0, 99999, err);
+    test::check (clip().length == 4300 && clip().offset == 500, "trim end past the source is clamped to what the file has left");
+    ed.trimEnd (0, 0, 0, err);
+    test::check (clip().length == 1, "trim end before the start is clamped to one sample");
+    setClip (1000, 500, 2000);
+    s.tracks[0]->clips[0].fadeOut = 500;
+    ed.trimEnd (0, 0, 1100, err);
+    test::check (clip().length == 100 && clip().fadeOut == 100, "a fade out longer than the new length is shortened");
+}
+
+void mixEditChecks()
+{
+    std::printf ("[25] Editor: fades, clip and track gains, pans and the master are clamped; the loop and markers are checked\n");
+    tempFolder().getChildFile ("ed").createDirectory();
+    const auto wav = makeWav ("ed/mix.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "M", err);
+    Editor ed (s);
+    const auto clip = [&s]() -> Clip& { return s.tracks[0]->clips[0]; };
+
+    test::check (ed.setClipFades (0, 0, 10000, 10000, err) && clip().fadeIn == 4800 && clip().fadeOut == 0, "fades are clamped to the length, and the fade out to what the fade in leaves");
+    test::check (ed.setClipFades (0, 0, -5, 300, err) && clip().fadeIn == 0 && clip().fadeOut == 300, "a negative fade is 0");
+    test::check (ed.setClipFades (0, 0, 500, 900, err) && clip().fadeIn == 500 && clip().fadeOut == 900, "fades inside the length are kept");
+    test::check (ed.setClipGain (0, 0, 100.0f, err) && close (clip().gainDb, 24.0), "clip gain is clamped to +24");
+    test::check (ed.setClipGain (0, 0, -500.0f, err) && close (clip().gainDb, -100.0), "and to -100");
+    test::check (ed.setClipMute (0, 0, true, err) && clip().mute && ed.setClipMute (0, 0, false, err) && ! clip().mute, "a clip is muted and unmuted");
+    test::check (! ed.renameClip (0, 0, "  ", err) && err.isNotEmpty() && ed.renameClip (0, 0, " Vox ", err) && clip().name == "Vox", "a clip is renamed (trimmed); an empty name is refused");
+
+    test::check (ed.setTrackGain (0, 50.0f, err) && close (s.tracks[0]->gainDb, 12.0) && ed.setTrackGain (0, -500.0f, err) && close (s.tracks[0]->gainDb, -100.0), "the fader is clamped to -100..+12");
+    test::check (ed.setTrackPan (0, 3.0f, err) && close (s.tracks[0]->pan, 1.0) && ed.setTrackPan (0, -3.0f, err) && close (s.tracks[0]->pan, -1.0), "the pan is clamped to -1..1");
+    test::check (ed.setTrackMute (0, true, err) && s.tracks[0]->mute && ed.setTrackSolo (0, true, err) && s.tracks[0]->solo, "a track is muted and soloed");
+    test::check (! ed.renameTrack (0, "", err) && ed.renameTrack (0, "Lead", err) && s.tracks[0]->name == "Lead", "a track is renamed; an empty name is refused");
+    test::check (! ed.setTrackGain (9, 0.0f, err) && err.isNotEmpty(), "a track that is not there is refused");
+    ed.setMasterDb (99.0f);
+    test::check (close (s.masterDb, 12.0), "the master is clamped to +12");
+    ed.setMasterDb (-500.0f);
+    test::check (close (s.masterDb, -100.0), "and to -100");
+
+    ed.setLoop (1000, 500, true);
+    test::check (s.loopStart == 1000 && s.loopEnd == 500 && ! s.loopOn, "a loop that ends before it starts stays off");
+    ed.setLoop (-5, 2000, true);
+    test::check (s.loopStart == 0 && s.loopEnd == 2000 && s.loopOn, "a loop start is not before 0");
+    ed.setLoop (-5, -1, true);
+    test::check (s.loopStart == 0 && s.loopEnd == 0 && ! s.loopOn, "an empty loop is off");
+
+    ed.addMarker ("a", 100);
+    const int c = ed.addMarker ("c", 200);
+    ed.addMarker ("b", 300);
+    test::check (c == 1 && s.markers[0].name == "a" && s.markers[1].name == "c" && s.markers[2].name == "b", "a marker is added in order, and the index is where it went");
+    test::check (ed.moveMarker (0, 400, err) && s.markers[2].name == "a" && s.markers[2].start == 400 && s.markers[0].name == "c", "a moved marker keeps its name and the list stays sorted");
+    test::check (! ed.moveMarker (9, 0, err) && ! ed.removeMarker (9, err) && ed.renameMarker (2, "A", err) && s.markers[2].name == "A", "a marker that is not there is refused; a marker is renamed");
+    test::check (ed.removeMarker (0, err) && s.markers.size() == 2, "a marker is removed");
+}
+
+void snapChecks()
+{
+    std::printf ("[26] Editor: snap to each grid at 120 bpm 4/4 (24000 samples a beat at 48 kHz); halfway goes up; off leaves the sample\n");
+    tempFolder().getChildFile ("ed").createDirectory();
+    const auto wav = makeWav ("ed/snap.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "S", err);
+    Editor ed (s);
+    ed.setSnap (false);
+    test::check (ed.snap (12345) == 12345 && ed.snap (-100) == 0, "snap off: the sample itself, and never before 0");
+    ed.setSnap (true);
+    const auto at = [&ed] (Grid g, juce::int64 x) { ed.setGrid (g); return ed.snap (x); };
+    test::check (at (Grid::Quarter, 12000) == 24000 && at (Grid::Quarter, 11999) == 0 && at (Grid::Quarter, 35999) == 24000, "quarter (24000): halfway goes up");
+    test::check (at (Grid::Eighth, 12000) == 12000 && at (Grid::Eighth, 7000) == 12000, "eighth (12000)");
+    test::check (at (Grid::Sixteenth, 7000) == 6000 && at (Grid::Sixteenth, 9000) == 12000, "sixteenth (6000)");
+    test::check (at (Grid::ThirtySecond, 3000) == 3000 && at (Grid::ThirtySecond, 4600) == 6000, "thirty-second (3000)");
+    test::check (at (Grid::Half, 40000) == 48000, "half (48000)");
+    test::check (at (Grid::Bar, 50000) == 96000 && at (Grid::Bar, 47000) == 0, "bar (96000 in 4/4)");
+}
+
+void undoChecks()
+{
+    std::printf ("[27] Editor: undo and redo: a split, a move, a gesture of 20 fader changes, the redo cleared, the cap, a track added\n");
+    tempFolder().getChildFile ("ed").createDirectory();
+    const auto wav = makeWav ("ed/undo.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "U", err);
+    Editor ed (s);
+    test::check (! ed.canUndo() && ! ed.canRedo() && ed.undoLabel().isEmpty() && ! ed.undo() && ! ed.redo(), "nothing to undo or redo at first");
+    ed.splitClip (0, 0, 2400, err);
+    test::check (ed.canUndo() && ed.undoLabel() == "Split clip", "a split is an undo step, with its label");
+    test::check (ed.undo() && s.tracks[0]->clips.size() == 1 && s.tracks[0]->clips[0].length == 4800 && ed.canRedo(), "undo puts the clip back in one piece");
+    test::check (ed.redo() && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 2400, "redo splits it again");
+    ed.undo();
+    ed.moveClip (0, 0, 5000, err);
+    test::check (ed.undoLabel() == "Move clip" && ! ed.canRedo() && ! ed.redo(), "a new edit clears the redo stack, so there is nothing to redo");
+    ed.undo();
+    test::check (s.tracks[0]->clips[0].start == 0, "undo of a move puts the clip back");
+
+    Session g;
+    g.addTrack (wav, "G", err);
+    Editor ged (g);
+    {
+        Gesture drag (ged, "Fader");
+        for (int i = 1; i <= 20; ++i)
+            ged.setTrackGain (0, -(float) i, err);
+    }
+    test::check (ged.undoLabel() == "Fader" && close (g.tracks[0]->gainDb, -20.0), "a gesture of 20 fader changes is one undo step");
+    ged.undo();
+    test::check (close (g.tracks[0]->gainDb, 0.0) && ! ged.canUndo(), "one undo takes the fader back to where the gesture began");
+    {
+        Gesture nothing (ged, "Nothing");
+        ged.setTrackGain (0, 0.0f, err);
+    }
+    test::check (! ged.canUndo(), "a gesture that changes nothing leaves no step");
+
+    Session c;
+    c.addTrack (wav, "C", err);
+    Editor ced (c);
+    for (int i = 1; i <= 105; ++i)
+        ced.moveClip (0, 0, i, err);
+    int undone = 0;
+    while (ced.undo())
+        ++undone;
+    test::check (undone == 100 && c.tracks[0]->clips[0].start == 5, test::fmt ("the stack holds 100 steps: %d undone, and the clip is back at 5", undone));
+
+    Session t;
+    t.addTrack (wav, "T", err);
+    Editor ted (t);
+    ted.moveClip (0, 0, 100, err);
+    t.addEmptyTrack ("New");
+    test::check (! ted.undo() && ! ted.canUndo(), "after a track is added, undo refuses and the stacks are cleared");
+}
+
+void fixChecks()
+{
+    std::printf ("[28] Session: a copy that cannot be made changes no track; a render with no audio, a long tail or a clip past 3 h; a missing clip's length\n");
+    tempFolder().getChildFile ("ed").createDirectory();
+    const auto wav = makeWav ("ed/fix.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        auto made = std::make_shared<int> (0);
+        // a plugin that can be made twice, then not: the second target of a copy cannot get it
+        s.catalog.addInternal (test::GainPlugin::description ("Flaky Gain"), [made] (double, int) -> std::unique_ptr<juce::AudioPluginInstance>
+                               { return ++*made <= 2 ? std::unique_ptr<juce::AudioPluginInstance> (new test::GainPlugin()) : nullptr; });
+        for (int i = 0; i < 3; ++i)
+            s.addTrack (wav, "C" + juce::String (i), err);
+        test::check (s.setChain (0, { "test gain", "flaky gain" }, err), "a chain with the flaky plugin is set");
+        test::check (! s.copyChain (0, { 1, 2 }, err) && err.isNotEmpty(), "a copy to two tracks fails when the second copy cannot be made: " + err);
+        test::check (s.tracks[1]->chain.empty() && s.tracks[2]->chain.empty(), "and the first target was not changed either");
+    }
+    {
+        Session s;
+        s.addEmptyTrack ("E");
+        RenderOptions o;
+        o.folder = tempFolder().getChildFile ("norender");
+        RenderResult r;
+        test::check (! s.renderStems (o, r, err) && err == "Nothing to render: no audio has been added.", "a render with tracks but no audio is refused");
+        test::check (! o.folder.exists(), "and writes nothing");
+    }
+    {
+        Session s;
+        const auto short8k = makeWav ("ed/tail.wav", 8000.0, 2, 8000, 0.5f, 440.0);
+        s.addTrack (short8k, "T", err);
+        RenderOptions o;
+        o.folder = tempFolder().getChildFile ("tail");
+        o.tailSeconds = 1000.0;
+        o.bits = 16;
+        o.writeMix = false;
+        RenderResult r;
+        test::check (s.renderStems (o, r, err) && std::abs (r.seconds - 61.0) < 1e-6, test::fmt ("a tail of 1000 s is clamped to a minute: %.3f s rendered", r.seconds));
+    }
+    {
+        Session s;
+        s.addTrack (wav, "L", err);
+        s.addClip (0, wav, 3LL * 3600 * 48000 + 10, err);
+        RenderOptions o;
+        o.folder = tempFolder().getChildFile ("long");
+        RenderResult r;
+        test::check (! s.renderStems (o, r, err) && err.contains ("three hours") && ! o.folder.exists(), "a render longer than three hours is refused before anything is written");
+    }
+    {
+        const auto dir = tempFolder().getChildFile ("clamp");
+        dir.deleteRecursively();
+        dir.createDirectory();
+        dir.getChildFile ("clamp.olympus").replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"48000\">"
+                                                            "<Track name=\"Gone\"><Clip name=\"g\" file=\"none/none.wav\" path=\"/none/none.wav\" start=\"0\" offset=\"0\" "
+                                                            "length=\"2000000000\" gainDb=\"0\" fadeIn=\"0\" fadeOut=\"0\" mute=\"0\"/></Track></OlympusProject>");
+        Session s;
+        test::check (s.load (dir.getChildFile ("clamp.olympus"), err) && s.tracks.size() == 1 && s.tracks[0]->clips[0].audio == nullptr
+                         && s.tracks[0]->clips[0].length == (juce::int64) (48000.0 * 3600 * 2),
+                     "a missing clip keeps its saved length, but no more than two hours at the session rate");
+    }
+}
+
 void realPlugins()
 {
     const auto dir = juce::SystemStats::getEnvironmentVariable ("OLYMPUS_PLUGIN_DIR", {});
@@ -375,7 +1112,10 @@ void realPlugins()
     }
     std::printf ("[9] Built plugins in %s\n", dir.toRawUTF8());
     Session s;
-    s.catalog.scan (juce::FileSearchPath (dir), false);
+    ScanOptions options;
+    options.includeSystem = false;
+    options.deadMansPedal = tempFolder().getChildFile ("real-scan.pedal");
+    s.catalog.scan (juce::FileSearchPath (dir), options);
     const auto names = s.catalog.names();
     std::printf ("    found: %s\n", names.joinIntoString (", ").toRawUTF8());
     test::check (names.size() > 0, "the suite's plugins are found in the folder");
@@ -388,7 +1128,7 @@ void realPlugins()
     RenderResult r;
     test::check (s.renderStems (o, r, err) && r.stems.size() == 1 && r.stems[0].peakDb > -90.0, "and renders a stem that is not silent: " + err);
     const auto xml = s.toXml (tempFolder().getChildFile ("real.olympus"));
-    test::check (xml->getChildElement (0)->getChildElement (0)->getStringAttribute ("state").isNotEmpty(), "its state is written to the project");
+    test::check (xml->getChildByName ("Track")->getChildByName ("Slot")->getStringAttribute ("state").isNotEmpty(), "its state is written to the project");
 }
 } // namespace
 
@@ -396,14 +1136,34 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
     catalogChecks();
+    catalogCacheChecks();
+    tempoChecks();
     suiteNamesMatchPlugins();
     trackChecks();
     renderChecks();
     realtimeChecks();
     projectChecks();
     chainChecks();
+    clipChecks();
+    poolChecks();
+    markerChecks();
+    projectV2Checks();
+    legacyChecks();
+    missingAudioChecks();
+    metronomeChecks();
+    headChecks();
+    editChecks();
+    masterChecks();
+    describeChecks();
     mcpChecks();
     realPlugins();
+    splitChecks();
+    moveChecks();
+    trimChecks();
+    mixEditChecks();
+    snapChecks();
+    undoChecks();
+    fixChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

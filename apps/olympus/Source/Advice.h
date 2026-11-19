@@ -30,8 +30,11 @@ inline std::vector<ui::Note> adviceFor (const Session& s, double deviceRate = 0.
     int missingPlugins = 0, anyAudible = 0;
     for (auto& t : s.tracks)
     {
-        if (t->length() == 0)
-            add (ui::Severity::warning, "Track '" + t->name.substring (0, 24) + "': its audio file is missing. The track stays and keeps its chain.");
+        bool missingAudio = false;
+        for (auto& clip : t->clips)
+            missingAudio = missingAudio || clip.audio == nullptr;
+        if (missingAudio)
+            add (ui::Severity::warning, "Track '" + t->name.substring (0, 24) + "': an audio file is missing. The track stays, and its clips play as silence.");
         for (auto& slot : t->chain)
             if (slot->instance == nullptr) ++missingPlugins;
         anyAudible += s.audible (*t) ? 1 : 0;
