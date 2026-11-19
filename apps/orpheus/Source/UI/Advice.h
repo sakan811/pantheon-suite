@@ -78,7 +78,7 @@ inline const char* guideText()
     return "IT IS FOR fixing the pitch of one voice, offline, note by note:\n"
            "  - Open a recording, and every note the singer sang is on the piano roll. Drag a note to where it should be, or CORRECT ALL "
            "to pull the notes onto a scale. Play it, loop it, and flip to ORIGINAL (Tab) at the same spot.\n"
-           "  - Per note: how much the slow drift and the vibrato are kept, FORMANT, and GAIN. COPY (Cmd-C) takes one note's settings and PASTE (Cmd-V) "
+           "  - Per note: how much the slow drift and the vibrato are kept, FORMANT, GAIN, and TRANSITION (how much of a slide into the note is kept). COPY (Cmd-C) takes one note's settings and PASTE (Cmd-V) "
            "puts them on others. SELECT finds the notes still off the scale by more than a few cents. Export a WAV when it is right; OUT PEAK shows "
            "whether it will clip.\n"
            "\n"

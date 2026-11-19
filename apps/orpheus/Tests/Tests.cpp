@@ -555,5 +555,102 @@ int main()
         test::check (edit::splitAt (copy, phraseSetup.contour, mid) == 0 && copy.size() == base.size() + 1, "and splitAt cuts there");
     }
 
+    // ---- [10] transition: the sung pitch at the start of a note ---------------------------------------------------------------
+    std::printf ("\n[10] transition: the sung pitch at the start of a note\n");
+    {
+        // (a) 0 is the plan as before: a note that was never given the field and one whose field is 0 plan the same, bit for bit
+        auto zero = phraseSetup.notes;
+        for (auto& n : zero)
+            n.transition = 0.0f;
+        const Plan before = Plan::build (phraseSetup.contour, phraseSetup.notes), at0 = Plan::build (phraseSetup.contour, zero);
+        bool same = before.outMidi.size() == at0.outMidi.size() && before.active == at0.active;
+        for (size_t i = 0; same && i < before.outMidi.size(); ++i)
+            same = sameBits (before.outMidi[i], at0.outMidi[i]) && sameBits (before.shiftCents[i], at0.shiftCents[i])
+                   && sameBits (before.formantSt[i], at0.formantSt[i]) && sameBits (before.gainDb[i], at0.gainDb[i]);
+        test::check (same && ! phraseSetup.notes.empty() && phraseSetup.notes[0].transition == 0.0f, "(a) TRANSITION 0 (the default) plans the phrase bit for bit as it did before the field existed");
+
+        // (b) a 60 ms slide into note B, from A's pitch to B's, straddling the boundary: the detected line runs 60 -> 62 over frames 52..64, the
+        //     note starts at frame 60, so its window (40 ms = 8 frames) holds the end of the slide and the corrected line is exact from frame 68 on.
+        Contour slide;
+        slide.sampleRate = 48000.0;
+        slide.hop = 240;
+        const int frames = 160, boundary = 60;
+        slide.midi.assign ((size_t) frames, 0.0f);
+        slide.confidence.assign ((size_t) frames, 1.0f);
+        slide.levelDb.assign ((size_t) frames, -20.0f);
+        slide.voiced.assign ((size_t) frames, 1);
+        for (int f = 0; f < frames; ++f)
+            slide.midi[(size_t) f] = f < 52 ? 60.0f : f <= 64 ? (float) (60.0 + 2.0 * (f - 52) / 12.0) : 62.0f;
+        std::vector<Note> two { makeNote (slide, 0, boundary), makeNote (slide, boundary, frames) };
+        two[1].target = 62.5f; // B moved half a semitone up, with no drift and no vibrato: its corrected pitch is exactly 62.5
+        two[1].drift = 1.0f;
+        two[1].vibrato = 0.0f;
+        const int window = (int) std::lround (Plan::transitionMs * 0.001 * slide.sampleRate / slide.hop);
+        const auto planAt = [&] (float amount)
+        {
+            auto n = two;
+            n[1].transition = amount;
+            return Plan::build (slide, n);
+        };
+        const Plan p0 = planAt (0.0f), p1 = planAt (1.0f);
+        const auto detected = [&] (int f) { return (double) slide.midi[(size_t) f]; };
+
+        const double followed = (p1.outMidi[(size_t) boundary] - detected (boundary)) * 100.0;
+        test::check (std::fabs (followed) < 1.0, test::fmt ("(b) at TRANSITION 100 %% the planned pitch at the note's start is the detected one (%.4f cents off, < 1)", followed));
+        const double notFollowed = (p0.outMidi[(size_t) boundary] - detected (boundary)) * 100.0;
+        test::check (std::fabs (notFollowed) > 40.0, test::fmt ("(b) at 0 %% it is not: the glided line is %.1f cents from the detected pitch there", notFollowed));
+
+        // the formula, frame by frame, at 50 % and 100 %: w * detected + (1 - w) * glided inside the window, the plan at 0 from its end on
+        double worstBlend = 0.0;
+        int changedAfter = 0;
+        for (const float amount : { 0.5f, 1.0f })
+        {
+            const Plan p = planAt (amount);
+            for (int f = boundary; f < frames; ++f)
+            {
+                const int k = f - boundary;
+                if (k < window)
+                {
+                    const double t = (double) k / (window - 1), s = t * t * (3.0 - 2.0 * t), w = amount * (1.0 - s);
+                    const double expect = w * detected (f) + (1.0 - w) * p0.outMidi[(size_t) f];
+                    worstBlend = std::max (worstBlend, std::fabs (p.outMidi[(size_t) f] - expect) * 100.0);
+                }
+                else if (! sameBits (p.outMidi[(size_t) f], p0.outMidi[(size_t) f]))
+                    ++changedAfter;
+            }
+        }
+        test::check (worstBlend < 0.01, test::fmt ("(b) inside the window the plan is w * detected + (1 - w) * glided, frame by frame (worst %.4f cents, < 0.01)", worstBlend));
+        test::check (changedAfter == 0, test::fmt ("(b) from the window's end on it is the plan at 0, bit for bit (%d frames differ)", changedAfter));
+        double afterWindow = 0.0;
+        for (int f = boundary + window; f < frames; ++f)
+            afterWindow = std::max (afterWindow, std::fabs (p1.outMidi[(size_t) f] - 62.5) * 100.0);
+        test::check (afterWindow < 0.01, test::fmt ("(b) at TRANSITION 100 %% the planned pitch at frame %d (40 ms) and later is the corrected 62.5 exactly (%.4f cents off)", window, afterWindow));
+
+        // (c) the centre of every note is on its target to the cent at every TRANSITION value: the settled part is beyond the window
+        double worstCentre = 0.0;
+        for (const float amount : { 0.0f, 0.5f, 1.0f })
+        {
+            auto notes = phraseSetup.notes;
+            for (auto& n : notes)
+            {
+                n.target += 1.37f;
+                n.transition = amount;
+            }
+            const Plan plan = Plan::build (phraseSetup.contour, notes);
+            const Contour out { kRate, phraseSetup.contour.hop, plan.outMidi, phraseSetup.contour.confidence, phraseSetup.contour.levelDb, phraseSetup.contour.voiced };
+            for (const auto& n : notes)
+                worstCentre = std::max (worstCentre, std::fabs (steadyCentre (out, n.start, n.end) - n.target) * 100.0);
+            worstCentre = std::max (worstCentre, std::fabs (steadyCentre (Contour { slide.sampleRate, slide.hop, planAt (amount).outMidi, slide.confidence, slide.levelDb, slide.voiced }, boundary, frames) - 62.5) * 100.0);
+        }
+        test::check (worstCentre < 0.01, test::fmt ("(c) the centre of every note is on its target at TRANSITION 0, 50 and 100 %% (worst %.4f cents off, < 0.01)", worstCentre));
+
+        // (d) the field is part of what undo compares, and reset takes it back
+        Note x = makeNote (slide, boundary, frames), y = x;
+        y.transition = 0.5f;
+        test::check (x.identicalTo (x) && ! x.identicalTo (y) && ! y.identicalTo (x), "(d) identicalTo sees a change of TRANSITION");
+        y.reset();
+        test::check (y.transition == 0.0f && y.identicalTo (x), "and reset() takes it back to 0");
+    }
+
     return test::finish ("OrpheusTests");
 }

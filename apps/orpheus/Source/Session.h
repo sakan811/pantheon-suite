@@ -499,6 +499,7 @@ public:
             e->setAttribute ("vibrato", (double) n.vibrato);
             e->setAttribute ("formant", (double) n.formant);
             e->setAttribute ("gain", (double) n.gainDb);
+            e->setAttribute ("transition", (double) n.transition);
         }
         return xml;
     }
@@ -541,6 +542,7 @@ public:
             n.vibrato = (float) number (*e, "vibrato", 1.0, 0.0, 2.0);
             n.formant = (float) number (*e, "formant", 0.0, -12.0, 12.0);
             n.gainDb = (float) number (*e, "gain", 0.0, -12.0, 12.0);
+            n.transition = (float) number (*e, "transition", 0.0, 0.0, 1.0); // a project from before the attribute opens at 0
             loaded.push_back (n);
         }
         std::stable_sort (loaded.begin(), loaded.end(), [] (const Note& a, const Note& b) { return a.start < b.start; });
