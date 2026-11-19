@@ -34,6 +34,7 @@ public:
     std::array<std::unique_ptr<Strip>, apollo::kBands> strips;
     ui::Choice phaseBox;
     ui::Knob outKnob;
+    ui::Knob pasteKnob; // PASTE AMOUNT, beside PASTE: how much of a pasted bell's or shelf's gain comes in
     apollo::gui::CurveView view;
     ui::PresetBox presetBox;
     ui::Toggle matchButton;
@@ -56,7 +57,7 @@ private:
     ApolloProcessor& proc;
     HardwareLookAndFeel look;
     juce::TooltipWindow tooltips { this, 600 };
-    juce::Rectangle<int> nameplate, presetLabel, phaseLabel, latencyLabel, noteStrip, stripArea;
+    juce::Rectangle<int> nameplate, presetLabel, phaseLabel, latencyLabel, pasteLabel, noteStrip, stripArea;
     int shownTypes = -1;
     std::string pasteSaid;
     int pasteTicks = 0; // timer ticks left to show pasteSaid

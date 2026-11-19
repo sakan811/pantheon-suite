@@ -23,7 +23,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 3 + 7 * kBands, fmt ("%d parameters: phase, output, gain match and 7 for each of %d bands", proc.getParameters().size(), kBands));
+    check (proc.getParameters().size() == 4 + 7 * kBands, fmt ("%d parameters: phase, output, gain match, paste amount and 7 for each of %d bands", proc.getParameters().size(), kBands));
     check (typeNames.size() == kNumTypes && targetNames.size() == kNumTargets && slopeNames.size() == kNumSlopes && phaseNames.size() == kNumPhases, "the choice lists match the engine's");
     const auto d = readParams (proc.apvts);
     bool defaultsOk = d.phase == Phase::minimum && std::fabs (d.outDb) < 1e-4 && ! d.match;
@@ -108,7 +108,7 @@ int main()
                                           juce::Time::getCurrentTime(), view.listenButton().getCentre(), juce::Time::getCurrentTime(), 1, false));
         check (proc.engine.listen.load() == 2 && ui::hasNote (editor.notes(), "LISTEN is on", ui::Severity::warning), "the LISTEN button plays the selected band alone, and a warning says so");
         view.select (5);
-        check (proc.engine.listen.load() == 5 && proc.getParameters().size() == 3 + 7 * kBands, "LISTEN follows the selected band and is not a parameter");
+        check (proc.engine.listen.load() == 5 && proc.getParameters().size() == 4 + 7 * kBands, "LISTEN follows the selected band and is not a parameter");
     }
 
     check (proc.engine.listen.load() == -1, "closing the editor ends LISTEN");
@@ -268,7 +268,7 @@ int main()
             editor.deltaButton.triggerClick();
             juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
             check (q.engine.delta.load() && ui::hasNote (editor.notes(), "DELTA is on", ui::Severity::warning), "DELTA turns the engine's monitor on, and a warning says you do not hear your track");
-            check (! (bool) q.apvts.state.getProperty ("delta", false) && q.getParameters().size() == 3 + 7 * kBands, "DELTA is not a parameter and not in the state: it is never saved or automated");
+            check (! (bool) q.apvts.state.getProperty ("delta", false) && q.getParameters().size() == 4 + 7 * kBands, "DELTA is not a parameter and not in the state: it is never saved or automated");
         }
         check (! q.engine.delta.load(), "closing the editor ends DELTA: monitoring never outlives its window");
 
@@ -499,6 +499,77 @@ int main()
         check (same, "UNDO takes a preset back as one step");
     }
 
+    // PASTE AMOUNT: the share of a pasted bell's or shelf's gain. It scales the gain only, and what is already placed does not move.
+    std::printf ("\nPASTE AMOUNT\n");
+    {
+        using K = pdsp::LinkBand::Kind;
+        using P = pdsp::LinkBand::Place;
+        const auto bell = [] (double hz, double gain, double qv, P place = P::stereo)
+        {
+            pdsp::LinkBand b;
+            b.kind = K::bell;
+            b.freq = hz;
+            b.gainDb = gain;
+            b.q = qv;
+            b.place = place;
+            return b;
+        };
+        const auto text = [] (const pdsp::LinkBand& b) { return juce::String (pdsp::link::encode ({ b })); };
+        // A new instance with PASTE AMOUNT at `percent`; one -4 dB bell is pasted, and the band it went in comes back.
+        const auto pasteAt = [&] (float percent, const pdsp::LinkBand& b, PasteResult& out)
+        {
+            ApolloProcessor q;
+            q.setPlayConfigDetails (2, 2, 48000.0, 512);
+            q.prepareToPlay (48000.0, 512);
+            setValue (q.apvts, id::pasteAmount, percent);
+            out = pasteBands (q.apvts, text (b));
+            return out.slots.empty() ? BandParams {} : readParams (q.apvts).bands[(size_t) out.slots[0]];
+        };
+        ApolloProcessor d;
+        check (std::fabs (d.apvts.getRawParameterValue (id::pasteAmount)->load() - 100.0f) < 1e-4f && d.apvts.getParameter (id::pasteAmount)->getVersionHint() == 2
+                   && ! d.apvts.getParameter (id::pasteAmount)->isAutomatable(),
+               "PASTE AMOUNT defaults to 100 %, is version 2 (an old session opens at 100) and is not automatable");
+
+        PasteResult r100, r50, r0;
+        const auto full = pasteAt (100.0f, bell (1000.0, -4.0, 1.0), r100);
+        const auto half = pasteAt (50.0f, bell (1000.0, -4.0, 1.0), r50);
+        const auto none = pasteAt (0.0f, bell (1000.0, -4.0, 1.0), r0);
+        check (std::fabs (full.gainDb + 4.0) < 0.01 && r100.percent == 100, fmt ("at 100 %% a -4 dB bell comes in at %.2f dB, as it always did", full.gainDb));
+        check (std::fabs (half.gainDb + 2.0) < 0.01, fmt ("at 50 %% the same bell comes in at %.2f dB: half the gain", half.gainDb));
+        check (r0.slots.size() == 1 && std::fabs (none.gainDb) < 1e-6 && none.on, fmt ("at 0 %% the band is still placed, at %.2f dB", none.gainDb));
+        check (half.on && half.type == Type::bell && std::fabs (half.freqHz - 1000.0) < 0.5 && std::fabs (half.q - 1.0) < 0.01 && half.target == Target::stereo,
+               "at 50 % the frequency, width, channels and type are the pasted ones: only the gain is scaled");
+        PasteResult rMid;
+        const auto mid = pasteAt (50.0f, bell (3200.0, 2.0, 0.9, P::mid), rMid);
+        check (mid.target == Target::mid && std::fabs (mid.gainDb - 1.0) < 0.01, "a Mid bell at 50 % goes on the Mid at half its gain");
+        check (apollo::pasteSaid (r50).find ("at 50% gain") != std::string::npos && apollo::pasteSaid (r100).find ("%") == std::string::npos,
+               "the strip says the amount when it is below 100 %, and says nothing at 100 %");
+
+        // A band placed at 100 % stays as it is when the amount is changed afterwards: PASTE AMOUNT only applies when PASTE is clicked.
+        ApolloProcessor k;
+        k.setPlayConfigDetails (2, 2, 48000.0, 512);
+        k.prepareToPlay (48000.0, 512);
+        PasteResult placed;
+        placed = pasteBands (k.apvts, text (bell (1000.0, -4.0, 1.0)));
+        const int slot = placed.slots.empty() ? -1 : placed.slots[0];
+        setValue (k.apvts, id::pasteAmount, 0.0f);
+        check (slot >= 0 && std::fabs (readParams (k.apvts).bands[(size_t) slot].gainDb + 4.0) < 0.01, "a band already placed keeps its gain when PASTE AMOUNT is changed");
+
+        // The editor: the knob sits between DELTA and PASTE and overlaps nothing; a paste at 50 % says so in the strip.
+        ApolloProcessor e;
+        e.setPlayConfigDetails (2, 2, 48000.0, 512);
+        e.prepareToPlay (48000.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> holder (e.createEditor());
+        auto& editor = ui::innerOf<ApolloEditor> (*holder);
+        editor.setVisible (true);
+        check (editor.deltaButton.getRight() <= editor.pasteKnob.getX() && editor.pasteKnob.getRight() < editor.pasteButton.getX()
+                   && editor.pasteKnob.getBottom() <= editor.getHeight(),
+               "the PASTE AMOUNT knob sits between DELTA and PASTE, overlapping nothing");
+        setValue (e.apvts, id::pasteAmount, 50.0f);
+        editor.pasteFromClipboard (text (bell (1000.0, -4.0, 1.0)));
+        check (ui::hasNote (editor.shownNotes(), "at 50% gain", ui::Severity::info), "PASTE at 50 % says so in the strip under the bands");
+    }
+
     // A paste of several bands is one undo step; the UNDO / REDO buttons and Cmd+Z take it back and put it on again. The display's tooltip names Delete.
     std::printf ("\nUndo of a paste, and the UNDO / REDO buttons\n");
     {
@@ -557,7 +628,7 @@ int main()
         check (editor.view.getTooltip().contains ("Delete"), "the display's tooltip says that Delete or Backspace switches the selected band off");
     }
 
-    // A / B: the header-row buttons, each slot keeps its settings, the kept parameters (OUTPUT, PHASE, GAIN MATCH) stay across a switch, and the active slot is saved.
+    // A / B: the header-row buttons, each slot keeps its settings, the kept parameters (OUTPUT, PHASE, GAIN MATCH, PASTE AMOUNT) stay across a switch, and the active slot is saved.
     std::printf ("\nA / B\n");
     {
         ApolloProcessor q;

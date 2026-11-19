@@ -13,7 +13,7 @@ namespace apollo
 {
 namespace id
 {
-inline const juce::String phase { "phase" }, out { "out" }, match { "match" };
+inline const juce::String phase { "phase" }, out { "out" }, match { "match" }, pasteAmount { "pasteAmount" };
 }
 
 struct BandIds
@@ -89,6 +89,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::out, 1 }, "Output", NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, Attr().withStringFromValueFunction (db)));
     // Version 2: a session saved before it opens with GAIN MATCH off, which is how it always sounded.
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::match, 2 }, "Gain Match", false));
+    // Version 2: a session saved before it opens at 100 %, which is how PASTE always took the gain. Not automatable: it only matters when PASTE is clicked.
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::pasteAmount, 2 }, "Paste Amount", NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f,
+                                                         Attr().withLabel ("%").withAutomatable (false)));
     return { p.begin(), p.end() };
 }
 
@@ -149,6 +152,7 @@ struct PasteResult
     int skipped = 0;        // a harmonic fill (Hephaestus'), a band on one channel (Apollo has Stereo, Mid and Side), or no free band left
     bool curve = false;     // the text carried a target curve (it becomes the display's reference: see CurveView)
     std::string curveName;
+    int percent = 100;      // PASTE AMOUNT when it was clicked: the share of each bell's or shelf's gain that came in
 };
 
 // A band is free for a paste when it does nothing now (off, or a bell or shelf at 0 dB): the default high-pass and low-pass, the shelves and the bells all are.
@@ -181,6 +185,9 @@ inline PasteResult pasteBands (juce::AudioProcessorValueTreeState& s, const juce
     ui::beginUndoStep (s, "Paste bands");
     result.curve = curve.valid();
     result.curveName = curve.name;
+    const float amount = s.getRawParameterValue (id::pasteAmount)->load();
+    result.percent = (int) std::lround (amount);
+    const double strength = amount / 100.0; // 1.0 at the default: the gain is then what the link says, bit for bit
     std::array<bool, kBands> used {};
     using K = pdsp::LinkBand::Kind;
     using P = pdsp::LinkBand::Place;
@@ -206,7 +213,7 @@ inline PasteResult pasteBands (juce::AudioProcessorValueTreeState& s, const juce
         const auto& ids = bandIds (slot);
         setValue (s, ids.type, (float) (int) type);
         setValue (s, ids.freq, (float) std::clamp (b.freq, kMinHz, kMaxHz));
-        setValue (s, ids.gain, hasGain (type) ? (float) std::clamp (b.gainDb * b.amount, -kMaxGainDb, kMaxGainDb) : 0.0f); // amount: how much of the gain to take
+        setValue (s, ids.gain, hasGain (type) ? (float) std::clamp (b.gainDb * b.amount * strength, -kMaxGainDb, kMaxGainDb) : 0.0f); // amount: how much of the gain to take; PASTE AMOUNT scales it again
         setValue (s, ids.q, (float) std::clamp (hasSlope (type) ? 0.7071 : b.q, 0.1, 10.0));
         setValue (s, ids.slope, (float) std::clamp ((int) std::lround (b.slopeDbPerOct / 12.0) - 1, 0, kNumSlopes - 1));
         setValue (s, ids.target, (float) (b.place == P::mid ? (int) Target::mid : b.place == P::side ? (int) Target::side : (int) Target::stereo));
@@ -229,6 +236,8 @@ inline std::string pasteSaid (const PasteResult& r)
         for (size_t i = 0; i < r.slots.size(); ++i)
             said += (i ? ", " : "") + std::to_string (r.slots[i] + 1);
         said += ")";
+        if (r.percent < 100)
+            said += " at " + std::to_string (r.percent) + "% gain";
     }
     if (r.curve)
         said += " and the target curve" + (r.curveName.empty() ? std::string() : ": " + r.curveName);
