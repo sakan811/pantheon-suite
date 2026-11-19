@@ -42,6 +42,8 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
                                     "stereo image stay together), at the price of about 48 ms of delay (the host compensates) and a softer low end (about 12 Hz resolution). "
                                     "Changing it while playing restarts the equaliser."),
       outKnob (p.apvts, id::out, "OUTPUT", "Output gain, after every band."),
+      pasteKnob (p.apvts, id::pasteAmount, "", "PASTE AMOUNT: how much of the gain of each pasted bell and shelf comes in, when PASTE is clicked (100 % is all of it, the default). "
+                                                "Frequencies, widths, channels and cuts are taken as they are, and the reference curve is not scaled. Bands already placed do not change."),
       view (p.apvts, [&p] { return p.getSampleRate(); }, p.tapIn, p.tapOut),
       presetBox (p, presets(), "The bands it does not use go back to 0 dB. PHASE, OUTPUT and GAIN MATCH are kept."),
       matchButton (p.apvts, id::match, "GAIN MATCH", "Takes the level the bands add or take away off again, slowly (about 0.6 s, within 12 dB), so a boost that is merely louder is not mistaken for better. "
@@ -71,7 +73,7 @@ ApolloEditor::ApolloEditor (ApolloProcessor& p)
         clearBands (proc.apvts);
         view.setListen (false); // LISTEN follows a band; a band that is off is not heard alone
     };
-    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &presetBox, &matchButton, &undoButtons, &abButtons, &clearAllButton, &deltaButton, &pasteButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &view, &phaseBox, &outKnob, &pasteKnob, &presetBox, &matchButton, &undoButtons, &abButtons, &clearAllButton, &deltaButton, &pasteButton, &guideButton })
         addAndMakeVisible (*c);
     startTimerHz (kTimerHz);
     showTypes();
@@ -107,7 +109,11 @@ void ApolloEditor::resized()
     row.removeFromLeft (14);
     matchButton.setBounds (row.removeFromLeft (112));
     row.removeFromLeft (8);
-    deltaButton.setBounds (row.removeFromLeft (70));
+    deltaButton.setBounds (row.removeFromLeft (62));
+    row.removeFromLeft (8);
+    const auto pasteKnobBounds = row.removeFromLeft (28); // the 8 px left before PASTE
+    pasteKnob.setBounds (pasteKnobBounds);
+    pasteLabel = { pasteKnobBounds.getX() + 2, pasteKnobBounds.getY() - 15, 60, 12 };
 
     bounds.removeFromTop (10);
     auto undoRow = bounds.removeFromTop (undoRowHeight);
@@ -205,6 +211,7 @@ void ApolloEditor::paint (juce::Graphics& g)
     hw::drawNameplate (g, nameplate, gui::kProjectWord, gui::kPluginWord, "Parametric equaliser", true, 25.0f);
     hw::drawLabel (g, "Preset", presetLabel, juce::Justification::left, colours::dim, 9.0f);
     hw::drawLabel (g, "Phase", phaseLabel, juce::Justification::left, colours::dim, 9.0f);
+    hw::drawLabel (g, "Amount", pasteLabel, juce::Justification::left, colours::dim, 9.0f);
     const int latency = proc.engine.latencySamples.load();
     if (proc.apvts.getRawParameterValue (id::match)->load() > 0.5f) // what GAIN MATCH is doing to the level right now
         hw::drawLabel (g, "Applying " + juce::String (proc.engine.matchDb.load (std::memory_order_relaxed), 1) + " dB",
