@@ -21,8 +21,8 @@ Regenerate with the command under "Development".*
 
 - **Place now, edit later.** The point is to get the chains onto the stems quickly, by hand or by an agent, and to keep every setting in a project file, so nothing is final.
   Open any plugin from its chain, change it, save.
-- **The suite only.** It hosts the plugins of this repository and nothing else, so what you hear is what the suite's own tests describe, and Hestia's instances (which listen to each other)
-  work across the stems.
+- **Any plugin it finds.** It hosts every VST3 (and, on macOS, Audio Unit) plugin the folders hold, the suite's own and third-party ones alike, and nothing else. Hestia's instances
+  (which listen to each other) still work across the stems. The setting *scanSuiteOnly* in `settings.xml` narrows this to the suite's own plugins.
 - **Not a DAW.** There is no recording, no MIDI, no instruments, no timeline editing and no automation. It plays the stems from the start and writes them out. Arranging and mixing stay in your own DAW.
 - **Nothing is hidden from the agent.** The server reads and sets every setting of a plugin by the names the plugin gives them, loads its presets, and says why anything it cannot do failed.
 - **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [the repository notes](../../NOTICE.md)).
@@ -32,7 +32,7 @@ Regenerate with the command under "Development".*
 | Area | What it does |
 |---|---|
 | **Tracks** | Audio files (WAV, AIFF, FLAC, MP3, M4A, Ogg, CAF), one track each, mono or stereo at any rate. A track becomes stereo at the session's rate, which is the first file's; others are resampled. Drop files on the window or press ADD TRACK. |
-| **Chains** | Any of the suite's plugins in any order, several of the same kind if you like. Click a plugin to open its own window, shift-click to bypass it, right-click to move or remove it. A plugin that is not installed on this machine stays in the chain (red), passes the audio through and keeps its settings. |
+| **Chains** | Any plugin Olympus found, in any order, several of the same kind if you like. Click a plugin to open its own window, shift-click to bypass it, right-click to move or remove it. A plugin that is not installed on this machine stays in the chain (red), passes the audio through and keeps its settings. |
 | **Fader, mute, solo** | A fader for each track after its chain. A muted track, or any track not soloed when another is, is not played and gets no stem. |
 | **Playback** | From the playhead to the end of the stems, through the chains, on the audio device. The plugins read the same playhead. A plugin's reported latency is compensated across the tracks, so the stems stay in time. |
 | **Project** | `.olympus`: a small XML file with the tracks (a relative path to each audio file, and the absolute one as a fallback), faders, and every plugin's complete state. A project opens without its plugins or audio (each is a warning) and saves again without losing what they held. |
@@ -41,9 +41,15 @@ Regenerate with the command under "Development".*
 
 ## Where it finds the plugins
 
-Olympus loads the suite's **VST3** builds at run time and links none of them. It looks in the system VST3 folder, in the folders you give it with **PLUGINS > Look in a folder...** (the
-choice is remembered, and the MCP server uses it too), in `OLYMPUS_PLUGIN_PATH`, and in `--plugins` for the server. Point it at this repository's `plugins/` folder and it finds the build
-folders under it, so `scripts/build.sh hermes vst3` is enough; only a bundle whose file name is one of the suite's (`Hermes Level.vst3`) is opened. AU is not hosted.
+Olympus hosts **VST3** plugins and, on macOS, **Audio Units**, loading them at run time and linking none of their code. A scan reads what it finds in the system's VST3 folders, in the
+folders you give it with **PLUGINS > Look in a folder...** (the choice is remembered, and the MCP server uses it too), in `OLYMPUS_PLUGIN_PATH`, and in `--plugins` for the server; the
+Audio Units are the ones the system registers. Point it at this repository's `plugins/` folder and it finds the build folders under it, so `scripts/build.sh hermes vst3` is enough.
+
+Third-party plugins are scanned on your machine, as you install them; nothing is sent anywhere. The result is kept beside the settings (`plugins.xml`), so the window starts from it and
+reads the folders again only when the cache is empty or you choose **PLUGINS > Rescan plugins**. A plugin that crashes while it is being read is written to `plugin-scan.pedal` first, and
+the next scan blacklists it and skips it (the blacklist is kept in `plugins.xml`; delete that file to try it again). A plugin that hangs in its read is only caught by the next run, once you
+have quit. Two plugins with one name are both listed as `Name (Maker)`; a VST3 and an Audio Unit of one name show as the VST3.
+`suiteNames()` in `Source/Catalog.h` still lists the suite's own plugins, which a test compares with `plugins/`.
 
 ## The MCP server
 
