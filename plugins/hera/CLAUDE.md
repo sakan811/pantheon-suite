@@ -41,6 +41,8 @@ sound itself (`pure`), not `dry + mix x (wet - dry)`. That is what makes the idl
 **AUTO release** is two followers and the gain is the larger of the two. The fast one has ATTACK and a fixed 50 ms release (`kFastAutoReleaseMs`); the slow one has an attack 20 times longer (`kSlowAttackFactor`) and a fixed 600 ms release
 (`kSlowAutoReleaseMs`). A short burst only moves the fast one far, a long passage moves both. RELEASE is not used.
 
+**HOLD** (`EngineParams::holdMs`, `Channel::hold`, plain release only) is a counter of samples: while `wanted < fast` and the counter is above 0 the follower does not move and the counter counts down; whenever `wanted >= fast` it is set back to the full hold. At 0 ms the counter is never above 0, so the follower is the one without a hold, bit for bit (tests [2], [8]). Not used with AUTO release.
+
 **LINK** is `own + link x (louder - own)` on the linear detector levels, not on the gains: at 100% both channels see the same level and get the same gain exactly.
 
 **The sidechain** is read only when KEY is on and the host connected one (`keyL != nullptr`); a mono key is given with `keyR == nullptr`. The detector's high-pass is on the key, whichever it is. The key is never heard.
@@ -64,7 +66,7 @@ its order is the order of `lookaheadNames`, the parameter's choice.
 
 **Real time.** `Engine::process` allocates and locks nothing. **Bad samples:** NaN and infinity are replaced by 0 on the way in.
 
-**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off) and `match`, version 3 (off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`hera::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lookahead`, which is version 2 (a session saved before it opens with it Off), `match`, version 3 (off), and `hold`, version 4 (0 ms); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `detectorNames` is the order of `Detector`.
 
 ## DRY: where each thing lives

@@ -28,12 +28,14 @@ inline constexpr double kRestDb = 1e-3;           // a reduction under this, wit
 // The choice is an index into this list (Off first), so a session keeps its meaning if a value is ever added at the end.
 inline constexpr std::array<float, 5> kLookaheadMs { 0.0f, 1.0f, 2.0f, 5.0f, 10.0f };
 inline constexpr int kNumLookaheads = (int) kLookaheadMs.size();
+inline constexpr float kMaxHoldMs = 500.0f;
 
 struct EngineParams
 {
     float thresholdDb = -18.0f;
     float ratio = 2.0f;
     float attackMs = 10.0f, releaseMs = 150.0f;
+    float holdMs = 0.0f;       // the gain stays where it is for this long after the level falls below it, then RELEASE starts; 0 is no hold. Not used with AUTO release
     float kneeDb = 6.0f;
     float makeupDb = 0.0f;
     float mix = 1.0f;          // 0 dry .. 1 compressed
@@ -235,6 +237,7 @@ public:
         }
         const bool hpfOn = p.hpfHz > 20.5f;
         const double aFast = coefOf (p.attackMs), rFast = coefOf (p.releaseMs);
+        const int holdSamples = (int) std::lround (0.001 * (double) std::clamp (p.holdMs, 0.0f, kMaxHoldMs) * fs);
         const double aSlow = coefOf (p.attackMs * kSlowAttackFactor), rSlow = coefOf (kSlowAutoReleaseMs), rAutoFast = coefOf (kFastAutoReleaseMs);
         const double ratio = std::fmax (p.ratio, 1.0);
         const double makeupTarget = std::pow (10.0, ((double) p.makeupDb + (p.autoMakeup ? autoMakeupDb (p.thresholdDb, ratio, p.kneeDb) : 0.0)) / 20.0);
@@ -326,7 +329,14 @@ public:
                 }
                 else
                 {
-                    s.fast += (wanted - s.fast) * (wanted > s.fast ? aFast : rFast);
+                    // HOLD: while the level is under what the gain is already doing, the gain waits `holdSamples` before it lets go; any time the level reaches it again the wait starts over.
+                    // With a hold of 0 the counter is never above 0, so this is the follower it always was, bit for bit.
+                    if (wanted >= s.fast)
+                        s.hold = holdSamples;
+                    if (wanted < s.fast && s.hold > 0)
+                        --s.hold;
+                    else
+                        s.fast += (wanted - s.fast) * (wanted > s.fast ? aFast : rFast);
                     if (s.fast < kRestDb && wanted == 0.0) s.fast = 0.0; // back at rest exactly: a gain of 1 is exactly 1
                     gr = s.fast;
                 }
@@ -415,6 +425,7 @@ private:
     {
         pdsp::Biquad hpf;
         double ms = 0.0, env = 0.0, fast = 0.0, slow = 0.0;
+        int hold = 0;             // samples the gain still waits before it releases
         std::vector<double> ring; // the sound of the last look-ahead, for the delay
     };
 

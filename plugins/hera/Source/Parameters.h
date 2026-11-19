@@ -12,7 +12,7 @@ namespace hera
 namespace id
 {
 inline const juce::String threshold { "thresh" }, ratio { "ratio" }, attack { "attack" }, release { "release" }, knee { "knee" }, makeup { "makeup" }, mix { "mix" },
-                          link { "link" }, hpf { "hpf" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" }, lookahead { "lookahead" }, match { "match" };
+                          link { "link" }, hpf { "hpf" }, hold { "hold" }, detector { "detector" }, autoRelease { "auto_rel" }, autoMakeup { "auto_mk" }, external { "key" }, lookahead { "lookahead" }, match { "match" };
 }
 
 inline const juce::StringArray detectorNames { "Peak", "RMS" };
@@ -63,6 +63,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id::lookahead, 2 }, "Look-ahead", lookaheadNames, d.lookahead));
     // Version 3: a session saved before it opens with LEVEL MATCH off, which is how it always sounded.
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::match, 3 }, "Level Match", d.match));
+    // Version 4: HOLD, 0 ms (no hold) in a session saved before it, which is how it always sounded.
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::hold, 4 }, "Hold", skewed (0.0f, kMaxHoldMs, 1.0f, 50.0f), d.holdMs, Attr().withStringFromValueFunction (ms).withValueFromStringFunction (msValue)));
     return { p.begin(), p.end() };
 }
 
@@ -86,6 +88,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.external = v (id::external) > 0.5f;
     e.lookahead = std::clamp ((int) v (id::lookahead), 0, kNumLookaheads - 1);
     e.match = v (id::match) > 0.5f;
+    e.holdMs = v (id::hold);
     return e;
 }
 
