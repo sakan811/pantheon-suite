@@ -7,6 +7,7 @@
 #include "ThemisUi.h"
 
 #include <themis/HistoryChecks.h>
+#include <themis/BandCrestMeter.h>
 #include <themis/LowCrestMeter.h>
 
 #include <cstring>
@@ -30,6 +31,8 @@ public:
         const double rate = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0;
         float crest = 0.0f;
         const bool haveCrestNow = proc.readLowCrest (crest);
+        themis::bandcrest::Crests bandsNow {};
+        const bool haveBandsNow = proc.readBandCrest (bandsNow);
         themis::BandArray f {};
         const bool haveFoldNow = proc.readMonoFold (f);
         const int dev = static_cast<int> (proc.paramReader.value (params::device));
@@ -47,7 +50,8 @@ public:
         const bool changed = have != haveData || haveClipNow != haveClip || (haveClipNow && clipNow != clipTotals) || havePhaseNow != havePhase || (havePhaseNow && differs (ph, phaseBands)) || differs (hz, fundamentalHz)
                              || differs (tilt, fundamentalTiltDb) || noHarmonics != noFundamentalHarmonics
                              || haveFoldNow != haveFold || (haveFoldNow && differs (f, fold)) || dev != deviceIndex || (have && differs (m, measured)) || haveCrestNow != haveCrest
-                             || (haveCrestNow && differs (crest, lowCrestDb)) || t.name != target.name
+                             || (haveCrestNow && differs (crest, lowCrestDb)) || haveBandsNow != haveBandCrest || (haveBandsNow && differs (bandsNow, bandCrestDb))
+                             || t.name != target.name
                              || differs (t.medianDb, target.medianDb) || differs (t.halfWidthDb, target.halfWidthDb)
                              || differs (tol, tolerance) || differs (rate, fs) || haveHeldNow != haveHeld || (haveHeldNow && differs (heldNow, held))
                              || differs (ceilingNow, ceilingDb);
@@ -66,6 +70,9 @@ public:
         haveCrest = haveCrestNow;
         if (haveCrestNow)
             lowCrestDb = crest;
+        haveBandCrest = haveBandsNow;
+        if (haveBandsNow)
+            bandCrestDb = bandsNow;
         if (have)
             measured = m;
         if (haveFoldNow)
@@ -97,12 +104,14 @@ public:
 
         // Two groups of readouts, each a caption band (gui::drawGroupCaption) over its row of cells. The row keeps the kit's cell
         // layout (title and glass), so the plot gives up only the caption bands.
-        auto strips = area.removeFromBottom (2.0f * (gui::kGroupCaptionHeight + kCellRowHeight));
+        auto strips = area.removeFromBottom (3.0f * (gui::kGroupCaptionHeight + kCellRowHeight));
         const auto toneBand = strips.removeFromTop (gui::kGroupCaptionHeight + kCellRowHeight);
-        const auto translationBand = strips;
+        const auto translationBand = strips.removeFromTop (gui::kGroupCaptionHeight + kCellRowHeight);
+        const auto crestBand = strips;
         broadbandStrip = toneBand.withTrimmedTop (gui::kGroupCaptionHeight).reduced (8.0f, 0.0f);
         const auto strip = broadbandStrip;
         translationStrip = translationBand.withTrimmedTop (gui::kGroupCaptionHeight).reduced (8.0f, 0.0f);
+        bandCrestStrip = crestBand.withTrimmedTop (gui::kGroupCaptionHeight).reduced (8.0f, 0.0f);
         screen = area.reduced (10.0f, 10.0f);
         plot = screen.reduced (38.0f, 10.0f).withTrimmedBottom (14.0f);
 
@@ -129,8 +138,10 @@ public:
         ui::hw::drawGlassOverlay (g, screen);
         gui::drawGroupCaption (g, toneBand.withHeight (gui::kGroupCaptionHeight).withTrimmedLeft (8.0f), gui::kToneGroupCaption);
         gui::drawGroupCaption (g, translationBand.withHeight (gui::kGroupCaptionHeight).withTrimmedLeft (8.0f), gui::kTranslationGroupCaption);
+        gui::drawGroupCaption (g, crestBand.withHeight (gui::kGroupCaptionHeight).withTrimmedLeft (8.0f), gui::kBandCrestGroupCaption);
         drawBroadband (g, strip);
         drawTranslation (g, translationStrip);
+        drawBandCrest (g, bandCrestStrip);
         drawHover (g);
     }
 
@@ -139,6 +150,7 @@ public:
         hoverBand = plot.contains (e.position) ? bandForX (e.position.x) : -1;
         overTranslationStrip = translationStrip.contains (e.position);
         overBroadbandStrip = broadbandStrip.contains (e.position);
+        overBandCrestStrip = bandCrestStrip.contains (e.position);
         repaint();
     }
     void mouseExit (const juce::MouseEvent&) override
@@ -146,12 +158,17 @@ public:
         hoverBand = -1;
         overTranslationStrip = false;
         overBroadbandStrip = false;
+        overBandCrestStrip = false;
         repaint();
     }
 
     // Tooltip over the translation readouts: the numbers behind the bars.
     juce::String getTooltip() override
     {
+        if (overBandCrestStrip)
+            return "CREST PER BAND: the peak over RMS of each main band of music (the bands of the AUDITION strip), measured like LOW CREST "
+                   "on the mid signal. A sine reads 3 dB, higher is more peaky. A readout only: there are no zones and no advice, because "
+                   "band-limited noise reads higher than a sine. Neighbouring bands leak into each other through the crossover slopes.";
         if (overBroadbandStrip && !overTranslationStrip)
             return fundamentalHz > 0.0f ? "FUNDAMENTAL: the lowest tonal bass peak (" + gui::hzText (fundamentalHz) + ") is "
                                               + (noFundamentalHarmonics ? juce::String ("the only tonal component found: no harmonics. ")
@@ -368,6 +385,24 @@ private:
             ui::MeterCell::drawMarker (g, bar, centre + pos, c);
             cell.drawReadout (g, gui::signedDb (static_cast<float> (delta)), c);
             gui::drawLevelWord (g, cell, themis::kEnergyRanges[r].name, level);
+        }
+    }
+
+    // Crest factor (peak/RMS, dB) of each main band of music: readouts only, no colour and no zone (see the tooltip).
+    void drawBandCrest (juce::Graphics& g, juce::Rectangle<float> strip) const
+    {
+        for (int b = 0; b < pdsp::bands::kCount; ++b)
+        {
+            const auto cell = ui::MeterCell::inStrip (strip, b);
+            const auto name = juce::String (pdsp::bands::kBands[static_cast<size_t> (b)].name);
+            const auto value = bandCrestDb[static_cast<size_t> (b)];
+            if (!haveBandCrest || value == themis::bandcrest::kNothingDb)
+            {
+                cell.drawTitle (g, name);
+                cell.drawEmpty (g);
+                continue;
+            }
+            cell.drawNote (g, name, juce::String (value, 1) + " dB", colours::amber);
         }
     }
 
@@ -726,6 +761,9 @@ private:
     bool haveData = false;
     bool haveCrest = false;
     float lowCrestDb = 0.0f;
+    bool haveBandCrest = false, overBandCrestStrip = false;
+    themis::bandcrest::Crests bandCrestDb {};
+    juce::Rectangle<float> bandCrestStrip;
     float tolerance = 1.0f;
     double fs = 48000.0;
     juce::Rectangle<float> plot, screen; // the plot, and the glass window it and its axis labels sit in

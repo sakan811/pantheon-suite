@@ -39,6 +39,7 @@ void ThemisProcessor::prepareToPlay (double sr, int)
     stopAnalysis(); // prepare() must not overlap with pump()
     analyzer.prepare (sr);
     lowCrest.prepare (sr);
+    bandCrest.prepare (sr);
     scope.prepare (sr);
     loudness.prepare (sr);
     monoLoudness.prepare (sr);
@@ -107,6 +108,8 @@ void ThemisProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     analyzer.push (l, r, n);
     lowCrest.setAveragingSeconds (avgSeconds);
     lowCrest.process (l, r, n);
+    bandCrest.setAveragingSeconds (avgSeconds);
+    bandCrest.process (l, r, n);
     scope.push (l, r, n);
     loudness.process (l, r, n);
     processMonoLoudness (l, r, n);
@@ -328,6 +331,12 @@ bool ThemisProcessor::readLowCrest (float& outDb) const
         return false;
     outDb = lowCrest.crestDb();
     return true;
+}
+
+bool ThemisProcessor::readBandCrest (themis::bandcrest::Crests& out) const
+{
+    out = bandCrest.crestDb();
+    return bandCrest.hasData();
 }
 
 int ThemisProcessor::deliveryIndex() const
