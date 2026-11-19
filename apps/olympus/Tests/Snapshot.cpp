@@ -87,7 +87,11 @@ int main (int argc, char** argv)
     window.setSize (olympus::gui::MainComponent::kDesignWidth, olympus::gui::MainComponent::kDesignHeight);
 
     if (pluginFolder.isNotEmpty())
-        window.session.catalog.scan (juce::FileSearchPath (pluginFolder), false);
+    {
+        olympus::ScanOptions scanOptions;
+        scanOptions.includeSystem = false;
+        window.session.catalog.scan (juce::FileSearchPath (pluginFolder), scanOptions);
+    }
     else
     {
         for (auto* n : { "Hermes Level", "Aegis Ceiling", "Hestia Space", "Nemesis Hush", "Dionysus Warmth", "Hera Bond", "Iris Prism", "Apollo Curve" })
