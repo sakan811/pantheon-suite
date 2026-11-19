@@ -11,7 +11,7 @@ namespace hw = ui::hw;
 namespace
 {
 constexpr int headerHeight = 84;
-constexpr int kKnobs = 9;
+constexpr int kKnobs = 10;
 constexpr int cellWidth = 96;
 constexpr int cellHeight = 108;
 constexpr int rowHeight = 34;
@@ -26,6 +26,7 @@ HeraEditor::HeraEditor (HeraProcessor& p)
       ratio (p.apvts, id::ratio, "RATIO", "How many dB the sound has to rise past the threshold for 1 dB more to come out. 20:1 is nearly a limiter.", ui::Knob::Layout::below),
       attack (p.apvts, id::attack, "ATTACK", "How fast the gain goes down (63% of the way in this time). Slow lets the transient through, fast takes it away.", ui::Knob::Layout::below),
       release (p.apvts, id::release, "RELEASE", "How fast the gain comes back (63% of the way in this time). Not used with AUTO release.", ui::Knob::Layout::below),
+      hold (p.apvts, id::hold, "HOLD", "How long the gain stays down after the level falls below it, before RELEASE starts: it keeps a low note or a pulse from being let go of between its peaks. 0 is none. Not used with AUTO release.", ui::Knob::Layout::below),
       knee (p.apvts, id::knee, "KNEE", "How gradually it starts compressing around THRESH: 0 is hard, 24 dB is gentle.", ui::Knob::Layout::below),
       makeup (p.apvts, id::makeup, "MAKEUP", "Gain after the compressor (added to AUTO makeup when that is on).", ui::Knob::Layout::below),
       mix (p.apvts, id::mix, "MIX", "100%: the compressed sound. Less: it is blended with the dry sound (parallel compression keeps the transients and lifts the body).", ui::Knob::Layout::below),
@@ -51,7 +52,7 @@ HeraEditor::HeraEditor (HeraProcessor& p)
     listenButton.setClickingTogglesState (true);
     listenButton.setTooltip ("Listen to what the detector hears: the key (this track, or the sidechain with KEY on) after SC HPF. Not saved with the project, and it ends when the window closes.");
     listenButton.onClick = [this] { proc.engine.scListen = listenButton.getToggleState(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &levelMatch, &deltaButton, &listenButton, &guideButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &threshold, &ratio, &attack, &release, &hold, &knee, &makeup, &mix, &link, &hpf, &detector, &lookahead, &presetBox, &autoRelease, &autoMakeup, &key, &levelMatch, &deltaButton, &listenButton, &guideButton })
         addAndMakeVisible (*c);
     addAndMakeVisible (undoButtons);
     addAndMakeVisible (abButtons);
@@ -101,7 +102,7 @@ void HeraEditor::resized()
     historyArea = display;
     bounds.removeFromTop (8);
     auto knobs = bounds.removeFromTop (cellHeight);
-    for (auto* k : { &threshold, &ratio, &attack, &release, &knee, &makeup, &mix, &link, &hpf })
+    for (auto* k : { &threshold, &ratio, &attack, &release, &hold, &knee, &makeup, &mix, &link, &hpf })
         k->setBounds (knobs.removeFromLeft (cellWidth));
     bounds.removeFromTop (8);
     auto row = bounds.removeFromTop (rowHeight).withTrimmedTop (4).withTrimmedBottom (4);

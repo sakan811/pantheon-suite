@@ -23,7 +23,7 @@ public:
 
     static constexpr int kHistory = 300;
 
-    ui::Knob threshold, ratio, attack, release, knee, makeup, mix, link, hpf;
+    ui::Knob threshold, ratio, attack, release, hold, knee, makeup, mix, link, hpf;
     ui::Choice detector, lookahead;
     ui::PresetBox presetBox;
     ui::Toggle autoRelease, autoMakeup, key, levelMatch;

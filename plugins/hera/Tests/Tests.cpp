@@ -635,5 +635,55 @@ int main()
 
     }
 
+    // [12] HOLD: the gain waits before it releases.
+    std::printf ("\n[12] Hold\n");
+    {
+        EngineParams p;
+        p.thresholdDb = -30.0f;
+        p.ratio = 8.0f;
+        p.kneeDb = 0.0f;
+        p.detector = Detector::peak;
+        p.attackMs = 5.0f;
+        p.releaseMs = 100.0f;
+        // A loud tone for 1 s, then a quiet one (under the threshold) that shows the gain.
+        const int n = 48000 * 2;
+        Stereo in = sine (1000.0, -6.0, n);
+        const auto quiet = sine (1000.0, -45.0, n);
+        for (int i = 48000; i < n; ++i) in.l[(size_t) i] = in.r[(size_t) i] = quiet.l[(size_t) i];
+        const auto reductionAfter = [&] (float holdMs, double secondsAfterStop)
+        {
+            EngineParams q = p;
+            q.holdMs = holdMs;
+            Engine e;
+            e.prepare (kFs);
+            const auto out = run (e, in, q, 64);
+            const size_t c = (size_t) ((1.0 + secondsAfterStop) * kFs);
+            return db (peakOf (in.l, c, c + 48)) - db (peakOf (out.l, c, c + 48));
+        };
+        const double full = reductionAfter (0.0f, -0.05);
+        const double none = reductionAfter (0.0f, 0.2), held = reductionAfter (300.0f, 0.2), after = reductionAfter (300.0f, 0.4);
+        check (std::fabs (full - 21.0) < 1.0 && none < 0.25 * full, fmt ("without a hold the reduction (%.1f dB) is %.1f dB 200 ms after the tone stops (RELEASE 100 ms)", full, none));
+        check (std::fabs (held - full) < 0.3, fmt ("HOLD 300 ms: 200 ms after the tone stops the reduction is still %.1f dB (%.1f before)", held, full));
+        check (after < 0.6 * full && after > 0.05 * full, fmt ("HOLD 300 ms: 400 ms after the stop (100 ms after the hold) the gain is letting go: %.1f dB of %.1f", after, full));
+        // A gap shorter than the hold does not let the gain go: the level comes back and the wait starts over.
+        Stereo gap = sine (1000.0, -6.0, n);
+        const auto gapQuiet = sine (1000.0, -45.0, n);
+        for (int i = 24000; i < 24000 + 4800; ++i) gap.l[(size_t) i] = gap.r[(size_t) i] = gapQuiet.l[(size_t) i];
+        EngineParams q = p;
+        q.holdMs = 200.0f;
+        Engine e;
+        e.prepare (kFs);
+        const auto out = run (e, gap, q, 64);
+        const size_t c = 24000 + 4800 - 96;
+        check (std::fabs ((db (peakOf (gap.l, c, c + 48)) - db (peakOf (out.l, c, c + 48))) - 21.0) < 1.0, "a 100 ms quiet gap inside a 200 ms hold keeps the full reduction");
+        // Block size makes no difference.
+        Engine a, b;
+        a.prepare (kFs);
+        b.prepare (kFs);
+        q.holdMs = 120.0f;
+        const auto oa = run (a, in, q, 64), ob = run (b, in, q, 777);
+        check (oa.l == ob.l, "HOLD gives the same output for any block size");
+    }
+
     return test::finish ("HeraTests");
 }

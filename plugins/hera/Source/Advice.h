@@ -94,7 +94,7 @@ inline const char* guideText()
 {
     return "FOR\n"
            "Compressing a whole track or a bus: it turns the sound down while it is over THRESH, by RATIO, so the loud and the quiet come closer. "
-           "Slow ATTACK keeps the punch, fast takes it away; RELEASE sets how it lets go (AUTO follows the programme). With MIX under 100% "
+           "Slow ATTACK keeps the punch, fast takes it away; RELEASE sets how it lets go (AUTO follows the programme), after HOLD has kept the gain down for a set time. With MIX under 100% "
            "the compressed sound is blended with the dry one (parallel compression).\n\n"
            "SIDECHAIN\n"
            "The detector can listen to a high-passed copy (SC HIGH-PASS) so the bass does not trigger it, or to another track routed to the sidechain input (KEY). SC LISTEN plays what the detector hears (after the high-pass) instead of the track.\n\n"

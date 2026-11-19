@@ -24,7 +24,7 @@ int main()
     proc.prepareToPlay (48000.0, 512);
 
     check (proc.getName() == juce::String (gui::kProjectWord) + " " + gui::kPluginWord, "the reported name is the nameplate's two words");
-    check (proc.getParameters().size() == 15, fmt ("%d parameters: nine knobs, the detector, three switches, the look-ahead and LEVEL MATCH", proc.getParameters().size()));
+    check (proc.getParameters().size() == 16, fmt ("%d parameters: ten knobs, the detector, three switches, the look-ahead and LEVEL MATCH", proc.getParameters().size()));
     check (lookaheadNames.size() == kNumLookaheads, "the look-ahead list matches the engine's");
     check (detectorNames.size() == kNumDetectors, "the choice list matches the engine's detectors");
     const auto d = readParams (proc.apvts);
@@ -311,7 +311,7 @@ int main()
             editor.listenButton.triggerClick();
             juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
             check (q.engine.scListen.load() && ui::hasNote (editor.notes(), "SC LISTEN is on", ui::Severity::warning), "SC LISTEN turns the engine's monitor on, and a warning says you hear the key");
-            check (q.getParameters().size() == 15 && ! (bool) q.apvts.state.getProperty ("delta", false), "neither is a parameter: they are never saved or automated");
+            check (q.getParameters().size() == 16 && ! (bool) q.apvts.state.getProperty ("delta", false), "neither is a parameter: they are never saved or automated");
         }
         check (! q.engine.delta.load() && ! q.engine.scListen.load(), "closing the editor ends both: monitoring never outlives its window");
         setValue (q.apvts, id::match, 1.0f);
