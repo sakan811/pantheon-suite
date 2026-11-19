@@ -446,6 +446,33 @@ int main()
             }
         }
 
+        // MIX under 100% with ADAA on at 1x: the dry sound is the plain input, the wet is the average of two samples (half a sample later), so on a linear piece the blend is
+        // (1 - m/2) x[n] + (m/2) x[n-1]. There is no comb, because the two never cancel (they are within a half sample of each other): the blend is the lowpass above, as much of it as MIX
+        // has wet. Measured against that formula, not fitted.
+        {
+            EngineParams quiet;
+            quiet.driveDb = 0.0f;
+            quiet.shape = Shape::clip;
+            quiet.autoGain = false;
+            quiet.oversampling = 0;
+            quiet.mix = 0.5f;
+            for (const double hz : { 1000.0, 10000.0, 20000.0 })
+            {
+                const auto tone = sine (hz, -30.0, n);
+                Engine a, b;
+                a.prepare (kFs, 0);
+                b.prepare (kFs, 0);
+                const double plain = levelAt (run (a, tone, quiet).l, hz);
+                quiet.adaa = true;
+                const double blended = levelAt (run (b, tone, quiet).l, hz);
+                quiet.adaa = false;
+                const double w = 2.0 * M_PI * hz / kFs, m = 0.5;
+                const double re = 1.0 - 0.5 * m + 0.5 * m * std::cos (w), im = -0.5 * m * std::sin (w);
+                const double expected = 20.0 * std::log10 (std::sqrt (re * re + im * im));
+                check (std::fabs ((blended - plain) - expected) < 0.05, fmt ("ADAA with MIX 50%% at 1x, a quiet %.0f Hz sine: %+.2f dB against the same MIX without ADAA (the blend of dry and averaged: %+.2f dB), no notch", hz, blended - plain, expected));
+            }
+        }
+
         // (c) Silence in is exactly silence out, for every curve, with BIAS 60% and ADAA on. And the switch off is the same run as one that never sets it.
         bool silent = true;
         for (int s = 0; s < kNumShapes; ++s)
