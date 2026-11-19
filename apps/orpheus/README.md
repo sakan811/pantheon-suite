@@ -16,7 +16,7 @@ When it is right, export a WAV.
 a little sharp or flat. The blobs are the notes, coloured by how far they are from the scale: **green** within 8 cents, **amber** up to 25,
 **red** beyond. The amber line is the pitch as sung, every 5 ms. The selected note (white outline) has a vibrato, which the line shows and the blob
 does not. Under the display, the waveform and the navigator; below them, the scale panel on the left (key, scale, tuning, glide, amount, and the voice range with
-RE-ANALYSE) and the controls for the selected note on the right (the knobs, COPY / PASTE, SELECT of the notes still off the scale, and OUT PEAK, the loudest sample of the
+RE-ANALYSE) and the controls for the selected note on the right (seven knobs, the last one TRANSITION, at 0 % here; COPY / PASTE; SELECT of the notes still off the scale; and OUT PEAK, the loudest sample of the
 result). Regenerate with the command under "Development".*
 
 ![After Correct all](docs/corrected.png)
@@ -60,13 +60,14 @@ of the third and seventh notes is kept, moved with the note. The strip at the fo
 | **Tuning A4** / **Detect A4** | The reference pitch of the song. **Detect A4** reads it from where the notes sit between semitones, and refuses (and says so) when they are each off in their own way and there is no common reference to find. A singer who is 30 cents flat all the way through is read as 30 cents flat; correcting to that grid then leaves the take where it is. |
 | **Amount / Correct all** | Pulls every note towards the scale by Amount; what you did to individual notes (drift, vibrato, formant, gain) is kept. Right after Correct all, Amount is **live**: moving it applies Correct all again from the notes before it (a drag is one undo step, and the strip says so). A hand edit to a note, or a change of key, ends that, and undoing it brings it back. |
 | **Glide** | How long two neighbouring notes take to slide into each other when they are moved by different amounts. 0 = a step. |
+| **Transition** (knob) | How much of the sung pitch comes back in over the first 40 ms of the selected notes, so a singer's slide into a note is kept. 0 = the glide alone (the default, as before). 100 % = the sung pitch at the note's start, the corrected pitch from 40 ms on. A design recipe, not a standard (see Limits). |
 | **Play / Loop / ORIGINAL** | Plays the corrected audio; Loop repeats the selected notes (or everything); ORIGINAL (Tab) swaps in the untouched recording with no gap. Edits are heard while it plays and while you drag. |
 | **Navigator** | The bar under the display shows the whole recording, with a tick for every note and a bright window for the part on screen. Drag the window to scroll along the audio, drag its edges to zoom, click elsewhere on the bar to go there. **-**, **+** and **FIT** zoom the display; the scrollbar at the right edge of the display scrolls the pitch. |
 | **Piano keys** | Click one to hear that pitch as a tone, to check a note by ear. |
 | **Save / Save as / Open** | A project (`.orpheus`) keeps the notes, the key, the settings and the voice range, and points at the audio, which it does not copy: by its path, by its path relative to the project (so the two can be moved together), and by a fingerprint (its length and 4096 samples spread over it). A project whose audio is not the same take is refused with a message and nothing is opened; one from before the fingerprint still opens. **Save** (Cmd+S) writes to the project silently once it has one (the first time it asks where); **Save as** (Shift+Cmd+S) always asks. A star in the window title marks edits that are not saved (undoing back to the saved state clears it), and Open, a dropped file, Re-analyse and Quit ask before they would lose them. Open takes any audio file the system can decode, or a project; its menu lists the last eight files, and at launch without a file Orpheus reopens the last one (the list is `recent.txt` in the application data folder). A file that cannot be read leaves the open recording, and an analysis that is running, alone. |
 | **Voice** / **Re-analyse** | The range the pitch tracker looks for: wide (65-1100 Hz, the default), low (65-400, bass and baritone), mid (100-700) or high (200-1100). A narrower range cannot jump an octave to a pitch outside it. It is used the next time the notes are found: **Re-analyse** finds them again (every edit is taken back, after asking), and it is saved in the project. |
 | **Select** / **Sel** (Z) | **Select** picks the notes that are, as they are now, more than 5, 10, 15, 25 or 50 cents from the nearest note of the scale (the amber and red ones); **Sel** (Z) zooms the display to the selected notes, in time and in pitch. |
-| **Copy / Paste** | Takes shift, drift, vibrato, formant and gain from the one selected note (Cmd+C) and puts them on the selected notes (Cmd+V). The shift is the same distance from each note's own pitch, not the same pitch. One undo takes a paste back. |
+| **Copy / Paste** | Takes shift, drift, vibrato, formant, gain and transition from the one selected note (Cmd+C) and puts them on the selected notes (Cmd+V). The shift is the same distance from each note's own pitch, not the same pitch. One undo takes a paste back. |
 | **Guide and notes** | **GUIDE** (header) says what Orpheus is for and what it is *not* for: the pitch of one voice, not chords or a mix, not timing, not big leaps (past about 5 semitones the voice changes), and not a plugin. The strip at the foot of the window warns, in amber, when ORIGINAL is lit (you hear the take, not your edits), when edits are not saved, when the result peaks above 0 dB (it will clip in the WAV), and when a note is moved more than 5 semitones; it says what to open when nothing is, and that a note under 100 ms may be a mis-cut. The rules are in [Advice.h](Source/UI/Advice.h), checked by `OrpheusUiCheck`. |
 | **Export** / **OUT PEAK** | A 24-bit WAV at the sample rate of the recording, mono or stereo, written to a temporary file and moved over the target when complete (a failed export leaves an existing file as it was). Gain up to +12 dB and the re-spaced grains can take the result past 0 dB, which a WAV cannot hold: OUT PEAK (red past 0 dB), the strip and a question at Export say so. |
 
@@ -109,7 +110,8 @@ Every knob works as in the plugins: drag it, double-click it to reset it, or cli
   piecewise-constant fit (dynamic programming, a fixed price for each new level); the cuts are then moved back onto the unsmoothed pitch, where
   a real change of note is a step, and the slide between two notes, a short piece at the edge of a phrase and a dip in loudness are told apart from a note.
 * **Plan** ([Plan.h](Source/Dsp/Plan.h)): inside a note the sung pitch is a centre, a slow part (drift) and a fast part (vibrato). The planned
-  pitch is `target + (1 - drift) * slow + vibrato * fast`, then smoothed over *Glide*. This is the only thing the renderer reads of the notes.
+  pitch is `target + (1 - drift) * slow + vibrato * fast`, then smoothed over *Glide*. Within 40 ms of a note's start, *Transition* blends the detected pitch
+  back in, `w * detected + (1 - w) * glided` with `w` falling by a smoothstep to 0 at the window's last frame. This is the only thing the renderer reads of the notes.
 * **Resynthesis** ([Psola.h](Source/Dsp/Psola.h)): pitch-synchronous overlap-add. Marks are found once per file by following the waveform
   (matching the shape around the last mark against the signal a period later). Output marks are spaced **exactly** as the plan's pitch says, so
   whatever error the tracker made on the input cancels out of the pitch that comes out; each takes the grain (two periods under a Hann window) of the nearest
@@ -136,6 +138,10 @@ sample (a harmonic series shaped by two formants), so the output is measured aga
 | Vibrato 0 % / 200 %, Drift 100 % | the pitch range of the note 88 -> 19 / 156 cents; the wander 19 -> 4 cents |
 | A note nobody edited, and the audio far from one that was | bit-for-bit the input |
 | Rebuilding only what an edit touched | exactly the samples a full rebuild gives |
+| TRANSITION 0 (the default) | the plan is bit-identical to the one before the field existed: `OrpheusTests` [10a] (against itself) and, **by hand**, a byte compare of the plans of the previous commit and this one (three glides, 841 frames) |
+| A 60 ms slide into a note, TRANSITION 100 % | the planned pitch at the note's start is the detected one (**0.0000 cent** off); from 40 ms on, the corrected pitch exactly (0.0000 cent); the formula holds frame by frame (worst 0.0002 cent); [10b] |
+| The same slide, TRANSITION 0 % | the planned pitch at the start is **52.4 cents** from the detected one (it does not follow the slide) [10b] |
+| The centre of every note, TRANSITION 0, 50 and 100 % | on its target to **0.0000 cent** [10c] |
 | Undo | the audio goes back bit-for-bit |
 | Export | a 24-bit WAV that reads back within 1e-6 |
 | Speed (20 s of audio, the development machine) | tracking 0.26 s, marks 0.10 s, a full resynthesis 0.04 s |
@@ -154,6 +160,10 @@ Treat the numbers above as what the algorithm does on clean, steady, harmonic vo
 - **A sibilant or a breath is left as it was**, by design: it has no pitch. A pitch edit of a word ends where the voicing ends.
 - **A note stays within two octaves of where it was sung** (24 semitones; the Shift knob itself goes to 12). A drag, the arrow keys, the knobs and a loaded project are held to it, and
   the resynthesis refuses a plan more than four octaves away; past two octaves the grains are a few samples apart and the result is noise.
+- **TRANSITION is a design recipe, not a standard.** Keeping the sung pitch at a note's start is what practice guidance on pitch editing
+  advises (for example [nailthemix.com](https://www.nailthemix.com/?p=15263)), but the 40 ms window and the smoothstep are chosen here, not measured
+  against singers. It acts on the start of a note only, not its end. A slide longer than the window is followed for its first 40 ms only, and the
+  ramp reaches the corrected line at 35 ms (the window's last 5 ms frame), so the corrected line is exact from 40 ms on. Nobody has listened to it.
 - **A large shift is audible.** A shift of a few semitones is transparent on a clean take; beyond about 5 to 7 semitones the character of the
   voice begins to change, as with any method that re-spaces grains. Formant can compensate by ear.
 - **Segmentation is a guess.** A very short note (under about 100 ms) between two others in pitch, or a fall-off at the end of a phrase, can be read as part of the neighbour; Split (S) cuts it.

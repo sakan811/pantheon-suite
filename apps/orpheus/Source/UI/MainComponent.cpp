@@ -142,7 +142,7 @@ MainComponent::MainComponent (bool withAudioDevice)
     reanalyseButton.setTooltip ("Find the notes again with the chosen voice range. Every edit is taken back.");
     reanalyseButton.onClick = [this] { reanalyse(); };
 
-    for (auto* k : { &tuningKnob, &glideKnob, &amountKnob, &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob })
+    for (auto* k : { &tuningKnob, &glideKnob, &amountKnob, &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob, &transitionKnob })
         addAndMakeVisible (*k);
 
     setupKnob (tuningKnob, "Tuning A4", kMinA4Hz, kMaxA4Hz, 0.1, 440.0, " Hz", 1, "The reference pitch of the song. Detect A4 reads it from the notes (a song recorded at 432 Hz, or a singer who is flat all the way through).");
@@ -245,6 +245,9 @@ MainComponent::MainComponent (bool withAudioDevice)
     setupKnob (vibratoKnob, "Vibrato", 0.0, 200.0, 1.0, 100.0, " %", 0, "The fast modulation: 0 = flat, 100 = as sung, 200 = twice as deep.");
     setupKnob (formantKnob, "Formant", -12.0, 12.0, 0.1, 0.0, " st", 1, "Moves the character of the voice (the vowel colour) without moving the pitch.");
     setupKnob (gainKnob, "Gain", -12.0, 12.0, 0.1, 0.0, " dB", 1, "The level of the selected notes.");
+    setupKnob (transitionKnob, "Transition", 0.0, 100.0, 1.0, 0.0, " %", 0,
+               "How much of the sung pitch comes back in over the first 40 ms of the selected notes, so a slide into the note is kept. 0 = the glide alone (as before); "
+               "100 = the sung pitch at the start, the corrected pitch from 40 ms on. A design recipe: check it by ear.");
     shiftKnob.setup ("Shift", -1200.0, 1200.0, 1.0, 0.0, [] (double v) { return (v > 0.5 ? "+" : "") + numberText (v) + " ct"; },
                      [] (const juce::String& t) -> double
                      {
@@ -253,7 +256,7 @@ MainComponent::MainComponent (bool withAudioDevice)
                      },
                      "Where the note is, in cents from where it was sung. Type an exact value; 100 cents = one semitone. \"+2st\" works too.");
 
-    for (auto* k : { &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob })
+    for (auto* k : { &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob, &transitionKnob })
         k->onGestureStart = [this] { session.pushUndo(); };
 
     correctKnob.onChange = [this] (double v) { applyToSelection ([&, v] (Note& n) { edit::snap (n, session.key, (float) (v / 100.0)); }); };
@@ -262,6 +265,7 @@ MainComponent::MainComponent (bool withAudioDevice)
     vibratoKnob.onChange = [this] (double v) { applyToSelection ([v] (Note& n) { n.vibrato = (float) (v / 100.0); }); };
     formantKnob.onChange = [this] (double v) { applyToSelection ([v] (Note& n) { n.formant = (float) v; }); };
     gainKnob.onChange = [this] (double v) { applyToSelection ([v] (Note& n) { n.gainDb = (float) v; }); };
+    transitionKnob.onChange = [this] (double v) { applyToSelection ([v] (Note& n) { n.transition = (float) (v / 100.0); }); };
 
     snapNoteButton.setTooltip ("Snap the selected notes onto the scale (Enter)");
     straightenButton.setTooltip ("Remove drift and vibrato from the selected notes");
@@ -274,7 +278,7 @@ MainComponent::MainComponent (bool withAudioDevice)
     splitButton.onClick = [this] { juce::int64 a, b; if (roll.selectionSpan (a, b)) { const auto at = playback.position(); roll.splitAtSample (at > a && at < b ? at : (a + b) / 2); } };
     mergeButton.onClick = [this] { roll.mergeSelected(); };
 
-    copyButton.setTooltip ("Copy the settings of the selected note: shift, drift, vibrato, formant and gain (Cmd/Ctrl+C)");
+    copyButton.setTooltip ("Copy the settings of the selected note: shift, drift, vibrato, formant, gain and transition (Cmd/Ctrl+C)");
     pasteButton.setTooltip ("Put the copied settings on the selected notes (Cmd/Ctrl+V). The shift is the same distance from each note's own pitch.");
     copyButton.onClick = [this] { copySettings(); };
     pasteButton.onClick = [this] { pasteSettings(); };
@@ -726,10 +730,10 @@ void MainComponent::copySettings()
         return;
     }
     const auto& n = session.notes[which[0]];
-    copied = NoteSettings { n.shift(), n.drift, n.vibrato, n.formant, n.gainDb };
+    copied = NoteSettings { n.shift(), n.drift, n.vibrato, n.formant, n.gainDb, n.transition };
     refreshInspector();
     say ("Copied: shift " + numberText (n.shift() * 100.0) + " ct, drift " + numberText (n.drift * 100.0) + " %, vibrato " + numberText (n.vibrato * 100.0) + " %, formant "
-         + numberText (n.formant, 1) + " st, gain " + numberText (n.gainDb, 1) + " dB");
+         + numberText (n.formant, 1) + " st, gain " + numberText (n.gainDb, 1) + " dB, transition " + numberText (n.transition * 100.0) + " %");
 }
 
 void MainComponent::pasteSettings()
@@ -752,6 +756,7 @@ void MainComponent::pasteSettings()
                           n.vibrato = c.vibrato;
                           n.formant = c.formant;
                           n.gainDb = c.gainDb;
+                          n.transition = c.transition;
                       });
     say ("Pasted onto " + juce::String ((int) roll.selectedIndices().size()) + (roll.selectedIndices().size() == 1 ? " note" : " notes"));
 }
@@ -771,7 +776,7 @@ void MainComponent::refreshInspector()
 {
     const auto which = roll.selectedIndices();
     const bool any = ! which.empty();
-    for (auto* k : { &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob })
+    for (auto* k : { &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob, &transitionKnob })
         k->setActive (any);
     for (auto* b : { &snapNoteButton, &straightenButton, &resetNoteButton })
         b->setEnabled (any);
@@ -817,6 +822,7 @@ void MainComponent::refreshInspector()
     show (vibratoKnob, [] (const Note& n) { return (double) n.vibrato; }, 100.0);
     show (formantKnob, [] (const Note& n) { return (double) n.formant; }, 1.0);
     show (gainKnob, [] (const Note& n) { return (double) n.gainDb; }, 1.0);
+    show (transitionKnob, [] (const Note& n) { return (double) n.transition; }, 100.0);
 
     if (! any)
         infoLine = session.isAnalysed() ? juce::String (session.notes.size()) + " notes   click a note to select it" : juce::String();
@@ -1047,8 +1053,8 @@ void MainComponent::resized()
         row.removeFromLeft (4);
         selectOffButton.setBounds (row.removeFromLeft (80));
         auto knobs = p;
-        const int w = knobs.getWidth() / 6;
-        for (auto* k : { &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob })
+        const int w = knobs.getWidth() / 7;
+        for (auto* k : { &correctKnob, &shiftKnob, &driftKnob, &vibratoKnob, &formantKnob, &gainKnob, &transitionKnob })
             k->setBounds (knobs.removeFromLeft (w).withTrimmedBottom (0));
         const int bh = (buttons.getHeight() - 4 * 4) / 5;
         for (auto* b : { &snapNoteButton, &straightenButton, &splitButton, &mergeButton, &resetNoteButton })

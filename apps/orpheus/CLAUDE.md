@@ -32,7 +32,7 @@ Source/Dsp/          no JUCE; everything here is covered by Tests/Tests.cpp
   Pitch.h             MIDI <-> Hz, Contour (the detected pitch per 5 ms frame)
   PitchAnalysis.h     PitchAnalyzer: decimate, YIN candidates, Viterbi over the whole file, full-rate refinement
   Segmenter.h         the cut into notes: exact piecewise-constant fit on the vibrato-free pitch, boundary refinement, loudness dips
-  NoteModel.h         Note (what is edited: target, drift, vibrato, formant, gain), steadyCentre
+  NoteModel.h         Note (what is edited: target, drift, vibrato, formant, gain, transition), steadyCentre
   Scales.h            scales, Key (snap, grid offset), detectKey, detectTuning, detectKeyAuto
   Edits.h             snap / split / merge on a list of notes
   Plan.h              notes -> numbers per frame (planned pitch, formant, gain, "needs resynthesis"): the only thing the renderer reads of the notes
@@ -50,6 +50,11 @@ Tests/               Tests.cpp (DSP and what the engine refuses), UiCheck.cpp (s
 **One direction of data.** `Contour` (found once) + `notes` (edited) -> `Plan::build` -> `Psola::render` -> `Session::output`. Nothing downstream reads the notes
 directly and nothing upstream knows about the plan. A new control is a field on `Note`, a use of it in `Plan::build`, a knob in `MainComponent`, and a line in
 `toXml` / `applyXml` and `Note::identicalTo` (undo compares notes with it: a field missing there is an edit that undo cannot see).
+
+**The fields of Note, and where each one lives.** `target`, `drift`, `vibrato`, `formant`, `gainDb`, `transition` (the start-of-note window of Plan.h, 40 ms).
+Each is read by `Plan::build` (the only use), set by a knob in `MainComponent`, written and read by `Session::toXml` / `applyXml` (an older project without
+the attribute opens at the default), compared by `Note::identicalTo` (undo and "unsaved"), reset by `Note::reset()` and carried by COPY / PASTE (`NoteSettings`).
+A field added later is in all of these, or undo, saved state or paste will miss it. The default of every field must plan exactly as before the field existed.
 
 **Untouched is bit-exact.** A frame is `active` (resynthesised) only if its planned shift is above `Plan::activeCents` or its formant moved; everything else is copied
 from the source. Do not "simplify" this to running the PSOLA everywhere with a ratio of 1: it would change every sample of the take and the tests [3] and the UiCheck
@@ -101,7 +106,7 @@ so. Notes that are each off in their own way give a "reference" that is only rou
 ## DRY: where each thing lives (change it there only)
 
 - scale list and masks, key snapping, the grid offset of a reference tuning -> `Scales.h` (the combo boxes, the display's rows and the engine all read it)
-- the planned pitch of a frame -> `Plan::build` (the display draws `plan.outMidi`, the renderer spaces marks by it, the tests measure against it)
+- the planned pitch of a frame, TRANSITION's window included -> `Plan::build` (the display draws `plan.outMidi`, the renderer spaces marks by it, the tests measure against it)
 - what the app warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `UI/Advice.h`; `MainComponent::adviceInput()` fills it and `ui::drawNoteStrip` draws it. The window's size is `MainComponent::kDesignWidth/Height` (the strip is part of it: tests and the snapshot use it too)
 - the A4 range (the Tuning knob, a loaded project) -> `kMinA4Hz` / `kMaxA4Hz` in `Scales.h`; the voice ranges -> `analysisSettingsFor` in `Session.h`
 - how a note is written ("A3 +12ct"), the time, the verdict colours -> `UI/OrpheusUi.h`

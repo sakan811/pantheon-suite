@@ -53,7 +53,7 @@ public:
     RecentFiles recent;
     // Finds the notes again with the chosen voice range (this takes every edit back).
     void reanalyse();
-    // The settings of the one selected note (shift, drift, vibrato, formant, gain), put onto the notes selected now.
+    // The settings of the one selected note (shift, drift, vibrato, formant, gain, transition), put onto the notes selected now.
     void copySettings();
     void pasteSettings();
     bool hasCopiedSettings() const { return copied.has_value(); }
@@ -86,7 +86,7 @@ public:
     juce::TextButton reanalyseButton { "Re-analyse" }, copyButton { "Copy" }, pasteButton { "Paste" }, selectOffButton { "Select" };
     ui::ValueKnob tuningKnob, glideKnob, amountKnob;
     juce::TextButton correctAllButton { "Correct all" }, detectKeyButton { "Detect key" }, detectTuneButton { "Detect A4" }, resetAllButton { "Reset all" };
-    ui::ValueKnob correctKnob, shiftKnob, driftKnob, vibratoKnob, formantKnob, gainKnob;
+    ui::ValueKnob correctKnob, shiftKnob, driftKnob, vibratoKnob, formantKnob, gainKnob, transitionKnob;
     juce::TextButton snapNoteButton { "Snap" }, straightenButton { "Straighten" }, splitButton { "Split" }, mergeButton { "Merge" }, resetNoteButton { "Reset" };
 
 private:
@@ -117,7 +117,7 @@ private:
     HardwareLookAndFeel look;
     struct NoteSettings
     {
-        float shift, drift, vibrato, formant, gainDb;
+        float shift, drift, vibrato, formant, gainDb, transition;
     };
     std::optional<NoteSettings> copied;
     juce::File projectFile;

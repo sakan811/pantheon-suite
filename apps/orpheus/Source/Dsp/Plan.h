@@ -16,6 +16,13 @@
 // so with the defaults (drift 0, vibrato 1) the whole sung shape is moved rigidly and its centre lands exactly on the target.
 // The shift that results is then smoothed over `glide` milliseconds, so two neighbouring notes moved by different amounts
 // are joined by a slide, not a step.
+//
+// TRANSITION (Note::transition) is a design recipe, not a standard: the first `transitionMs` of a note may keep the pitch as sung,
+// so a singer's slide into the note survives the glide. Within that window the planned pitch is
+//
+//     w * detected + (1 - w) * glided,   w = transition * (1 - s),   s = smoothstep from 0 at the note's start to 1 at the window's end
+//
+// and it is the glided line again from there on, so the centre of a note is untouched.
 namespace orpheus
 {
 struct Plan
@@ -29,6 +36,7 @@ struct Plan
     std::vector<uint8_t> active;     // the frame has to be resynthesised (pitch or formant moved)
 
     static constexpr double activeCents = 0.02; // below this the shift is inaudible and the original is kept untouched
+    static constexpr double transitionMs = 40.0; // the window of Note::transition, from the note's start
 
     int numFrames() const noexcept { return (int) outMidi.size(); }
 
@@ -89,12 +97,32 @@ struct Plan
             }
 
         for (int f = 0; f < nf; ++f)
+            if (c.voiced[(size_t) f])
+                p.outMidi[(size_t) f] = c.midi[(size_t) f] + p.shiftCents[(size_t) f] * 0.01f;
+
+        // TRANSITION: near each note's start the detected pitch comes back in (see the comment at the top). A note at 0 changes nothing.
+        const int window = std::max (2, (int) std::lround (transitionMs * 0.001 * c.sampleRate / c.hop));
+        for (const auto& note : notes)
         {
-            if (! c.voiced[(size_t) f])
+            const float amount = std::clamp (note.transition, 0.0f, 1.0f);
+            if (amount <= 0.0f)
                 continue;
-            p.outMidi[(size_t) f] = c.midi[(size_t) f] + p.shiftCents[(size_t) f] * 0.01f;
-            p.active[(size_t) f] = std::fabs (p.shiftCents[(size_t) f]) > activeCents || std::fabs (p.formantSt[(size_t) f]) > 1.0e-3f;
+            const int first = std::max (0, note.start), last = std::min (nf, std::min (note.end, note.start + window));
+            for (int f = first; f < last; ++f)
+            {
+                if (! c.voiced[(size_t) f])
+                    continue;
+                const double t = (double) (f - note.start) / (window - 1); // 0 at the boundary, 1 at the window's last frame
+                const double s = t * t * (3.0 - 2.0 * t);
+                const double w = amount * (1.0 - s);
+                p.outMidi[(size_t) f] = (float) (w * c.midi[(size_t) f] + (1.0 - w) * p.outMidi[(size_t) f]);
+                p.shiftCents[(size_t) f] = (float) ((p.outMidi[(size_t) f] - c.midi[(size_t) f]) * 100.0);
+            }
         }
+
+        for (int f = 0; f < nf; ++f)
+            if (c.voiced[(size_t) f])
+                p.active[(size_t) f] = std::fabs (p.shiftCents[(size_t) f]) > activeCents || std::fabs (p.formantSt[(size_t) f]) > 1.0e-3f;
         return p;
     }
 

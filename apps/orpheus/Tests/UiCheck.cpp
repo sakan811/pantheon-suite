@@ -523,6 +523,37 @@ int main()
     }
 
 
+    {
+        // TRANSITION: the knob is on the note panel, inside the window and over no other control; it sets the selected note; COPY and PASTE carry it
+        auto w = makeWindow();
+        auto& s = w->session;
+        w->roll.select ({ 2 });
+        w->refreshInspector();
+        const auto knob = w->transitionKnob.getBounds();
+        test::check (w->transitionKnob.isVisible() && w->getLocalBounds().contains (knob), "the TRANSITION knob is on the window, inside it");
+        bool clear = true;
+        for (auto* c : w->getChildren())
+            if (c != &w->transitionKnob && c->isVisible() && c->getBounds().intersects (knob))
+                clear = false;
+        test::check (clear, "and it overlaps no other control of the window");
+
+        w->transitionKnob.onGestureStart();
+        w->transitionKnob.onChange (60.0);
+        test::check (std::fabs (s.notes[2].transition - 0.6f) < 1e-6f && s.notes[3].transition == 0.0f, "TRANSITION 60 % sets the selected note, and no other");
+        w->refreshInspector();
+        test::check (std::fabs (w->transitionKnob.getValue() - 60.0) < 1e-6, "the knob shows it when the note is selected again");
+        w->undo();
+        test::check (s.notes[2].transition == 0.0f, "one undo takes it back");
+
+        s.notes[2].transition = 0.4f;
+        s.changedAll();
+        w->roll.select ({ 2 });
+        w->copyButton.onClick();
+        w->roll.select ({ 4 });
+        w->pasteButton.onClick();
+        test::check (std::fabs (s.notes[4].transition - 0.4f) < 1e-6f, "COPY and PASTE carry TRANSITION with the other settings");
+    }
+
     // ---- [4] files, limits, and the tools of the editing session -----------------------------------------------------
     std::printf ("\n[4] files and tools\n");
     {
@@ -672,6 +703,23 @@ int main()
             test::check (std::fabs (s.notes[2].target - s.notes[2].centre) <= kMaxShiftSemitones + 1e-4f && s.notes[3].target == s.notes[3].centre && s.notes[3].gainDb == 12.0f,
                          "an absurd or NaN target is held to the range, an absurd gain to the knob's");
             test::check (s.key.a4Hz == kMaxA4Hz && s.glideMs == 200.0, "the reference pitch and the glide are held to the knobs' ranges (one constant for the A4 range)");
+        }
+
+        // TRANSITION in a project: written per note, read back, and a project from before the attribute opens at 0
+        {
+            auto w = makeWindow();
+            auto& s = w->session;
+            s.notes[2].transition = 0.7f;
+            s.changedAll();
+            auto xml = s.toXml();
+            auto w2 = makeWindow();
+            const bool applied = w2->session.applyXml (*xml);
+            test::check (applied && std::fabs (w2->session.notes[2].transition - 0.7f) < 1e-6f && w2->session.notes[1].transition == 0.0f,
+                         "a project keeps TRANSITION per note (70 % on one note, 0 on the others)");
+            for (auto* e : xml->getChildWithTagNameIterator ("Note"))
+                e->removeAttribute ("transition");
+            auto w3 = makeWindow();
+            test::check (w3->session.applyXml (*xml) && w3->session.notes[2].transition == 0.0f, "a project from before the attribute opens with TRANSITION 0");
         }
 
         // the split that cannot happen

@@ -25,6 +25,7 @@ struct Note
     float vibrato = 1.0f;     // the fast modulation (vibrato, jitter) scaled: 0 = flat, 1 = as sung, 2 = twice
     float formant = 0.0f;     // formant shift in semitones, the pitch left alone
     float gainDb = 0.0f;
+    float transition = 0.0f;  // 0..1: how much of the detected pitch comes back in over the first 40 ms of the note (Plan.h); 0 = the plan as before
 
     int length() const noexcept { return end - start; }
     // Exactly the same note, field for field (what undo compares; floats are compared on purpose, not with a tolerance).
@@ -32,7 +33,7 @@ struct Note
     {
         const auto same = [] (float a, float b) { return ! (a < b) && ! (b < a); };
         return start == o.start && end == o.end && same (centre, o.centre) && same (target, o.target) && same (drift, o.drift) && same (vibrato, o.vibrato)
-               && same (formant, o.formant) && same (gainDb, o.gainDb);
+               && same (formant, o.formant) && same (gainDb, o.gainDb) && same (transition, o.transition);
     }
     float shift() const noexcept { return target - centre; } // semitones
     // Puts the target back into the range the model accepts (and a NaN back on the centre).
@@ -55,6 +56,7 @@ struct Note
         vibrato = 1.0f;
         formant = 0.0f;
         gainDb = 0.0f;
+        transition = 0.0f;
     }
 };
 
