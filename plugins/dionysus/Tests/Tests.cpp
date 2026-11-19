@@ -376,5 +376,151 @@ int main()
         check (driveForPeak (4.0, hot) && hot == 0.0f, "a loud programme (+12 dB before DRIVE) asks for less than the knob has: DRIVE is at 0 dB");
     }
 
+    // [10] ADAA (the 1x path): the antiderivatives are the curves' own, the switch cuts the aliasing at 1x, silence stays silence, and it does nothing above 1x.
+    std::printf ("\n[10] Anti-aliasing (ADAA)\n");
+    {
+        // (a) F' is the curve: a central difference of each antiderivative against the curve, at 2000 points in [-6, 6].
+        for (int s = 0; s < kNumShapes; ++s)
+        {
+            double worst = 0.0;
+            for (int i = 0; i < 2000; ++i)
+            {
+                const double x = -6.0 + 12.0 * i / 1999.0, h = 1e-6;
+                const double slope = (shapeIntegral ((Shape) s, x + h) - shapeIntegral ((Shape) s, x - h)) / (2.0 * h);
+                worst = std::fmax (worst, std::fabs (slope - shape ((Shape) s, x)));
+            }
+            check (worst < 1e-6, fmt ("%s: the antiderivative's slope is the curve, within %.1e at 2000 points in [-6, 6]", shapeName ((Shape) s), worst));
+        }
+
+        // (b) A 7 kHz sine hard-driven at 1x: its 5th harmonic folds back to 13 kHz, and ADAA lowers that alias.
+        EngineParams p;
+        p.driveDb = 24.0f;
+        p.shape = Shape::clip;
+        p.autoGain = false;
+        p.oversampling = 0;
+        const auto in = sine (7000.0, -6.0, n);
+        Engine plain;
+        plain.prepare (kFs, 0);
+        const auto outPlain = run (plain, in, p);
+        p.adaa = true;
+        Engine smooth;
+        smooth.prepare (kFs, 0);
+        const auto outAdaa = run (smooth, in, p);
+        const double aliasPlain = levelAt (outPlain.l, 13000.0), aliasAdaa = levelAt (outAdaa.l, 13000.0);
+        check (aliasPlain - aliasAdaa >= 10.0, fmt ("the same 7 kHz sine, clipped at 1x: the 13 kHz alias is %.1f dB plain and %.1f dB with ADAA, %.1f dB lower", aliasPlain, aliasAdaa, aliasPlain - aliasAdaa));
+        std::printf ("    7 kHz fundamental: %.2f dB plain, %.2f dB with ADAA\n", levelAt (outPlain.l, 7000.0), levelAt (outAdaa.l, 7000.0));
+        for (const Shape hard : { Shape::fold, Shape::transformer })
+        {
+            EngineParams q = p;
+            q.shape = hard;
+            q.adaa = false;
+            Engine a, b;
+            a.prepare (kFs, 0);
+            b.prepare (kFs, 0);
+            const double before = levelAt (run (a, in, q).l, 13000.0);
+            q.adaa = true;
+            const double after = levelAt (run (b, in, q).l, 13000.0);
+            std::printf ("    %-12s 13 kHz alias: %.1f dB plain, %.1f dB with ADAA (%.1f dB lower)\n", shapeName (hard), before, after, before - after);
+        }
+
+        // The cost of ADAA where the curve is linear (a quiet sine, no drive): on a linear piece the average over a step is (x[n] + x[n-1]) / 2, a one-zero lowpass,
+        // so a sine at f comes out |cos (pi f / fs)| times as loud. Measured against that, not fitted.
+        {
+            EngineParams quiet;
+            quiet.driveDb = 0.0f;
+            quiet.shape = Shape::clip;
+            quiet.autoGain = false;
+            quiet.oversampling = 0;
+            for (const double hz : { 1000.0, 10000.0 })
+            {
+                const auto tone = sine (hz, -30.0, n);
+                Engine a, b;
+                a.prepare (kFs, 0);
+                b.prepare (kFs, 0);
+                const double plain = levelAt (run (a, tone, quiet).l, hz);
+                quiet.adaa = true;
+                const double smoothed = levelAt (run (b, tone, quiet).l, hz);
+                quiet.adaa = false;
+                const double expected = 20.0 * std::log10 (std::fabs (std::cos (M_PI * hz / kFs)));
+                check (std::fabs ((smoothed - plain) - expected) < 0.05, fmt ("a quiet %.0f Hz sine through the clip at 1x with ADAA: %+.2f dB, as the one-zero lowpass gives (%+.2f dB)", hz, smoothed - plain, expected));
+            }
+        }
+
+        // (c) Silence in is exactly silence out, for every curve, with BIAS 60% and ADAA on. And the switch off is the same run as one that never sets it.
+        bool silent = true;
+        for (int s = 0; s < kNumShapes; ++s)
+        {
+            EngineParams q;
+            q.shape = (Shape) s;
+            q.bias = 0.6f;
+            q.driveDb = 18.0f;
+            q.oversampling = 0;
+            q.adaa = true;
+            Engine e;
+            e.prepare (kFs, 0);
+            const auto out = run (e, Stereo { std::vector<float> (4800, 0.0f), std::vector<float> (4800, 0.0f) }, q);
+            for (size_t i = 0; i < out.l.size(); ++i)
+                silent = silent && out.l[i] == 0.0f && out.r[i] == 0.0f;
+        }
+        check (silent, "silence in is exactly 0 out for every curve at BIAS 60%, ADAA on, 1x");
+        {
+            EngineParams never;
+            never.driveDb = 14.0f;
+            never.bias = 0.3f;
+            never.shape = Shape::transformer;
+            never.oversampling = 0;
+            EngineParams off = never;
+            off.adaa = false;
+            Engine a, b;
+            a.prepare (kFs, 0);
+            b.prepare (kFs, 0);
+            const auto tone = sine (1000.0, -12.0, 9600);
+            check (run (a, tone, never).l == run (b, tone, off).l, "ADAA off is the run that never sets it, bit for bit");
+        }
+
+        // AUTO GAIN is measured on the static curve; with ADAA on at 1x the level moves a little. How much, for the drives a sine at -12 dBFS meets.
+        {
+            double worst = 0.0;
+            for (int s = 0; s < kNumShapes; ++s)
+                for (const float drive : { 6.0f, 18.0f, 30.0f })
+                {
+                    EngineParams q;
+                    q.shape = (Shape) s;
+                    q.driveDb = drive;
+                    q.autoGain = true;
+                    q.oversampling = 0;
+                    q.adaa = true;
+                    Engine e;
+                    e.prepare (kFs, 0);
+                    const auto in = sine (1000.0, kReferenceDb, n);
+                    const auto out = run (e, in, q);
+                    worst = std::fmax (worst, std::fabs (db (rms (out.l, (size_t) n - 24000) / rms (in.l, (size_t) n - 24000))));
+                }
+            check (worst < 0.5, fmt ("AUTO GAIN with ADAA on at 1x: a sine at -12 dBFS comes out within %.2f dB (RMS) of its level, for every curve at 6, 18 and 30 dB drive", worst));
+        }
+
+        // (d) Above 1x the switch is ignored: the output is the output without it, bit for bit, for every curve.
+        bool ignored = true;
+        for (int s = 0; s < kNumShapes; ++s)
+            for (int k = 1; k < kNumOversampling; ++k)
+            {
+                EngineParams q;
+                q.shape = (Shape) s;
+                q.driveDb = 20.0f;
+                q.bias = 0.3f;
+                q.oversampling = k;
+                q.autoGain = false;
+                Engine a, b;
+                a.prepare (kFs, k);
+                b.prepare (kFs, k);
+                const auto t = sine (3000.0, -6.0, 9600);
+                const auto oa = run (a, t, q);
+                q.adaa = true;
+                const auto ob = run (b, t, q);
+                ignored = ignored && oa.l == ob.l && oa.r == ob.r;
+            }
+        check (ignored, "at 2x, 4x and 8x ADAA on is the output of ADAA off, bit for bit, for every curve");
+    }
+
     return test::finish ("DionysusTests");
 }

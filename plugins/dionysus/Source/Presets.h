@@ -8,6 +8,7 @@
 
 // Starting points for the sounds a saturator is most often used for. A preset sets every control, oversampling included (a hard curve needs it); what it does
 // not list is back at its default. AUTO GAIN is on by default, so a preset can be judged at the level it started at: turn it off to hear the drive's loudness too.
+// ADAA is listed by none of them: the presets at 1x are tape and tube, which have no corner to alias, so they sound as they did and ADAA stays Off.
 namespace dionysus
 {
 inline const std::vector<ui::Preset>& presets()

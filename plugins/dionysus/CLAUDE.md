@@ -21,7 +21,7 @@ cmake --build build --target DionysusSnapshot && ./build/DionysusSnapshot_artefa
 ## Layout
 
 ```
-Source/DSP/Shapes.h        the curves, saturate() (curve + bias), harmonicsDb() (what the editor shows), compensation() (AUTO GAIN)   <- one source for the engine, the display and the tests
+Source/DSP/Shapes.h        the curves, saturate() (curve + bias), harmonicsDb() (what the editor shows), compensation() (AUTO GAIN), the antiderivatives and saturateAdaa() (ADAA, 1x)   <- one source for the engine, the display and the tests
 Source/DSP/Oversampler.h   HalfbandStage (one doubling), Oversampler (the chain of one channel), oversamplingLatency()
 Source/DSP/Engine.h        the signal path: drive, the oversampler around the curve, DC block, tone, the delayed dry sound, mix, output
 Source/Presets.h           the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
@@ -39,12 +39,14 @@ and made the wet path one sample later than the dry delay (test [4], the impulse
 
 **The stages are half-bands, and the code uses it.** Every tap an even distance from the centre is exactly 0, the centre is 1/2, the filter is symmetric: `up` gives its first output as the delayed input and its second from the odd taps in pairs, `down` is the centre plus the odd taps in pairs, and each history is written twice (`taps` apart) so a window is contiguous, with no modulo. That is about a fifth of the CPU of the plain convolution it replaced (8x went from 25-50% to about 4% of a core, stereo at 48 kHz) with the same output to 1e-15. Taps must stay odd with (taps - 1) / 2 even and at most `HalfbandStage::kMaxTaps`. `Engine::process` measures AUTO GAIN only when the shape, drive or bias moves (`compensationFor`: it is a loop of 256 curve evaluations, which at small host blocks cost more than the oversampler).
 
+**ADAA is the 1x path's, and it is off.** `saturateAdaa()` (first-order antiderivative anti-aliasing, Parker et al. 2016) runs only when `adaa` is on and the oversampling is Off; at 2x, 4x and 8x the parameter is ignored and the oversampled path is untouched. It is not the default: on a linear piece the curve's average over a step is `(x[n] + x[n-1]) / 2`, a lowpass on the whole sound (test [10] pins -2 dB at 10 kHz). The state (`AdaaState`) is per channel: `reset()` clears it, the first sample continues from silence at the working point, and a block with the switch off clears `primed` so that the next time it starts from silence again. Each antiderivative is checked against its curve by test [10]; the diode's is 0.49 ln cosh (x / 0.7), not the 0.343 the first draft had (the chain rule).
+
 **Gain 2 on the way up.** Zero-stuffing halves the level; the up filter has a gain of 2 (`first = 2 x a`). The fundamental is the same at every oversampling (test [3]).
 
 **BIAS and the DC.** The curve gets `x + b` and gives back `curve (x + b) - curve (b)`, so zero in is zero out; an asymmetric curve (BIAS, or the diode) still has DC while a signal plays, so a 10 Hz high-pass runs after the curve
 whenever either is in use (`dcOn`) and is reset while it is not. `compensation()` takes the mean off the output before it reads the RMS for the same reason (test [5]).
 
-**The display is the curve, not a measurement.** `harmonicsDb()` and the editor's curve call `saturate()`, the function the engine runs; test [2] checks the engine against it at 8x. Do not write a second formula for either.
+**The display is the curve, not a measurement.** `harmonicsDb()` and the editor's curve call `saturate()`, the function the engine runs; test [2] checks the engine against it at 8x. Do not write a second formula for either. The one exception is ADAA at 1x (below): the engine runs `saturateAdaa()` there, the display stays the static curve, and AUTO GAIN measures the static curve too (test [10] bounds the difference).
 
 **MIX.** 100% takes the saturated sound itself (not `dry + mix x (wet - dry)`), 0% the delayed dry sound itself: exact at both ends. The wet path runs all the time so its states are warm.
 
@@ -60,7 +62,7 @@ whenever either is in use (`dcOn`) and is reset while it is not. `compensation()
 **Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
 (`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
 
-**Parameters.** Ids (`dionysus::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lowcut`, version 2 (Off: a session saved before it sounds as it did; a preset that does not list it leaves it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
+**Parameters.** Ids (`dionysus::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lowcut`, version 2, and `adaa`, version 3 (Off: a session saved before either sounds as it did; a preset that does not list one leaves it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
 The order of `shapeNames` is the order of `Shape`; of `oversamplingNames`, the index of `kOversamplingFactor`.
 
 ## DRY: where each thing lives

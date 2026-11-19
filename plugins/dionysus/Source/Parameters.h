@@ -11,7 +11,7 @@ namespace dionysus
 {
 namespace id
 {
-inline const juce::String drive { "drive" }, shape { "shape" }, bias { "bias" }, tone { "tone" }, mix { "mix" }, out { "out" }, autoGain { "autogain" }, oversampling { "os" }, lowCut { "lowcut" };
+inline const juce::String drive { "drive" }, shape { "shape" }, bias { "bias" }, tone { "tone" }, mix { "mix" }, out { "out" }, autoGain { "autogain" }, oversampling { "os" }, lowCut { "lowcut" }, adaa { "adaa" };
 }
 
 inline const juce::StringArray shapeNames { "Tape", "Tube", "Transformer", "Diode", "Fold", "Clip" };
@@ -42,6 +42,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     // Version 2: a session saved before it has no value and gets the default (Off, the plug-in as it was).
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id::lowCut, 2 }, "Low Cut", lowCutRange, d.lowCutHz,
                                                          Attr().withStringFromValueFunction ([] (float v, int) { return v <= 20.5f ? String ("Off") : String (roundToInt (v)) + " Hz"; })));
+    // Version 3: a session saved before it has no value and gets the default (Off: the curve as it was, plain at 1x).
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id::adaa, 3 }, "ADAA", d.adaa));
     return { p.begin(), p.end() };
 }
 
@@ -61,6 +63,7 @@ inline EngineParams readParams (juce::AudioProcessorValueTreeState& s)
     e.autoGain = v (id::autoGain, d.autoGain ? 1.0f : 0.0f) > 0.5f;
     e.oversampling = std::clamp ((int) v (id::oversampling, (float) d.oversampling), 0, kNumOversampling - 1);
     e.lowCutHz = v (id::lowCut, d.lowCutHz);
+    e.adaa = v (id::adaa, d.adaa ? 1.0f : 0.0f) > 0.5f;
     return e;
 }
 

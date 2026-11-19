@@ -42,6 +42,57 @@ inline double saturate (Shape s, double x, double bias) noexcept
     return b == 0.0 ? shape (s, x) : shape (s, x + b) - shape (s, b);
 }
 
+// The antiderivative F of each curve (F' = shape (s, x)), for the ADAA of the 1x path. Each one is checked against its curve by DionysusTests [10].
+// ln cosh is written so that it does not overflow for a large input.
+inline double lnCosh (double x) noexcept
+{
+    const double a = std::fabs (x);
+    return a + std::log1p (std::exp (-2.0 * a)) - std::log (2.0);
+}
+
+inline double shapeIntegral (Shape s, double x) noexcept
+{
+    switch (s)
+    {
+        case Shape::tape: return lnCosh (x);
+        case Shape::tube: return std::fabs (x) - std::log1p (std::fabs (x));
+        case Shape::transformer: return std::fabs (x) < 1.0 ? x * x / 2.0 - x * x * x * x / 12.0 : 2.0 / 3.0 * std::fabs (x) - 0.25;
+        // The negative side is 0.7 tanh (x / 0.7). Its antiderivative is 0.49 ln cosh (x / 0.7): the chain rule divides by 0.7 and the 0.49 leaves 0.7 (test [10] checks it).
+        case Shape::diode: return x >= 0.0 ? lnCosh (x) : 0.49 * lnCosh (x / 0.7);
+        case Shape::fold: return -std::cos (x);
+        case Shape::clip: return std::fabs (x) <= 1.0 ? x * x / 2.0 : std::fabs (x) - 0.5;
+    }
+    return x * x / 2.0;
+}
+
+// First-order antiderivative anti-aliasing (Parker, Zavalishin, Le Bivic, DAFx 2016): the curve is averaged over each step of its input, not sampled at the sample, which
+// keeps the aliasing of a hard curve down at 1x. The state is the previous input (the working point, BIAS included) and the antiderivative there.
+struct AdaaState
+{
+    double uPrev = 0.0, fPrev = 0.0;
+    bool primed = false;
+};
+
+// Like saturate(), with ADAA: the same BIAS offset is taken off after. A stream that started from silence (the first sample continues from the silence's working point)
+// gives exactly 0 for silence, and a step smaller than 1e-5 uses the curve at the midpoint (the limit of the average as the step goes to 0).
+inline double saturateAdaa (Shape s, AdaaState& st, double x, double bias) noexcept
+{
+    const double b = bias * kBiasScale;
+    if (! st.primed)
+    {
+        st.uPrev = b;
+        st.fPrev = shapeIntegral (s, b);
+        st.primed = true;
+    }
+    const double u = x + b;
+    const double fNow = shapeIntegral (s, u);
+    const double du = u - st.uPrev;
+    const double y = std::fabs (du) < 1e-5 ? shape (s, 0.5 * (u + st.uPrev)) : (fNow - st.fPrev) / du;
+    st.uPrev = u;
+    st.fPrev = fNow;
+    return b == 0.0 ? y : y - shape (s, b);
+}
+
 // What a sine at `levelDb` (peak, dBFS) turns into, per harmonic: the level of harmonic 1 .. kHarmonics in dB relative to the sound that went in, taken from one cycle through
 // the curve (no oversampling: the curve itself, not the engine's aliasing).
 inline std::array<double, kHarmonics> harmonicsDb (Shape s, double driveDb, double bias, double levelDb = kReferenceDb) noexcept
