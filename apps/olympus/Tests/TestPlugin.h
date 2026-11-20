@@ -12,6 +12,7 @@ namespace test
 class GainPlugin : public juce::AudioPluginInstance
 {
 public:
+    double preparedRate = 0.0; // the rate of the last prepareToPlay (the rate checks read it)
     explicit GainPlugin (int latencyInSamples = 0) : GainPlugin (latencyInSamples > 0 ? "Test Delay" : "Test Gain", latencyInSamples) {}
     GainPlugin (const juce::String& pluginName, int latencyInSamples) : displayName (pluginName), latency (latencyInSamples)
     {
@@ -36,7 +37,7 @@ public:
         return d;
     }
 
-    void prepareToPlay (double, int) override { ring.setSize (2, juce::jmax (1, latency)); ring.clear(); pos = 0; }
+    void prepareToPlay (double rate, int) override { preparedRate = rate; ring.setSize (2, juce::jmax (1, latency)); ring.clear(); pos = 0; }
     void releaseResources() override {}
     void reset() override { ring.clear(); pos = 0; }
     void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&) override
@@ -86,6 +87,84 @@ private:
     juce::AudioBuffer<float> ring;
 };
 
+// Plugins made in code with a channel layout of their own, for the bus checks. PassPlugin passes its block through and counts what it is
+// handed: `shortBlocks` counts the blocks with fewer channels than the plugin's total input or output needs, which must stay 0.
+class PassPlugin : public juce::AudioPluginInstance
+{
+public:
+    PassPlugin (const juce::String& pluginName, juce::AudioChannelSet mainSet) : displayName (pluginName), main (mainSet) {}
+
+    // the main pair is the one the plugin was made for: a stereo plugin refuses a mono layout, and the other way round
+    bool isBusesLayoutSupported (const BusesLayout& layout) const override
+    {
+        return layout.getMainInputChannelSet() == main && layout.getMainOutputChannelSet() == main;
+    }
+
+    const juce::String getName() const override { return displayName; }
+    void fillInPluginDescription (juce::PluginDescription& d) const override { d = GainPlugin::description (displayName); }
+    void prepareToPlay (double rate, int) override { preparedRate = rate; }
+    void releaseResources() override {}
+    void reset() override {}
+    void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&) override
+    {
+        ++blocks;
+        lastChannels = b.getNumChannels();
+        if (b.getNumChannels() < juce::jmax (getTotalNumInputChannels(), getTotalNumOutputChannels()))
+            ++shortBlocks;
+    }
+    using juce::AudioProcessor::processBlock;
+
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram (int) override {}
+    const juce::String getProgramName (int) override { return "Default"; }
+    void changeProgramName (int, const juce::String&) override {}
+    void getStateInformation (juce::MemoryBlock& m) override { m.setSize (0); }
+    void setStateInformation (const void*, int) override {}
+
+    double preparedRate = 0.0;
+    int blocks = 0, shortBlocks = 0, lastChannels = 0;
+
+private:
+    juce::String displayName;
+    juce::AudioChannelSet main;
+};
+
+// Stereo, with a stereo sidechain input that is on by default (a bus added to the processor). The sidechain is switched off by the host's
+// layout (Session::configure), so the plugin runs on its two channels.
+class AuxPlugin : public PassPlugin
+{
+public:
+    AuxPlugin() : PassPlugin ("Test Aux", juce::AudioChannelSet::stereo())
+    {
+        addBus (true);   // main input
+        addBus (false);  // main output
+        addBus (true);   // sidechain
+    }
+    bool canAddBus (bool) const override { return true; }
+    bool canApplyBusCountChange (bool isInput, bool isAdding, BusProperties& out) override
+    {
+        if (! isAdding) return false;
+        const bool sidechain = isInput && getBusCount (true) > 0;
+        out.busName = sidechain ? "Sidechain" : (isInput ? "Input" : "Output");
+        out.defaultLayout = juce::AudioChannelSet::stereo();
+        out.isActivatedByDefault = true;
+        return true;
+    }
+};
+
+// Mono in and out: it does not run on a stereo track, and says so.
+class MonoPlugin : public PassPlugin
+{
+public:
+    MonoPlugin() : PassPlugin ("Test Mono", juce::AudioChannelSet::mono()) { setPlayConfigDetails (1, 1, 48000.0, 512); }
+};
+
 // A plugin of this name that only changes the level (for the snapshot, where the names are the suite's), reporting `latency` samples.
 inline void addStandIn (olympus::Catalog& catalog, const juce::String& name, int latency)
 {
@@ -96,5 +175,12 @@ inline void addTestPlugins (olympus::Catalog& catalog)
 {
     addStandIn (catalog, "Test Gain", 0);
     addStandIn (catalog, "Test Delay", 64);
+}
+
+// The two bus plugins, for the checks that need them (not in addTestPlugins: the catalog's counts of the other checks stay as they are).
+inline void addBusPlugins (olympus::Catalog& catalog)
+{
+    catalog.addInternal (GainPlugin::description ("Test Aux"), [] (double, int) { return std::make_unique<AuxPlugin>(); });
+    catalog.addInternal (GainPlugin::description ("Test Mono"), [] (double, int) { return std::make_unique<MonoPlugin>(); });
 }
 }

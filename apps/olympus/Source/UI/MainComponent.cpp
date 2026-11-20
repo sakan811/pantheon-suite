@@ -156,6 +156,11 @@ void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice
         return;
     owner.deviceRate = started->getCurrentSampleRate();
     owner.recorder.prepare (started->getCurrentSampleRate(), started->getCurrentBufferSizeSamples());
+    // the session follows the device's rate; its plugins are set up on the message thread
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+        owner.adoptDeviceRate();
+    else
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (&owner)] { if (safe != nullptr) safe->adoptDeviceRate(); });
 }
 
 // Device thread. Only a flag: the timer ends a take that the device stopped under (on the message thread).
@@ -320,6 +325,7 @@ MainComponent::MainComponent (Options options) : opts (options)
         opts.fillCatalog (session.catalog);
     if (! session.catalog.names().isEmpty())
         loadMonitorChain();
+    adoptDeviceRate(); // a session without a rate takes the device's; one with a project at another rate is converted
 
     addAndMakeVisible (monitorAddButton);
     addAndMakeVisible (monitorBypassButton);
@@ -538,6 +544,28 @@ void MainComponent::readDevice()
 }
 
 // A change of the device (the AUDIO dialog, or the device going away): the new state is read and kept, and a take that cannot go on ends.
+// Message thread. The session takes the device's rate (Session::adoptRate): nothing when no device runs. A project's audio is converted once
+// and the playhead keeps its place in seconds; the undo steps are cleared, since they hold the old rate.
+void MainComponent::adoptDeviceRate()
+{
+    if (deviceRate <= 0.0)
+        return;
+    const double before = session.sampleRate;
+    const juce::int64 playhead = position();
+    juce::String error;
+    if (! session.adoptRate (deviceRate, error))
+    {
+        showError (error);
+        return;
+    }
+    if (session.sampleRate == before)
+        return;
+    editor.clearUndo();
+    if (before > 0.0)
+        source.position = (juce::int64) std::llround ((double) playhead * session.sampleRate / before);
+    refreshNow();
+}
+
 void MainComponent::deviceChanged()
 {
     readDevice();
@@ -735,6 +763,7 @@ void MainComponent::newProject()
     source.playing = false;
     session.newProject ("Untitled");
     editor.clearUndo();
+    adoptDeviceRate();
     seek (0);
     arrange.selected = {};
     arrange.zoom = ArrangeView::kDefaultZoom;
@@ -754,6 +783,7 @@ void MainComponent::openProject (const juce::File& file)
         return;
     }
     editor.clearUndo();
+    adoptDeviceRate(); // a project at another rate is converted to the device's
     arrange.selected = {};
     seek (0);
     settings.lastProject = file.getFullPathName();
@@ -1149,6 +1179,7 @@ void MainComponent::loadMonitorChain()
     monitorLoaded = session.loadMonitor (Settings::monitorFile (opts.settingsFile), problems);
     monitorProblem = monitorLoaded ? juce::String() : problems.joinIntoString (" ");
     refreshMonitorStrip();
+    adoptDeviceRate(); // the chain's plugins were made at the session's rate, which may not be the device's yet
 }
 
 // Writes the chain beside settings.xml. Never before the chain was read: an unread file is not overwritten.

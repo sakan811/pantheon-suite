@@ -34,6 +34,7 @@ namespace olympus
 inline constexpr int kProjectVersion = 2;
 inline constexpr int kMonitorVersion = 1; // monitor.xml, separate from the project's version
 inline constexpr int kBlockSize = 512;
+inline constexpr int kMaxMonitorChannels = 8; // the most channels the monitor chain is handed (a device's outputs past this are not run)
 
 struct Slot
 {
@@ -169,7 +170,11 @@ public:
     std::vector<std::unique_ptr<Slot>> monitor;
     bool monitorBypass = false;
 
-    Session() { formats.registerBasicFormats(); }
+    Session()
+    {
+        formats.registerBasicFormats();
+        monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
+    }
     ~Session()
     {
         for (auto& t : tracks)
@@ -214,9 +219,11 @@ public:
         return (int) tracks.size() - 1;
     }
 
-    // Appends a clip of the file to a track, starting at `startSample` on the timeline; the whole file, at its own place in the pool.
-    // Returns the clip's index on the track, -1 with the reason in `error`.
-    int addClip (int track, const juce::File& file, juce::int64 startSample, juce::String& error)
+    // Appends a clip of the file to a track, at `startSample` on the timeline: from `offset` in the file, for `length` samples (0 = to the
+    // end of the file). The file is read into the pool BEFORE the lock is taken (the audio callback only tries it, so a decode under it
+    // would silence every block); the clip is checked and inserted under the lock, so a refusal changes nothing. Returns the clip's index
+    // on the track, -1 with the reason in `error`.
+    int addClip (int track, const juce::File& file, juce::int64 startSample, juce::String& error, juce::int64 offset = 0, juce::int64 length = 0)
     {
         {
             const juce::ScopedLock sl (lock);
@@ -227,12 +234,21 @@ public:
             return -1;
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return -1; }
+        const juce::int64 available = audio->getNumSamples();
+        const juce::int64 play = length > 0 ? length : available - offset;
+        if (offset < 0 || offset >= available || play < 1 || offset + play > available)
+        {
+            error = "The file is " + juce::String (available) + " samples long: a clip from sample " + juce::String (offset) + " for "
+                    + juce::String (play) + " samples does not fit in it.";
+            return -1;
+        }
         Clip clip;
         clip.name = file.getFileNameWithoutExtension();
         clip.file = file;
         clip.audio = audio;
         clip.start = juce::jmax ((juce::int64) 0, startSample);
-        clip.length = audio->getNumSamples();
+        clip.offset = offset;
+        clip.length = play;
         auto& clips = tracks[(size_t) track]->clips;
         clips.push_back (std::move (clip));
         dirty = true;
@@ -530,12 +546,13 @@ public:
 
     // Runs the monitor chain in place over one playback block of any length (cut into kBlockSize pieces). The audio callback calls it after
     // processBlock and nowhere else. If the lock is busy the block is left as it is; a bypassed or empty chain does nothing.
+    // The plugins are never handed the device's buffer: each block is copied into monitorScratch (two channels at least, so a stereo plugin
+    // always has its two, and zeros where the device has none) and copied back for the channels the device has.
     void processMonitor (juce::AudioBuffer<float>& out)
     {
-        constexpr int kMaxMonitorChannels = 8;
         const int n = out.getNumSamples();
-        const int channels = juce::jmin (out.getNumChannels(), kMaxMonitorChannels);
-        if (monitorBypass || n <= 0 || channels <= 0)
+        const int copied = juce::jmin (out.getNumChannels(), kMaxMonitorChannels);
+        if (monitorBypass || n <= 0 || copied <= 0)
             return;
         const juce::ScopedTryLock sl (lock);
         if (! sl.isLocked())
@@ -545,17 +562,22 @@ public:
             active = active || (s->instance != nullptr && ! s->bypass);
         if (! active)
             return;
+        const int viewChannels = juce::jmax (2, copied);
         for (int start = 0; start < n; start += kBlockSize)
         {
             const int count = juce::jmin (kBlockSize, n - start);
-            float* pointers[kMaxMonitorChannels];
-            for (int ch = 0; ch < channels; ++ch)
-                pointers[ch] = out.getWritePointer (ch) + start;
-            juce::AudioBuffer<float> view (pointers, channels, count);
+            for (int ch = 0; ch < viewChannels; ++ch)
+            {
+                if (ch < copied) monitorScratch.copyFrom (ch, 0, out, ch, start, count);
+                else monitorScratch.clear (ch, 0, count);
+            }
+            juce::AudioBuffer<float> view (monitorScratch.getArrayOfWritePointers(), viewChannels, count);
             juce::MidiBuffer midi;
             for (auto& s : monitor)
                 if (s->instance != nullptr && ! s->bypass)
                     s->instance->processBlock (view, midi);
+            for (int ch = 0; ch < copied; ++ch)
+                out.copyFrom (ch, start, monitorScratch, ch, 0, count);
         }
     }
 
@@ -691,6 +713,68 @@ public:
                     dest.addSample (ch, (int) (s - start), src.getSample (juce::jmin (ch, src.getNumChannels() - 1), (int) index) * env);
             }
         }
+    }
+
+    // Makes `rate` the session's rate (the device's, see the window). Message thread. Without clip audio it only sets the rate. With audio, every
+    // buffer of the pool is resampled once (a buffer shared by clips stays shared), and every clip, marker and the loop is scaled to the new
+    // rate in samples (so it keeps its seconds; a clip keeps at least one sample). Then every plugin of every track and the monitor chain
+    // is set up again for the new rate. The undo steps are not converted: the window clears them. A rate that is the same changes nothing.
+    bool adoptRate (double rate, juce::String& error)
+    {
+        if (! (rate > 0.0) || ! std::isfinite (rate)) { error = "The sample rate must be above zero."; return false; }
+        const juce::ScopedLock sl (lock);
+        if (std::abs (rate - sampleRate) < 0.5)
+            return true;
+        const double old = sampleRate;
+        const double k = old > 0.0 ? rate / old : 1.0;
+
+        // every distinct buffer of the clips, converted once; the old ones are kept alive until the clips are changed
+        std::map<const juce::AudioBuffer<float>*, std::shared_ptr<const juce::AudioBuffer<float>>> converted;
+        std::vector<std::shared_ptr<const juce::AudioBuffer<float>>> keepAlive;
+        for (auto& t : tracks)
+            for (auto& c : t->clips)
+            {
+                if (c.audio == nullptr || old <= 0.0)
+                    continue;
+                keepAlive.push_back (c.audio);
+                auto found = converted.find (c.audio.get());
+                if (found == converted.end())
+                    found = converted.emplace (c.audio.get(), std::make_shared<const juce::AudioBuffer<float>> (resampled (*c.audio, old, rate))).first;
+                c.audio = found->second;
+            }
+        for (auto it = pool.begin(); it != pool.end();)
+        {
+            const auto alive = it->second.lock();
+            const auto found = alive != nullptr ? converted.find (alive.get()) : converted.end();
+            if (found != converted.end()) { it->second = found->second; ++it; }
+            else it = pool.erase (it);
+        }
+
+        const auto scale = [k] (juce::int64 v) { return (juce::int64) std::llround ((double) v * k); };
+        for (auto& t : tracks)
+            for (auto& c : t->clips)
+            {
+                c.start = scale (c.start);
+                c.offset = scale (c.offset);
+                c.length = juce::jmax ((juce::int64) 1, scale (c.length));
+                if (c.audio != nullptr)
+                {
+                    const juce::int64 n = c.audio->getNumSamples();
+                    c.offset = juce::jmin (c.offset, juce::jmax ((juce::int64) 0, n - 1));
+                    c.length = juce::jmax ((juce::int64) 1, juce::jmin (c.length, n - c.offset));
+                }
+                c.fadeIn = juce::jmin (scale (c.fadeIn), c.length);
+                c.fadeOut = juce::jmin (scale (c.fadeOut), c.length);
+            }
+        for (auto& m : markers)
+            m.start = scale (m.start);
+        loopStart = scale (loopStart);
+        loopEnd = scale (loopEnd);
+
+        setSampleRateLocked (rate);  // also the tempo's rate, and the monitor chain
+        prepareLocked (false);       // every plugin of every track
+        if (old > 0.0) dirty = true;
+        return true;
     }
 
     // ---- playing --------------------------------------------------------------------------------------------------------
@@ -1228,9 +1312,15 @@ public:
             if (error.isEmpty()) error = "Cannot create " + pluginName;
             return nullptr;
         }
+        const double useRate = rate > 0.0 ? rate : (sampleRate > 0.0 ? sampleRate : 48000.0);
+        const juce::String supports = layoutWords (*instance); // before configure: a refused layout leaves the buses empty
+        if (! configure (*instance, useRate, false))
+        {
+            error = pluginName + " cannot run on a stereo track (it supports " + supports + ")";
+            return nullptr;
+        }
         auto slot = std::make_unique<Slot>();
         slot->plugin = pluginName;
-        configure (*instance, rate > 0.0 ? rate : (sampleRate > 0.0 ? sampleRate : 48000.0), false);
         if (state != nullptr && state->getSize() > 0)
             instance->setStateInformation (state->getData(), (int) state->getSize());
         instance->setPlayHead (&head);
@@ -1280,6 +1370,7 @@ public:
 
 private:
     juce::AudioFormatManager formats;
+    juce::AudioBuffer<float> monitorScratch; // the monitor chain's view of a block (kMaxMonitorChannels x kBlockSize), sized here, never in the callback
 
     // The audio pool: a file's buffer, shared by the clips that play it. Held weakly, so a buffer goes when its last clip does.
     // Message thread only; the audio thread never reads it.
@@ -1324,15 +1415,23 @@ private:
             out = std::move (raw);
             return true;
         }
-        const double ratio = reader->sampleRate / rate;
+        out = resampled (raw, reader->sampleRate, rate);
+        return true;
+    }
+
+    // Two channels of `raw` at `fromRate`, as two channels at `toRate` (Lagrange interpolation; the one resampler of the session).
+    static juce::AudioBuffer<float> resampled (const juce::AudioBuffer<float>& raw, double fromRate, double toRate)
+    {
+        const int len = raw.getNumSamples();
+        const double ratio = fromRate / toRate;
         const int outLen = (int) std::ceil ((double) len / ratio);
-        out.setSize (2, outLen);
+        juce::AudioBuffer<float> out (2, outLen);
         for (int ch = 0; ch < 2; ++ch)
         {
             juce::LagrangeInterpolator resampler;
             resampler.process (ratio, raw.getReadPointer (ch), out.getWritePointer (ch), outLen, len, 0);
         }
-        return true;
+        return out;
     }
 
     // One clip from a project element. A version 1 track is read as its own clip: the whole file at sample 0.
@@ -1385,15 +1484,38 @@ private:
                 }
     }
 
-    // Stereo in and out, the rate and block, the playhead; for a plugin that has been made or that must start from a clean state.
-    void configure (juce::AudioPluginInstance& p, double rate, bool nonRealtime)
+    // Stereo main buses, every other bus (a sidechain, an extra output) disabled, then the rate and the block. Returns false when the plugin does
+    // not run stereo as set up here (see runsStereo): its layout is then left as it is and it must not be used on a track or in the monitor.
+    bool configure (juce::AudioPluginInstance& p, double rate, bool nonRealtime)
     {
         auto layout = p.getBusesLayout();
-        if (p.getBusCount (true) > 0) layout.getMainInputChannelSet() = juce::AudioChannelSet::stereo();
-        if (p.getBusCount (false) > 0) layout.getMainOutputChannelSet() = juce::AudioChannelSet::stereo();
-        p.setBusesLayout (layout);
+        for (int i = 0; i < layout.inputBuses.size(); ++i)
+            layout.inputBuses.getReference (i) = i == 0 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled();
+        for (int i = 0; i < layout.outputBuses.size(); ++i)
+            layout.outputBuses.getReference (i) = i == 0 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled();
+        p.setBusesLayout (layout); // a refusal is caught by runsStereo, which looks at the layout the plugin ended with
+        if (! runsStereo (p))
+            return false;
         p.setNonRealtime (nonRealtime);
         p.prepareToPlay (rate, kBlockSize);
+        return true;
+    }
+
+    // Whether the plugin, as it now is, takes two channels in and out on its main buses, with no other bus enabled. A plugin with no input bus
+    // (an instrument) is accepted.
+    static bool runsStereo (const juce::AudioPluginInstance& p)
+    {
+        const int inputs = p.getTotalNumInputChannels(), outputs = p.getTotalNumOutputChannels();
+        bool auxOff = true;
+        for (int i = 1; i < p.getBusCount (true); ++i) auxOff = auxOff && p.getChannelCountOfBus (true, i) == 0;
+        for (int i = 1; i < p.getBusCount (false); ++i) auxOff = auxOff && p.getChannelCountOfBus (false, i) == 0;
+        return (inputs == 0 || inputs == 2) && outputs == 2 && auxOff;
+    }
+
+    // The channels the plugin has, for the refusal's words: "1 in, 1 out".
+    static juce::String layoutWords (const juce::AudioPluginInstance& p)
+    {
+        return juce::String (p.getTotalNumInputChannels()) + " in, " + juce::String (p.getTotalNumOutputChannels()) + " out";
     }
 
     // A track's buffers before it plays: two channels at the block size (the chain may need more; prepareLocked grows them).
@@ -1406,18 +1528,14 @@ private:
     {
         const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
         for (auto& t : tracks)
-        {
-            int channels = 2;
             for (auto& s : t->chain)
                 if (s->instance != nullptr)
                 {
                     s->instance->releaseResources();
                     configure (*s->instance, rate, nonRealtime);
                     s->instance->reset();
-                    channels = juce::jmax (channels, s->instance->getTotalNumInputChannels(), s->instance->getTotalNumOutputChannels());
                 }
-            t->scratch.setSize (channels, kBlockSize, false, true, false);
-        }
+        monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
         updateLatenciesLocked();
     }
 
@@ -1427,6 +1545,13 @@ private:
         const int most = maxLatency();
         for (auto& t : tracks)
         {
+            // the buffer the chain runs in has the channels of its widest plugin (two at least), so no plugin is handed more than it owns
+            int channels = 2;
+            for (auto& s : t->chain)
+                if (s->instance != nullptr)
+                    channels = juce::jmax (channels, s->instance->getTotalNumInputChannels(), s->instance->getTotalNumOutputChannels());
+            if (channels != t->scratch.getNumChannels())
+                t->scratch.setSize (channels, kBlockSize, false, true, false);
             const int wanted = most - t->latency();
             if (wanted != t->delaySamples)
             {

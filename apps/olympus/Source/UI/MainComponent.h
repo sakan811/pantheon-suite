@@ -305,6 +305,7 @@ private:
     void syncPlayhead() { arrange.playhead = (double) position(); }
     juce::int64 endOfPlay() const { return session.length() + session.maxLatency(); }
     void readDevice();                              // the device as it is now, into `device`
+    void adoptDeviceRate();                         // the session takes the device's rate (converting a project opened at another one); message thread
     void deviceChanged();                           // a change of the device: read it, save its state, end a take that cannot go on
     void saveAudioState();
     void updateRecording();                         // the timer's part of a take: its strip, its time, a device that stopped
