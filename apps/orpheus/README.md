@@ -35,7 +35,7 @@ of the third and seventh notes is kept, moved with the note. The strip at the fo
 - **Your voice stays your voice.** Grains of the original are re-spaced, not resampled, so the vowel colour stays where it was, and
   consonants and breaths are never touched. A note you did not edit is **bit-for-bit the original**, so editing one word cannot
   harm the rest of the take.
-- **Non-destructive.** The audio is never changed; an edit is a list of numbers per note. Undo is unlimited in practice (200 steps),
+- **Non-destructive.** The audio is never changed; an edit is a list of numbers per note. Undo keeps the last 200 steps,
   a project file keeps the edit, and **ORIGINAL** plays the untouched recording at the same position at any moment.
 - **One voice at a time.** It is built for a clean solo vocal (or any monophonic line: a bass, a horn) and says so. Chords and
   backing-vocal stacks are not what it is for.
@@ -68,7 +68,7 @@ of the third and seventh notes is kept, moved with the note. The strip at the fo
 | **Voice** / **Re-analyse** | The range the pitch tracker looks for: wide (65-1100 Hz, the default), low (65-400, bass and baritone), mid (100-700) or high (200-1100). A narrower range cannot jump an octave to a pitch outside it. It is used the next time the notes are found: **Re-analyse** finds them again (every edit is taken back, after asking), and it is saved in the project. |
 | **Select** / **Sel** (Z) | **Select** picks the notes that are, as they are now, more than 5, 10, 15, 25 or 50 cents from the nearest note of the scale (the amber and red ones); **Sel** (Z) zooms the display to the selected notes, in time and in pitch. |
 | **Copy / Paste** | Takes shift, drift, vibrato, formant, gain and transition from the one selected note (Cmd+C) and puts them on the selected notes (Cmd+V). The shift is the same distance from each note's own pitch, not the same pitch. One undo takes a paste back. |
-| **Guide and notes** | **GUIDE** (header) says what Orpheus is for and what it is *not* for: the pitch of one voice, not chords or a mix, not timing, not big leaps (past about 5 semitones the voice changes), and not a plugin. The strip at the foot of the window warns, in amber, when ORIGINAL is lit (you hear the take, not your edits), when edits are not saved, when the result peaks above 0 dB (it will clip in the WAV), and when a note is moved more than 5 semitones; it says what to open when nothing is, and that a note under 100 ms may be a mis-cut. The rules are in [Advice.h](Source/UI/Advice.h), checked by `OrpheusUiCheck`. |
+| **Guide and notes** | **GUIDE** (header) says what Orpheus is for and what it is *not* for: the pitch of one voice, not chords or a mix, not timing, not big leaps (past about 5 semitones the voice changes), and not a plugin. The strip at the foot of the window warns, in amber, when ORIGINAL is lit (you hear the take, not your edits), when edits are not saved, when the result peaks above 0 dB (it will clip in the WAV), and when a note is moved more than 5 semitones; it says what to open when nothing is, and an info line says that a note under 100 ms may be a mis-cut. The rules are in [Advice.h](Source/UI/Advice.h), checked by `OrpheusUiCheck`. |
 | **Export** / **OUT PEAK** | A 24-bit WAV at the sample rate of the recording, mono or stereo, written to a temporary file and moved over the target when complete (a failed export leaves an existing file as it was). Gain up to +12 dB and the re-spaced grains can take the result past 0 dB, which a WAV cannot hold: OUT PEAK (red past 0 dB), the strip and a question at Export say so. |
 
 ### Keys and mouse
@@ -138,10 +138,10 @@ sample (a harmonic series shaped by two formants), so the output is measured aga
 | Vibrato 0 % / 200 %, Drift 100 % | the pitch range of the note 88 -> 19 / 156 cents; the wander 19 -> 4 cents |
 | A note nobody edited, and the audio far from one that was | bit-for-bit the input |
 | Rebuilding only what an edit touched | exactly the samples a full rebuild gives |
-| TRANSITION 0 (the default) | the plan is bit-identical to the one before the field existed: `OrpheusTests` [10a] (against itself) and, **by hand**, a byte compare of the plans of the previous commit and this one (three glides, 841 frames) |
-| A 60 ms slide into a note, TRANSITION 100 % | the planned pitch at the note's start is the detected one (**0.0000 cent** off); from 40 ms on, the corrected pitch exactly (0.0000 cent); the formula holds frame by frame (worst 0.0002 cent); [10b] |
-| The same slide, TRANSITION 0 % | the planned pitch at the start is **52.4 cents** from the detected one (it does not follow the slide) [10b] |
-| The centre of every note, TRANSITION 0, 50 and 100 % | on its target to **0.0000 cent** [10c] |
+| TRANSITION 0 (the default) | the plan is bit-identical to the one before the field existed: `OrpheusTests` [10] (a) (against itself) and, **by hand**, a byte compare of the plans of the previous commit and this one (three glides, 841 frames) |
+| A 60 ms slide into a note, TRANSITION 100 % | the planned pitch at the note's start is the detected one (**0.0000 cent** off); from 40 ms on, the corrected pitch exactly (0.0000 cent); the formula holds frame by frame (worst 0.0002 cent); [10] (b) |
+| The same slide, TRANSITION 0 % | the planned pitch at the start is **52.4 cents** from the detected one (it does not follow the slide) [10] (b) |
+| The centre of every note, TRANSITION 0, 50 and 100 % | on its target to **0.0000 cent** [10] (c) |
 | Undo | the audio goes back bit-for-bit |
 | Export | a 24-bit WAV that reads back within 1e-6 |
 | Speed (20 s of audio, the development machine) | tracking 0.26 s, marks 0.10 s, a full resynthesis 0.04 s |

@@ -39,7 +39,7 @@ Source/Dsp/          no JUCE; everything here is covered by Tests/Tests.cpp
   Psola.h             findMarks (once per file), render (the stretches an edit touches), matchLoudness, applyGain
 Source/Session.h     the recording and everything done to it: audio, contour, marks, notes, key, plan, output, undo, "unsaved" (dirty), project XML, fingerprint, WAV export, output peak, the voice ranges
 Source/Playback.h    the audio-thread reader of the session (corrected / original, loop, reference tone)
-Source/UI/           Advice.h (the notes of the strip at the foot and the GUIDE text; plain C++, no JUCE), OrpheusUi.h (words, note text, verdict colours), PitchRoll.h (the display and its mouse), MainComponent.{h,cpp} (window, panels, keys, files, analysis thread), Recent.h (the list of recent files)
+Source/UI/           Advice.h (the notes of the strip at the foot and the GUIDE text; plain C++, no JUCE), OrpheusUi.h (words, note text, verdict colours), PitchRoll.h (the display and its mouse), MainComponent.{h,cpp} (window, panels, keys, files, analysis thread), Recent.h (the list of recent files), Navigator.h (the navigator bar under the display)
 Source/Main.cpp      the application and its window
 ../../shared/ui/     the look (and ValueKnob.h, the knob for a value that is not a plugin parameter, added for this app)
 Tests/               Tests.cpp (DSP and what the engine refuses), UiCheck.cpp (session, player, window), Snapshot.cpp (window -> PNG), TestSignals.h (the synthetic singer), Check.h

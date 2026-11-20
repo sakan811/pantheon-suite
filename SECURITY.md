@@ -1,8 +1,9 @@
 # Security policy
 
-The plugins in this repository (Themis Verdict, Hephaestus Forge, Harmonia Pitch, Iris Prism) are source only: they ship no binaries, have no network
+The plugins and apps in this repository (all thirteen in plugins/, and apps/orpheus and apps/olympus) are source only: they ship no binaries, have no network
 code (JUCE's web browser and curl support are switched off in every build) and no installer. Of them, only Themis
-reads files you pick (reference masters for *Learn from tracks…*, `.themiscurve` target files); it decodes them with JUCE's
+(reference masters for *Learn from tracks…*, `.themiscurve` target files), Hermes (a reference track), Orpheus and Olympus
+(the audio files and the project files you open) read files you pick; they decode them with JUCE's
 audio format readers, so a malformed file is the most realistic way to hurt it.
 
 ## Reporting a vulnerability
