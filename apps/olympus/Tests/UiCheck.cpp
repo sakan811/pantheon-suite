@@ -66,6 +66,7 @@ std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true, const juce::
     MainComponent::Options options;
     options.audioDevice = false;
     options.scanPlugins = false;
+    options.includeSystemPlugins = false;
     options.settingsFile = settings != juce::File() ? settings : tempFolder().getChildFile ("settings.xml");
     options.recordings = takesFolder();
     if (withPlugins)
@@ -1834,6 +1835,448 @@ int main()
         test::check (rec->session.tracks[0]->clips.size() == clipsBefore && gErrors.size() == 1 && gErrors[0].contains ("Stop the recording before you paste."),
                      "a paste during a take is refused, and says so");
         rec->stopRecording();
+    }
+
+    std::printf ("[35] UI, lifecycle, threading and advice safeguards (R2.1, R2.3, R2.4, R2.5, R2.6, R3.9, R3.10, R3.11)\n");
+    {
+        // R2.1: IMPORT AUDIO opens the chooser (dialogOpen = true while open, blocking concurrent askToDiscard), and finishing/cancelling resets it
+        {
+            auto w = makeWindow();
+            std::function<void (const juce::StringArray&)> pendingImport;
+            w->chooseImportFiles = [&] (const juce::File&, std::function<void (const juce::StringArray&)> done)
+            {
+                pendingImport = std::move (done);
+            };
+            w->seek (12000);
+            press (w->importButton);
+            test::check (w->isDialogOpen() && (bool) pendingImport, "IMPORT AUDIO opens the chooser and sets dialogOpen true");
+            bool discardedWhileOpen = false;
+            w->askToDiscard ("Start a new project and lose them?", [&] { discardedWhileOpen = true; });
+            test::check (! discardedWhileOpen, "askToDiscard is refused while the import chooser is open");
+            const auto importedFile = makeWav ("r21.wav", 24000);
+            pendingImport ({ importedFile.getFullPathName() });
+            pendingImport = nullptr;
+            test::check (! w->isDialogOpen() && w->session.tracks.size() == 1 && w->session.tracks[0]->clips.size() == 1
+                             && w->session.tracks[0]->clips[0].start == 12000,
+                         "completing the import chooser resets dialogOpen and imports at the playhead");
+            // cancelling the import chooser also resets dialogOpen and leaves askToDiscard working
+            press (w->importButton);
+            test::check (w->isDialogOpen() && (bool) pendingImport, "IMPORT AUDIO opens a second time");
+            pendingImport ({});
+            pendingImport = nullptr;
+            test::check (! w->isDialogOpen(), "cancelling the import chooser resets dialogOpen to false");
+            gAnswer = true;
+            bool proceededAfterClose = false;
+            w->askToDiscard ("Start a new project and lose them?", [&] { proceededAfterClose = true; });
+            test::check (proceededAfterClose, "askToDiscard works normally after the import chooser closes");
+        }
+
+        // R2.3: audioDeviceAboutToStart called from a background thread while a take is recording marshals to the message thread
+        {
+            struct DummyAudioDevice : juce::AudioIODevice
+            {
+                DummyAudioDevice (double r, int b) : juce::AudioIODevice ("Dummy", "Test"), rate (r), buf (b) {}
+                juce::StringArray getOutputChannelNames() override { return { "Out L", "Out R" }; }
+                juce::StringArray getInputChannelNames() override { return { "In 1", "In 2", "In 3", "In 4" }; }
+                juce::Array<double> getAvailableSampleRates() override { return { rate }; }
+                juce::Array<int> getAvailableBufferSizes() override { return { buf }; }
+                int getDefaultBufferSize() override { return buf; }
+                juce::String open (const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
+                void close() override {}
+                bool isOpen() override { return true; }
+                void start (juce::AudioIODeviceCallback*) override {}
+                void stop() override {}
+                bool isPlaying() override { return true; }
+                juce::String getLastError() override { return {}; }
+                int getCurrentBufferSizeSamples() override { return buf; }
+                double getCurrentSampleRate() override { return rate; }
+                int getCurrentBitDepth() override { return 24; }
+                juce::BigInteger getActiveOutputChannels() const override { juce::BigInteger ch; ch.setRange (0, 2, true); return ch; }
+                juce::BigInteger getActiveInputChannels() const override { juce::BigInteger ch; ch.setRange (0, 4, true); return ch; }
+                int getOutputLatencyInSamples() override { return 50; }
+                int getInputLatencyInSamples() override { return 100; }
+                double rate;
+                int buf;
+            };
+
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("r23.wav", 24000).getFullPathName() });
+            juce::String err;
+            w->setDeviceForTest (fakeDevice (48000.0, 100, 50));
+            test::check (w->session.setTrackArm (0, true, err) && w->session.setTrackInput (0, 0, -1, err), "track 0 is armed for R2.3");
+            gErrors.clear();
+            test::check (w->startRecording(), "recording starts at 48 kHz");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 4800);
+
+            std::atomic<bool> stillRecordingOnWorker { false }, rateUnchangedOnWorker { false };
+            std::thread worker ([&]
+            {
+                DummyAudioDevice dev (44100.0, 512);
+                w->io.audioDeviceAboutToStart (&dev);
+                stillRecordingOnWorker = w->isRecording();
+                rateUnchangedOnWorker = (w->deviceRate == 48000.0 && w->session.sampleRate == 48000.0);
+            });
+            worker.join();
+            test::check (stillRecordingOnWorker && rateUnchangedOnWorker,
+                         "background audioDeviceAboutToStart does not mutate recording or sample rate on the worker thread");
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            test::check (! w->isRecording() && w->deviceRate == 44100.0 && w->session.sampleRate == 44100.0
+                             && w->session.tracks[0]->clips.size() == 2 && ! gErrors.empty() && gErrors.back().contains ("changed while recording"),
+                         "once the message loop runs, the take is stopped and placed and the new 44.1 kHz rate is adopted");
+        }
+
+        // R2.4: startRecording prepares the session and sets takeFrom / takeLatency / syncTransport before the recorder opens, and isPlaying() is true immediately
+        {
+            struct PrepareSpyPlugin : test::GainPlugin
+            {
+                std::function<void()> onPrepare;
+                explicit PrepareSpyPlugin (std::function<void()> cb) : test::GainPlugin ("Test Spy", 32), onPrepare (std::move (cb)) {}
+                void prepareToPlay (double rate, int block) override
+                {
+                    test::GainPlugin::prepareToPlay (rate, block);
+                    if (onPrepare) onPrepare();
+                }
+            };
+
+            auto w = makeWindow();
+            bool recorderWasActiveDuringPrepare = true;
+            int prepareCount = 0;
+            w->session.catalog.addInternal (test::GainPlugin::description ("Test Spy"), [&] (double, int)
+            {
+                return std::make_unique<PrepareSpyPlugin> ([&]
+                {
+                    ++prepareCount;
+                    recorderWasActiveDuringPrepare = w->isRecording();
+                });
+            });
+            w->addTracks ({ makeWav ("r24.wav", 24000).getFullPathName() });
+            juce::String err;
+            test::check (w->session.setChain (0, { "Test Spy" }, err), "Test Spy added to track 0");
+            w->setDeviceForTest (fakeDevice (48000.0, 100, 50));
+            test::check (w->session.setTrackArm (0, true, err) && w->session.setTrackInput (0, 0, -1, err), "track 0 armed for R2.4");
+            w->seek (4800);
+            prepareCount = 0;
+            recorderWasActiveDuringPrepare = true;
+            test::check (w->startRecording() && w->isRecording() && w->isPlaying(), "startRecording starts both recording and playback");
+            test::check (prepareCount > 0 && ! recorderWasActiveDuringPrepare,
+                         "session.prepare(false) ran before beginRecording opened the recorder");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 2400);
+            w->stopRecording();
+            // takeLatency = 100 + 50 + 32 + monitorLatency = 182 + session.monitorLatency() samples
+            const juce::int64 expectedStart = 4800 - (182 + w->session.monitorLatency());
+            test::check (w->session.tracks[0]->clips.size() == 2 && w->session.tracks[0]->clips[1].start == expectedStart,
+                         test::fmt ("takeLatency was computed before recording began and placed the take at %d (expected %d)",
+                                    (int) (w->session.tracks[0]->clips.size() == 2 ? w->session.tracks[0]->clips[1].start : -1), (int) expectedStart));
+        }
+
+        // R2.5: ArrangeView::askText sets dialogOpen, validates clip/marker identity on confirm, and cleans up safely on destruction
+        {
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("r25a.wav", 24000).getFullPathName(), makeWav ("r25b.wav", 24000).getFullPathName() });
+            w->refreshNow();
+
+            // 1) Clip gain dialog sets dialogOpen, refuses NEW/OPEN/Quit while open, and applies when clip is unchanged
+            w->arrange.openClipActionForTest ({ 0, 0 }, 6);
+            test::check (w->isDialogOpen() && w->arrange.hasOpenDialog() && w->refuseWhileBusy(),
+                         "opening Clip gain sets dialogOpen true and refuseWhileBusy returns true");
+            w->arrange.finishOpenDialogForTest (true, "-6.0");
+            test::check (! w->isDialogOpen() && ! w->arrange.hasOpenDialog() && std::abs (w->session.tracks[0]->clips[0].gainDb + 6.0f) < 0.01f,
+                         "confirming Clip gain resets dialogOpen and updates the clip's gain");
+
+            // 2) Stale clip: deleting/replacing the target clip while Rename clip is open ignores the callback instead of mutating the replacement clip
+            w->arrange.openClipActionForTest ({ 0, 0 }, 7);
+            test::check (w->isDialogOpen(), "Rename clip sets dialogOpen true");
+            juce::String err;
+            test::check (w->editor.deleteClip (0, 0, err) && w->editor.moveClipToTrack (1, 0, 0, 1200, err).valid(),
+                         "clip 0 on track 0 is deleted and replaced by another clip while Rename clip is open");
+            const auto replacementName = w->session.tracks[0]->clips[0].name;
+            w->arrange.finishOpenDialogForTest (true, "Wrongly Renamed");
+            test::check (! w->isDialogOpen() && w->session.tracks[0]->clips[0].name == replacementName,
+                         "confirming Rename clip after the target clip was replaced does not rename the replacement clip");
+
+            // 3) Stale marker: deleting a marker while Rename marker is open does not rename the marker that shifted into its index
+            w->editor.addMarker ("Verse", 1000);
+            w->editor.addMarker ("Chorus", 8000);
+            w->arrange.openMarkerActionForTest (0, 1);
+            test::check (w->isDialogOpen(), "Rename marker sets dialogOpen true");
+            test::check (w->editor.removeMarker (0, err), "marker 0 is removed while Rename marker is open");
+            w->arrange.finishOpenDialogForTest (true, "Stale Marker Name");
+            test::check (! w->isDialogOpen() && w->session.markers.size() == 1 && w->session.markers[0].name == "Chorus",
+                         "confirming Rename marker after marker 0 was removed leaves the shifted marker untouched");
+
+            // 4) Destroying an ArrangeView while askText is open resets dialogOpen and does not use-after-free
+            bool sharedDialogOpen = false;
+            {
+                ArrangeView tempArrange (w->session, w->editor);
+                tempArrange.dialogOpen = &sharedDialogOpen;
+                tempArrange.openMarkerActionForTest (0, 1);
+                test::check (sharedDialogOpen && tempArrange.hasOpenDialog(), "tempArrange opened askText and set sharedDialogOpen");
+            }
+            test::check (! sharedDialogOpen, "destroying ArrangeView while askText is open resets dialogOpen cleanly");
+        }
+
+        // R2.6: adviceFor and w->notes() do not block or race on track/plugin state while a render holds session.lock and mutates plugins
+        {
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("r26.wav", 24000).getFullPathName() });
+            juce::String err;
+            test::check (w->session.addPlugin (0, "Test Delay", -1, err), "Test Delay added to track 0");
+            const auto cachedNotes = w->notes();
+            test::check (! cachedNotes.empty(), "notes() populates notesCache when unlocked");
+
+            std::atomic<bool> held { false }, stopWorker { false };
+            std::thread worker ([&]
+            {
+                w->session.renderBusy = true;
+                const juce::ScopedLock sl (w->session.lock);
+                held = true;
+                auto* gain = dynamic_cast<test::GainPlugin*> (w->session.tracks[0]->chain[0]->instance.get());
+                int step = 0;
+                while (! stopWorker)
+                {
+                    if (gain != nullptr) gain->changeLatency ((++step % 4) * 32);
+                    std::this_thread::sleep_for (std::chrono::milliseconds (1));
+                }
+                w->session.renderBusy = false;
+            });
+            while (! held)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            const auto duringRenderNotes = w->notes();
+            const auto directAdvice = adviceFor (w->session);
+            const auto snap = w->createComponentSnapshot (w->getLocalBounds());
+            const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - t0;
+            stopWorker = true;
+            worker.join();
+            test::check (snap.isValid() && ! duringRenderNotes.empty() && ! directAdvice.empty() && elapsedMs < 500.0,
+                         test::fmt ("notes(), adviceFor() and paint return immediately during render without racing: %d ms", (int) elapsedMs));
+        }
+
+        // R3.9: openProjectRequested refuses while busy and asks to discard unsaved changes before opening another project
+        {
+            const auto folder = tempFolder().getChildFile ("r39");
+            folder.deleteRecursively();
+            folder.createDirectory();
+            const auto settings = folder.getChildFile ("settings.xml");
+            const auto projA = folder.getChildFile ("a.olympus"), projB = folder.getChildFile ("b.olympus");
+            {
+                auto setup = makeWindow (true, settings);
+                setup->addTracks ({ makeWav ("r39b.wav", 12000).getFullPathName() });
+                test::check (setup->saveTo (projB), "project B saved for R3.9");
+            }
+            auto w = makeWindow (true, settings);
+            w->addTracks ({ makeWav ("r39a.wav", 24000).getFullPathName() });
+            test::check (w->saveTo (projA), "project A saved for R3.9");
+            w->editor.setGrid (Grid::Half);   // dirty project A
+            test::check (w->autosaveNow() && w->autosaveFile().existsAsFile(), "project A has an autosave");
+
+            // Refused while a render is running
+            gErrors.clear();
+            gAsked.clear();
+            w->session.renderBusy = true;
+            w->openProjectRequested (projB);
+            w->session.renderBusy = false;
+            test::check (w->session.projectFile == projA && gAsked.empty() && gErrors.size() == 1,
+                         "openProjectRequested refuses while a render runs");
+
+            // Refused when the user cancels the unsaved prompt
+            gAsked.clear();
+            gAnswer = false;
+            w->openProjectRequested (projB);
+            test::check (w->session.projectFile == projA && gAsked.size() == 1 && w->autosaveFile().existsAsFile(),
+                         "openProjectRequested prompts when dirty and keeps the current project and autosave on Cancel");
+
+            // Discards, opens project B, and deletes project A's autosave when the user chooses Discard
+            const auto oldAutosave = w->autosaveFile();
+            gAnswer = true;
+            w->openProjectRequested (projB);
+            test::check (w->session.projectFile == projB && ! w->session.dirty && ! oldAutosave.existsAsFile(),
+                         "openProjectRequested opens the new project and removes the discarded project's autosave on Discard");
+        }
+
+        // R3.10: an open monitor plugin editor across saveTo, newProject, openProject, and recoverFrom does not mark a clean project dirty on the timer
+        {
+            const auto folder = tempFolder().getChildFile ("r310");
+            folder.deleteRecursively();
+            folder.createDirectory();
+            const auto settings = folder.getChildFile ("settings.xml");
+            const auto proj = folder.getChildFile ("clean.olympus");
+
+            auto w = makeWindow (true, settings);
+            test::check (w->addMonitorPlugin ("Test Gain"), "monitor plugin added for R3.10");
+            w->openEditor (-1, 0);
+            test::check (w->openEditors() == 1, "monitor plugin editor is open");
+
+            w->addTracks ({ makeWav ("r310.wav", 24000).getFullPathName() });
+            juce::String err;
+            test::check (w->session.addPlugin (0, "Test Gain", -1, err), "track plugin added for R3.10");
+            // let the timer hash the current track plugin state
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (600);
+            test::check (w->saveTo (proj) && ! w->session.dirty, "project saved cleanly with monitor editor open");
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (600);
+            test::check (! w->session.dirty, "timer ticks after saveTo do not mark the saved project dirty");
+
+            w->newProject();
+            test::check (! w->session.dirty && w->openEditors() == 1, "newProject is clean while monitor editor stays open");
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (600);
+            test::check (! w->session.dirty, "timer ticks after newProject do not mark the new project dirty");
+
+            w->openProject (proj);
+            test::check (! w->session.dirty && w->openEditors() == 1, "openProject is clean while monitor editor stays open");
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (600);
+            test::check (! w->session.dirty, "timer ticks after openProject do not mark the opened project dirty");
+
+            // recovery resets lastEditorHash too (if then saved, timer ticks keep it clean)
+            w->editor.setGrid (Grid::Half);
+            proj.setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::seconds (60));
+            test::check (w->autosaveNow(), "autosave written before recovery");
+            gRecoverAnswer = true;
+            test::check (w->offerRecovery() && w->session.dirty, "offerRecovery loads the autosave");
+            gRecoverAnswer = false;
+            test::check (w->saveTo (proj) && ! w->session.dirty, "saving after recovery clears dirty");
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (600);
+            test::check (! w->session.dirty, "timer ticks after recoverFrom + saveTo keep the project clean");
+        }
+
+        // R3.11: out-of-bounds ArrangeView::selected does not crash nudgeSelected or splitAtPlayhead
+        {
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("r311.wav", 48000).getFullPathName() });
+            w->refreshNow();
+
+            w->arrange.selected = { 99, 99 };
+            w->arrange.keyPressed (juce::KeyPress (juce::KeyPress::rightKey));
+            test::check (! w->arrange.selected.valid() && w->session.tracks[0]->clips[0].start == 0,
+                         "nudgeSelected with out-of-bounds track clears selection without crashing");
+
+            w->arrange.selected = { 0, 99 };
+            w->arrange.keyPressed (juce::KeyPress (juce::KeyPress::downKey));
+            test::check (! w->arrange.selected.valid() && w->session.tracks[0]->clips.size() == 1,
+                         "nudgeSelected with out-of-bounds clip clears selection without crashing");
+
+            w->seek (24000);
+            w->arrange.playhead = 24000.0;
+            w->arrange.selected = { 99, 99 };
+            w->arrange.splitAtPlayhead();
+            test::check (! w->arrange.selected.valid() && w->session.tracks[0]->clips.size() == 2,
+                         "splitAtPlayhead with out-of-bounds selected clip safely falls back to splitting clips under the playhead");
+        }
+    }
+
+    std::printf ("[36] Startup plugin scan, empty cache persistence, and folder safety (R1.1, R1.3, R1.4)\n");
+    {
+        const auto folder = tempFolder().getChildFile ("r1-uicheck");
+        folder.deleteRecursively();
+        folder.createDirectory();
+
+        // 1) When plugins.xml already exists with 0 plugins (<KNOWNPLUGINS/>), startup with opts.scanPlugins = true does NOT queue a scan
+        {
+            const auto dir1 = folder.getChildFile ("existing-empty");
+            dir1.createDirectory();
+            const auto settingsFile = dir1.getChildFile ("settings.xml");
+            const auto cacheFile = Settings::pluginCacheFile (settingsFile);
+            cacheFile.replaceWithText ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<KNOWNPLUGINS/>\n");
+
+            MainComponent::Options options;
+            options.audioDevice = false;
+            options.scanPlugins = true;
+            options.includeSystemPlugins = false;
+            options.settingsFile = settingsFile;
+            options.recordings = takesFolder();
+            auto w = std::make_unique<MainComponent> (options);
+            test::check (! w->isScanQueued() && ! w->isScanning(),
+                         "startup with an existing 0-plugin plugins.xml does not queue an automatic scan");
+        }
+
+        // 2) When plugins.xml is missing, startup queues the suite-only scan, writes plugins.xml, skips third-party bundles,
+        //    and the next launch with that plugins.xml present does not queue another scan
+        {
+            const auto dir2 = folder.getChildFile ("first-launch");
+            dir2.createDirectory();
+            const auto pluginDir = dir2.getChildFile ("custom-vst3");
+            pluginDir.createDirectory();
+            // Create a fake third-party .vst3 bundle in pluginDir; suite-only startup scan must ignore it before loading
+            const auto thirdParty = pluginDir.getChildFile ("ThirdParty Crash.vst3");
+            thirdParty.createDirectory();
+
+            const auto settingsFile = dir2.getChildFile ("settings.xml");
+            Settings s;
+            s.pluginFolders.add (pluginDir.getFullPathName());
+            s.save (settingsFile);
+            const auto cacheFile = Settings::pluginCacheFile (settingsFile);
+            test::check (! cacheFile.existsAsFile(), "plugins.xml is missing before first launch");
+
+            MainComponent::Options options;
+            options.audioDevice = false;
+            options.scanPlugins = true;
+            options.includeSystemPlugins = false;
+            options.settingsFile = settingsFile;
+            options.recordings = takesFolder();
+            auto w1 = std::make_unique<MainComponent> (options);
+            test::check (w1->isScanQueued() && ! w1->settings.scanSuiteOnly,
+                         "missing plugins.xml queues startup scan while settings.scanSuiteOnly stays false");
+
+            // Check that candidate filtering for w1's startup scan (onlySuite = true) ignores ThirdParty Crash.vst3
+            const auto startupCandidates = w1->session.catalog.candidatesForFormat ("VST3", w1->settings.searchPath(), false, true);
+            test::check (startupCandidates.isEmpty(),
+                         "suite-only startup scan ignores third-party .vst3 bundles in pluginFolders");
+
+            // Run the queued startup scan (with includeSystem = false via scanPlugins or let scanPlugins run on the temp folder)
+            // Note: scanPlugins(false, true) scans system folders for suite names too, and writes plugins.xml
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+            test::check (! w1->isScanQueued() && ! w1->isScanning() && cacheFile.existsAsFile(),
+                         "queued startup scan completes and writes plugins.xml to disk");
+            test::check (! w1->session.catalog.names().contains ("ThirdParty Crash"),
+                         "third-party bundle was not loaded by the automatic startup scan");
+
+            // Second launch with the newly written plugins.xml present
+            auto w2 = std::make_unique<MainComponent> (options);
+            test::check (! w2->isScanQueued() && ! w2->isScanning(),
+                         "next window launch with plugins.xml present does not queue another startup scan");
+        }
+
+        // 3) defaultPluginFolder() is never userHomeDirectory or a TCC-protected folder, and addPluginFolder refuses forbidden roots
+        {
+            const auto dir3 = folder.getChildFile ("folder-safety");
+            dir3.createDirectory();
+            const auto settingsFile = dir3.getChildFile ("settings.xml");
+            auto w = makeWindow (true, settingsFile);
+
+            const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+            const auto def1 = w->defaultPluginFolder();
+            test::check (def1 != home && ! Catalog::isForbiddenPluginRoot (def1) && ! Catalog::isTccProtectedDir (def1),
+                         "defaultPluginFolder() is never userHomeDirectory or a TCC-protected folder: " + def1.getFullPathName());
+
+            // Even if settings.pluginFolders contains userHomeDirectory, defaultPluginFolder() ignores it
+            w->settings.pluginFolders.add (home.getFullPathName());
+            const auto def2 = w->defaultPluginFolder();
+            test::check (def2 != home && ! Catalog::isForbiddenPluginRoot (def2),
+                         "defaultPluginFolder() ignores a forbidden root stored in settings.pluginFolders");
+            w->settings.pluginFolders.clear();
+
+            for (const auto& bad : { home,
+                                     juce::File::getSpecialLocation (juce::File::userDesktopDirectory),
+                                     juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                                     juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                                     juce::File ("/") })
+            {
+                gErrors.clear();
+                test::check (! w->addPluginFolder (bad) && w->settings.pluginFolders.isEmpty()
+                                 && gErrors.size() == 1 && gErrors[0].contains ("not your home or a protected folder"),
+                             "addPluginFolder refuses forbidden root with an error: " + bad.getFullPathName());
+            }
+
+            const auto validFolder = dir3.getChildFile ("my-vst3");
+            validFolder.createDirectory();
+            gErrors.clear();
+            test::check (w->addPluginFolder (validFolder) && gErrors.empty()
+                             && w->settings.pluginFolders.contains (validFolder.getFullPathName())
+                             && w->defaultPluginFolder() == validFolder,
+                         "addPluginFolder accepts a valid plugin folder and defaultPluginFolder() returns it");
+        }
     }
 
     tempFolder().deleteRecursively();
