@@ -3,8 +3,8 @@
 A **basic DAW for the Pantheon plugins**, as a standalone macOS app. Audio goes on tracks as clips on a timeline with a tempo map, a grid,
 markers and a loop; each track has a chain of plugins (the suite's own, and any VST3 or, on macOS, Audio Unit plugin the scan finds); you set
 the faders and pans, save the project, and write the stems out again with their chains. The window shows the arrangement (the clips on their
-tracks, the ruler, the markers and the loop) under a transport bar. The engine and the window are covered by the automated tests; playback on an
-audio device has not yet been checked by ear. An AI agent can place the chains for you through the built-in **MCP server**, whose 31 tools cover
+tracks, the ruler, the markers and the loop) under a transport bar. It records from an audio interface onto armed tracks (REC). The engine and the window are
+covered by the automated tests; playback and recording on a real audio device have not yet been checked by ear. An AI agent can place the chains for you through the built-in **MCP server**, whose 31 tools cover
 the same clips, tempo, markers, loop and master.
 
 ## Name origin
@@ -17,7 +17,15 @@ the same clips, tempo, markers, loop and master.
 *Headless render of the window (the hardware-style interface shared with the plugins) over a small song: four tracks cut from synthetic stems into clips, on a 96 bpm
 timeline with the bars and beats on the ruler, three markers (Intro, Verse, Chorus), the loop lit from bar 3 to bar 9, and the snap on. The Chords clips have fades; the
 Vocal track has one test plugin, which its FX button lists. Each track is a row in the left column: its name, FX (its plugins) and X (remove), mute and solo, the pan, the fader and
-the meter. The playhead is the amber line at 11 seconds (bar 5, beat 2), and the position read-out in the top right says the same in bars and in time.
+the meter; under them R (arm for recording) and IN (its input, here the default pair). The playhead is the amber line at 11 seconds (bar 5, beat 2), and the position read-out in the top
+right says the same in bars and in time. The row under the transport names the audio device (none, in a headless render).
+Regenerate with the command under "Development".*
+
+![Olympus recording a take](docs/screenshot-record.png)
+
+*The same session while it records, in a headless render: Vocal (on IN 1) and Drums (on IN 3+4) are armed, so their R lamps are lit and their meters show the input (a 440 Hz tone the
+render feeds to the device). REC is lit and reads the take's time in red (00:03.50), and the armed lanes carry a red strip from where the take began (8 seconds) to the playhead
+(11.5 seconds). The row under the transport names the device, IN: Interface / OUT: Headphones / 48.0 kHz / 128 smp: the render has no audio device, so the device is a stand-in.
 Regenerate with the command under "Development".*
 
 ## Core philosophy
@@ -26,8 +34,9 @@ Regenerate with the command under "Development".*
   Open any plugin from its chain, change it, save.
 - **Any plugin it finds.** It hosts every VST3 (and, on macOS, Audio Unit) plugin the folders hold, the suite's own and third-party ones alike, and nothing else. Hestia's instances
   (which listen to each other) still work across the stems. The setting *scanSuiteOnly* in `settings.xml` narrows this to the suite's own plugins.
-- **A basic DAW, not a full one.** There is no recording, no MIDI, no instruments and no automation, and no time-stretching: audio plays at its
-  own speed, and when the tempo changes the grid moves, not the audio. Instruments and recording stay in your own DAW.
+- **A basic DAW, not a full one.** There is no MIDI, no instruments and no automation, and no time-stretching: audio plays at its
+  own speed, and when the tempo changes the grid moves, not the audio. It records from an audio interface onto tracks; software input monitoring,
+  punch-in and comping stay in your own DAW.
 - **Nothing is hidden from the agent.** The server reads and sets every setting of a plugin by the names the plugin gives them, loads its presets, and says why anything it cannot do failed.
 - **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [the repository notes](../../NOTICE.md)).
 
@@ -42,6 +51,8 @@ Regenerate with the command under "Development".*
 | **Fader, pan, master** | A fader and a balance pan for each track, after its chain (the far side of a pan is attenuated; the centre is unity). One master gain on the sum: it applies to playback and to `mix.wav`, never to the stems. A muted track, or any track not soloed when another is, is not played and gets no stem. |
 | **Undo** | Undo and redo cover every timeline edit, track mix setting, master, tempo, time signature, marker, loop and metronome change; a fader drag is one step. Adding or removing a track or a plugin cannot be undone and clears the history. |
 | **Chains** | Any plugin Olympus found, in any order, several of the same kind if you like. A track's FX button lists its plugins: each one opens its own window, can be bypassed, moved or removed, and `Add plugin...` puts a new one at the end. A plugin that is not installed on this machine stays in the chain, passes the audio through and keeps its settings. |
+| **Devices** | **AUDIO** opens the system's audio device settings: the input and the output device, the sample rate and the buffer size (no MIDI). The top bar names the devices, the rate and the buffer; its tooltip gives the round trip, the input plus the output latency in samples and ms. The choice is saved in `settings.xml`, so the device comes back as it was chosen, and the default device is used when it cannot be opened. |
+| **Recording** | Arm a track with **R**: its lamp lights, and its meter shows its input while the transport is stopped. **IN** chooses its device input, one input or a neighbouring pair (`In 1`, `In 1+2`). **REC** (or the R key) starts playback from the playhead and records every armed track into a take: one 32-bit float WAV per track, written by a background thread and kept on disk. Stop (or Space, or REC again) places each take on its track as a clip, one undo step, starting the device's round trip (and the extra latency in the settings, and the monitor chain's) earlier, so it lines up with what was heard. REC is refused, with the reason, when no track is armed or no device runs. While a take runs the loop does not wrap, the playhead goes on past the end of the audio and cannot be moved; a device that stops or changes ends the take with what it has. Takes go to `<project> Recordings/` beside the project file, or to `~/Music/Olympus Recordings/` for a project not saved yet. The app never deletes a take. Recording has not been tried on a real interface yet. |
 | **Playback** | From the playhead to the end of the audio, through each track's clips, chain, fader and pan, and the master, on the audio device. With the loop on, playback wraps from the loop's end to its start. The plugins read the same playhead. A plugin's reported latency is compensated across the tracks, so the stems stay in time. |
 | **Project** | `.olympus`: a small XML file (version 2) with the tracks and their clips (a relative path to each audio file, and the absolute one as a fallback), faders, pans and mutes, the master, the tempo map, markers, loop and grid, and every plugin's complete state. A version 1 file opens as one clip at 0. A project opens without its plugins or audio (each is a warning) and saves again without losing what they held. A project from a newer version is refused. |
 | **Render stems** | One WAV per audible track, after its clips, chain, fader and pan, aligned with the audio (the chain's latency is taken off the front), named `01-Vocal.wav`, and `mix.wav`, the sum with the master. 32-bit float by default, so a stem cannot clip and can be edited later; 16 or 24 bit on request. A tail of at most a minute for reverbs and delays; a render longer than three hours is refused. All tracks run together block by block, which Hestia's bus needs. |
@@ -85,7 +96,7 @@ Build and check with the script (it builds the targets in one go and runs the ch
 
 ```bash
 scripts/build.sh olympus            # OlympusTests and OlympusUiCheck
-scripts/build.sh olympus snap       # docs/screenshot.png
+scripts/build.sh olympus snap       # docs/screenshot.png and docs/screenshot-record.png (the record picture is a headless take)
 scripts/build.sh olympus app        # the app
 OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests   # also hosts a built plugin
 ```

@@ -8,7 +8,7 @@ namespace olympus::gui
 namespace
 {
 const char* const kAudioWildcard = "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.caf";
-constexpr int kMargin = 16, kHeaderHeight = 84;
+constexpr int kMargin = 16, kHeaderHeight = 116, kRowC = 80; // kRowC: the top bar's third row (the device, the position)
 constexpr int kTicksPerBeat = 960;
 
 juce::String timeText (juce::int64 sample, double rate)
@@ -52,6 +52,20 @@ void styleField (juce::TextEditor& field)
 }
 } // namespace
 
+// The audio device's settings dialog: a window that stays open beside the arrangement (no modal loop).
+class AudioDialog : public juce::DialogWindow
+{
+public:
+    explicit AudioDialog (std::unique_ptr<juce::Component> content)
+        : juce::DialogWindow ("Audio devices", colours::background, true, true)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (content.release(), true);
+        setResizable (false, false);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
 // ---- PluginWindow ------------------------------------------------------------------------------------------------------------
 PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed)
     : juce::DocumentWindow (title, colours::background, juce::DocumentWindow::closeButton), onClosed (std::move (closed))
@@ -66,35 +80,70 @@ PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEdito
 
 // ---- audio -------------------------------------------------------------------------------------------------------------------
 // The callback plays the session block by block. A block never crosses the loop's end: it is cut there, and the rest comes from the
-// loop's start. Without a loop the playback stops at the end of the audio (the longest track, and the latency of its chains).
+// loop's start. Without a loop the playback stops at the end of the audio (the longest track, and the latency of its chains). While a take
+// runs, neither happens: the loop does not wrap and the playhead goes on past the end of the audio.
 void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
 {
     info.clearActiveBufferRegion();
     if (! playing.load())
         return;
+    const bool recording = owner.recorder.isRecording();
     const juce::int64 start = loopStart.load(), end = loopEnd.load(), audioEnd = endOfAudio.load();
-    const bool wrap = loopOn.load() && end > start;
+    const bool wrap = ! recording && loopOn.load() && end > start;
     juce::int64 pos = position.load();
     int done = 0;
     while (done < info.numSamples)
     {
         if (wrap && pos >= end)
             pos = start;
-        else if (! wrap && pos >= audioEnd)
+        else if (! wrap && ! recording && pos >= audioEnd)
         {
             playing = false;
             break;
         }
-        const juce::int64 room = wrap ? end - pos : audioEnd - pos;
+        const juce::int64 room = wrap ? end - pos : recording ? (juce::int64) info.numSamples : audioEnd - pos;
         const int n = (int) juce::jmin ((juce::int64) juce::jmin (kBlockSize, info.numSamples - done), room);
         chunk.setSize (2, n, false, false, true);
         owner.session.processBlock (chunk, pos);
+        owner.session.processMonitor (chunk); // the headphones' chain: playback only (Session::processMonitor)
         for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
             info.buffer->copyFrom (ch, info.startSample + done, chunk, juce::jmin (ch, 1), 0, n);
         pos += n;
         done += n;
     }
     position = pos;
+}
+
+// Audio thread. One device block: the inputs to the recorder, then the transport into the outputs. The take's first sample is the playhead
+// of its first block, so the position is read here, before the block plays.
+void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int numIn, float* const* out, int numOut, int n)
+{
+    if (owner.recorder.isRecording() && owner.source.recordStart.load() < 0)
+        owner.source.recordStart = owner.source.position.load();
+    owner.recorder.push (in, numIn, n);
+    if (out == nullptr || numOut <= 0)
+        return; // a device with no outputs has nothing to play into; the take still has its inputs
+    juce::AudioBuffer<float> buffer (out, numOut, n);
+    juce::AudioSourceChannelInfo info (&buffer, 0, n);
+    owner.source.getNextAudioBlock (info);
+}
+
+// Message thread, before the device's callbacks start (also when the device changes). A take cannot go on across a change of rate or
+// block size, so it ends here with what it has; the recorder is then prepared for the new device.
+void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice* started)
+{
+    if (owner.recorder.isRecording())
+        owner.stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
+    if (started == nullptr)
+        return;
+    owner.deviceRate = started->getCurrentSampleRate();
+    owner.recorder.prepare (started->getCurrentSampleRate(), started->getCurrentBufferSizeSamples());
+}
+
+// Device thread. Only a flag: the timer ends a take that the device stopped under (on the message thread).
+void MainComponent::DeviceCallback::audioDeviceStopped()
+{
+    owner.deviceStopped = true;
 }
 
 // ---- the window --------------------------------------------------------------------------------------------------------------
@@ -124,24 +173,39 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.onRemoveTrack = [this] (int track) { removeTrack (track); };
     arrange.onFilesDropped = [this] (const juce::StringArray& files, int track, juce::int64 at) { importFiles (files, track, at); };
     arrange.reportError = [this] (const juce::String& message) { showError (message); };
+    arrange.onInputMenu = [this] (int track) { showInputMenu (track); };
+    // an armed track's meter shows its input: the larger of its one or two device inputs, since the last read
+    arrange.inputLevel = [this] (int track)
+    {
+        if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return 0.0f;
+        const auto& t = *session.tracks[(size_t) track];
+        float peak = recorder.inputPeak (t.inputLeft);
+        if (t.inputRight >= 0) peak = juce::jmax (peak, recorder.inputPeak (t.inputRight));
+        return peak;
+    };
     addAndMakeVisible (arrange);
 
-    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton, &renderButton,
+    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton, &renderButton, &audioButton,
                      &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton })
         addAndMakeVisible (*b);
-    for (auto* b : { &playButton, &loopButton, &metronomeButton, &snapButton })
+    for (auto* b : { &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton })
     {
         b->setClickingTogglesState (false);   // the session says what state they are in: see updateTransport
         addAndMakeVisible (*b);
     }
+    recordButton.lamp = colours::bad;
     addAndMakeVisible (guideButton);
     addAndMakeVisible (bpmField);
     addAndMakeVisible (signatureBox);
     addAndMakeVisible (gridBox);
+    addAndMakeVisible (deviceLabel);
+    deviceLabel.setFont (ui::font (10.5f));
+    deviceLabel.setColour (juce::Label::textColourId, colours::dim);
     // a focused button would take Space and Return for itself: the keys stay with the window
     for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton,
-                                                             &renderButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton,
-                                                             &playButton, &loopButton, &metronomeButton, &snapButton, &guideButton, &signatureBox, &gridBox })
+                                                             &renderButton, &audioButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton,
+                                                             &zoomFitButton, &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &guideButton,
+                                                             &signatureBox, &gridBox })
         c->setWantsKeyboardFocus (false);
 
     newButton.onClick = [this] { askToDiscard ("Start a new project and lose them?", [this] { newProject(); }); };
@@ -152,8 +216,10 @@ MainComponent::MainComponent (Options options) : opts (options)
     importButton.onClick = [this] { chooseAndImport(); };
     pluginsButton.onClick = [this] { showPluginsMenu(); };
     renderButton.onClick = [this] { chooseAndRender(); };
+    audioButton.onClick = [this] { showAudioSettings(); };
     rewindButton.onClick = [this] { rewind(); updateTransport(); };
     playButton.onClick = [this] { togglePlay(); updateTransport(); };
+    recordButton.onClick = [this] { toggleRecord(); };
     loopButton.onClick = [this] { toggleLoop(); };
     metronomeButton.onClick = [this] { toggleMetronome(); };
     snapButton.onClick = [this] { editor.setSnap (! session.snapOn); updateTransport(); };
@@ -170,7 +236,9 @@ MainComponent::MainComponent (Options options) : opts (options)
     importButton.setTooltip ("Audio files: each one becomes a track with its clip at the playhead. You can also drop them on the window or a lane.");
     pluginsButton.setTooltip ("Where plugins (VST3, and Audio Units on macOS) are looked for, which were found, and a rescan.");
     renderButton.setTooltip ("Write one WAV per audible track, after its clips, chain, fader and pan, and the mix.");
-    playButton.setTooltip ("Play from the playhead, or stop (Space).");
+    audioButton.setTooltip ("The audio input and output devices, the sample rate and the buffer size.");
+    playButton.setTooltip ("Play from the playhead, or stop (Space). While a take runs, this stops it.");
+    recordButton.setTooltip ("Record every armed track from the playhead, with playback. Again stops, and the takes go on their tracks (R).");
     rewindButton.setTooltip ("Back to the loop's start when the loop is on, else to the start (Return).");
     loopButton.setTooltip ("Loop the region between the loop markers (L). A loop with no range yet covers the first four bars.");
     metronomeButton.setTooltip ("A click on every beat, a higher one on the bar. Not in the stems. (Undoable.)");
@@ -212,9 +280,14 @@ MainComponent::MainComponent (Options options) : opts (options)
 
     if (opts.audioDevice)
     {
-        deviceManager.initialiseWithDefaultDevices (0, 2);
-        player.setSource (&source);
-        deviceManager.addAudioCallback (&player);
+        // the device the user chose last time, else the default one (initialise falls back to it)
+        const auto saved = juce::parseXML (settings.audioDeviceState);
+        const auto error = deviceManager.initialise (32, 2, saved.get(), true);
+        deviceManager.addAudioCallback (&io);
+        deviceManager.addChangeListener (this);
+        if (error.isNotEmpty())
+            showError ("The audio device could not be opened: " + error);
+        readDevice();
     }
     if (opts.scanPlugins)
     {
@@ -233,11 +306,15 @@ MainComponent::~MainComponent()
 {
     stopTimer();
     cancelPendingUpdate();
+    // a take still running keeps its files (Record.h: the takes are never deleted); the project is going away with the window
+    if (recorder.isRecording())
+        recorder.stop();
     if (opts.audioDevice)
     {
-        deviceManager.removeAudioCallback (&player);
-        player.setSource (nullptr);
+        deviceManager.removeChangeListener (this);
+        deviceManager.removeAudioCallback (&io);
     }
+    audioDialog.reset();
     closeEditors();
     setLookAndFeel (nullptr);
 }
@@ -267,6 +344,16 @@ juce::String MainComponent::windowTitle() const { return "Olympus - " + session.
 
 void MainComponent::showError (const juce::String& message) { if (reportError) reportError (message); }
 
+std::vector<ui::Note> MainComponent::notes() const
+{
+    AdviceDevice advice;
+    advice.running = device.running;
+    advice.rate = device.running ? device.rate : 0.0;
+    advice.inputs = device.inputs;
+    advice.roundTripMs = roundTripMs();
+    return adviceFor (session, advice);
+}
+
 void MainComponent::askToDiscard (const juce::String& action, std::function<void()> proceed)
 {
     if (! session.dirty || session.tracks.empty()) { proceed(); return; }
@@ -281,6 +368,7 @@ void MainComponent::updateTransport()
     const bool playing = isPlaying();
     playButton.setToggleState (playing, juce::dontSendNotification);
     if (playButton.getButtonText() != (playing ? "Stop" : "Play")) playButton.setButtonText (playing ? "Stop" : "Play");
+    recordButton.setToggleState (recorder.isRecording(), juce::dontSendNotification);
     loopButton.setToggleState (session.loopOn, juce::dontSendNotification);
     metronomeButton.setToggleState (session.metronomeOn, juce::dontSendNotification);
     snapButton.setToggleState (session.snapOn, juce::dontSendNotification);
@@ -288,6 +376,15 @@ void MainComponent::updateTransport()
     showSignature (session.tempo.numerator, session.tempo.denominator);
     undoButton.setEnabled (editor.canUndo());
     redoButton.setEnabled (editor.canRedo());
+
+    // the device, as the top bar names it and its tooltip says what it means for the takes
+    const auto summary = deviceSummary();
+    if (deviceLabel.getText() != summary) deviceLabel.setText (summary, juce::dontSendNotification);
+    const auto tip = device.running
+        ? "Round trip about " + juce::String (roundTripMs(), 1) + " ms (input " + juce::String (device.inputLatency) + " + output "
+              + juce::String (device.outputLatency) + " samples). Each take is placed earlier by that, and by the extra latency in the settings."
+        : juce::String ("No audio device is running. Click Audio to choose the input and the output.");
+    if (deviceLabel.getTooltip() != tip) deviceLabel.setTooltip (tip);
 
     if (! bpmField.hasKeyboardFocus (true))
     {
@@ -345,9 +442,256 @@ void MainComponent::refreshNow()
     repaint();
 }
 
+// ---- the audio device ----------------------------------------------------------------------------------------------------------
+std::vector<MainComponent::InputChoice> MainComponent::inputChoices (const DeviceState& state)
+{
+    std::vector<InputChoice> out;
+    const int highest = state.activeInputs.getHighestBit();
+    for (int i = 0; i <= highest; ++i)
+    {
+        if (! state.activeInputs[i])
+            continue;
+        out.push_back ({ "In " + juce::String (i + 1), i, -1 });
+        if (state.activeInputs[i + 1])
+            out.push_back ({ "In " + juce::String (i + 1) + "+" + juce::String (i + 2), i, i + 1 });
+    }
+    return out;
+}
+
+juce::String MainComponent::deviceSummary() const
+{
+    if (! device.running)
+        return "no audio device";
+    return "IN: " + (device.inputs > 0 && device.inputName.isNotEmpty() ? device.inputName : juce::String ("none"))
+           + " / OUT: " + (device.outputs > 0 && device.outputName.isNotEmpty() ? device.outputName : juce::String ("none"))
+           + " / " + juce::String (device.rate / 1000.0, 1) + " kHz / " + juce::String (device.bufferSize) + " smp";
+}
+
+double MainComponent::roundTripMs() const
+{
+    if (! device.running || device.rate <= 0.0)
+        return 0.0;
+    return 1000.0 * (double) (device.inputLatency + device.outputLatency) / device.rate;
+}
+
+// The device as the device manager has it now: running, its names, rate, buffer and active channels, and its latencies.
+void MainComponent::readDevice()
+{
+    if (! opts.audioDevice)
+        return; // the checks set their device (setDeviceForTest); there is no device manager to read
+    DeviceState state;
+    if (auto* current = deviceManager.getCurrentAudioDevice())
+    {
+        const auto setup = deviceManager.getAudioDeviceSetup();
+        state.running = current->isPlaying();
+        state.inputName = setup.inputDeviceName;
+        state.outputName = setup.outputDeviceName;
+        state.rate = current->getCurrentSampleRate();
+        state.bufferSize = current->getCurrentBufferSizeSamples();
+        state.activeInputs = current->getActiveInputChannels();
+        state.inputs = state.activeInputs.countNumberOfSetBits();
+        state.outputs = current->getActiveOutputChannels().countNumberOfSetBits();
+        state.inputLatency = current->getInputLatencyInSamples();
+        state.outputLatency = current->getOutputLatencyInSamples();
+    }
+    device = state;
+    deviceRate = state.running ? state.rate : 0.0;
+}
+
+// A change of the device (the AUDIO dialog, or the device going away): the new state is read and kept, and a take that cannot go on ends.
+void MainComponent::deviceChanged()
+{
+    readDevice();
+    saveAudioState();
+    updateTransport();
+    repaint();
+}
+
+void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    deviceChanged();
+}
+
+// The device's settings as XML text, saved with the other settings, so the device comes back as it was chosen.
+void MainComponent::saveAudioState()
+{
+    if (auto xml = deviceManager.createStateXml())
+        settings.audioDeviceState = xml->toString();
+    settings.save (opts.settingsFile);
+}
+
+void MainComponent::setDeviceForTest (const DeviceState& state)
+{
+    device = state;
+    deviceRate = state.running ? state.rate : 0.0;
+    if (state.running && state.rate > 0.0)
+        recorder.prepare (state.rate, state.bufferSize);
+    updateTransport();
+}
+
+void MainComponent::showAudioSettings()
+{
+    if (! audioDialog)
+    {
+        audioDialog = std::make_unique<AudioDialog> (std::make_unique<juce::AudioDeviceSelectorComponent> (deviceManager, 0, 32, 0, 2, false, false, false, false));
+        audioDialog->setLookAndFeel (&look);
+        audioDialog->centreAroundComponent (this, audioDialog->getWidth(), audioDialog->getHeight());
+    }
+    audioDialog->setVisible (true);
+    audioDialog->toFront (true);
+}
+
+// The IN menu of a track: the device's inputs, one at a time or in pairs, and the choice goes to the track (not an undo step).
+void MainComponent::showInputMenu (int track)
+{
+    if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return;
+    const auto& current = *session.tracks[(size_t) track];
+    juce::PopupMenu menu;
+    const auto choices = inputChoices (device);
+    if (! device.running)
+        menu.addItem ("No audio device: choose the input with Audio", false, false, nullptr);
+    else if (choices.empty())
+        menu.addItem ("The device has no active input", false, false, nullptr);
+    for (const auto& c : choices)
+        menu.addItem (c.label, true, c.left == current.inputLeft && c.right == current.inputRight, [this, track, c]
+        {
+            juce::String error;
+            if (! session.setTrackInput (track, c.left, c.right, error)) showError (error);
+            requestRefresh();
+        });
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&arrange));
+}
+
+// ---- recording ------------------------------------------------------------------------------------------------------------------
+juce::File MainComponent::recordingFolder() const
+{
+    if (opts.recordings != juce::File())
+        return opts.recordings;
+    const auto name = juce::File::createLegalFileName (session.name);
+    if (session.projectFile != juce::File())
+        return session.projectFile.getParentDirectory().getChildFile (name + " Recordings");
+    const auto stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H.%M.%S");
+    return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Olympus Recordings").getChildFile (name + " " + stamp);
+}
+
+// The latency the takes are placed earlier by: the device's input and output latency, the extra latency in the settings and the monitor
+// chain's (what is heard late). Fixed at REC, so the take lines up with what was heard then.
+void MainComponent::setTakeLatency()
+{
+    takeLatency = (juce::int64) device.inputLatency + device.outputLatency + settings.extraLatencySamples + session.monitorLatency();
+}
+
+bool MainComponent::startRecording()
+{
+    if (recorder.isRecording())
+        return true;
+    juce::String error;
+    if (! device.running)
+        error = "No audio device is running: choose the input and output device with Audio.";
+    else if (device.inputs == 0)
+        error = "The audio device has no input channels: choose an input device with Audio.";
+    if (error.isNotEmpty())
+    {
+        showError (error);
+        return false;
+    }
+    source.recordStart = -1;   // set by the first device block the recorder runs in
+    if (! beginRecording (recorder, session, recordingFolder(), device.rate, error))
+    {
+        showError (error);
+        return false;
+    }
+    takeFrom = position();
+    setTakeLatency();
+    {
+        const juce::ScopedLock sl (session.lock);
+        arrange.recordingTracks.clear();
+        for (int i = 0; i < (int) session.tracks.size(); ++i)
+            if (session.tracks[(size_t) i]->armed)
+                arrange.recordingTracks.push_back (i);
+    }
+    arrange.recordingFrom = arrange.recordingTo = (double) takeFrom;
+    syncTransport();
+    session.prepare (false);
+    source.playing = true;
+    updateTransport();
+    return true;
+}
+
+void MainComponent::toggleRecord()
+{
+    if (recorder.isRecording()) stopRecording();
+    else startRecording();
+    updateTransport();
+}
+
+// Ends the takes, waits for their files to be written, and places them: one undo step, the first clip selected and the view on it. A take
+// that stopped with the device is kept as it is; `problem` is shown after.
+void MainComponent::stopRecording (const juce::String& problem)
+{
+    if (! recorder.isRecording())
+        return;
+    source.playing = false;
+    const auto takes = recorder.stop();
+    const juce::int64 heard = source.recordStart.exchange (-1);
+    const juce::int64 start = heard >= 0 ? heard : takeFrom;
+    const juce::int64 begin = juce::jmax ((juce::int64) 0, start - takeLatency);
+
+    juce::String error;
+    if (! finishRecording (takes, start, (int) takeLatency, editor, error) && error.isEmpty())
+        error = "A take could not be placed on its track.";
+    session.dirty = true;
+
+    ClipRef first;
+    {
+        const juce::ScopedLock sl (session.lock);
+        for (const auto& take : takes)
+        {
+            if (take.frames <= 0 || first.valid())
+                continue;
+            const auto& clips = session.tracks[(size_t) take.track]->clips;
+            for (int c = (int) clips.size() - 1; c >= 0; --c)
+                if (clips[(size_t) c].start == begin) { first = { take.track, c }; break; }
+        }
+    }
+    arrange.recordingFrom = arrange.recordingTo = -1.0;
+    arrange.recordingTracks.clear();
+    if (first.valid())
+        arrange.selected = first;
+    arrange.scrollTo (begin);
+    syncTransport();
+    refreshNow();
+
+    juce::StringArray problems;
+    if (error.isNotEmpty()) problems.add (error);
+    if (problem.isNotEmpty()) problems.add (problem);
+    if (problems.size() > 0)
+        showError (problems.joinIntoString ("\n"));
+}
+
+// The timer's part of a take: the strip grows from where it began to the playhead, and a device that stopped ends it. Also what the
+// arrangement's meters show (the inputs of an armed track while the transport is stopped or recording).
+void MainComponent::updateRecording()
+{
+    if (deviceStopped.exchange (false))
+    {
+        if (recorder.isRecording())
+            stopRecording ("The audio device stopped while recording: the take was kept up to where it stopped.");
+        readDevice();
+        updateTransport();
+    }
+    if (! recorder.isRecording())
+        return;
+    const juce::int64 heard = source.recordStart.load();
+    arrange.recordingFrom = (double) (heard >= 0 ? heard : takeFrom);
+    arrange.recordingTo = (double) position();
+    repaint();
+}
+
 // ---- actions -----------------------------------------------------------------------------------------------------------------
 void MainComponent::newProject()
 {
+    stopRecording();
     closeEditors();
     source.playing = false;
     session.newProject ("Untitled");
@@ -361,6 +705,7 @@ void MainComponent::newProject()
 
 void MainComponent::openProject (const juce::File& file)
 {
+    stopRecording();
     closeEditors();
     source.playing = false;
     juce::String error;
@@ -493,6 +838,12 @@ void MainComponent::zoomBy (double factor)
 
 void MainComponent::removeTrack (int index)
 {
+    // a take on this track's index would land on another track: it is stopped first, which is the user's choice to make
+    if (recorder.isRecording())
+    {
+        showError ("Stop the recording before you remove a track.");
+        return;
+    }
     closeEditors();
     juce::String error;
     if (session.removeTrack (index, error))
@@ -519,6 +870,7 @@ juce::String MainComponent::renderTo (const juce::File& folder, const std::funct
 
 void MainComponent::togglePlay()
 {
+    if (recorder.isRecording()) { stopRecording(); return; }
     if (source.playing.load()) { source.playing = false; return; }
     if (session.tracks.empty()) return;
     syncTransport();
@@ -533,8 +885,17 @@ void MainComponent::rewind()
     seek (session.loopOn && session.loopEnd > session.loopStart ? session.loopStart : 0);
 }
 
-// The playhead may be put anywhere from 0; playing stops at the end of the audio (or wraps at the loop's end).
-void MainComponent::seek (juce::int64 sample) { source.position = juce::jmax ((juce::int64) 0, sample); }
+// The playhead may be put anywhere from 0; playing stops at the end of the audio (or wraps at the loop's end). While a take runs it stays
+// where the take is: the take is a continuous recording from where it began.
+void MainComponent::seek (juce::int64 sample)
+{
+    if (recorder.isRecording())
+    {
+        showError ("Stop the recording before you move the playhead.");
+        return;
+    }
+    source.position = juce::jmax ((juce::int64) 0, sample);
+}
 
 void MainComponent::syncTransport()
 {
@@ -591,6 +952,7 @@ void MainComponent::chooseFolder()
 void MainComponent::chooseAndRender()
 {
     if (session.tracks.empty()) { showError ("There are no tracks to render."); return; }
+    if (recorder.isRecording()) { showError ("Stop the recording before you render the stems."); return; }
     const auto start = session.projectFile != juce::File() ? session.projectFile.getParentDirectory().getChildFile (session.name + " stems") : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
     chooser = std::make_unique<juce::FileChooser> ("Render the stems into this folder", start);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
@@ -715,6 +1077,8 @@ void MainComponent::timerCallback()
     // The audio copy of the transport is not taken here: every change that moves it calls syncTransport (refreshNow, the loop, the arrangement's
     // edits). A timer that took the session's lock would make the audio callback's try-lock miss a block now and then.
     syncPlayhead();
+    arrange.showInputLevels = ! isPlaying() || recorder.isRecording();
+    updateRecording();
     arrange.refresh();
     updateTransport();
     // A plugin edited in its own window changes the project: notice it by what the plugins would save.
@@ -753,6 +1117,12 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (code == juce::KeyPress::spaceKey) { togglePlay(); updateTransport(); return true; }
     if (code == juce::KeyPress::returnKey) { rewind(); updateTransport(); return true; }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { arrange.deleteSelected(); return true; }
+    if (is ('r'))
+    {
+        if (bpmField.hasKeyboardFocus (true)) return false;   // typing a tempo: the R is a letter there
+        toggleRecord();
+        return true;
+    }
     if (is ('s')) { syncPlayhead(); arrange.splitAtPlayhead(); return true; }
     if (is ('m')) { syncPlayhead(); arrange.addMarkerAtPlayhead(); return true; }
     if (is ('l')) { toggleLoop(); return true; }
@@ -765,9 +1135,9 @@ void MainComponent::resized()
 {
     auto r = getLocalBounds();
     const int w = r.getWidth();
-    const int rowA = 12, rowB = 46, h = 26, hb = 30;
+    const int rowA = 12, rowB = 46, h = 26, hb = 30, hc = 28;
 
-    // row A: the project and the tracks
+    // row A: the project and the tracks, the audio devices
     int x = 290;
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton })
     {
@@ -782,12 +1152,14 @@ void MainComponent::resized()
     pluginsButton.setBounds (x, rowA, 80, h);
     x += 86;
     renderButton.setBounds (x, rowA, 112, h);
+    audioButton.setBounds (x + 118, rowA, 76, h);
     guideButton.setBounds (w - kMargin - 70, rowA, 70, h);
 
-    // row B: the transport, then the zoom, then the position
+    // row B: the transport, then the zoom
     x = 290;
     rewindButton.setBounds (x, rowB, 34, hb);       x += 40;
     playButton.setBounds (x, rowB, 66, hb);         x += 72;
+    recordButton.setBounds (x, rowB, 60, hb);       x += 66;
     loopButton.setBounds (x, rowB, 60, hb);         x += 66;
     metronomeButton.setBounds (x, rowB, 64, hb);    x += 70;
     bpmField.setBounds (x, rowB, 70, hb);           x += 76;
@@ -799,7 +1171,10 @@ void MainComponent::resized()
     zoomOutButton.setBounds (x, rowB, 30, hb);      x += 36;
     zoomInButton.setBounds (x, rowB, 30, hb);       x += 36;
     zoomFitButton.setBounds (x, rowB, 44, hb);
-    positionBox = { w - kMargin - 184, rowB, 184, hb };
+
+    // row C: the device's summary, the take's time or the track count, and the position
+    deviceLabel.setBounds (290, kRowC, 620, hc);
+    positionBox = { w - kMargin - 184, kRowC, 184, hc };
 
     noteStrip = { kMargin, r.getHeight() - kMargin - ui::kNoteStripHeight, w - 2 * kMargin, ui::kNoteStripHeight };
     bodyArea = { kMargin, kHeaderHeight + 12, w - 2 * kMargin, noteStrip.getY() - 10 - (kHeaderHeight + 12) };
@@ -819,9 +1194,20 @@ void MainComponent::paint (juce::Graphics& g)
     g.drawText (positionText (session, position()), positionBox.reduced (8, 0), juce::Justification::centredRight);
     ui::hw::drawGlassOverlay (g, positionBox.toFloat(), 3.0f, false);
 
-    const auto tracks = juce::String ((int) session.tracks.size()) + (session.tracks.size() == 1 ? " track" : " tracks")
-                        + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String());
-    ui::hw::drawLabel (g, tracks, { 1026, 12, 160, 26 }, juce::Justification::centredLeft, colours::dim, 10.5f);
+    // beside the position: the time of the take in progress in red, else the track count and the sample rate
+    juce::String readout;
+    juce::Colour colour = colours::dim;
+    if (recorder.isRecording())
+    {
+        readout = "REC  " + timeText ((juce::int64) recorder.framesRecorded(), device.rate);
+        colour = colours::bad;
+    }
+    else
+    {
+        readout = juce::String ((int) session.tracks.size()) + (session.tracks.size() == 1 ? " track" : " tracks")
+                  + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String());
+    }
+    ui::hw::drawLabel (g, readout, { 930, kRowC, 140, 28 }, juce::Justification::centredRight, colour, 10.5f);
     ui::drawNoteStrip (g, noteStrip, notes());
 }
 }

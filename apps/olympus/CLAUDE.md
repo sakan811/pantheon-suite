@@ -10,7 +10,7 @@ names), which a test compares with every `plugins/*/CMakeLists.txt`, and which t
 
 ```bash
 scripts/build.sh olympus                 # OlympusTests + OlympusUiCheck, built and run
-scripts/build.sh olympus snap            # docs/screenshot.png (the picture the README embeds)
+scripts/build.sh olympus snap            # docs/screenshot.png and docs/screenshot-record.png (the pictures the README embeds)
 scripts/build.sh olympus app             # the window;  scripts/build.sh olympus OlympusMcp  # the server
 OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests     # also hosts a real built plugin (VST3)
 ```
@@ -33,9 +33,9 @@ Source/Mcp.h          the MCP server: JSON-RPC lines in and out, the 31 tools, p
 Source/Settings.h     plugin folders, scanSuiteOnly and the last project, in one file shared by the window and the server; the plugin cache and the scan's pedal sit beside it
 Source/Advice.h       the GUIDE text and the notes at the foot (rules only; the kit draws them)
 Source/Main.cpp       the app and its 16:10 window;  Source/McpMain.cpp  the server's main
-Source/UI/MainComponent.h / .cpp  the window: the project buttons and the transport bar, the audio source (the callback), the actions, the keys, the FX menu of a track; owns `Editor editor`
+Source/UI/MainComponent.h / .cpp  the window: the project buttons, the transport bar and the top bar's device line; the audio device's callback (`DeviceCallback`: the inputs to the recorder, the transport `Source` to the outputs), REC and the takes, the AUDIO dialog and the IN menu, the actions, the keys, the FX menu of a track; owns `Editor editor`
 Source/UI/Arrange.h / .cpp  ArrangeView, the arrangement in the window's body: track headers (name, FX, X, M, S, pan, fader, meter), ruler, loop and marker lanes, clip lanes, the playhead; its drags go through Editor gestures
-Source/UI/                 LampButton, SlotButton, PluginWindow (SlotButton is kept, unused: the FX menu lists a track's plugins)
+Source/UI/                 LampButton, SlotButton, PluginWindow (SlotButton is kept, unused: the FX menu lists a track's plugins); the header of a track (in Arrange.cpp) has the R (arm) and IN (input) buttons, and its meter shows the input of an armed track while the transport is stopped or recording
 Tests/                Tests.cpp (session, render, project, server, the Editor's edits [22]-[28]), TempoTests.h (tempo and grid, included by Tests.cpp), UiCheck.cpp, Snapshot.cpp, TestPlugin.h, Check.h (a copy of Orpheus' tiny helper: apps share nothing)
 ```
 
@@ -50,6 +50,8 @@ Tests/                Tests.cpp (session, render, project, server, the Editor's 
 - **The server writes only what it is told to** (a project path, a render folder) and prints nothing but protocol on stdout. Every tool failure is an `isError` result with a reason an agent can act on; keep the 31 tools in `tools()` and in README in step.
 - **The monitor chain is playback only, never in a render, not in the project, saved in `monitor.xml`**: `Session::processMonitor` runs after `processBlock` on the audio callback's playback block and nowhere else; `renderStems` and `processBlock` never touch it (test [31]), and it is not an undo step.
 - **Recording is real-time safe, its files are written by a thread, and a take lands minus the latency**: `Recorder::push` allocates nothing, takes no lock and does no file IO (the `ThreadedWriter`s do, on a `TimeSliceThread`); `stop()` waits for a push in flight before it closes a file; `finishRecording` puts each take at `startSample - latencyCompensation` (never before 0) as one undo step.
+- **One audio path, the device's.** `MainComponent::DeviceCallback::deviceBlock` is what the device calls and what the checks call with their own buffers: the inputs go to `Recorder::push` first (always, so the meters work), then `Source::getNextAudioBlock` fills the outputs (it clears them first, so unused outputs are silent). `processMonitor` runs on the playback block after `processBlock`, as its invariant says. A device with no outputs plays nothing and its takes still get their inputs. `audioDeviceAboutToStart` (message thread, before the callbacks start) ends a running take, because a take cannot go on across a new rate or block size, and then prepares the recorder; `audioDeviceStopped` (device thread) only sets a flag that the timer reads and ends the take.
+- **A take starts where the playhead was at its first block.** `deviceBlock` sets `Source::recordStart` from the position at the first block the recorder runs in (the block is then pushed, so the take and the position agree); REC clears it first. `stopRecording` places each take at `recordStart - latency`, with the latency fixed at REC (device input + output latency + `extraLatencySamples` + `Session::monitorLatency()`). While a take runs the loop does not wrap, the end of the audio does not stop it, `seek` is refused (the take is one continuous recording), and a track cannot be removed.
 - **Plugins must be created and edited on the message thread.** The window and the server run on it; the render thread of the progress window only calls `processBlock`.
 - **Everything is drawn from the kit** (`shared/ui`): `LampButton` exists only because the kit's look-and-feel lights every switch in one colour; if the kit grows per-button colours, use them and delete it. The window is 16:10 (`kDesignWidth` a multiple of 8).
 - **Adding a plugin to the suite** means adding its product name to `suiteNames()` (a test fails until you do).
@@ -69,5 +71,7 @@ Tests/                Tests.cpp (session, render, project, server, the Editor's 
 - No macOS CI job, and the app has not been run against the other twelve built plugins by a person; only Hermes was hosted by hand on Linux.
 - No inline plugin parameter panel: a plugin is edited in its own window.
 - No per-slot wet/dry.
-- Nothing has been listened to. Real-time playback of clips, the loop wrap and the metronome, the audio device, hosting a real third-party plugin and the plugin editors are checked only by the automated tests (the callback's own code, `renderAudioBlock`), and a person must check them on the Mac. The real-plugin check (`OLYMPUS_PLUGIN_DIR`) has not been run on the clip engine.
+- Nothing has been listened to. Real-time playback of clips, the loop wrap and the metronome, the audio device, hosting a real third-party plugin and the plugin editors are checked only by the automated tests (the callback's own code, `renderAudioBlock`, `DeviceCallback::deviceBlock` with the checks' buffers), and a person must check them on the Mac. The real-plugin check (`OLYMPUS_PLUGIN_DIR`) has not been run on the clip engine.
+- **Recording has never run on a real interface.** No check opens a device: the take, its placement and its undo are checked with a fake device (`setDeviceForTest`) and fed blocks. Not checked: the AUDIO dialog (`AudioDeviceSelectorComponent`, a non-modal `DialogWindow`), the macOS microphone prompt (`MICROPHONE_PERMISSION_*` in CMake), a device's real latency values, a stop or change of the device under a real driver (its handling is the flag and `audioDeviceAboutToStart`), and the take files on a real disk under a long stall (six seconds of buffer, then dropped samples are counted by `Recorder::samplesDropped`, which no window shows).
+- No software input monitoring (use the interface's direct monitoring), no punch-in or loop recording, no comping of takes, no take lanes: a take is a clip, and recording again on a track adds another clip over the first.
 - The arrangement's drags, menus and the look at other sizes are checked by its methods and one screenshot, not by a person's hand.
