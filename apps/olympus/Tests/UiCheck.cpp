@@ -759,8 +759,9 @@ int main()
         w->io.audioDeviceStopped();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         test::check (! w->isRecording() && (int) w->session.tracks[0]->clips.size() == before + 1
-                         && w->session.tracks[0]->clips.back().length == 2000 && ! gErrors.empty() && gErrors.back().contains ("stopped while recording"),
-                     "a device that stops ends the take, which is kept, and the window says so");
+                         && w->session.tracks[0]->clips.back().length == 2000 - 150 && w->session.tracks[0]->clips.back().offset == 150
+                         && ! gErrors.empty() && gErrors.back().contains ("stopped while recording"),
+                     "a device that stops ends the take, which is kept, and the window says so: the 150 samples of latency before 0 are skipped");
 
         // a change of the device during a take ends it as well
         w->toggleRecord();
@@ -781,6 +782,160 @@ int main()
         feedDevice (*w, fed, 44100.0, 4410);
         w->toggleRecord();
         test::check (w->session.sampleRate == 44100.0 && w->session.tracks[0]->clips.size() == 1, "the first take sets the session's rate: " + juce::String (w->session.sampleRate));
+    }
+
+    std::printf ("[17] Inputs by their own number: the callback gets only the switched-on inputs; REC refuses one that is off; the take holds its own input\n");
+    {
+        auto w = makeWindow();
+        juce::String error;
+        w->session.addEmptyTrack ("Drums");
+        w->session.setTrackArm (0, true, error);
+
+        // the device has ONE active input, input 2 (absolute number 1), so the callback passes one channel
+        MainComponent::DeviceState only = fakeDevice (48000.0, 0, 0);
+        only.inputs = 1;
+        only.activeInputs.clear();
+        only.activeInputs.setBit (1);
+        only.inputNames = { "Mic 1", "Guitar" };
+        const auto choices = MainComponent::inputChoices (only);
+        test::check (choices.size() == 1 && choices[0].label == "In 2: Guitar" && choices[0].left == 1,
+                     "the IN menu lists only the switched-on input, by its number and its name");
+        w->setDeviceForTest (only);
+
+        test::check (w->session.setTrackInput (0, 0, -1, error), "Drums is set to input 1, which is switched off");
+        gErrors.clear();
+        test::check (! w->startRecording() && ! w->isRecording() && gErrors.size() == 1 && gErrors.back() == "Drums records input 1, which is not switched on in AUDIO",
+                     "REC refuses it, naming the track and the input");
+
+        test::check (w->session.setTrackInput (0, 1, -1, error) && w->startRecording(), "on input 2, the take starts");
+        std::vector<float> sine (4800);
+        for (int i = 0; i < (int) sine.size(); ++i)
+            sine[(size_t) i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * i / 48000.0);
+        std::vector<float> outL (1200), outR (1200);
+        float* outPtr[2] = { outL.data(), outR.data() };
+        for (int b = 0; b < (int) sine.size(); b += 1200)
+        {
+            const float* inPtr[1] = { sine.data() + b };   // one channel: the only active input
+            w->io.deviceBlock (inPtr, 1, outPtr, 2, 1200);
+        }
+        w->stopRecording();
+        const auto& clips = w->session.tracks[0]->clips;
+        test::check (clips.size() == 1 && clips[0].audio != nullptr && clips[0].length == 4800, "the take is a clip of what the input heard");
+        test::check (clips.size() == 1 && clips[0].audio != nullptr && std::abs (clips[0].audio->getSample (0, 1000) - sine[1000]) < 1e-4f
+                         && std::abs (clips[0].audio->getSample (1, 1000) - sine[1000]) < 1e-4f,
+                     "the take is the sine of input 2, on both channels (mono)");
+
+        // a device with no outputs: nothing is heard, but the transport still runs (the playhead advances over the take)
+        w->seek (0);
+        w->togglePlay();
+        std::vector<float> none (256, 0.0f);
+        const float* noneIn[1] = { none.data() };
+        w->io.deviceBlock (noneIn, 1, nullptr, 0, 256);
+        test::check (w->position() == 256 && w->isPlaying(), "a device with no outputs still advances the playhead: " + juce::String ((int) w->position()));
+    }
+
+    std::printf ("[18] A take is placed minus every latency it is heard late by: the device's, the extra, the monitor's and the longest track chain's; a take that begins before 0 keeps its sound\n");
+    {
+        auto w = makeWindow();
+        juce::String error;
+        w->session.addEmptyTrack ("Gtr");
+        w->session.setTrackArm (0, true, error);
+        // a track chain with 64 samples of latency: the tracks are delayed to line up with it, so the mix is heard 64 samples late
+        test::check (w->session.setChain (0, { "test delay" }, error) && w->session.maxLatency() == 64, "a chain with 64 samples of latency");
+        w->setDeviceForTest (fakeDevice());   // 100 samples in, 50 out
+        w->seek (0);                           // the take begins at 0, so 100 + 50 + 64 samples of its head fall before it
+        test::check (w->startRecording(), "REC starts on the switched-on input");
+        juce::int64 fed = 0;
+        feedDevice (*w, fed, 48000.0, 4800);
+        w->stopRecording();
+        const auto& clips = w->session.tracks[0]->clips;
+        test::check (clips.size() == 1 && clips[0].start == 0 && clips[0].offset == 214 && clips[0].length == 4800 - 214,
+                     test::fmt ("the take starts at 0 from sample 214 (the latencies), length %d", clips.empty() ? -1 : (int) clips[0].length));
+        test::check (clips.size() == 1 && clips[0].audio != nullptr
+                         && std::abs (clips[0].audio->getSample (0, (int) clips[0].offset) - 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * 214.0 / 48000.0)) < 1e-4f,
+                     "and the first sample it plays (file sample 214) is the sine there: none of the sound is lost");
+    }
+
+    std::printf ("[19] Safe start: a pedal left by a start that died skips the monitor chain or the last project (the files kept, a note says so); PLUGINS loads the chain; no pedal changes nothing. A plugin with no editor is said so\n");
+    {
+        const auto dir = tempFolder().getChildFile ("safe-start");
+        dir.deleteRecursively();
+        const auto settings = dir.getChildFile ("settings.xml");
+        const auto monitorFile = Settings::monitorFile (settings);
+        const auto monitorPedal = Settings::monitorPedalFile (settings);
+        const auto projectPedal = Settings::projectPedalFile (settings);
+        const auto project = dir.getChildFile ("song.olympus");
+        const auto monitorNote = "Last start stopped loading the monitor chain";
+        const auto projectNote = "Last start stopped opening the last project";
+
+        {
+            auto w = makeWindow (true, settings);
+            test::check (w->addMonitorPlugin ("test gain") && monitorFile.existsAsFile(), "a monitor plugin is saved in monitor.xml");
+        }
+        const auto before = monitorFile.loadFileAsString();
+
+        // the last start died while loading the chain: its pedal is still there
+        monitorPedal.replaceWithText ("loading the monitor chain\n");
+        {
+            auto w = makeWindow (true, settings);
+            test::check (! w->monitorChainLoaded() && w->monitorChainSkipped() && w->session.monitor.empty(), "a chain whose pedal is there is not loaded");
+            test::check (! monitorPedal.existsAsFile(), "the pedal is removed at this start");
+            test::check (noteMentions (*w, monitorNote, ui::Severity::warning), "and a note at the foot says so");
+            test::check (monitorFile.loadFileAsString() == before, "monitor.xml is byte-identical");
+            w->loadSkippedMonitorChain();
+            test::check (w->monitorChainLoaded() && w->session.monitor.size() == 1 && ! w->monitorChainSkipped() && ! monitorPedal.existsAsFile(),
+                         "PLUGINS > Load saved monitor chain reads it, and leaves no pedal behind");
+            test::check (! noteMentions (*w, monitorNote, ui::Severity::warning), "and the note goes");
+        }
+
+        // no pedal: the chain loads as before, and no note
+        {
+            auto w = makeWindow (true, settings);
+            test::check (w->monitorChainLoaded() && w->session.monitor.size() == 1 && ! w->monitorChainSkipped() && ! noteMentions (*w, monitorNote, ui::Severity::warning),
+                         "without a pedal the chain loads as before, with no note");
+        }
+        test::check (! monitorPedal.existsAsFile(), "and no pedal is left");
+
+        // the last project: a pedal means the start died opening it, so it is not opened again
+        {
+            auto w = makeWindow (true, settings);
+            w->addTracks ({ makeWav ("safe.wav").getFullPathName() });
+            test::check (w->saveTo (project), "a project to reopen is saved");
+        }
+        Settings saved = Settings::load (settings);
+        saved.lastProject = project.getFullPathName();
+        saved.save (settings);
+        const auto projectBefore = project.loadFileAsString();
+        projectPedal.replaceWithText ("opening the last project\n");
+        {
+            auto w = makeWindow (true, settings);
+            w->openLastProjectAtStart();
+            test::check (w->session.projectFile == juce::File() && w->session.tracks.empty() && ! projectPedal.existsAsFile(),
+                         "a last project whose pedal is there is not opened again; the pedal is removed");
+            test::check (noteMentions (*w, projectNote, ui::Severity::warning), "and a note says so");
+            test::check (project.loadFileAsString() == projectBefore, "the project file is byte-identical");
+        }
+        {
+            auto w = makeWindow (true, settings);
+            w->openLastProjectAtStart();
+            test::check (w->session.projectFile == project && ! w->session.tracks.empty() && ! projectPedal.existsAsFile(),
+                         "without a pedal the last project opens as before");
+        }
+
+        // a plugin that says it has an editor and gives none: the window says so
+        struct NoEditor : test::GainPlugin
+        {
+            NoEditor() : test::GainPlugin ("Silent Plugin", 0) {}
+            bool hasEditor() const override { return true; }
+        };
+        auto w = makeWindow();
+        w->session.catalog.addInternal (test::GainPlugin::description ("Silent Plugin"), [] (double, int) { return std::make_unique<NoEditor>(); });
+        juce::String error;
+        const int track = w->session.addEmptyTrack ("Ed");
+        test::check (w->session.addPlugin (track, "Silent Plugin", -1, error), "a plugin with no editor is added: " + error);
+        gErrors.clear();
+        w->openEditor (track, 0);
+        test::check (gErrors.size() == 1 && gErrors.back() == "Silent Plugin has no editor window", "a plugin that gives no editor is said so, not silent");
     }
 
     std::printf ("[10] Session: empty tracks\n");

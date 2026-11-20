@@ -40,6 +40,8 @@ struct AdviceDevice
     int inputs = 0;
     double roundTripMs = 0.0;
     juce::String monitorProblem;   // the monitor chain could not be read (its file is not one, or is newer): kept as it is
+    bool monitorSkipped = false;   // the last start died loading the monitor chain: it is skipped until PLUGINS loads it
+    bool projectSkipped = false;   // the last start died opening the last project: it was not opened again
 };
 
 inline juce::String kiloHertz (double rate) { return juce::String (rate / 1000.0, 1) + " kHz"; }
@@ -103,6 +105,10 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
     }
     if (device.monitorProblem.isNotEmpty())
         add (ui::Severity::warning, ("Monitor chain not read: " + device.monitorProblem + " Its file is kept.").substring (0, ui::kMaxNoteChars));
+    if (device.monitorSkipped)
+        add (ui::Severity::warning, "Last start stopped loading the monitor chain: skipped. PLUGINS > Load saved monitor chain tries again.");
+    if (device.projectSkipped)
+        add (ui::Severity::warning, "Last start stopped opening the last project: not opened again. OPEN opens it.");
     if (s.tracks.empty())
         add (ui::Severity::info, "No audio yet: IMPORT AUDIO, or drop files on the window, puts them on tracks at the playhead.");
     else if (clips == 0)

@@ -40,6 +40,16 @@ public:
     void prepareToPlay (double rate, int) override { preparedRate = rate; ring.setSize (2, juce::jmax (1, latency)); ring.clear(); pos = 0; }
     void releaseResources() override {}
     void reset() override { ring.clear(); pos = 0; }
+    // A plugin that changes its latency while it runs (a linear-phase switch, say): it reports the change to its listeners, as
+    // setLatencySamples does, and its delay line follows.
+    void changeLatency (int samples)
+    {
+        latency = samples;
+        setLatencySamples (samples);
+        ring.setSize (2, juce::jmax (1, samples));
+        ring.clear();
+        pos = 0;
+    }
     void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&) override
     {
         const auto g = juce::Decibels::decibelsToGain (gain->get());

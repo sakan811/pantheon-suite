@@ -148,6 +148,8 @@ public:
 
     // The bundles (and Audio Units) the scan refused to load a second time because they crashed or hung: skipped until the cache is deleted.
     juce::StringArray blacklisted() const { return list.getBlacklistedFiles(); }
+    // Forgets the blacklist: the next scan reads those bundles again (PLUGINS > Forget blacklisted plugins).
+    void clearBlacklist() { list.clearBlacklistedFiles(); }
 
     // The name of the plugin `query` means: its whole name as names() gives it, or the start of one, in any case. A name two different plugins
     // share is refused with both of them named. Empty, with the reason in `error`, if there is none or more than one.

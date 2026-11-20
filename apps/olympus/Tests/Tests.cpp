@@ -1547,6 +1547,27 @@ void finishChecks()
     const std::vector<Recorder::Finished> early { { 0, file44, 44100 }, { 0, file44b, 0 } };
     test::check (finishRecording (early, 500, 2000, ec, err) && c.tracks[0]->clips.size() == 1 && c.tracks[0]->clips[0].start == 0 && c.sampleRate == 44100.0,
                  "a take that would start before 0 starts at 0; an empty take adds nothing");
+    test::check (c.tracks[0]->clips[0].offset == 1500 && c.tracks[0]->clips[0].length == 44100 - 1500,
+                 "and its head that falls before 0 is skipped: the offset is the part before 0 (1500), so the rest plays on time");
+
+    // a take starting at 100 with 441 samples of latency: placed at 0, its first 341 samples skipped
+    Session h;
+    h.addEmptyTrack ("H");
+    Editor eh (h);
+    test::check (finishRecording ({ { 0, file44, 44100 } }, 100, 441, eh, err) && h.tracks[0]->clips.size() == 1 && h.tracks[0]->clips[0].start == 0
+                     && h.tracks[0]->clips[0].offset == 341 && h.tracks[0]->clips[0].length == 44100 - 341,
+                 "start 100, latency 441: the clip starts at 0 from sample 341 of the file");
+    Session z;
+    z.addEmptyTrack ("Z");
+    Editor ez (z);
+    test::check (finishRecording ({ { 0, file44, 44100 } }, 100, 0, ez, err) && z.tracks[0]->clips[0].start == 100 && z.tracks[0]->clips[0].offset == 0
+                     && z.tracks[0]->clips[0].length == 44100, "latency 0: the take is placed where recording began, unchanged");
+    Session t;
+    t.addEmptyTrack ("T");
+    Editor et (t);
+    err.clear();
+    test::check (! finishRecording ({ { 0, file44, 300 } }, 100, 441, et, err) && t.tracks[0]->clips.empty() && err.contains ("was not placed"),
+                 "a take shorter than its latency is not placed, and the reason says so");
 }
 
 void recordSettingsChecks()
@@ -1798,6 +1819,83 @@ void addClipLockChecks()
                  "a file that is not there is refused with the reason");
 }
 
+// [38] A plugin that changes its latency: after the timer's call the tracks follow it; a missing plugin a scan finds is given its slot; slots
+// that listen to a plugin are removed safely by every way out of a session.
+void latencyChecks()
+{
+    std::printf ("[38] Latency changes: a plugin that reports a new latency moves the tracks' delays once the window has followed it; a missing plugin is retried; removals with listeners are safe\n");
+    juce::String err;
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        s.addEmptyTrack ("A");
+        s.addEmptyTrack ("B");
+        test::check (s.setChain (0, { "test gain" }, err) && s.setChain (1, { "test delay" }, err), "track A has no latency, track B a delay of 64");
+        test::check (s.tracks[0]->delaySamples == 64 && s.tracks[1]->delaySamples == 0, "so A is delayed by 64 to line up with B");
+        auto* gain = dynamic_cast<test::GainPlugin*> (s.tracks[0]->chain[0]->instance.get());
+        test::check (gain != nullptr, "A's plugin is the test gain");
+        gain->changeLatency (100);   // a linear-phase switch: the plugin reports it, and the flag is set (no lock, any thread)
+        test::check (s.latencyWatch.changed.load(), "the plugin's report is noticed");
+        test::check (s.takeLatencyChange() && ! s.takeLatencyChange(), "takeLatencyChange reads the report once");
+        s.updateLatencies();   // what the window's timer does after it
+        test::check (s.tracks[0]->delaySamples == 0 && s.tracks[1]->delaySamples == 36, "B is now delayed by 36 (100 - 64) and A by 0: the tracks follow the new latency");
+        test::check (s.maxLatency() == 100, "and the session's latency is the new one");
+    }
+
+    {
+        // a project's missing plugin (a track's and a monitor chain's) gets another try when the scan has found it
+        Session m;
+        test::addTestPlugins (m.catalog);
+        m.addEmptyTrack ("M");
+        m.tracks[0]->chain.push_back (std::make_unique<Slot>());
+        m.tracks[0]->chain.back()->plugin = "Late Plugin";
+        m.monitor.push_back (std::make_unique<Slot>());
+        m.monitor.back()->plugin = "Late Plugin";
+        test::check (m.retryMissing() == 0 && m.tracks[0]->chain.back()->instance == nullptr, "a plugin not found is still missing: nothing changes");
+        m.catalog.addInternal (test::GainPlugin::description ("Late Plugin"), [] (double, int) { return std::make_unique<test::GainPlugin> ("Late Plugin", 0); });
+        test::check (m.retryMissing() == 2 && m.tracks[0]->chain.back()->instance != nullptr && m.monitor.back()->instance != nullptr,
+                     "found by a scan: its track slot and its monitor slot take the plugin");
+        test::check (m.retryMissing() == 0, "a plugin that is there is not made again");
+    }
+
+    {
+        // slots that listen to their plugins are removed on every way out: a plugin removed, a track removed, the session destroyed
+        Session r;
+        test::addTestPlugins (r.catalog);
+        r.addEmptyTrack ("R");
+        r.addEmptyTrack ("R2");
+        test::check (r.setChain (0, { "test gain", "test delay" }, err) && r.setChain (1, { "test delay" }, err), "two chains to take apart");
+        test::check (r.removePlugin (0, 0, err) && r.removeTrack (1, err) && r.tracks.size() == 1, "a plugin and a track are removed");
+        test::check (r.addMonitorPlugin ("test gain", -1, err) && r.monitor.size() == 1, "the monitor chain takes a plugin too");
+        // the session goes out of scope with its listening plugins: their destructors remove the listener first (no crash, the checks reach the end)
+    }
+    test::check (true, "a session with listening plugins was destroyed");
+}
+
+// [39] Settings: written through a temporary file (no half-written settings.xml left); a file that is not settings is kept once as .bad.
+void settingsFileChecks()
+{
+    std::printf ("[39] Settings: the file is written whole, and a damaged settings file is kept once as settings.xml.bad\n");
+    const auto dir = tempFolder().getChildFile ("settings-safe");
+    dir.deleteRecursively();
+    const auto file = dir.getChildFile ("settings.xml");
+    Settings good;
+    good.lastProject = "/tmp/song.olympus";
+    good.extraLatencySamples = 128;
+    good.save (file);
+    const auto back = Settings::load (file);
+    test::check (back.lastProject == "/tmp/song.olympus" && back.extraLatencySamples == 128, "the settings are written and read back");
+    test::check (dir.getNumberOfChildFiles (juce::File::findFiles, "*") == 1, "and no temporary file is left beside them");
+
+    file.replaceWithText ("this is not XML <<");
+    const auto broken = Settings::load (file);
+    const auto bad = dir.getChildFile ("settings.xml.bad");
+    test::check (broken.lastProject.isEmpty() && bad.existsAsFile() && bad.loadFileAsString() == "this is not XML <<", "a damaged file is read as no settings, and kept as settings.xml.bad");
+    file.replaceWithText ("second damage");
+    (void) Settings::load (file);
+    test::check (bad.loadFileAsString() == "this is not XML <<", "a second damaged file does not replace the first copy");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -1839,6 +1937,8 @@ int main()
     deviceRateChecks();
     busChecks();
     addClipLockChecks();
+    latencyChecks();
+    settingsFileChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

@@ -36,12 +36,32 @@ inline constexpr int kMonitorVersion = 1; // monitor.xml, separate from the proj
 inline constexpr int kBlockSize = 512;
 inline constexpr int kMaxMonitorChannels = 8; // the most channels the monitor chain is handed (a device's outputs past this are not run)
 
+// Hears a plugin say its latency has changed (a linear-phase switch, say). A plugin may say so on any thread, so it only sets a flag: the
+// window's timer reads it on the message thread and the session follows (Session::takeLatencyChange). One is owned by each Session.
+class LatencyWatch : public juce::AudioProcessorListener
+{
+public:
+    std::atomic<bool> changed { false };
+    void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override {}
+    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails& details) override
+    {
+        if (details.latencyChanged)
+            changed = true;
+    }
+};
+
 struct Slot
 {
     juce::String plugin;                                 // the plugin's name, as the catalog knows it
     bool bypass = false;
     std::unique_ptr<juce::AudioPluginInstance> instance; // null while the plugin is not installed on this machine
     juce::MemoryBlock savedState;                        // what a missing plugin had, kept so a project that is saved again does not lose it
+    LatencyWatch* watch = nullptr;                       // the session's listener on `instance`, removed before the instance goes
+
+    Slot() = default;
+    Slot (const Slot&) = delete;
+    Slot& operator= (const Slot&) = delete;
+    ~Slot() { if (instance != nullptr && watch != nullptr) instance->removeListener (watch); }
 
     int latency() const { return instance != nullptr && ! bypass ? instance->getLatencySamples() : 0; }
 };
@@ -144,6 +164,7 @@ struct EditState
 class Session
 {
 public:
+    LatencyWatch latencyWatch;                 // declared before the slots: they remove their listener from it (Slot::~Slot)
     Catalog catalog;
     mutable juce::CriticalSection lock;
     std::vector<std::unique_ptr<Track>> tracks;
@@ -168,7 +189,7 @@ public:
     // The plugins the headphones hear (a correction plugin, say): run on the playback block by processMonitor, after processBlock, and
     // by nothing else. Not in the project, not in a render, not an undo step: it belongs to the headphones. Saved in its own file (saveMonitor).
     std::vector<std::unique_ptr<Slot>> monitor;
-    bool monitorBypass = false;
+    std::atomic<bool> monitorBypass { false };   // read by the audio callback without the lock: atomic
 
     Session()
     {
@@ -587,7 +608,7 @@ public:
     {
         auto xml = std::make_unique<juce::XmlElement> ("OlympusMonitor");
         xml->setAttribute ("version", kMonitorVersion);
-        xml->setAttribute ("bypass", monitorBypass);
+        xml->setAttribute ("bypass", monitorBypass.load());
         {
             // every plugin's state is read here: not while processBlock runs beside it
             const juce::ScopedLock sl (lock);
@@ -1299,7 +1320,7 @@ public:
             monitorList.add (juce::var (entry));
         }
         root->setProperty ("monitor", monitorList);
-        root->setProperty ("monitor_bypass", monitorBypass);
+        root->setProperty ("monitor_bypass", monitorBypass.load());
         return juce::var (root);
     }
 
@@ -1325,8 +1346,14 @@ public:
             instance->setStateInformation (state->getData(), (int) state->getSize());
         instance->setPlayHead (&head);
         slot->instance = std::move (instance);
+        slot->watch = &latencyWatch;
+        slot->instance->addListener (&latencyWatch);
         return slot;
     }
+
+    // Message thread (the window's timer): true once after a plugin reported a change of its latency. The caller then calls updateLatencies(),
+    // so the tracks' delays and the take compensation follow the new latency.
+    bool takeLatencyChange() { return latencyWatch.changed.exchange (false); }
 
     // The playhead the plugins read (a plugin that listens to the transport sees this one). The audio thread sets it in processBlock, so
     // a plugin never reads the tempo map itself.
@@ -1367,6 +1394,34 @@ public:
     Head head;
 
     void updateLatencies() { const juce::ScopedLock sl (lock); updateLatenciesLocked(); }
+
+    // Message thread, under the lock: every missing plugin of the tracks and of the monitor chain gets another try, since a scan may have found
+    // it since. One that now loads takes its slot and is given the saved state the slot kept. Returns how many came back.
+    int retryMissing()
+    {
+        const juce::ScopedLock sl (lock);
+        int back = 0;
+        const auto retry = [this, &back] (Slot& slot)
+        {
+            if (slot.instance != nullptr)
+                return;
+            juce::String error;
+            auto fresh = makeSlot (slot.plugin, &slot.savedState, error);
+            if (fresh == nullptr)
+                return;
+            slot.instance = std::move (fresh->instance);   // fresh keeps no instance, so its destructor removes nothing
+            slot.watch = fresh->watch;
+            ++back;
+        };
+        for (auto& t : tracks)
+            for (auto& s : t->chain)
+                retry (*s);
+        for (auto& s : monitor)
+            retry (*s);
+        if (back > 0)
+            updateLatenciesLocked();
+        return back;
+    }
 
 private:
     juce::AudioFormatManager formats;

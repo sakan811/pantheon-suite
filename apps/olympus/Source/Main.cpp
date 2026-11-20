@@ -43,8 +43,8 @@ public:
         const auto path = commandLine.unquoted().trim();
         if (path.isNotEmpty() && juce::File (path).existsAsFile())
             window->content->openProject (juce::File (path));
-        else if (juce::File (window->content->settings.lastProject).existsAsFile())
-            window->content->openProject (juce::File (window->content->settings.lastProject));
+        else
+            window->content->openLastProjectAtStart();   // skipped when the last start died opening it (a pedal, Settings.h)
     }
 
     void shutdown() override { window.reset(); }
