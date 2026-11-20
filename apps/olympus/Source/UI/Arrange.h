@@ -64,6 +64,8 @@ public:
     // While a recording runs: where it began and where it is now (samples; -1 when none), and the armed tracks it records on.
     double recordingFrom = -1.0, recordingTo = -1.0;
     std::vector<int> recordingTracks;
+    // Shared with the window when present: true while an askText box (or a window chooser) is open, so NEW/OPEN/Quit wait.
+    bool* dialogOpen = nullptr;
 
     // ---- the view -------------------------------------------------------------------------------------------------------------
     // Takes the model as it is now: the meters are read here (the peak since the last read), the headers follow, and the playhead
@@ -90,6 +92,12 @@ public:
     // The header's ARM and IN buttons (the checks press them; nullptr when there is no such track).
     juce::Button* armButton (int track);
     juce::Button* inputButton (int track);
+
+    // Checks only: drive an open askText box (clip gain, rename clip, rename marker) without clicking its native modal buttons.
+    bool hasOpenDialog() const { return activeDialog != nullptr || (bool) pendingDialogEnd; }
+    void openClipActionForTest (ClipRef ref, int action) { clipAction (ref, action); }
+    void openMarkerActionForTest (int index, int action) { markerAction (index, action); }
+    void finishOpenDialogForTest (bool accept, const juce::String& text = {});
 
     // ---- geometry (view coordinates, for the checks and the window) -------------------------------------------------------------
     ClipRef clipAt (juce::Point<int> point) const;       // the clip under the point, invalid when none
@@ -159,5 +167,10 @@ private:
     void askText (const juce::String& title, const juce::String& prompt, const juce::String& initial, std::function<void (const juce::String&)> onOk);
     void beginGesture (const juce::String& label) { gesture = std::make_unique<Gesture> (editor, label); }
     void endGesture() { gesture.reset(); }
+    bool& dialogFlag() { return dialogOpen != nullptr ? *dialogOpen : localDialogOpen; }
+
+    bool localDialogOpen = false;
+    juce::Component::SafePointer<juce::AlertWindow> activeDialog;
+    std::function<void (bool, const juce::String&)> pendingDialogEnd;
 };
 } // namespace olympus::gui
