@@ -24,6 +24,7 @@ inline void check (bool ok, const juce::String& what) { check (ok, what.toStdStr
 namespace
 {
 std::vector<juce::String> gErrors, gAsked;
+std::vector<std::function<void()>> gClosers;   // the "closed" callbacks of the plugin windows the checks opened
 bool gAnswer = false;
 
 juce::File tempFolder()
@@ -54,19 +55,23 @@ juce::File takesFolder()
     return tempFolder().getChildFile ("takes-" + juce::String (++windows));
 }
 
-std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true)
+// The window of the checks. Its plugins are filled before its monitor chain is read (Options::fillCatalog), as the app's scan does. The
+// settings (and so monitor.xml) are the given file, else the folder's shared one.
+std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true, const juce::File& settings = {})
 {
     MainComponent::Options options;
     options.audioDevice = false;
     options.scanPlugins = false;
-    options.settingsFile = tempFolder().getChildFile ("settings.xml");
+    options.settingsFile = settings != juce::File() ? settings : tempFolder().getChildFile ("settings.xml");
     options.recordings = takesFolder();
+    if (withPlugins)
+        options.fillCatalog = [] (olympus::Catalog& catalog) { test::addTestPlugins (catalog); };
     auto w = std::make_unique<MainComponent> (options);
     w->setSize (MainComponent::kDesignWidth, MainComponent::kDesignHeight);
-    if (withPlugins) test::addTestPlugins (w->session.catalog);
     w->reportError = [] (const juce::String& m) { gErrors.push_back (m); };
-    w->makeEditorWindow = [] (const juce::String&, juce::AudioProcessorEditor* editor, std::function<void()>) -> std::unique_ptr<juce::Component>
+    w->makeEditorWindow = [] (const juce::String&, juce::AudioProcessorEditor* editor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
     {
+        gClosers.push_back (closed);
         auto holder = std::make_unique<juce::Component>(); // no native window under test
         holder->addAndMakeVisible (editor);
         holder->setSize (editor->getWidth(), editor->getHeight());
@@ -139,6 +144,24 @@ bool noteMentions (MainComponent& w, const char* word, ui::Severity sev) { retur
 bool inside (const juce::Component& child, const juce::Component& parent)
 {
     return parent.getLocalBounds().contains (child.getBounds());
+}
+
+// The peak the device gets from one pass of the playback, from its start: the monitor chain is in it when the chain is on.
+float playPeak (MainComponent& w)
+{
+    w.seek (0);
+    if (! w.isPlaying())
+        w.togglePlay();
+    juce::int64 fed = 0;
+    return feedDevice (w, fed, 48000.0, 8000);
+}
+
+// What a file holds, byte for byte (an empty result when there is no file).
+juce::MemoryBlock bytesOf (const juce::File& f)
+{
+    juce::MemoryBlock data;
+    f.loadFileAsData (data);
+    return data;
 }
 
 juce::ModifierKeys cmd() { return juce::ModifierKeys::commandModifier; }
@@ -766,6 +789,189 @@ int main()
         const int index = session.addEmptyTrack ("Empty");
         test::check (index == 0 && session.tracks[0]->clips.empty() && session.tracks[0]->name == "Empty", "an empty track is a valid track");
         test::check (session.length() == 0, "and it has no length");
+    }
+
+    std::printf ("[14] The monitor chain: the headphones' plugins, on the playback only\n");
+    {
+        const auto home = tempFolder().getChildFile ("monitor-home").getChildFile ("settings.xml");
+        const auto monitorFile = Settings::monitorFile (home);
+        auto w = makeWindow (true, home);
+        juce::StringArray files;
+        files.add (makeWav ("monitor-a.wav").getFullPathName());
+        w->addTracks (files);
+        w->editor.clearUndo();                                   // the import is the project's: the monitor's changes are checked from here
+        w->saveTo (tempFolder().getChildFile ("monitor-start.olympus"));
+        const float dry = playPeak (*w);
+        test::check (dry > 0.1f && w->monitorButtons.isEmpty(), "a track plays, and the chain is empty: " + juce::String (dry));
+
+        // ADD: a button on the strip; the output is the plugin's (a gain of 0 dB, so the same)
+        test::check (w->addMonitorPlugin ("Test Gain") && w->monitorButtons.size() == 1 && w->monitorButtons[0]->getButtonText() == "Test Gain",
+                     "ADD puts a button on the MONITOR strip");
+        test::check (std::abs (playPeak (*w) - dry) < 1e-6f, "a plugin at 0 dB leaves the playback as it was");
+        test::check (! w->editor.canUndo() && ! w->session.dirty, "adding a monitor plugin is not an undo step and does not dirty the project");
+        test::check (bytesOf (monitorFile).getSize() > 0, "monitor.xml is written after the change");
+        {
+            const auto xml = juce::parseXML (monitorFile);
+            test::check (xml != nullptr && xml->getNumChildElements() == 1 && xml->getChildByName ("Plugin") != nullptr, "and it holds the one plugin");
+        }
+
+        // the plugin's own window: a click on its button opens it; a change made in the window is saved when it closes
+        press (*w->monitorButtons[0]);
+        test::check (w->openEditors() == 1, "a click on the button opens the plugin's window");
+        w->session.monitor[0]->instance->setCurrentProgram (1);   // a +6 dB boost, changed in its own window
+        test::check (! gClosers.empty(), "the window has a closed callback to tell the window it closed");
+        gClosers.back()();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (60);
+        test::check (w->openEditors() == 0, "closing the window");
+        const float boosted = playPeak (*w);
+        test::check (std::abs (boosted / dry - 1.9953f) < 0.01f, "the plugin's gain is in the playback: " + juce::String (boosted / dry));
+
+        // the CORRECTION lamp: bypassed, the headphones hear the uncorrected mix
+        press (w->monitorBypassButton);
+        test::check (w->session.monitorBypass && ! w->monitorBypassButton.getToggleState() && w->monitorBypassButton.getButtonText() == "Bypass",
+                     "the lamp bypasses the chain: BYPASS");
+        test::check (std::abs (playPeak (*w) - dry) < 1e-6f, "bypassed, the output is the unprocessed mix");
+        test::check (! w->editor.canUndo() && ! w->session.dirty, "the bypass is not an undo step either");
+        press (w->monitorBypassButton);
+        test::check (! w->session.monitorBypass && std::abs (playPeak (*w) - boosted) < 1e-6f, "and CORRECTION on again brings the plugin back");
+
+        // MOVE and bypass one plugin, saved at once
+        test::check (w->addMonitorPlugin ("Test Delay") && w->monitorButtons.size() == 2, "a second plugin, after the first");
+        w->moveMonitorPlugin (1, 0);
+        test::check (w->monitorButtons[0]->getButtonText() == "Test Delay" && w->session.monitor[0]->plugin == "Test Delay", "move: the delay is first");
+        w->setMonitorPluginBypass (0, true);
+        test::check (w->session.monitor[0]->bypass && ! w->monitorButtons[0]->getToggleState(), "a bypassed plugin is dark on the strip");
+        {
+            const auto xml = juce::parseXML (monitorFile);
+            test::check (xml != nullptr && xml->getChildByName ("Plugin") != nullptr && xml->getChildByName ("Plugin")->getStringAttribute ("plugin") == "Test Delay"
+                         && xml->getChildByName ("Plugin")->getBoolAttribute ("bypass"), "monitor.xml has the order and the bypass after each change");
+        }
+
+        // the state of the chain as a second window reads it back from the same settings
+        const auto boostedState = w->session.stateOf (*w->session.monitor[1]);
+        w->openEditor (-1, 1);   // a window left open at the end: it is closed with the window, and its state saved
+        w->session.monitor[1]->instance->setCurrentProgram (1);
+        w.reset();   // the window goes: its plugins' windows close and the chain is saved
+        auto back = makeWindow (true, home);
+        test::check (back->session.monitor.size() == 2 && back->monitorChainLoaded(), "a second window reads the chain from monitor.xml");
+        test::check (back->session.monitor[0]->plugin == "Test Delay" && back->session.monitor[0]->bypass && back->session.monitor[1]->plugin == "Test Gain",
+                     "with its order and bypass");
+        test::check (back->session.stateOf (*back->session.monitor[1]) == boostedState, "the boosted state of a plugin is read back");
+        test::check (! back->session.monitorBypass, "and the chain is on");
+        juce::StringArray clip;
+        clip.add (makeWav ("monitor-a.wav").getFullPathName());
+        back->addTracks (clip);
+        test::check (std::abs (playPeak (*back) - boosted) < 0.01f * boosted, "its playback is the same as the window that saved it");
+
+        // NEW and OPEN keep the chain, and the plugin window that is open stays open
+        back->openEditor (-1, 0);
+        const auto project = tempFolder().getChildFile ("monitor-keep.olympus");
+        test::check (back->saveTo (project), "a project is saved");
+        back->newProject();
+        test::check (back->session.tracks.empty() && back->session.monitor.size() == 2 && back->monitorButtons.size() == 2, "NEW keeps the monitor chain");
+        test::check (back->openEditors() == 1, "and the monitor window stays open across NEW");
+        back->openProject (project);
+        test::check (back->session.monitor.size() == 2 && back->session.monitor[0]->plugin == "Test Delay" && back->openEditors() == 1,
+                     "OPEN keeps the monitor chain and its window");
+        test::check (! back->editor.canUndo(), "and clears no undo step of its own");
+
+        // a track's window closes with its track; the monitor's does not
+        back->removeMonitorPlugin (0);
+        test::check (back->session.monitor.size() == 1 && back->monitorButtons.size() == 1 && back->openEditors() == 0,
+                     "REMOVE takes the plugin off the strip and closes its window");
+        test::check (bytesOf (monitorFile).getSize() > 0 && juce::parseXML (monitorFile)->getNumChildElements() == 1, "and monitor.xml is saved after the removal");
+
+        // the notes: correction bypassed; a latency above 30 ms; a plugin that is not installed
+        back->setMonitorBypassed (true);
+        test::check (noteMentions (*back, "headphone correction is bypassed", ui::Severity::warning), "a note: the correction is bypassed");
+        back->setMonitorBypassed (false);
+        test::check (! noteMentions (*back, "headphone correction is bypassed", ui::Severity::warning), "and it goes when the correction is on");
+        back->session.catalog.addInternal (test::GainPlugin::description ("Test Long"), [] (double, int) { return std::make_unique<test::GainPlugin> ("Test Long", 2000); });
+        test::check (back->addMonitorPlugin ("Test Long"), "a plugin of 2000 samples of latency");
+        test::check (noteMentions (*back, "linear-phase correction adds delay", ui::Severity::warning), "a note: a monitor latency above 30 ms");
+        back->removeMonitorPlugin (1);
+        test::check (! noteMentions (*back, "linear-phase", ui::Severity::warning), "and it goes with the latency");
+        test::check (back->session.monitorLatency() == 0 && back->monitorLatencyMs() == 0.0, "the chain's latency is read out on the strip (0 with no delay)");
+        back.reset();
+
+        // a monitor plugin that is not installed: red, a note; and a file that is not one is kept as it is
+        const auto gone = tempFolder().getChildFile ("monitor-gone").getChildFile ("settings.xml");
+        {
+            juce::XmlElement xml ("OlympusMonitor");
+            xml.setAttribute ("version", 1);
+            xml.setAttribute ("bypass", false);
+            auto* plugin = xml.createNewChildElement ("Plugin");
+            plugin->setAttribute ("plugin", "Gone Plugin");
+            plugin->setAttribute ("bypass", false);
+            plugin->setAttribute ("state", "");
+            Settings::monitorFile (gone).getParentDirectory().createDirectory();
+            xml.writeTo (Settings::monitorFile (gone));
+        }
+        auto missing = makeWindow (true, gone);
+        test::check (missing->session.monitor.size() == 1 && missing->monitorButtons.size() == 1 && missing->monitorButtons[0]->missing,
+                     "a plugin that is not installed is on the strip, in red");
+        test::check (noteMentions (*missing, "not installed here", ui::Severity::warning), "and a note says so");
+        test::check (missing->session.monitor[0]->savedState.getSize() == 0 && missing->session.monitor[0]->plugin == "Gone Plugin",
+                     "its saved settings are kept");
+        missing.reset();
+
+        const auto newer = tempFolder().getChildFile ("monitor-newer").getChildFile ("settings.xml");
+        {
+            juce::XmlElement xml ("OlympusMonitor");
+            xml.setAttribute ("version", 99);
+            Settings::monitorFile (newer).getParentDirectory().createDirectory();
+            xml.writeTo (Settings::monitorFile (newer));
+        }
+        const auto before = bytesOf (Settings::monitorFile (newer));
+        auto other = makeWindow (true, newer);
+        test::check (! other->monitorChainLoaded() && noteMentions (*other, "Monitor chain not read", ui::Severity::warning), "a monitor.xml from a newer Olympus is not read, and says so");
+        test::check (! other->addMonitorPlugin ("Test Gain") && other->session.monitor.empty(), "and a change is refused, not saved over it");
+        other.reset();
+        test::check (bytesOf (Settings::monitorFile (newer)) == before, "the newer file is kept as it is");
+    }
+
+    std::printf ("[15] The monitor chain and the render\n");
+    {
+        // the same project rendered with a monitor chain (a boosted plugin and a delay) and without: the stems and the mix are the same bytes
+        const auto clipFile = makeWav ("monitor-render.wav");
+        juce::StringArray files;
+        files.add (clipFile.getFullPathName());
+        const auto homeWith = tempFolder().getChildFile ("render-with").getChildFile ("settings.xml");
+        const auto homeWithout = tempFolder().getChildFile ("render-without").getChildFile ("settings.xml");
+        auto with = makeWindow (true, homeWith);
+        auto without = makeWindow (true, homeWithout);
+        with->addTracks (files);
+        without->addTracks (files);
+        with->addMonitorPlugin ("Test Gain");
+        with->session.monitor[0]->instance->setCurrentProgram (1);
+        with->addMonitorPlugin ("Test Delay");
+        const auto folderWith = tempFolder().getChildFile ("stems-with"), folderWithout = tempFolder().getChildFile ("stems-without");
+        folderWith.deleteRecursively();
+        folderWithout.deleteRecursively();
+        test::check (with->renderTo (folderWith).isEmpty() && without->renderTo (folderWithout).isEmpty(), "both windows render");
+        int compared = 0;
+        bool same = true;
+        for (auto& f : folderWithout.findChildFiles (juce::File::findFiles, false, "*.wav"))
+        {
+            ++compared;
+            same = same && bytesOf (folderWith.getChildFile (f.getFileName())) == bytesOf (f) && bytesOf (f).getSize() > 1000;
+        }
+        test::check (compared >= 2 && same, "the stems and the mix are the same bytes with and without the monitor chain: " + juce::String (compared) + " files");
+    }
+
+    std::printf ("[16] The MONITOR strip and the header\n");
+    {
+        auto w = makeWindow();
+        w->addMonitorPlugin ("Test Gain");
+        w->addMonitorPlugin ("Test Delay");
+        const auto area = w->monitorStrip;
+        bool ok = area.getY() >= 110 && w->arrange.getY() >= area.getBottom();
+        for (auto* b : { static_cast<juce::Component*> (&w->monitorAddButton), static_cast<juce::Component*> (&w->monitorBypassButton) })
+            ok = ok && inside (*b, *w) && b->getBottom() <= w->arrange.getY() && ! b->getBounds().intersects (w->positionBox);
+        for (auto* b : w->monitorButtons)
+            ok = ok && inside (*b, *w) && b->getBottom() <= w->arrange.getY() && b->getBounds().getRight() < w->monitorAddButton.getX();
+        test::check (ok, "the strip sits under the header and above the arrangement, the plugins left of '+', CORRECTION on the right");
+        test::check (w->monitorButtons[0]->getBounds().getRight() <= w->monitorButtons[1]->getX(), "the plugin buttons do not overlap");
     }
 
     tempFolder().deleteRecursively();

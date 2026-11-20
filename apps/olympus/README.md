@@ -18,7 +18,8 @@ the same clips, tempo, markers, loop and master.
 timeline with the bars and beats on the ruler, three markers (Intro, Verse, Chorus), the loop lit from bar 3 to bar 9, and the snap on. The Chords clips have fades; the
 Vocal track has one test plugin, which its FX button lists. Each track is a row in the left column: its name, FX (its plugins) and X (remove), mute and solo, the pan, the fader and
 the meter; under them R (arm for recording) and IN (its input, here the default pair). The playhead is the amber line at 11 seconds (bar 5, beat 2), and the position read-out in the top
-right says the same in bars and in time. The row under the transport names the audio device (none, in a headless render).
+right says the same in bars and in time. The row under the transport names the audio device (none, in a headless render). The MONITOR row under the header holds the monitor chain: here one stand-in plugin (Test Gain, lit,
+so it is on), CORRECTION ON in green, and the chain's latency (0.0 ms). A headphone correction plugin would sit there (see "Monitoring through headphone correction").
 Regenerate with the command under "Development".*
 
 ![Olympus recording a take](docs/screenshot-record.png)
@@ -26,6 +27,7 @@ Regenerate with the command under "Development".*
 *The same session while it records, in a headless render: Vocal (on IN 1) and Drums (on IN 3+4) are armed, so their R lamps are lit and their meters show the input (a 440 Hz tone the
 render feeds to the device). REC is lit and reads the take's time in red (00:03.50), and the armed lanes carry a red strip from where the take began (8 seconds) to the playhead
 (11.5 seconds). The row under the transport names the device, IN: Interface / OUT: Headphones / 48.0 kHz / 128 smp: the render has no audio device, so the device is a stand-in.
+The MONITOR row is the same stand-in chain as in the picture above: the stand-in is on the headphones' playback only, and the take is not affected by it.
 Regenerate with the command under "Development".*
 
 ## Core philosophy
@@ -53,6 +55,7 @@ Regenerate with the command under "Development".*
 | **Chains** | Any plugin Olympus found, in any order, several of the same kind if you like. A track's FX button lists its plugins: each one opens its own window, can be bypassed, moved or removed, and `Add plugin...` puts a new one at the end. A plugin that is not installed on this machine stays in the chain, passes the audio through and keeps its settings. |
 | **Devices** | **AUDIO** opens the system's audio device settings: the input and the output device, the sample rate and the buffer size (no MIDI). The top bar names the devices, the rate and the buffer; its tooltip gives the round trip, the input plus the output latency in samples and ms. The choice is saved in `settings.xml`, so the device comes back as it was chosen, and the default device is used when it cannot be opened. |
 | **Recording** | Arm a track with **R**: its lamp lights, and its meter shows its input while the transport is stopped. **IN** chooses its device input, one input or a neighbouring pair (`In 1`, `In 1+2`). **REC** (or the R key) starts playback from the playhead and records every armed track into a take: one 32-bit float WAV per track, written by a background thread and kept on disk. Stop (or Space, or REC again) places each take on its track as a clip, one undo step, starting the device's round trip (and the extra latency in the settings, and the monitor chain's) earlier, so it lines up with what was heard. REC is refused, with the reason, when no track is armed or no device runs. While a take runs the loop does not wrap, the playhead goes on past the end of the audio and cannot be moved; a device that stops or changes ends the take with what it has. Takes go to `<project> Recordings/` beside the project file, or to `~/Music/Olympus Recordings/` for a project not saved yet. The app never deletes a take. Recording has not been tried on a real interface yet. |
+| **Monitoring** | The MONITOR strip under the header holds the plugins the headphones hear, such as a headphone correction plugin: one button per plugin (click opens its window, shift-click bypasses it, right-click gives Open, Bypass, Move left, Move right, Remove), `+` adds one, CORRECTION / BYPASS switches the whole chain, and the chain's latency is shown. They run on playback only, after the tracks; they are never in a render, the stems or the mix. The chain is saved in `monitor.xml` beside `settings.xml`, not in the project, and it is not an undo step. |
 | **Playback** | From the playhead to the end of the audio, through each track's clips, chain, fader and pan, and the master, on the audio device. With the loop on, playback wraps from the loop's end to its start. The plugins read the same playhead. A plugin's reported latency is compensated across the tracks, so the stems stay in time. |
 | **Project** | `.olympus`: a small XML file (version 2) with the tracks and their clips (a relative path to each audio file, and the absolute one as a fallback), faders, pans and mutes, the master, the tempo map, markers, loop and grid, and every plugin's complete state. A version 1 file opens as one clip at 0. A project opens without its plugins or audio (each is a warning) and saves again without losing what they held. A project from a newer version is refused. |
 | **Render stems** | One WAV per audible track, after its clips, chain, fader and pan, aligned with the audio (the chain's latency is taken off the front), named `01-Vocal.wav`, and `mix.wav`, the sum with the master. 32-bit float by default, so a stem cannot clip and can be edited later; 16 or 24 bit on request. A tail of at most a minute for reverbs and delays; a render longer than three hours is refused. All tracks run together block by block, which Hestia's bus needs. |
@@ -69,6 +72,24 @@ reads the folders again only when the cache is empty or you choose **PLUGINS > R
 the next scan blacklists it and skips it (the blacklist is kept in `plugins.xml`; delete that file to try it again). A plugin that hangs in its read is only caught by the next run, once you
 have quit. Two plugins with one name are both listed as `Name (Maker)`; a VST3 and an Audio Unit of one name show as the VST3.
 `suiteNames()` in `Source/Catalog.h` still lists the suite's own plugins, which a test compares with `plugins/`.
+
+## Monitoring through headphone correction
+
+The monitor chain is for a headphone correction plugin, or any other plugin that should sit on what the headphones hear and nowhere else. Add one with **+** in the MONITOR strip (it lists
+the plugins the scan found, grouped by maker when there are many). If a plugin you have just installed is not listed, choose **PLUGINS > Rescan plugins** first. A correction plugin is
+usually a VST3 (on macOS also an Audio Unit); for example Sonarworks SoundID Reference is added the same way, and it should be the last plugin of the chain.
+
+- **It is for playback only.** The chain runs on what the device plays, after the tracks. It is never in a render, the stems or `mix.wav`, and it does not process what you record or the
+  files you write. The takes are placed with the chain's latency taken off (so they line up with what you heard), but the chain itself is not recorded.
+- **Bypass to compare.** CORRECTION / BYPASS on the strip switches the whole chain off, so the headphones hear the uncorrected mix; shift-click or the menu bypasses one plugin. Use the chain
+  last, and bypass it to check the mix by ear without correction.
+- **Its state is kept on this computer.** The chain is saved in `monitor.xml`, next to `settings.xml`, after each change, and when a plugin's window is closed (a profile or a licence changed
+  there is kept). It is not part of the project, so NEW and OPEN leave the chain and its open windows alone. A plugin that is not installed on this machine stays on the strip in red and passes
+  the audio through.
+- **Latency.** The strip shows the chain's latency in ms beside CORRECTION. Above 30 ms a note at the foot says that a linear-phase correction adds delay: recording is compensated, playback
+  alignment with the transport is not.
+- **What is checked here.** Only with a stand-in plugin: the checks use a gain (and a delay) made in code, so the strip, the bypass, the file and the render are tested, but no real correction
+  plugin has been loaded or heard on this machine.
 
 ## The MCP server
 

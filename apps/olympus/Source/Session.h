@@ -483,6 +483,25 @@ public:
         return true;
     }
 
+    // The monitor plugin at `index` (message thread: the chain changes only there).
+    Slot* monitorSlotAt (int index, juce::String& error) const
+    {
+        if (! juce::isPositiveAndBelow (index, (int) monitor.size())) { error = "No monitor plugin " + juce::String (index); return nullptr; }
+        return monitor[(size_t) index].get();
+    }
+
+    // Moves a plugin of the monitor chain to another place in it.
+    bool moveMonitorPlugin (int from, int to, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (from, (int) monitor.size()) || ! juce::isPositiveAndBelow (to, (int) monitor.size()))
+        { error = "No monitor plugin " + juce::String (juce::isPositiveAndBelow (from, (int) monitor.size()) ? to : from); return false; }
+        auto slot = std::move (monitor[(size_t) from]);
+        monitor.erase (monitor.begin() + from);
+        monitor.insert (monitor.begin() + to, std::move (slot));
+        return true;
+    }
+
     // Bypasses one plugin of the monitor chain (its own flag, saved in monitor.xml).
     bool setMonitorPluginBypass (int index, bool bypass, juce::String& error)
     {

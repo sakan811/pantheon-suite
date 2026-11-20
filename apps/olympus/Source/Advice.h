@@ -25,6 +25,10 @@ inline const char* guideText()
            "tempo change moves the grid, not the audio.\n\n"
            "Keys: Space plays and stops, Return rewinds, L loops, M adds a marker, R records, Delete removes the selected clip, Cmd+D duplicates it, "
            "Cmd+Z and Shift+Cmd+Z undo and redo, Cmd+S saves.\n\n"
+           "MONITORING: the MONITOR strip holds the plugins the headphones hear, such as a headphone correction plugin (a VST3, or an Audio Unit on "
+           "macOS). They run on playback only: they are never in a render, the stems or the mix, and they are saved on this computer, not in the "
+           "project. They do not process what you record or the files you write. Use them last, and bypass them (CORRECTION) to check the mix by "
+           "ear without correction.\n\n"
            "An agent can edit the project through the MCP server (OlympusMcp, see the README); open the saved project here.";
 }
 
@@ -35,6 +39,7 @@ struct AdviceDevice
     double rate = 0.0;
     int inputs = 0;
     double roundTripMs = 0.0;
+    juce::String monitorProblem;   // the monitor chain could not be read (its file is not one, or is newer): kept as it is
 };
 
 inline juce::String kiloHertz (double rate) { return juce::String (rate / 1000.0, 1) + " kHz"; }
@@ -81,6 +86,23 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
                                          + juce::String (1000.0 * t->latency() / (s.sampleRate > 0.0 ? s.sampleRate : 48000.0), 1) + " ms). Playback and stems are aligned for it.");
             break;
         }
+    // the monitor chain: what the headphones hear, never a render (Session::processMonitor)
+    if (! s.monitor.empty())
+    {
+        int missingMonitor = 0;
+        for (auto& slot : s.monitor)
+            if (slot->instance == nullptr) ++missingMonitor;
+        if (s.monitorBypass)
+            add (ui::Severity::warning, "Monitor: headphone correction is bypassed: you are hearing the uncorrected mix.");
+        const double rate = device.rate > 0.0 ? device.rate : (s.sampleRate > 0.0 ? s.sampleRate : 48000.0);
+        const double monitorMs = 1000.0 * s.monitorLatency() / rate;
+        if (monitorMs > 30.0)
+            add (ui::Severity::warning, "Monitor " + juce::String (juce::roundToInt (monitorMs)) + " ms: a linear-phase correction adds delay; recording is compensated, playback alignment is not.");
+        if (missingMonitor > 0)
+            add (ui::Severity::warning, juce::String (missingMonitor) + " monitor plugin(s) not installed here: the headphones hear the mix without them.");
+    }
+    if (device.monitorProblem.isNotEmpty())
+        add (ui::Severity::warning, ("Monitor chain not read: " + device.monitorProblem + " Its file is kept.").substring (0, ui::kMaxNoteChars));
     if (s.tracks.empty())
         add (ui::Severity::info, "No audio yet: IMPORT AUDIO, or drop files on the window, puts them on tracks at the playhead.");
     else if (clips == 0)
