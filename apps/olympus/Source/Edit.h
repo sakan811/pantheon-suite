@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -237,6 +238,63 @@ public:
         c->name = text;
         record (before, "Rename clip");
         return true;
+    }
+
+    // ---- clipboard ------------------------------------------------------------------------------------------------------------
+    // The clipboard holds one clip: its audio (shared, not copied), its place in the file, gain, fades, mute and name. It lives in the
+    // Editor only: it is not the system clipboard, it is not saved in the project and it is not an undo step, so it survives undo and redo.
+    // It is cleared by NEW and OPEN (clearClipboard), and a paste is refused when the session's rate has changed since the copy.
+    bool hasClipboard() const { return clipboard.has_value(); }
+    int clipboardTrack() const { return clipboardFrom; }   // the track the copied clip came from; -1 when the clipboard is empty
+
+    // Copies the clip, replacing what the clipboard held. Changes nothing in the session.
+    bool copyClip (ClipRef ref, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (ref.track, ref.clip, error);
+        if (c == nullptr) return false;
+        storeClipboard (*c, ref.track);
+        return true;
+    }
+
+    // Copies the clip and deletes it: ONE undo step ("Cut clip").
+    bool cutClip (ClipRef ref, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (ref.track, ref.clip, error);
+        if (c == nullptr) return false;
+        storeClipboard (*c, ref.track);
+        const auto before = session.captureEdit();
+        auto& clips = session.tracks[(size_t) ref.track]->clips;
+        clips.erase (clips.begin() + ref.clip);
+        record (before, "Cut clip");
+        return true;
+    }
+
+    // Adds a copy of the clipboard's clip to `track`, starting at sample `at` (appended to the track's clips): ONE undo step ("Paste
+    // clip"). Returns the new clip. Refused, with the reason, when the clipboard is empty, the track is not there, `at` is before 0, or
+    // the session's rate is not the one the clip was copied at.
+    ClipRef pasteClip (int track, juce::int64 at, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! clipboard) { error = "The clipboard is empty: copy or cut a clip first."; return {}; }
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
+        if (at < 0) { error = "The paste position must be 0 or later."; return {}; }
+        if (std::abs (clipboardRate - session.sampleRate) > 0.5) { error = "The clipboard holds audio at another sample rate: copy the clip again."; return {}; }
+        const auto before = session.captureEdit();
+        Clip copy = *clipboard;
+        copy.start = at;
+        auto& clips = session.tracks[(size_t) track]->clips;
+        clips.push_back (std::move (copy));
+        record (before, "Paste clip");
+        return { track, (int) clips.size() - 1 };
+    }
+
+    void clearClipboard()
+    {
+        clipboard.reset();
+        clipboardFrom = -1;
+        clipboardRate = 0.0;
     }
 
     // ---- track mix and master -------------------------------------------------------------------------------------------------
@@ -545,6 +603,9 @@ private:
 
     Session& session;
     std::vector<Step> undoSteps, redoSteps;
+    std::optional<Clip> clipboard;        // what copyClip and cutClip put there (see the clipboard section)
+    int clipboardFrom = -1;
+    double clipboardRate = 0.0;           // the session's rate when it was copied: a paste at another rate is refused
     int gestureDepth = 0;
     bool gestureChanged = false;
     EditState gestureBefore;
@@ -574,6 +635,13 @@ private:
     {
         if (steps.size() > kMaxSteps)
             steps.erase (steps.begin(), steps.begin() + (std::ptrdiff_t) (steps.size() - kMaxSteps));
+    }
+
+    void storeClipboard (const Clip& clip, int track)
+    {
+        clipboard = clip;
+        clipboardFrom = track;
+        clipboardRate = session.sampleRate;
     }
 
     bool isTrack (int track) const { return juce::isPositiveAndBelow (track, (int) session.tracks.size()); }

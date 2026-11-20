@@ -1723,6 +1723,102 @@ int main()
         test::check (! m->masterClipLatched(), "OPEN of a project clears the CLIP latch");
     }
 
+    std::printf ("[34] Clipboard and navigation keys: Cmd+C, Cmd+X and Cmd+V on the selected clip (the paste at the playhead, the new clip selected, one undo step); Home, End, comma and full stop move the playhead (no marker, one marker, three markers); the tempo field keeps its keys; a paste during a take is refused\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("clip34.wav", 48000).getFullPathName() });
+        w->refreshNow();
+        auto& arrange = w->arrange;
+        const auto clipsOn0 = [&w] { return (int) w->session.tracks[0]->clips.size(); };
+
+        arrange.selected = {};
+        w->keyPressed (juce::KeyPress ('c', cmd(), 'c'));
+        test::check (! w->editor.hasClipboard(), "Cmd+C with no clip selected copies nothing");
+        arrange.selected = { 0, 0 };
+        w->keyPressed (juce::KeyPress ('c', cmd(), 'c'));
+        test::check (w->editor.hasClipboard() && clipsOn0() == 1, "Cmd+C copies the selected clip and leaves it in place");
+
+        w->seek (12000);
+        arrange.selected = { 0, 0 };
+        w->keyPressed (juce::KeyPress ('v', cmd(), 'v'));
+        test::check (clipsOn0() == 2 && w->session.tracks[0]->clips.back().start == 12000, "Cmd+V pastes at the playhead on the selected clip's track");
+        test::check (arrange.selected.track == 0 && arrange.selected.clip == 1, "and the new clip is selected");
+        w->keyPressed (juce::KeyPress ('z', cmd(), 'z'));
+        test::check (clipsOn0() == 1, "one Cmd+Z takes the paste back");
+
+        arrange.selected = { 0, 0 };
+        w->keyPressed (juce::KeyPress ('x', cmd(), 'x'));
+        test::check (clipsOn0() == 0 && ! arrange.selected.valid(), "Cmd+X cuts the selected clip and clears the selection");
+        w->keyPressed (juce::KeyPress ('z', cmd(), 'z'));
+        test::check (clipsOn0() == 1, "one Cmd+Z brings the cut clip back");
+
+        // nothing selected: the paste goes to the clipboard's track, at the playhead
+        arrange.selected = {};
+        w->seek (24000);
+        w->keyPressed (juce::KeyPress ('v', cmd(), 'v'));
+        test::check (clipsOn0() == 2 && w->session.tracks[0]->clips.back().start == 24000 && arrange.selected.clip == 1,
+                     "with no clip selected, Cmd+V pastes on the clipboard's track");
+        w->keyPressed (juce::KeyPress ('z', cmd(), 'z'));
+
+        // an empty clipboard: a paste changes nothing
+        w->editor.clearClipboard();
+        const auto label = w->editor.undoLabel();
+        w->keyPressed (juce::KeyPress ('v', cmd(), 'v'));
+        test::check (clipsOn0() == 1 && w->editor.undoLabel() == label, "Cmd+V with an empty clipboard changes nothing");
+
+        // Home, End, comma and full stop: the markers before and after the playhead (none, one, three)
+        auto nav = makeWindow();
+        nav->addTracks ({ makeWav ("nav34.wav", 48000).getFullPathName() });
+        nav->refreshNow();
+        const auto pos = [&nav] { return nav->position(); };
+        nav->seek (12000);
+        nav->keyPressed (juce::KeyPress (juce::KeyPress::endKey));
+        test::check (pos() == nav->session.length() && pos() == 48000, "End goes to the end of the audio");
+        nav->keyPressed (juce::KeyPress (juce::KeyPress::homeKey));
+        test::check (pos() == 0, "Home goes to 0");
+        nav->seek (12000);
+        nav->keyPressed (juce::KeyPress (','));
+        nav->keyPressed (juce::KeyPress ('.'));
+        test::check (pos() == 12000, "with no marker, comma and full stop do nothing");
+        nav->editor.addMarker ("A", 4000);
+        nav->seek (0);
+        nav->keyPressed (juce::KeyPress ('.'));
+        test::check (pos() == 4000, "with one marker, full stop goes to it from before it");
+        nav->keyPressed (juce::KeyPress (','));
+        test::check (pos() == 4000, "and comma does nothing before the first marker");
+        nav->editor.addMarker ("B", 20000);
+        nav->editor.addMarker ("C", 36000);
+        nav->seek (12000);
+        nav->keyPressed (juce::KeyPress ('.'));
+        test::check (pos() == 20000, "with three markers, full stop goes to the next one");
+        nav->keyPressed (juce::KeyPress (','));
+        test::check (pos() == 4000, "and comma to the previous one");
+        nav->seek (36000);
+        nav->keyPressed (juce::KeyPress ('.'));
+        test::check (pos() == 36000, "at the last marker, full stop does nothing");
+
+        // The tempo field's guard (keys typed there never jump or copy) is not checked here: a headless window has no peer, so the
+        // field cannot take the keyboard focus. keyPressed reads it with hasKeyboardFocus (true), as the R key does.
+
+        // a paste while a take runs is refused with the reason, and the take is placed as usual when it stops
+        auto rec = makeWindow();
+        rec->addTracks ({ makeWav ("rec34.wav", 48000).getFullPathName() });
+        juce::String recError;
+        rec->setDeviceForTest (fakeDevice());
+        test::check (rec->session.setTrackArm (0, true, recError) && rec->session.setTrackInput (0, 0, -1, recError), "a track is armed for a take");
+        test::check (rec->editor.copyClip ({ 0, 0 }, recError), "a clip is copied before the take");
+        rec->arrange.selected = { 0, 0 };
+        juce::int64 fed = 0;
+        gErrors.clear();
+        test::check (rec->startRecording(), "REC starts a take");
+        feedDevice (*rec, fed, 48000.0, 4800);
+        const auto clipsBefore = rec->session.tracks[0]->clips.size();
+        rec->keyPressed (juce::KeyPress ('v', cmd(), 'v'));
+        test::check (rec->session.tracks[0]->clips.size() == clipsBefore && gErrors.size() == 1 && gErrors[0].contains ("Stop the recording before you paste."),
+                     "a paste during a take is refused, and says so");
+        rec->stopRecording();
+    }
+
     tempFolder().deleteRecursively();
     return test::finish ("OlympusUiCheck");
 }

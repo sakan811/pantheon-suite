@@ -78,6 +78,11 @@ public:
     void deleteSelected();
     void duplicateSelected();
     void addMarkerAtPlayhead();
+    // The clipboard keys (Cmd+C, Cmd+X, Cmd+V) and the empty lane's menu. A paste is refused while a take runs (recordingFrom >= 0).
+    void copySelected();                              // Cmd+C: nothing when no clip is selected
+    void cutSelected();                               // Cmd+X: one undo step; the selection goes
+    void pasteAtPlayhead();                           // Cmd+V: on the selected clip's track, else the clipboard's; the new clip is selected
+    void pasteAt (int track, juce::int64 at);         // the empty lane's "Paste here": the clicked track and sample
 
     // The label of a track's input: "IN 1" for a mono input, "IN 1+2" for a pair (inputs are numbered from 1 here).
     static juce::String inputText (int left, int right);
@@ -147,6 +152,7 @@ private:
     void paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const Clip& clip, bool selectedNow);
     void clipMenu (ClipRef ref);
     void clipAction (ClipRef ref, int action);
+    void laneMenu (int track, juce::int64 at);
     void markerMenu (int index);
     void markerAction (int index, int action);
     void nudgeSelected (int dx, int dy, bool bar);

@@ -966,6 +966,7 @@ void MainComponent::newProject()
     source.playing = false;
     session.newProject ("Untitled");
     editor.clearUndo();
+    editor.clearClipboard();
     clearMasterClip();   // a new project starts with no CLIP latched
     adoptDeviceRate();
     seek (0);
@@ -988,6 +989,7 @@ void MainComponent::openProject (const juce::File& file)
         return;
     }
     editor.clearUndo();
+    editor.clearClipboard();
     clearMasterClip(); // a project opened starts with no CLIP latched, as NEW does
     adoptDeviceRate(); // a project at another rate is converted to the device's
     arrange.selected = {};
@@ -1164,6 +1166,28 @@ void MainComponent::togglePlay()
     if (! session.loopOn && position() >= endOfPlay()) seek (0);
     session.prepare (false);
     source.playing = true;
+}
+
+// , and . : the marker before or after the playhead. With no marker that way nothing moves (and nothing is said).
+void MainComponent::jumpToMarker (bool forward)
+{
+    const juce::int64 at = position();
+    bool found = false;
+    juce::int64 target = 0;
+    {
+        const juce::ScopedLock sl (session.lock);
+        for (auto& m : session.markers)
+        {
+            const bool beyond = forward ? m.start > at : m.start < at;
+            if (! beyond) continue;
+            if (! found || (forward ? m.start < target : m.start > target))
+            {
+                target = m.start;
+                found = true;
+            }
+        }
+    }
+    if (found) seek (target);
 }
 
 void MainComponent::rewind()
@@ -1853,6 +1877,9 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     const auto mods = key.getModifiers();
     const bool cmd = mods.isCommandDown(), shift = mods.isShiftDown();
     const auto is = [text, code] (juce::juce_wchar c) { return text == c || lowerCase ((juce::juce_wchar) code) == c; };
+    // the tempo field keeps its own keys (its letters, its caret, Home and End, its copy and paste): the jumps and the clipboard keys
+    // stay out of it
+    const bool typing = bpmField.hasKeyboardFocus (true);
 
     if (cmd)
     {
@@ -1861,11 +1888,21 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (is ('o')) { openButton.triggerClick(); return true; }
         if (is ('n')) { newButton.triggerClick(); return true; }
         if (is ('d')) { arrange.duplicateSelected(); return true; }
+        if (typing) return false;
+        if (is ('c')) { arrange.copySelected(); return true; }
+        if (is ('x')) { arrange.cutSelected(); return true; }
+        if (is ('v')) { syncPlayhead(); arrange.pasteAtPlayhead(); return true; }
         return false;
     }
     if (code == juce::KeyPress::spaceKey) { togglePlay(); updateTransport(); return true; }
     if (code == juce::KeyPress::returnKey) { rewind(); updateTransport(); return true; }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { arrange.deleteSelected(); return true; }
+    if (! typing)
+    {
+        if (code == juce::KeyPress::homeKey) { seek (0); syncPlayhead(); updateTransport(); return true; }
+        if (code == juce::KeyPress::endKey) { seek (session.length()); syncPlayhead(); updateTransport(); return true; }
+        if (is (',') || is ('.')) { jumpToMarker (is ('.')); syncPlayhead(); updateTransport(); return true; }
+    }
     if (is ('r'))
     {
         if (bpmField.hasKeyboardFocus (true)) return false;   // typing a tempo: the R is a letter there
