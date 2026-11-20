@@ -19,8 +19,8 @@ struct MeterBallistics
     float level = -100.0f, hold = -100.0f;
     void add (float db)
     {
-        level = std::max (db, level - 3.0f);
-        hold = std::max (db, hold - 0.4f);
+        level = juce::jmax (-100.0f, std::max (db, level - 3.0f));
+        hold = juce::jmax (-100.0f, std::max (db, hold - 0.4f));
     }
 };
 
