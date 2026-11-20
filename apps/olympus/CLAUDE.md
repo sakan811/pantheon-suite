@@ -33,8 +33,9 @@ Source/Mcp.h          the MCP server: JSON-RPC lines in and out, the 31 tools, p
 Source/Settings.h     plugin folders, scanSuiteOnly and the last project, in one file shared by the window and the server; the plugin cache and the scan's pedal sit beside it
 Source/Advice.h       the GUIDE text and the notes at the foot (rules only; the kit draws them)
 Source/Main.cpp       the app and its 16:10 window;  Source/McpMain.cpp  the server's main
-Source/UI/            MainComponent (the window, the audio source, actions), TrackRow / TrackList / WaveStrip / LampButton / SlotButton / PluginWindow
-Source/UI/Arrange.h / .cpp  the arrange view (the timeline): in progress, not yet in MainComponent
+Source/UI/MainComponent.h / .cpp  the window: the project buttons and the transport bar, the audio source (the callback), the actions, the keys, the FX menu of a track; owns `Editor editor`
+Source/UI/Arrange.h / .cpp  ArrangeView, the arrangement in the window's body: track headers (name, FX, X, M, S, pan, fader, meter), ruler, loop and marker lanes, clip lanes, the playhead; its drags go through Editor gestures
+Source/UI/                 LampButton, SlotButton, PluginWindow (SlotButton is kept, unused: the FX menu lists a track's plugins)
 Tests/                Tests.cpp (session, render, project, server, the Editor's edits [22]-[28]), TempoTests.h (tempo and grid, included by Tests.cpp), UiCheck.cpp, Snapshot.cpp, TestPlugin.h, Check.h (a copy of Orpheus' tiny helper: apps share nothing)
 ```
 
@@ -52,7 +53,8 @@ Tests/                Tests.cpp (session, render, project, server, the Editor's 
 - **Plugins must be created and edited on the message thread.** The window and the server run on it; the render thread of the progress window only calls `processBlock`.
 - **Everything is drawn from the kit** (`shared/ui`): `LampButton` exists only because the kit's look-and-feel lights every switch in one colour; if the kit grows per-button colours, use them and delete it. The window is 16:10 (`kDesignWidth` a multiple of 8).
 - **Adding a plugin to the suite** means adding its product name to `suiteNames()` (a test fails until you do).
-- **Every timeline edit goes through `Editor`** (`Source/Edit.h`): clips, track gain, pan, mute, solo and name, the master, tempo, time signature, loop, markers, snap and grid. It takes the session lock, refuses a bad argument with a reason and changes nothing, and pushes one undo step per change; a `Gesture` makes a drag one step. Snap and grid are saved but not undone. Nothing else should write those fields (the window still does in places, see "Not done yet").
+- **Every timeline edit goes through `Editor`** (`Source/Edit.h`): clips, track gain, pan, mute, solo and name, the master, tempo, time signature, loop, metronome, markers, snap and grid. It takes the session lock, refuses a bad argument with a reason and changes nothing, and pushes one undo step per change; a `Gesture` makes a drag one step. Snap and grid are saved but not undone. Nothing else writes those fields: the window, the arrangement and the server all call `Editor`.
+- **The audio callback has its own copy of the transport** (`MainComponent::Source`: the position, the loop, the end of the audio, all atomics). `syncTransport` copies the loop and the end from the session; it is called by every change that moves them (`refreshNow`, the loop, the arrangement's `onStructure`), never by the 30 Hz timer, because the callback's try-lock would otherwise miss a block now and then. A block is cut at the loop's end (`processBlock` is never called across it), and playing stops at the end of the audio unless the loop is on. `renderAudioBlock` runs the same code for the checks.
 - **Adding or removing a track or a plugin is not undoable.** It is not an `Editor` step: the window calls `Editor::clearUndo()` after it, and after opening or starting a project. Undo and redo also refuse a step recorded with another track count.
 - **Clips are samples at the session's rate.** An imported file is resampled to it (the first file sets it), and nothing is time-stretched: a tempo change moves the grid, not the audio. Overlapping clips on a track are summed, with their gain and fades. A clip whose file is missing keeps its place and plays silence (its `audio` is null). A version 1 project loads as one clip at 0.
 - **The master applies to the mix only.** `masterDb` is applied to playback and to `mix.wav`; the stems are written without it (`renderStems`).
@@ -61,11 +63,11 @@ Tests/                Tests.cpp (session, render, project, server, the Editor's 
 
 ## Not done yet (do not describe it as done)
 
-- The window is not yet on the clip model. It still shows one stem per track and plays the stems, not the clips; it has no timeline, grid, tempo, markers, loop, metronome, pan or undo in the window. The arrange view (`Source/UI/Arrange.h`) is in progress and not in `MainComponent` yet.
-- No mixer view.
+- No mixer view (roadmap step 2). The fader and pan of a track are in the arrangement's header only.
+- A track's plugins are not drawn on the arrangement: the FX button lists them (open, bypass, move, remove).
 - The MCP server's timeline tools (clips, tempo, time signature, markers, loop, master) are in, but its undo is not exposed: it has no undo tool, so an agent's edits cannot be undone from it.
-- The window still writes some track settings (name, mute, solo, gain) straight into the session, without `Editor` and its lock.
 - No macOS CI job, and the app has not been run against the other twelve built plugins by a person; only Hermes was hosted by hand on Linux.
 - No inline plugin parameter panel: a plugin is edited in its own window.
 - No per-slot wet/dry.
-- Nothing has been listened to. Real-time playback of clips, the loop and the metronome, the audio device, hosting a real third-party plugin and the plugin editors are checked only by the automated tests, and a person must check them on the Mac. The real-plugin check (`OLYMPUS_PLUGIN_DIR`) has not been run on the clip engine.
+- Nothing has been listened to. Real-time playback of clips, the loop wrap and the metronome, the audio device, hosting a real third-party plugin and the plugin editors are checked only by the automated tests (the callback's own code, `renderAudioBlock`), and a person must check them on the Mac. The real-plugin check (`OLYMPUS_PLUGIN_DIR`) has not been run on the clip engine.
+- The arrangement's drags, menus and the look at other sizes are checked by its methods and one screenshot, not by a person's hand.

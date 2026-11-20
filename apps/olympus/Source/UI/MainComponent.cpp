@@ -8,7 +8,8 @@ namespace olympus::gui
 namespace
 {
 const char* const kAudioWildcard = "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.caf";
-constexpr int kMargin = 16, kHeaderHeight = 84, kRowGap = 8, kSlotWidth = 116, kSlotHeight = 28;
+constexpr int kMargin = 16, kHeaderHeight = 84;
+constexpr int kTicksPerBeat = 960;
 
 juce::String timeText (juce::int64 sample, double rate)
 {
@@ -17,205 +18,39 @@ juce::String timeText (juce::int64 sample, double rate)
     return juce::String (minutes).paddedLeft ('0', 2) + ":" + juce::String (std::fmod (s, 60.0), 2).paddedLeft ('0', 5);
 }
 
-// The peaks of a track's clips merged on its timeline, `buckets` of them (what the row draws).
-std::vector<float> envelopeOf (const Track& track, int buckets)
+// "5.2.480  00:09.50": bar, beat and tick of the position (from the tempo map), then the time.
+juce::String positionText (const Session& s, juce::int64 sample)
 {
-    std::vector<float> env ((size_t) buckets, 0.0f);
-    const juce::int64 length = track.length();
-    if (length <= 0) return env;
-    juce::AudioBuffer<float> chunk (2, kBlockSize);
-    for (juce::int64 start = 0; start < length; start += kBlockSize)
-    {
-        const int n = (int) juce::jmin ((juce::int64) kBlockSize, length - start);
-        Session::mixClips (track, start, n, chunk);
-        for (int i = 0; i < n; ++i)
-        {
-            const auto b = (size_t) juce::jmin ((juce::int64) buckets - 1, (start + i) * buckets / length);
-            for (int ch = 0; ch < 2; ++ch)
-                env[b] = juce::jmax (env[b], std::abs (chunk.getSample (ch, i)));
-        }
-    }
-    return env;
+    const auto bb = s.tempo.barBeatAt ((double) sample);
+    const int ticks = juce::jlimit (0, kTicksPerBeat - 1, (int) std::floor (bb.fraction * kTicksPerBeat + 1.0e-9));
+    return juce::String (bb.bar) + "." + juce::String (bb.beat) + "." + juce::String (ticks).paddedLeft ('0', 3) + "  "
+           + timeText (sample, s.sampleRate > 0.0 ? s.sampleRate : 48000.0);
+}
+
+// The tempo as the field shows it: a whole number without decimals, else one decimal.
+juce::String bpmText (double bpm)
+{
+    if (std::abs (bpm - std::round (bpm)) < 0.05) return juce::String ((int) std::round (bpm));
+    return juce::String (bpm, 1);
+}
+
+juce::juce_wchar lowerCase (juce::juce_wchar c) { return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c; }
+
+// The tempo field's look: a glass display, amber figures, no outline of its own.
+void styleField (juce::TextEditor& field)
+{
+    field.setFont (ui::lcdFont (14.0f));
+    field.setJustification (juce::Justification::centred);
+    field.setColour (juce::TextEditor::backgroundColourId, colours::glass);
+    field.setColour (juce::TextEditor::textColourId, colours::amber);
+    field.setColour (juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    field.setColour (juce::TextEditor::focusedOutlineColourId, colours::amber);
+    field.setColour (juce::TextEditor::highlightColourId, colours::amber.withAlpha (0.35f));
+    field.setColour (juce::TextEditor::highlightedTextColourId, colours::amber);
+    field.setInputRestrictions (6, "0123456789.");
+    field.setSelectAllWhenFocused (true);
 }
 } // namespace
-
-// ---- WaveStrip ---------------------------------------------------------------------------------------------------------------
-void WaveStrip::paint (juce::Graphics& g)
-{
-    const auto area = getLocalBounds().toFloat();
-    ui::hw::drawGlass (g, area, 3.0f, colours::accent);
-    const auto inner = area.reduced (3.0f, 3.0f);
-    g.setColour (colours::accent.withAlpha (0.8f));
-    const int n = (int) envelope.size();
-    for (int i = 0; i < n; ++i)
-    {
-        const float x = inner.getX() + inner.getWidth() * (float) i / (float) juce::jmax (1, n);
-        const float h = juce::jlimit (0.0f, 1.0f, std::sqrt (envelope[(size_t) i])) * inner.getHeight() * 0.5f;
-        g.fillRect (x, inner.getCentreY() - h, juce::jmax (1.0f, inner.getWidth() / (float) juce::jmax (1, n)), juce::jmax (1.0f, h * 2.0f));
-    }
-    if (n == 0)
-    {
-        g.setColour (colours::dim);
-        g.setFont (ui::labelFont (10.0f));
-        g.drawText ("NO AUDIO", getLocalBounds(), juce::Justification::centred);
-    }
-    g.setColour (colours::amber);
-    g.fillRect (inner.getX() + inner.getWidth() * (float) fraction - 0.5f, inner.getY(), 1.5f, inner.getHeight());
-    ui::hw::drawGlassOverlay (g, area, 3.0f, false);
-}
-
-// ---- TrackRow ----------------------------------------------------------------------------------------------------------------
-TrackRow::TrackRow (MainComponent& owner, int trackIndex) : index (trackIndex), main (owner)
-{
-    auto& track = *owner.session.tracks[(size_t) trackIndex];
-    addAndMakeVisible (wave);
-    wave.envelope = envelopeOf (track, 240);
-    wave.onSeek = [this] (double f) { main.seek ((juce::int64) (f * (double) main.session.tracks[(size_t) index]->length())); };
-
-    nameLabel.setText (track.name, juce::dontSendNotification);
-    nameLabel.setEditable (false, true);
-    nameLabel.setFont (ui::font (15.0f, juce::Font::bold));
-    nameLabel.setColour (juce::Label::textColourId, colours::text);
-    nameLabel.onTextChange = [this]
-    {
-        const auto text = nameLabel.getText().trim();
-        if (text.isNotEmpty()) { main.session.tracks[(size_t) index]->name = text; main.session.dirty = true; }
-    };
-    addAndMakeVisible (nameLabel);
-
-    for (auto* b : { &muteButton, &soloButton })
-    {
-        b->setClickingTogglesState (true);
-        addAndMakeVisible (*b);
-    }
-    muteButton.lamp = colours::bad;
-    soloButton.lamp = colours::good;
-    muteButton.setToggleState (track.mute, juce::dontSendNotification);
-    soloButton.setToggleState (track.solo, juce::dontSendNotification);
-    muteButton.setTooltip ("Mute: this track is not played, and no stem is written for it.");
-    soloButton.setTooltip ("Solo: only soloed tracks are played and rendered.");
-    muteButton.onClick = [this] { main.session.tracks[(size_t) index]->mute = muteButton.getToggleState(); main.session.dirty = true; };
-    soloButton.onClick = [this] { main.session.tracks[(size_t) index]->solo = soloButton.getToggleState(); main.session.dirty = true; };
-    removeButton.setTooltip ("Remove this track from the project (the audio file is not touched).");
-    removeButton.onClick = [this] { main.removeTrack (index); };
-    addAndMakeVisible (removeButton);
-
-    gainKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    gainKnob.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
-    gainKnob.setRange (-60.0, 12.0, 0.1);
-    gainKnob.setDoubleClickReturnValue (true, 0.0);
-    gainKnob.setValue ((double) track.gainDb, juce::dontSendNotification);
-    gainKnob.setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
-    gainKnob.setTooltip ("Fader of the track, after its chain. Double-click for 0 dB.");
-    gainKnob.onValueChange = [this] { main.session.tracks[(size_t) index]->gainDb = (float) gainKnob.getValue(); main.session.dirty = true; repaint(); };
-    addAndMakeVisible (gainKnob);
-
-    auto& chain = track.chain;
-    for (int s = 0; s < (int) chain.size(); ++s)
-    {
-        auto* b = slotButtons.add (new SlotButton());
-        b->setButtonText (chain[(size_t) s]->plugin);
-        const bool missing = chain[(size_t) s]->instance == nullptr;
-        b->lamp = missing ? colours::bad : colours::amber;
-        b->setToggleState (missing || ! chain[(size_t) s]->bypass, juce::dontSendNotification);
-        b->setTooltip (missing ? "This plugin is not installed here. It passes the audio through and keeps its settings."
-                               : "Click: open the plugin. Shift-click: bypass. Right-click: more.");
-        b->onClick = [this, s]
-        {
-            if (juce::ModifierKeys::currentModifiers.isShiftDown())
-            {
-                juce::String error;
-                main.session.setBypass (index, s, ! main.session.tracks[(size_t) index]->chain[(size_t) s]->bypass, error);
-                main.requestRebuild();
-            }
-            else
-                main.toggleEditor (index, s);
-        };
-        b->onMenu = [this, s] { main.showSlotMenu (index, s); };
-        addAndMakeVisible (*b);
-    }
-    addPluginButton.setTooltip ("Put a plugin of the suite at the end of this chain.");
-    addPluginButton.onClick = [this] { main.showAddPluginMenu (index); };
-    addAndMakeVisible (addPluginButton);
-}
-
-namespace
-{
-constexpr int kChainX = 640;
-int slotsPerLine (int width) { return juce::jmax (1, (width - kChainX - 16) / (kSlotWidth + 6)); }
-}
-
-int TrackRow::heightFor (int width) const
-{
-    const int items = slotButtons.size() + 1;
-    const int lines = (items + slotsPerLine (width) - 1) / slotsPerLine (width);
-    return juce::jmax (84, 14 + lines * (kSlotHeight + 6) + 8);
-}
-
-void TrackRow::resized()
-{
-    auto r = getLocalBounds().reduced (14, 10);
-    nameLabel.setBounds (r.getX(), r.getY(), 190, 24);
-    removeButton.setBounds (r.getX() + 196, r.getY() + 1, 22, 22);
-    muteButton.setBounds (r.getX() + 236, r.getY(), 30, 24);
-    soloButton.setBounds (r.getX() + 270, r.getY(), 30, 24);
-    gainKnob.setBounds (r.getX() + 312, r.getY() - 2, 46, 46);
-    wave.setBounds (r.getX() + 372, r.getY(), kChainX - 14 - 372 - 12, 52);
-    const int perLine = slotsPerLine (getWidth());
-    int i = 0;
-    for (auto* b : slotButtons)
-    {
-        b->setBounds (kChainX + (i % perLine) * (kSlotWidth + 6), r.getY() + (i / perLine) * (kSlotHeight + 6), kSlotWidth, kSlotHeight);
-        ++i;
-    }
-    addPluginButton.setBounds (kChainX + (i % perLine) * (kSlotWidth + 6), r.getY() + (i / perLine) * (kSlotHeight + 6), 30, kSlotHeight);
-}
-
-void TrackRow::paint (juce::Graphics& g)
-{
-    ui::hw::drawModule (g, getLocalBounds().toFloat().reduced (1.0f), true);
-    if (index >= (int) main.session.tracks.size()) return; // the track was removed and the rows are about to be rebuilt
-    auto& track = *main.session.tracks[(size_t) index];
-    const auto r = getLocalBounds().reduced (14, 10);
-    const auto line2 = juce::Rectangle<int> (r.getX(), r.getY() + 28, 300, 14);
-    // the first clip's file, and how many more there are
-    const juce::String files = track.clips.empty() ? juce::String ("NO CLIPS")
-                                                   : track.clips[0].file.getFileName() + (track.clips.size() > 1 ? "  +" + juce::String ((int) track.clips.size() - 1) : juce::String());
-    ui::hw::drawLabel (g, files, line2, juce::Justification::left, colours::dim, 10.0f);
-    juce::String detail = timeText (track.length(), main.session.sampleRate);
-    if (track.latency() > 0) detail += "   LATENCY " + juce::String (track.latency()) + " SMP";
-    ui::hw::drawLabel (g, detail, line2.translated (0, 15), juce::Justification::left, colours::dim, 10.0f);
-    ui::hw::drawLabel (g, juce::String (track.gainDb, 1) + " dB", juce::Rectangle<int> (r.getX() + 300, r.getY() + 42, 70, 12), juce::Justification::centred, colours::amber, 9.5f);
-}
-
-void TrackRow::refresh()
-{
-    if (auto* t = index < (int) main.session.tracks.size() ? main.session.tracks[(size_t) index].get() : nullptr)
-        wave.fraction = t->length() > 0 ? juce::jlimit (0.0, 1.0, (double) main.position() / (double) t->length()) : 0.0;
-    wave.repaint();
-}
-
-// ---- TrackList ---------------------------------------------------------------------------------------------------------------
-void TrackList::rebuild()
-{
-    rows.clear();
-    for (int i = 0; i < (int) main.session.tracks.size(); ++i)
-        addAndMakeVisible (rows.add (new TrackRow (main, i)));
-    resized();
-}
-
-void TrackList::resized()
-{
-    int y = 0;
-    for (auto* row : rows)
-    {
-        const int h = row->heightFor (getWidth());
-        row->setBounds (0, y, getWidth(), h);
-        y += h + kRowGap;
-    }
-    // the height is the rows', but never less than the viewport's, so the empty list still has a body to draw
-    setSize (getWidth(), juce::jmax (y, getParentHeight()));
-}
 
 // ---- PluginWindow ------------------------------------------------------------------------------------------------------------
 PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed)
@@ -230,16 +65,28 @@ PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEdito
 }
 
 // ---- audio -------------------------------------------------------------------------------------------------------------------
+// The callback plays the session block by block. A block never crosses the loop's end: it is cut there, and the rest comes from the
+// loop's start. Without a loop the playback stops at the end of the audio (the longest track, and the latency of its chains).
 void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
 {
     info.clearActiveBufferRegion();
     if (! playing.load())
         return;
+    const juce::int64 start = loopStart.load(), end = loopEnd.load(), audioEnd = endOfAudio.load();
+    const bool wrap = loopOn.load() && end > start;
+    juce::int64 pos = position.load();
     int done = 0;
-    auto pos = position.load();
     while (done < info.numSamples)
     {
-        const int n = juce::jmin (kBlockSize, info.numSamples - done);
+        if (wrap && pos >= end)
+            pos = start;
+        else if (! wrap && pos >= audioEnd)
+        {
+            playing = false;
+            break;
+        }
+        const juce::int64 room = wrap ? end - pos : audioEnd - pos;
+        const int n = (int) juce::jmin ((juce::int64) juce::jmin (kBlockSize, info.numSamples - done), room);
         chunk.setSize (2, n, false, false, true);
         owner.session.processBlock (chunk, pos);
         for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
@@ -248,8 +95,6 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
         done += n;
     }
     position = pos;
-    if (pos >= owner.endOfPlay())
-        playing = false;
 }
 
 // ---- the window --------------------------------------------------------------------------------------------------------------
@@ -267,34 +112,103 @@ MainComponent::MainComponent (Options options) : opts (options)
                                             juce::ModalCallbackFunction::create ([proceed] (int result) { if (result == 1) proceed(); }));
     };
     reportError = [] (const juce::String& message) { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Olympus", message); };
-    makeEditorWindow = [] (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
+    makeEditorWindow = [] (const juce::String& title, juce::AudioProcessorEditor* pluginEditor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
     {
-        return std::make_unique<PluginWindow> (title, editor, std::move (closed));
+        return std::make_unique<PluginWindow> (title, pluginEditor, std::move (closed));
     };
 
-    addAndMakeVisible (viewport);
-    viewport.setViewedComponent (&trackList, false);
-    viewport.setScrollBarsShown (true, false);
-    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addButton, &pluginsButton, &renderButton, &rewindButton, &playButton })
+    // the arrangement reports what the user did; the window owns the transport, the files, the menus and the plugin windows
+    arrange.onSeek = [this] (juce::int64 s) { seek (s); };
+    arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); };
+    arrange.onTrackMenu = [this] (int track) { showTrackMenu (track); };
+    arrange.onRemoveTrack = [this] (int track) { removeTrack (track); };
+    arrange.onFilesDropped = [this] (const juce::StringArray& files, int track, juce::int64 at) { importFiles (files, track, at); };
+    arrange.reportError = [this] (const juce::String& message) { showError (message); };
+    addAndMakeVisible (arrange);
+
+    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton, &renderButton,
+                     &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton })
         addAndMakeVisible (*b);
+    for (auto* b : { &playButton, &loopButton, &metronomeButton, &snapButton })
+    {
+        b->setClickingTogglesState (false);   // the session says what state they are in: see updateTransport
+        addAndMakeVisible (*b);
+    }
     addAndMakeVisible (guideButton);
-    playButton.setClickingTogglesState (false);
+    addAndMakeVisible (bpmField);
+    addAndMakeVisible (signatureBox);
+    addAndMakeVisible (gridBox);
+    // a focused button would take Space and Return for itself: the keys stay with the window
+    for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton,
+                                                             &renderButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton,
+                                                             &playButton, &loopButton, &metronomeButton, &snapButton, &guideButton, &signatureBox, &gridBox })
+        c->setWantsKeyboardFocus (false);
+
     newButton.onClick = [this] { askToDiscard ("Start a new project and lose them?", [this] { newProject(); }); };
     openButton.onClick = [this] { askToDiscard ("Open another project and lose them?", [this] { chooseAndOpen(); }); };
     saveButton.onClick = [this] { saveProject(); };
     saveAsButton.onClick = [this] { saveProjectAs(); };
-    addButton.onClick = [this] { chooseAndAdd(); };
+    addTrackButton.onClick = [this] { addEmptyTrack(); };
+    importButton.onClick = [this] { chooseAndImport(); };
     pluginsButton.onClick = [this] { showPluginsMenu(); };
     renderButton.onClick = [this] { chooseAndRender(); };
-    rewindButton.onClick = [this] { seek (0); };
-    playButton.onClick = [this] { togglePlay(); };
+    rewindButton.onClick = [this] { rewind(); updateTransport(); };
+    playButton.onClick = [this] { togglePlay(); updateTransport(); };
+    loopButton.onClick = [this] { toggleLoop(); };
+    metronomeButton.onClick = [this] { toggleMetronome(); };
+    snapButton.onClick = [this] { editor.setSnap (! session.snapOn); updateTransport(); };
+    undoButton.onClick = [this] { undoEdit(); };
+    redoButton.onClick = [this] { redoEdit(); };
+    zoomOutButton.onClick = [this] { zoomBy (1.0 / 1.5); };
+    zoomInButton.onClick = [this] { zoomBy (1.5); };
+    zoomFitButton.onClick = [this] { arrange.zoomToFit(); arrange.repaint(); };
+
     newButton.setTooltip ("Empty the session.");
     openButton.setTooltip ("Open a saved project (.olympus).");
-    saveButton.setTooltip ("Save the project: the tracks, their chains and every plugin's settings. Cmd+S.");
-    addButton.setTooltip ("Add stems: audio files, one track each. You can also drop them on the window.");
+    saveButton.setTooltip ("Save the project: the tracks, clips, chains, tempo, markers and loop, and every plugin's settings. Cmd+S.");
+    addTrackButton.setTooltip ("Add an empty track.");
+    importButton.setTooltip ("Audio files: each one becomes a track with its clip at the playhead. You can also drop them on the window or a lane.");
     pluginsButton.setTooltip ("Where plugins (VST3, and Audio Units on macOS) are looked for, which were found, and a rescan.");
-    renderButton.setTooltip ("Write one WAV per audible track, after its chain and fader, and the mix.");
-    playButton.setTooltip ("Play from the playhead (space).");
+    renderButton.setTooltip ("Write one WAV per audible track, after its clips, chain, fader and pan, and the mix.");
+    playButton.setTooltip ("Play from the playhead, or stop (Space).");
+    rewindButton.setTooltip ("Back to the loop's start when the loop is on, else to the start (Return).");
+    loopButton.setTooltip ("Loop the region between the loop markers (L). A loop with no range yet covers the first four bars.");
+    metronomeButton.setTooltip ("A click on every beat, a higher one on the bar. Not in the stems. (Undoable.)");
+    snapButton.setTooltip ("Snap moves and edges to the grid.");
+    undoButton.setTooltip ("Undo the last edit (Cmd+Z). Adding or removing a track or a plugin cannot be undone.");
+    redoButton.setTooltip ("Redo (Shift+Cmd+Z).");
+    zoomOutButton.setTooltip ("Zoom out (-).");
+    zoomInButton.setTooltip ("Zoom in (+).");
+    zoomFitButton.setTooltip ("Zoom so the whole session fits.");
+    bpmField.setTooltip ("The tempo in beats per minute (20 to 300). Type a number and press Return. With tempo changes in the project, the field shows the tempo at the playhead.");
+    signatureBox.setTooltip ("The time signature of the project.");
+    gridBox.setTooltip ("The grid that snap and the lines of the ruler follow.");
+
+    styleField (bpmField);
+    bpmField.onReturnKey = [this] { applyBpm(); grabKeyboardFocus(); };
+    bpmField.onFocusLost = [this] { applyBpm(); };
+
+    for (int i = 0; i < signatures.size(); ++i)
+        signatureBox.addItem (signatures[i], i + 1);
+    signatureBox.setColour (juce::ComboBox::textColourId, colours::amber);
+    signatureBox.onChange = [this]
+    {
+        const int index = signatureBox.getSelectedItemIndex();
+        if (! juce::isPositiveAndBelow (index, signatures.size())) return;
+        const auto parts = juce::StringArray::fromTokens (signatures[index], "/", "");
+        editor.setSignature (parts[0].getIntValue(), parts[1].getIntValue());
+        updateTransport();
+        arrange.repaint();
+    };
+    for (int g = 0; g <= (int) Grid::ThirtySecond; ++g)
+        gridBox.addItem (gridName ((Grid) g), g + 1);
+    gridBox.onChange = [this]
+    {
+        const int index = gridBox.getSelectedItemIndex();
+        if (index >= 0) editor.setGrid ((Grid) index);
+        updateTransport();
+        arrange.repaint();
+    };
 
     if (opts.audioDevice)
     {
@@ -310,6 +224,8 @@ MainComponent::MainComponent (Options options) : opts (options)
         if (! cached || session.catalog.names().isEmpty())
             juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->scanPlugins (false); });
     }
+    syncTransport();
+    updateTransport();
     startTimerHz (30);
 }
 
@@ -358,11 +274,74 @@ void MainComponent::askToDiscard (const juce::String& action, std::function<void
     else proceed();
 }
 
-void MainComponent::rebuildNow()
+// Puts the session's transport on the controls and the audio callback's copy of the loop and the end. The timer calls it; so does every
+// action, so a button shows what it did at once.
+void MainComponent::updateTransport()
+{
+    const bool playing = isPlaying();
+    playButton.setToggleState (playing, juce::dontSendNotification);
+    if (playButton.getButtonText() != (playing ? "Stop" : "Play")) playButton.setButtonText (playing ? "Stop" : "Play");
+    loopButton.setToggleState (session.loopOn, juce::dontSendNotification);
+    metronomeButton.setToggleState (session.metronomeOn, juce::dontSendNotification);
+    snapButton.setToggleState (session.snapOn, juce::dontSendNotification);
+    if (gridBox.getSelectedItemIndex() != (int) session.grid) gridBox.setSelectedItemIndex ((int) session.grid, juce::dontSendNotification);
+    showSignature (session.tempo.numerator, session.tempo.denominator);
+    undoButton.setEnabled (editor.canUndo());
+    redoButton.setEnabled (editor.canRedo());
+
+    if (! bpmField.hasKeyboardFocus (true))
+    {
+        // one tempo: the field sets it. Tempo changes: the field shows the tempo at the playhead, and the ruler's flags are where they are edited.
+        const bool single = session.tempo.points.size() <= 1;
+        const double bpm = single ? session.tempo.bpmAtBeat (0.0) : session.tempo.bpmAtSample ((double) position());
+        const auto text = bpmText (bpm);
+        if (bpmField.getText() != text) bpmField.setText (text, juce::dontSendNotification);
+        bpmField.setReadOnly (! single);
+    }
+    repaint (positionBox);
+    updateTitle();
+}
+
+void MainComponent::showSignature (int numerator, int denominator)
+{
+    const auto text = juce::String (numerator) + "/" + juce::String (denominator);
+    if (! signatures.contains (text))
+    {
+        signatures.add (text);   // a signature set elsewhere (an agent, a project) is listed too
+        signatureBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < signatures.size(); ++i)
+            signatureBox.addItem (signatures[i], i + 1);
+    }
+    const int index = signatures.indexOf (text);
+    if (signatureBox.getSelectedItemIndex() != index) signatureBox.setSelectedItemIndex (index, juce::dontSendNotification);
+}
+
+// Reads the tempo field: a number from 20 to 300 sets the tempo at beat 0 (one undo step). Anything else is refused and the field goes back.
+void MainComponent::applyBpm()
+{
+    if (session.tempo.points.size() > 1) { updateTransport(); return; }   // read-only: the tempo at the playhead
+    const auto text = bpmField.getText().trim();
+    const double bpm = text.getDoubleValue();
+    if (! text.containsOnly ("0123456789.") || text.isEmpty() || bpm < TempoMap::kMinBpm || bpm > TempoMap::kMaxBpm)
+    {
+        showError ("The tempo must be a number from 20 to 300 bpm.");
+        bpmField.setText (bpmText (session.tempo.bpmAtBeat (0.0)), juce::dontSendNotification);
+        return;
+    }
+    juce::String error;
+    if (! editor.setTempo (0.0, bpm, error)) showError (error);
+    bpmField.setText (bpmText (session.tempo.bpmAtBeat (0.0)), juce::dontSendNotification);
+    updateTransport();
+    arrange.repaint();
+}
+
+// Everything the arrangement shows is taken from the session again: its headers, its meters, the transport and the title.
+void MainComponent::refreshNow()
 {
     cancelPendingUpdate();
-    trackList.rebuild();
-    resized();
+    syncTransport();
+    arrange.refresh();
+    updateTransport();
     repaint();
 }
 
@@ -372,8 +351,12 @@ void MainComponent::newProject()
     closeEditors();
     source.playing = false;
     session.newProject ("Untitled");
+    editor.clearUndo();
     seek (0);
-    rebuildNow();
+    arrange.selected = {};
+    arrange.zoom = ArrangeView::kDefaultZoom;
+    arrange.scrollTo (0);
+    refreshNow();
 }
 
 void MainComponent::openProject (const juce::File& file)
@@ -386,10 +369,14 @@ void MainComponent::openProject (const juce::File& file)
         showError (error);
         return;
     }
+    editor.clearUndo();
+    arrange.selected = {};
     seek (0);
     settings.lastProject = file.getFullPathName();
     settings.save (opts.settingsFile);
-    rebuildNow();
+    refreshNow();
+    arrange.zoomToFit();
+    arrange.repaint();
     if (session.warnings.size() > 0)
         showError ("Opened with notes:\n\n" + session.warnings.joinIntoString ("\n"));
 }
@@ -417,26 +404,104 @@ bool MainComponent::saveTo (const juce::File& file)
     return true;
 }
 
-void MainComponent::addTracks (const juce::StringArray& files)
+void MainComponent::addTracks (const juce::StringArray& files) { importFiles (files, -1, 0); }
+
+void MainComponent::importFiles (const juce::StringArray& files, int track, juce::int64 at)
 {
     juce::StringArray problems;
-    for (auto& f : files)
+    juce::int64 next = juce::jmax ((juce::int64) 0, at);
+    for (const auto& f : files)
     {
+        const juce::File file (f);
+        const bool fresh = track < 0;
+        int target = track;
+        if (fresh)
+        {
+            // each file is a track of its own, its clip at `at`
+            target = session.addEmptyTrack (file.getFileNameWithoutExtension());
+            editor.clearUndo();   // the track is not undone; the clip is (below)
+            next = juce::jmax ((juce::int64) 0, at);
+        }
         juce::String error;
-        if (! session.addTrack (juce::File (f), {}, error))
+        const auto clip = editor.addClip (target, file, next, 0, 0, error);
+        if (! clip.valid())
+        {
             problems.add (error);
+            if (fresh)
+            {
+                juce::String ignored;
+                session.removeTrack (target, ignored);
+                editor.clearUndo();
+            }
+            continue;
+        }
+        // files dropped on one track follow each other
+        const juce::ScopedLock sl (session.lock);
+        next = session.tracks[(size_t) target]->clips[(size_t) clip.clip].end();
     }
-    rebuildNow();
+    refreshNow();
     if (problems.size() > 0)
         showError (problems.joinIntoString ("\n"));
+}
+
+void MainComponent::addEmptyTrack()
+{
+    session.addEmptyTrack ({});
+    editor.clearUndo();
+    refreshNow();
+}
+
+void MainComponent::undoEdit()
+{
+    editor.undo();
+    refreshNow();
+}
+
+void MainComponent::redoEdit()
+{
+    editor.redo();
+    refreshNow();
+}
+
+// Switches the loop on or off. Turned on with no range yet, the loop covers the first four bars or the whole audio, whichever is longer.
+void MainComponent::toggleLoop()
+{
+    const bool on = ! session.loopOn;
+    juce::int64 start = session.loopStart, end = session.loopEnd;
+    if (on && end <= start)
+    {
+        start = 0;
+        end = (juce::int64) std::llround (juce::jmax (session.tempo.sampleAtBar (5), (double) session.length()));
+    }
+    editor.setLoop (start, end, on);
+    syncTransport();
+    updateTransport();
+    arrange.repaint();
+}
+
+void MainComponent::toggleMetronome()
+{
+    editor.setMetronome (! session.metronomeOn);
+    updateTransport();
+}
+
+void MainComponent::zoomBy (double factor)
+{
+    arrange.zoom = juce::jlimit (0.05, 4000.0, arrange.zoom * factor);
+    arrange.repaint();
 }
 
 void MainComponent::removeTrack (int index)
 {
     closeEditors();
     juce::String error;
-    session.removeTrack (index, error);
-    requestRebuild();
+    if (session.removeTrack (index, error))
+    {
+        editor.clearUndo();
+        arrange.selected = {};
+    }
+    else showError (error);
+    requestRefresh();
 }
 
 juce::String MainComponent::renderTo (const juce::File& folder, const std::function<bool (float)>& progress)
@@ -456,19 +521,37 @@ void MainComponent::togglePlay()
 {
     if (source.playing.load()) { source.playing = false; return; }
     if (session.tracks.empty()) return;
-    if (source.position.load() >= endOfPlay()) source.position = 0;
+    syncTransport();
+    // at the end of the audio (and not looping), playing starts again from the beginning
+    if (! session.loopOn && position() >= endOfPlay()) seek (0);
     session.prepare (false);
     source.playing = true;
 }
 
-void MainComponent::seek (juce::int64 sample) { source.position = juce::jlimit ((juce::int64) 0, juce::jmax ((juce::int64) 0, endOfPlay()), sample); }
+void MainComponent::rewind()
+{
+    seek (session.loopOn && session.loopEnd > session.loopStart ? session.loopStart : 0);
+}
+
+// The playhead may be put anywhere from 0; playing stops at the end of the audio (or wraps at the loop's end).
+void MainComponent::seek (juce::int64 sample) { source.position = juce::jmax ((juce::int64) 0, sample); }
+
+void MainComponent::syncTransport()
+{
+    const juce::ScopedLock sl (session.lock);
+    source.loopOn = session.loopOn;
+    source.loopStart = session.loopStart;
+    source.loopEnd = session.loopEnd;
+    source.endOfAudio = session.length() + session.maxLatency();
+}
 
 void MainComponent::filesDropped (const juce::StringArray& files, int, int)
 {
+    // dropped outside the arrangement: a project opens, audio goes on new tracks at the playhead
     if (files.size() == 1 && juce::File (files[0]).hasFileExtension ("olympus"))
         askToDiscard ("Open it and lose them?", [this, f = files[0]] { openProject (juce::File (f)); });
     else
-        addTracks (files);
+        importFiles (files, -1, position());
 }
 
 // ---- file choosers -----------------------------------------------------------------------------------------------------------
@@ -479,15 +562,16 @@ void MainComponent::chooseAndOpen()
                           [this] (const juce::FileChooser& fc) { if (fc.getResult() != juce::File()) openProject (fc.getResult()); });
 }
 
-void MainComponent::chooseAndAdd()
+void MainComponent::chooseAndImport()
 {
-    chooser = std::make_unique<juce::FileChooser> ("Add stems", juce::File::getSpecialLocation (juce::File::userMusicDirectory), kAudioWildcard);
+    const auto at = position();
+    chooser = std::make_unique<juce::FileChooser> ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), kAudioWildcard);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
-                          [this] (const juce::FileChooser& fc)
+                          [this, at] (const juce::FileChooser& fc)
                           {
                               juce::StringArray files;
                               for (auto& f : fc.getResults()) files.add (f.getFullPathName());
-                              if (! files.isEmpty()) addTracks (files);
+                              if (! files.isEmpty()) importFiles (files, -1, at);
                           });
 }
 
@@ -531,7 +615,7 @@ void MainComponent::chooseAndRender()
                           });
 }
 
-// ---- plugins -----------------------------------------------------------------------------------------------------------------
+// ---- plugins and tracks ------------------------------------------------------------------------------------------------------
 void MainComponent::showPluginsMenu()
 {
     juce::PopupMenu menu;
@@ -539,7 +623,7 @@ void MainComponent::showPluginsMenu()
     for (auto& n : session.catalog.names()) menu.addItem (n, false, false, nullptr);
     menu.addSeparator();
     menu.addItem ("Look in a folder...", [this] { chooseFolder(); });
-    menu.addItem ("Rescan plugins", [this] { scanPlugins (true); requestRebuild(); });
+    menu.addItem ("Rescan plugins", [this] { scanPlugins (true); requestRefresh(); });
     if (! settings.pluginFolders.isEmpty())
     {
         menu.addSeparator();
@@ -561,34 +645,49 @@ void MainComponent::showAddPluginMenu (int track)
         {
             juce::String error;
             if (! session.addPlugin (track, n, -1, error)) showError (error);
-            requestRebuild();
+            editor.clearUndo();
+            requestRefresh();
         });
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
-void MainComponent::showSlotMenu (int track, int slot)
+// The FX menu of a track: one submenu per plugin (its first item opens the plugin's window, then bypass, move and remove), and Add plugin.
+void MainComponent::showTrackMenu (int track)
 {
     if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return;
-    const int count = (int) session.tracks[(size_t) track]->chain.size();
-    const bool bypassed = session.tracks[(size_t) track]->chain[(size_t) slot]->bypass;
-    juce::PopupMenu menu;
-    menu.addItem ("Open", [this, track, slot] { openEditor (track, slot); });
-    menu.addItem (bypassed ? "Switch on" : "Bypass", [this, track, slot, bypassed] { juce::String e; session.setBypass (track, slot, ! bypassed, e); requestRebuild(); });
-    menu.addItem ("Move earlier", slot > 0, false, [this, track, slot] { closeEditors(); juce::String e; session.movePlugin (track, slot, slot - 1, e); requestRebuild(); });
-    menu.addItem ("Move later", slot < count - 1, false, [this, track, slot] { closeEditors(); juce::String e; session.movePlugin (track, slot, slot + 1, e); requestRebuild(); });
-    menu.addSeparator();
-    menu.addItem ("Remove", [this, track, slot] { closeEditors(); juce::String e; session.removePlugin (track, slot, e); requestRebuild(); });
-    menu.showMenuAsync (juce::PopupMenu::Options());
-}
+    const auto& chain = session.tracks[(size_t) track]->chain;
+    const int count = (int) chain.size();
 
-void MainComponent::toggleEditor (int track, int slot)
-{
-    juce::String error;
-    if (auto* s = session.slotAt (track, slot, error))
+    juce::PopupMenu menu;
+    if (count == 0)
+        menu.addItem ("No plugins on this track yet", false, false, nullptr);
+    for (int s = 0; s < count; ++s)
     {
-        if (windows.count (s) > 0) windows.erase (s);
-        else openEditor (track, slot);
+        const bool missing = chain[(size_t) s]->instance == nullptr;
+        const bool bypassed = chain[(size_t) s]->bypass;
+        juce::PopupMenu sub;
+        sub.addItem ("Open", ! missing, false, [this, track, s] { openEditor (track, s); });
+        sub.addItem (bypassed ? "Switch on" : "Bypass", [this, track, s, bypassed]
+        {
+            juce::String error;
+            if (! session.setBypass (track, s, ! bypassed, error)) showError (error);
+            requestRefresh();
+        });
+        sub.addItem ("Move earlier", s > 0, false, [this, track, s] { closeEditors(); juce::String e; session.movePlugin (track, s, s - 1, e); requestRefresh(); });
+        sub.addItem ("Move later", s < count - 1, false, [this, track, s] { closeEditors(); juce::String e; session.movePlugin (track, s, s + 1, e); requestRefresh(); });
+        sub.addSeparator();
+        sub.addItem ("Remove", [this, track, s]
+        {
+            closeEditors();
+            juce::String error;
+            if (session.removePlugin (track, s, error)) editor.clearUndo(); else showError (error);
+            requestRefresh();
+        });
+        menu.addSubMenu (chain[(size_t) s]->plugin + (missing ? "  (not installed)" : bypassed ? "  (bypassed)" : ""), sub);
     }
+    menu.addSeparator();
+    menu.addItem ("Add plugin...", [this, track] { showAddPluginMenu (track); });
+    menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
 void MainComponent::openEditor (int track, int slot)
@@ -601,9 +700,9 @@ void MainComponent::openEditor (int track, int slot)
         return;
     }
     if (auto it = windows.find (s); it != windows.end()) { it->second->toFront (true); return; }
-    juce::AudioProcessorEditor* editor = s->instance->hasEditor() ? s->instance->createEditorAndMakeActive() : new juce::GenericAudioProcessorEditor (*s->instance);
-    if (editor == nullptr) return;
-    windows[s] = makeEditorWindow (session.tracks[(size_t) track]->name + " - " + s->plugin, editor,
+    juce::AudioProcessorEditor* pluginEditor = s->instance->hasEditor() ? s->instance->createEditorAndMakeActive() : new juce::GenericAudioProcessorEditor (*s->instance);
+    if (pluginEditor == nullptr) return;
+    windows[s] = makeEditorWindow (session.tracks[(size_t) track]->name + " - " + s->plugin, pluginEditor,
                                    [this, s, safe = juce::Component::SafePointer<MainComponent> (this)]
                                    { juce::MessageManager::callAsync ([safe, s] { if (safe != nullptr) safe->windows.erase (s); }); });
 }
@@ -613,11 +712,11 @@ void MainComponent::closeEditors() { windows.clear(); }
 // ---- timer, keys, layout -----------------------------------------------------------------------------------------------------
 void MainComponent::timerCallback()
 {
-    playButton.setToggleState (source.playing.load(), juce::dontSendNotification);
-    playButton.setButtonText (source.playing.load() ? "Stop" : "Play");
-    for (auto* r : trackList.rows) r->refresh();
-    repaint (timeBox);
-    updateTitle();
+    // The audio copy of the transport is not taken here: every change that moves it calls syncTransport (refreshNow, the loop, the arrangement's
+    // edits). A timer that took the session's lock would make the audio callback's try-lock miss a block now and then.
+    syncPlayhead();
+    arrange.refresh();
+    updateTransport();
     // A plugin edited in its own window changes the project: notice it by what the plugins would save.
     if (! windows.empty() && ++tick % 15 == 0)
     {
@@ -632,15 +731,33 @@ void MainComponent::timerCallback()
         lastEditorHash = 0;
 }
 
+// The keys. The window owns the transport and the clip keys; the arrangement takes only its selection and nudges (arrows, Escape).
+// Keys typed into the tempo field never get here (the field takes them).
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
-    const auto cmd = juce::ModifierKeys::commandModifier;
-    if (key == juce::KeyPress (juce::KeyPress::spaceKey)) { togglePlay(); return true; }
-    if (key == juce::KeyPress ('s', cmd, 0)) { saveProject(); return true; }
-    if (key == juce::KeyPress ('s', cmd | juce::ModifierKeys::shiftModifier, 0)) { saveProjectAs(); return true; }
-    if (key == juce::KeyPress ('o', cmd, 0)) { openButton.triggerClick(); return true; }
-    if (key == juce::KeyPress ('n', cmd, 0)) { newButton.triggerClick(); return true; }
-    if (key == juce::KeyPress (juce::KeyPress::returnKey)) { seek (0); return true; }
+    const auto code = key.getKeyCode();
+    const auto text = lowerCase (key.getTextCharacter());
+    const auto mods = key.getModifiers();
+    const bool cmd = mods.isCommandDown(), shift = mods.isShiftDown();
+    const auto is = [text, code] (juce::juce_wchar c) { return text == c || lowerCase ((juce::juce_wchar) code) == c; };
+
+    if (cmd)
+    {
+        if (is ('z')) { if (shift) redoEdit(); else undoEdit(); return true; }
+        if (is ('s')) { if (shift) saveProjectAs(); else saveProject(); return true; }
+        if (is ('o')) { openButton.triggerClick(); return true; }
+        if (is ('n')) { newButton.triggerClick(); return true; }
+        if (is ('d')) { arrange.duplicateSelected(); return true; }
+        return false;
+    }
+    if (code == juce::KeyPress::spaceKey) { togglePlay(); updateTransport(); return true; }
+    if (code == juce::KeyPress::returnKey) { rewind(); updateTransport(); return true; }
+    if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { arrange.deleteSelected(); return true; }
+    if (is ('s')) { syncPlayhead(); arrange.splitAtPlayhead(); return true; }
+    if (is ('m')) { syncPlayhead(); arrange.addMarkerAtPlayhead(); return true; }
+    if (is ('l')) { toggleLoop(); return true; }
+    if (is ('+') || is ('=')) { zoomBy (1.5); return true; }
+    if (is ('-')) { zoomBy (1.0 / 1.5); return true; }
     return false;
 }
 
@@ -648,48 +765,63 @@ void MainComponent::resized()
 {
     auto r = getLocalBounds();
     const int w = r.getWidth();
+    const int rowA = 12, rowB = 46, h = 26, hb = 30;
+
+    // row A: the project and the tracks
     int x = 290;
-    const int by = 14, bh = 26;
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton })
     {
-        b->setBounds (x, by, 70, bh);
+        b->setBounds (x, rowA, 70, h);
         x += 76;
     }
-    x += 12;
-    addButton.setBounds (x, by, 90, bh);
-    pluginsButton.setBounds (x + 96, by, 80, bh);
-    renderButton.setBounds (x + 182, by, 112, bh);
-    guideButton.setBounds (w - kMargin - 70, by, 70, bh);
-    rewindButton.setBounds (290, 50, 56, bh);
-    playButton.setBounds (352, 50, 84, bh);
-    timeBox = { 448, 48, 150, 30 };
+    x += 6;
+    addTrackButton.setBounds (x, rowA, 92, h);
+    x += 98;
+    importButton.setBounds (x, rowA, 104, h);
+    x += 110;
+    pluginsButton.setBounds (x, rowA, 80, h);
+    x += 86;
+    renderButton.setBounds (x, rowA, 112, h);
+    guideButton.setBounds (w - kMargin - 70, rowA, 70, h);
+
+    // row B: the transport, then the zoom, then the position
+    x = 290;
+    rewindButton.setBounds (x, rowB, 34, hb);       x += 40;
+    playButton.setBounds (x, rowB, 66, hb);         x += 72;
+    loopButton.setBounds (x, rowB, 60, hb);         x += 66;
+    metronomeButton.setBounds (x, rowB, 64, hb);    x += 70;
+    bpmField.setBounds (x, rowB, 70, hb);           x += 76;
+    signatureBox.setBounds (x, rowB, 66, hb);       x += 72;
+    snapButton.setBounds (x, rowB, 56, hb);         x += 62;
+    gridBox.setBounds (x, rowB, 84, hb);            x += 90;
+    undoButton.setBounds (x, rowB, 54, hb);         x += 60;
+    redoButton.setBounds (x, rowB, 54, hb);         x += 60;
+    zoomOutButton.setBounds (x, rowB, 30, hb);      x += 36;
+    zoomInButton.setBounds (x, rowB, 30, hb);       x += 36;
+    zoomFitButton.setBounds (x, rowB, 44, hb);
+    positionBox = { w - kMargin - 184, rowB, 184, hb };
+
     noteStrip = { kMargin, r.getHeight() - kMargin - ui::kNoteStripHeight, w - 2 * kMargin, ui::kNoteStripHeight };
     bodyArea = { kMargin, kHeaderHeight + 12, w - 2 * kMargin, noteStrip.getY() - 10 - (kHeaderHeight + 12) };
-    viewport.setBounds (bodyArea);
-    trackList.setSize (bodyArea.getWidth() - viewport.getScrollBarThickness(), trackList.getHeight());
-    trackList.resized();
+    arrange.setBounds (bodyArea);
 }
 
 void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (colours::background);
     ui::hw::drawHeaderPlate (g, juce::Rectangle<float> (0.0f, 0.0f, (float) getWidth(), (float) kHeaderHeight - 6.0f));
-    ui::hw::drawNameplate (g, { kMargin, 8, 250, 66 }, "Olympus", "Session host", "Pantheon stems", ! session.tracks.empty(), 24.0f);
-    ui::hw::drawGlass (g, timeBox.toFloat(), 3.0f, colours::amber);
+    ui::hw::drawNameplate (g, { kMargin, 8, 250, 66 }, "Olympus", "Basic DAW", "Pantheon plugins", ! session.tracks.empty(), 24.0f);
+
+    // the position read-out, on glass
+    ui::hw::drawGlass (g, positionBox.toFloat(), 3.0f, colours::amber);
     g.setColour (colours::amber);
-    g.setFont (ui::lcdFont (17.0f));
-    g.drawText (timeText (position(), session.sampleRate > 0.0 ? session.sampleRate : 48000.0), timeBox.reduced (8, 0), juce::Justification::centredRight);
-    ui::hw::drawGlassOverlay (g, timeBox.toFloat(), 3.0f, false);
-    ui::hw::drawLabel (g, juce::String ((int) session.tracks.size()) + (session.tracks.size() == 1 ? " track" : " tracks") + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String()),
-                       { 612, 50, 220, 26 }, juce::Justification::centredLeft, colours::dim, 10.5f);
-    if (session.tracks.empty())
-    {
-        ui::hw::drawModule (g, bodyArea.toFloat(), true);
-        g.setColour (colours::dim);
-        g.setFont (ui::font (18.0f));
-        g.drawText ("Drop the stems here", bodyArea.withTrimmedBottom (30), juce::Justification::centred);
-        ui::hw::drawLabel (g, "Audio files, one track each. Then put plugins on them.", bodyArea.withTrimmedTop (30), juce::Justification::centred, colours::dim, 11.0f);
-    }
+    g.setFont (ui::lcdFont (14.0f));
+    g.drawText (positionText (session, position()), positionBox.reduced (8, 0), juce::Justification::centredRight);
+    ui::hw::drawGlassOverlay (g, positionBox.toFloat(), 3.0f, false);
+
+    const auto tracks = juce::String ((int) session.tracks.size()) + (session.tracks.size() == 1 ? " track" : " tracks")
+                        + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String());
+    ui::hw::drawLabel (g, tracks, { 1026, 12, 160, 26 }, juce::Justification::centredLeft, colours::dim, 10.5f);
     ui::drawNoteStrip (g, noteStrip, notes());
 }
 }

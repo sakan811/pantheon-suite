@@ -380,6 +380,16 @@ public:
         record (before, "Loop");
     }
 
+    // The metronome (a click, not in the stems): an undo step like the loop.
+    void setMetronome (bool on)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (on == session.metronomeOn) return;
+        const auto before = session.captureEdit();
+        session.metronomeOn = on;
+        record (before, on ? "Metronome on" : "Metronome off");
+    }
+
     // ---- markers --------------------------------------------------------------------------------------------------------------
     // Adds a marker. Returns its index in the sorted list.
     int addMarker (const juce::String& name, juce::int64 at)
