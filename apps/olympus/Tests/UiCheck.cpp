@@ -184,7 +184,7 @@ juce::ModifierKeys cmdShift() { return juce::ModifierKeys::commandModifier | juc
 void layoutCheck (MainComponent& w, const char* label)
 {
     std::vector<juce::Component*> controls { &w.newButton, &w.openButton, &w.saveButton, &w.saveAsButton, &w.addTrackButton, &w.importButton,
-                                             &w.pluginsButton, &w.renderButton, &w.guideButton, &w.rewindButton, &w.playButton, &w.loopButton,
+                                             &w.pluginsButton, &w.renderButton, &w.exportButton, &w.guideButton, &w.rewindButton, &w.playButton, &w.loopButton,
                                              &w.metronomeButton, &w.bpmField, &w.signatureBox, &w.snapButton, &w.gridBox, &w.undoButton, &w.redoButton,
                                              &w.zoomOutButton, &w.zoomInButton, &w.zoomFitButton, &w.audioButton, &w.recordButton, &w.deviceLabel };
     bool ok = inside (w.arrange, w) && w.arrange.getBounds().getWidth() > 0;
@@ -1921,7 +1921,7 @@ int main()
             });
             worker.join();
             test::check (stillRecordingOnWorker && rateUnchangedOnWorker,
-                         "background audioDeviceAboutToStart does not mutate recording or sample rate on the worker thread");
+                         "background audioDeviceAboutToStart defers stopping the take and adopting the new rate to the message thread");
             juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
             test::check (! w->isRecording() && w->deviceRate == 44100.0 && w->session.sampleRate == 44100.0
                              && w->session.tracks[0]->clips.size() == 2 && ! gErrors.empty() && gErrors.back().contains ("changed while recording"),
@@ -2361,6 +2361,156 @@ int main()
                          && std::abs (w->session.tracks[0]->gainDb - (-9.0f)) < 0.01f
                          && w->session.dirty && w->autosaveFile().existsAsFile(),
                      "external reload: failed reload returns false, keeps session state, and preserves autosave");
+    }
+
+    std::printf ("[38] Window resizing: AudioDialog, PluginWindow, and MainComponent wide layout\n");
+    {
+        // 1. AudioDialog has non-zero initial size and is resizable with limits
+        AudioDialog dlg (std::make_unique<juce::Component>(), false);
+        test::check (dlg.getWidth() > 0 && dlg.getHeight() > 0 && dlg.isResizable(),
+                     "AudioDialog has non-zero width/height and isResizable() is true");
+
+        // 2. PluginWindow forwards editor->getConstrainer() and isResizable()
+        struct ResizablePlugin : test::GainPlugin
+        {
+            struct Editor : juce::AudioProcessorEditor
+            {
+                explicit Editor (juce::AudioProcessor& p) : juce::AudioProcessorEditor (p)
+                {
+                    setResizeLimits (240, 160, 900, 700);
+                    setResizable (true, true);
+                    setSize (400, 300);
+                }
+            };
+            bool hasEditor() const override { return true; }
+            juce::AudioProcessorEditor* createEditor() override { return new Editor (*this); }
+        };
+        ResizablePlugin proc;
+        auto* editor = proc.createEditor();
+        auto* expectedConstrainer = editor->getConstrainer();
+        PluginWindow pwin ("Test Plugin", editor, {}, false);
+        test::check (pwin.isResizable() && pwin.getConstrainer() == expectedConstrainer && pwin.getConstrainer() != nullptr,
+                     "PluginWindow forwards editor->getConstrainer() and isResizable() for a resizable editor");
+
+        struct FixedPlugin : test::GainPlugin
+        {
+            struct Editor : juce::AudioProcessorEditor
+            {
+                explicit Editor (juce::AudioProcessor& p) : juce::AudioProcessorEditor (p) { setSize (320, 200); }
+            };
+            bool hasEditor() const override { return true; }
+            juce::AudioProcessorEditor* createEditor() override { return new Editor (*this); }
+        };
+        FixedPlugin fixedProc;
+        auto* fixedEditor = fixedProc.createEditor();
+        PluginWindow fixedWin ("Fixed Plugin", fixedEditor, {}, false);
+        test::check (! fixedWin.isResizable(),
+                     "PluginWindow respects isResizable() == false for a fixed-size editor");
+
+        // 3. MainComponent at 1600x1000 lays out deviceLabel, track/REC readout area, and positionBox without overlap
+        auto w = makeWindow();
+        w->setSize (1600, 1000);
+        w->resized();
+        layoutCheck (*w, "1600x1000");
+        const int readoutX = w->positionBox.getX() - 148;
+        test::check (! w->deviceLabel.getBounds().intersects (w->positionBox)
+                         && w->deviceLabel.getWidth() > 620
+                         && w->deviceLabel.getRight() <= readoutX
+                         && readoutX + 140 <= w->positionBox.getX(),
+                     "MainComponent at 1600x1000 anchors deviceLabel and readout before positionBox without overlap");
+    }
+
+    std::printf ("[39] Export button: layout at 1280x800, mix-only export, and monitor chain exclusion\n");
+    {
+        const auto expRoot = tempFolder().getChildFile ("export-check");
+        expRoot.deleteRecursively();
+        expRoot.createDirectory();
+        auto w = makeWindow (true, expRoot.getChildFile ("settings.xml"));
+        w->setSize (MainComponent::kDesignWidth, MainComponent::kDesignHeight);
+        w->resized();
+        test::check (w->exportButton.isVisible() && inside (w->exportButton, *w)
+                         && w->exportButton.getButtonText() == "Export"
+                         && ! w->exportButton.getBounds().intersects (w->renderButton.getBounds())
+                         && ! w->exportButton.getBounds().intersects (w->audioButton.getBounds())
+                         && ! w->exportButton.getBounds().intersects (w->guideButton.getBounds())
+                         && w->renderButton.getBounds().getRight() <= w->exportButton.getX()
+                         && w->exportButton.getBounds().getRight() <= w->audioButton.getX()
+                         && w->audioButton.getBounds().getRight() <= w->guideButton.getX(),
+                     "exportButton is visible, inside bounds, and sits cleanly between renderButton and audioButton at 1280x800");
+        layoutCheck (*w, "Export button at 1280x800");
+
+        w->addTracks ({ makeWav ("exp-a.wav", 24000).getFullPathName(), makeWav ("exp-b.wav", 24000).getFullPathName() });
+        juce::String gainErr;
+        test::check (w->editor.setTrackGain (0, -12.0f, gainErr) && w->editor.setTrackGain (1, -12.0f, gainErr),
+                     "track gains attenuate before monitor boost check");
+        const auto baselineDir = expRoot.getChildFile ("baseline");
+        RenderOptions baseOpts;
+        baseOpts.writeStems = false;
+        baseOpts.writeMix = true;
+        baseOpts.bits = 32;
+        test::check (w->renderTo (baselineDir, {}, false, baseOpts).isEmpty(), "baseline monitor-free mix renders");
+        const auto baselineBytes = bytesOf (baselineDir.getChildFile ("mix.wav"));
+        test::check (baselineBytes.getSize() > 1000, "baseline mix.wav is non-empty");
+
+        // Add a monitor plugin with +6 dB gain (Boost preset) and verify playback is boosted while Export excludes it.
+        const float unmonitoredPeak = playPeak (*w);
+        test::check (unmonitoredPeak < 0.5f, "attenuated unmonitored playback stays well below full scale");
+        test::check (w->addMonitorPlugin ("Test Gain") && w->session.monitor.size() == 1, "Test Gain added to monitor chain");
+        w->session.monitor[0]->instance->setCurrentProgram (1);   // +6 dB
+        const float monitoredPeak = playPeak (*w);
+        test::check (monitoredPeak > unmonitoredPeak * 1.8f, "active +6 dB monitor plugin boosts playback");
+
+        const auto export32Dir = expRoot.getChildFile ("export-32");
+        juce::String seenChooserTitle;
+        bool sawMixOnlyDefaults = false;
+        w->settings.renderStems = true;
+        w->settings.renderBits = 32;
+        w->chooseRenderOptions = [&] (RenderOptions& o)
+        {
+            sawMixOnlyDefaults = (! o.writeStems && o.writeMix);
+            o.writeStems = true;   // chooseAndExport must still force writeStems = false
+            return true;
+        };
+        w->chooseRenderFolder = [&] (const juce::String& title, const juce::File&, std::function<void (const juce::File&)> done)
+        {
+            seenChooserTitle = title;
+            done (export32Dir);
+        };
+        gErrors.clear();
+        gNotes.clear();
+        press (w->exportButton);
+        const auto exportedFiles = export32Dir.findChildFiles (juce::File::findFiles, false, "*");
+        test::check (sawMixOnlyDefaults && seenChooserTitle == "Export final audio into this folder" && gErrors.empty(),
+                     "Export button opens folder chooser with export title and mix-only options");
+        test::check (exportedFiles.size() == 1 && exportedFiles[0].getFileName() == "mix.wav",
+                     "Export writes only mix.wav without stems");
+        test::check (bytesOf (export32Dir.getChildFile ("mix.wav")) == baselineBytes,
+                     "Exported mix.wav excludes the active +6 dB monitor chain");
+        test::check (w->settings.renderStems, "Export preserves settings.renderStems");
+
+        // 24-bit export remembers bits without changing renderStems.
+        const auto export24Dir = expRoot.getChildFile ("export-24");
+        w->chooseRenderOptions = [] (RenderOptions& o) { o.bits = 24; return true; };
+        w->chooseRenderFolder = [&] (const juce::String&, const juce::File&, std::function<void (const juce::File&)> done)
+        {
+            done (export24Dir);
+        };
+        press (w->exportButton);
+        const auto files24 = export24Dir.findChildFiles (juce::File::findFiles, false, "*");
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::InputStream> in24 (export24Dir.getChildFile ("mix.wav").createInputStream());
+        std::unique_ptr<juce::AudioFormatReader> reader24 (wav.createReaderFor (in24.release(), true));
+        test::check (files24.size() == 1 && reader24 != nullptr && reader24->bitsPerSample == 24
+                         && w->settings.renderBits == 24 && w->settings.renderStems,
+                     "24-bit Export writes 24-bit mix.wav, remembers renderBits, and keeps renderStems");
+
+        // Export refuses while another render is running.
+        gErrors.clear();
+        w->session.renderBusy = true;
+        press (w->exportButton);
+        w->session.renderBusy = false;
+        test::check (gErrors.size() == 1 && gErrors[0].contains ("A render is running"),
+                     "Export button refuses while a render is running");
     }
 
     tempFolder().deleteRecursively();

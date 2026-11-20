@@ -77,30 +77,19 @@ void styleField (juce::TextEditor& field)
 }
 } // namespace
 
-// The audio device's settings dialog: a window that stays open beside the arrangement (no modal loop).
-class AudioDialog : public juce::DialogWindow
-{
-public:
-    explicit AudioDialog (std::unique_ptr<juce::Component> content)
-        : juce::DialogWindow ("Audio devices", colours::background, true, true)
-    {
-        setUsingNativeTitleBar (true);
-        setContentOwned (content.release(), true);
-        setResizable (false, false);
-    }
-    void closeButtonPressed() override { setVisible (false); }
-};
-
 // ---- PluginWindow ------------------------------------------------------------------------------------------------------------
-PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed)
-    : juce::DocumentWindow (title, colours::background, juce::DocumentWindow::closeButton), onClosed (std::move (closed))
+PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed, bool addToDesktop)
+    : juce::DocumentWindow (title, colours::background, juce::DocumentWindow::closeButton, addToDesktop), onClosed (std::move (closed))
 {
     setUsingNativeTitleBar (true);
     setContentOwned (editor, true);
-    setResizable (editor->isResizable(), false);
+    if (editor != nullptr && editor->getConstrainer() != nullptr)
+        setConstrainer (editor->getConstrainer());
+    setResizable (editor != nullptr && editor->isResizable(), false);
     setAlwaysOnTop (false);
     centreAroundComponent (nullptr, getWidth(), getHeight());
-    setVisible (true);
+    if (addToDesktop)
+        setVisible (true);
 }
 
 // ---- audio -------------------------------------------------------------------------------------------------------------------
@@ -109,9 +98,11 @@ PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEdito
 // runs, neither happens: the loop does not wrap and the playhead goes on past the end of the audio.
 void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
 {
-    info.clearActiveBufferRegion();
     if (! playing.load())
+    {
+        info.clearActiveBufferRegion();
         return;
+    }
     const bool recording = owner.recorder.isRecording();
     const juce::int64 start = loopStart.load(), end = loopEnd.load(), audioEnd = endOfAudio.load();
     const bool wrap = ! recording && loopOn.load() && end > start;
@@ -136,6 +127,8 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
         pos += n;
         done += n;
     }
+    if (done < info.numSamples)
+        info.buffer->clear (info.startSample + done, info.numSamples - done);
     position = pos;
 }
 
@@ -150,7 +143,8 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
     if (out == nullptr || numOut <= 0)
     {
         // no outputs: nothing is heard, but the transport still advances, so a take on an input-only device runs and the playhead with it
-        if (n <= scratch.getNumSamples())
+        const juce::SpinLock::ScopedTryLockType sl (scratchLock);
+        if (sl.isLocked() && n <= scratch.getNumSamples())
         {
             juce::AudioSourceChannelInfo info (&scratch, 0, n);
             owner.source.getNextAudioBlock (info);
@@ -172,8 +166,8 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
         }
 }
 
-// Message thread, before the device's callbacks start (also when the device changes). A take cannot go on across a change of rate or
-// block size, so it ends here with what it has; the recorder is then prepared for the new device.
+// Before the device's callbacks start (also when the device changes). A take cannot go on across a change of rate or block size, so it
+// ends and the audio buffers (scratch, recorder) are prepared on the message thread (marshalled with callAsync if called from another thread).
 void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice* started)
 {
     auto* mm = juce::MessageManager::getInstanceWithoutCreating();
@@ -183,20 +177,7 @@ void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice
     const int bufSize = hasDevice ? started->getCurrentBufferSizeSamples() : 0;
     const juce::BigInteger activeIn = hasDevice ? started->getActiveInputChannels() : juce::BigInteger();
 
-    if (onMessageThread)
-    {
-        if (owner.recorder.isRecording())
-            owner.stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
-        if (! hasDevice)
-            return;
-        owner.deviceRate = rate;
-        prepareScratch (bufSize);
-        owner.recorder.prepare (rate, bufSize, activeIn);
-        owner.adoptDeviceRate();
-        return;
-    }
-
-    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (&owner), hasDevice, rate, bufSize, activeIn]
+    auto apply = [safe = juce::Component::SafePointer<MainComponent> (&owner), hasDevice, rate, bufSize, activeIn, refresh = ! onMessageThread]
     {
         if (safe == nullptr)
             return;
@@ -208,7 +189,15 @@ void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice
         safe->io.prepareScratch (bufSize);
         safe->recorder.prepare (rate, bufSize, activeIn);
         safe->adoptDeviceRate();
-    });
+        if (refresh)
+            safe->refreshNow();
+    };
+    if (onMessageThread)
+    {
+        apply();
+        return;
+    }
+    juce::MessageManager::callAsync (std::move (apply));
 }
 
 // Device thread. Only a flag: the timer ends a take that the device stopped under (on the message thread).
@@ -242,9 +231,13 @@ MainComponent::MainComponent (Options options) : opts (options)
         dialogOpen = true;
         chooser = std::make_unique<juce::FileChooser> (title, start, "*.olympus");
         chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
-                              [this, done] (const juce::FileChooser& fc) { dialogOpen = false; done (fc.getResult()); });
+                              [safe = juce::Component::SafePointer<MainComponent> (this), done] (const juce::FileChooser& fc)
+                              {
+                                  if (safe == nullptr) return;
+                                  safe->dialogOpen = false;
+                                  done (fc.getResult());
+                              });
     };
-    chooseRenderOptions = [] (RenderOptions& choice) { return askRenderDialog (choice); };
     askRecover = [] (const juce::String& message)
     {
         return juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "Olympus", message, "Open it", "Ignore");
@@ -264,7 +257,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     // the arrangement reports what the user did; the window owns the transport, the files, the menus and the plugin windows
     arrange.dialogOpen = &dialogOpen;
     arrange.onSeek = [this] (juce::int64 s) { seek (s); };
-    arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); };
+    arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); repaint (noteStrip); };
     arrange.onTrackMenu = [this] (int track) { showTrackMenu (track); };
     arrange.onRemoveTrack = [this] (int track) { removeTrack (track); };
     arrange.onFilesDropped = [this] (const juce::StringArray& files, int track, juce::int64 at) { importFiles (files, track, at); };
@@ -283,7 +276,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     };
     addAndMakeVisible (arrange);
 
-    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton, &renderButton, &audioButton,
+    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton, &renderButton, &exportButton, &audioButton,
                      &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton })
         addAndMakeVisible (*b);
     for (auto* b : { &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton })
@@ -324,7 +317,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     masterClipLamp.onClick = [this] { clearMasterClip(); };
     // a focused button would take Space and Return for itself: the keys stay with the window
     for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton,
-                                                             &renderButton, &audioButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton,
+                                                             &renderButton, &exportButton, &audioButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton,
                                                              &zoomFitButton, &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &guideButton,
                                                              &signatureBox, &gridBox })
         c->setWantsKeyboardFocus (false);
@@ -337,6 +330,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     importButton.onClick = [this] { chooseAndImport(); };
     pluginsButton.onClick = [this] { showPluginsMenu(); };
     renderButton.onClick = [this] { chooseAndRender(); };
+    exportButton.onClick = [this] { chooseAndExport(); };
     audioButton.onClick = [this] { showAudioSettings(); };
     rewindButton.onClick = [this] { rewind(); updateTransport(); };
     playButton.onClick = [this] { togglePlay(); updateTransport(); };
@@ -357,6 +351,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     importButton.setTooltip ("Audio files: each one becomes a track with its clip at the playhead. You can also drop them on the window or a lane.");
     pluginsButton.setTooltip ("Where plugins (VST3, and Audio Units on macOS) are looked for, which were found, and a rescan.");
     renderButton.setTooltip ("Write one WAV per audible track, after its clips, chain, fader and pan, and the mix.");
+    exportButton.setTooltip ("Export the final mix (mix.wav) without stems or the monitor chain");
     audioButton.setTooltip ("The audio input and output devices, the sample rate and the buffer size.");
     playButton.setTooltip ("Play from the playhead, or stop (Space). While a take runs, this stops it.");
     recordButton.setTooltip ("Record every armed track from the playhead, with playback. Again stops, and the takes go on their tracks (R).");
@@ -595,7 +590,17 @@ void MainComponent::updateTransport()
         if (bpmField.getText() != text) bpmField.setText (text, juce::dontSendNotification);
         bpmField.setReadOnly (! single);
     }
-    repaint (positionBox);
+    const auto posText = positionText (session, position());
+    const bool recNow = recorder.isRecording();
+    const bool recChanged = recNow != lastRecordingState;
+    if (posText != lastPositionText || recChanged)
+    {
+        lastPositionText = posText;
+        lastRecordingState = recNow;
+        repaint (positionBox);
+    }
+    if (recChanged || recNow)
+        repaint ({ positionBox.getX() - 148, kRowC, 140, 28 });
     refreshMonitorStrip();
     updateTitle();
 }
@@ -828,17 +833,19 @@ bool MainComponent::startRecording()
         showError (error);
         return false;
     }
+    const bool wasPlaying = source.playing.load();
     takeFrom = position();
     setTakeLatency();
     syncTransport();
     session.prepare (false);
     source.recordStart = -1;   // set by the first device block the recorder runs in
+    source.playing = true;
     if (! beginRecording (recorder, session, recordingFolder(), device.rate, error))
     {
+        source.playing = wasPlaying;
         showError (error);
         return false;
     }
-    source.playing = true;
     session.dirty = true;   // a take's WAV is on disk from its first block: the project is dirty now, so a quit asks and the autosave runs
     {
         const juce::ScopedLock sl (session.lock);
@@ -868,6 +875,11 @@ void MainComponent::stopRecording (const juce::String& problem)
     source.playing = false;
     const auto takes = recorder.stop();
     const juce::int64 heard = source.recordStart.exchange (-1);
+    finishRecordingTakes (takes, heard, problem);
+}
+
+void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, const juce::String& problem)
+{
     const juce::int64 start = heard >= 0 ? heard : takeFrom;
     const juce::int64 begin = juce::jmax ((juce::int64) 0, start - takeLatency);
 
@@ -882,7 +894,7 @@ void MainComponent::stopRecording (const juce::String& problem)
         const juce::ScopedLock sl (session.lock);
         for (const auto& take : takes)
         {
-            if (take.frames <= 0 || first.valid())
+            if (take.frames <= 0 || first.valid() || ! juce::isPositiveAndBelow (take.track, (int) session.tracks.size()))
                 continue;
             const auto& clips = session.tracks[(size_t) take.track]->clips;
             for (int c = (int) clips.size() - 1; c >= 0; --c)
@@ -908,8 +920,10 @@ void MainComponent::stopRecording (const juce::String& problem)
     juce::String largestTrack;
     for (const auto& take : takes)
     {
-        if (take.lost > lost) { lost = take.lost; largestTrack = session.tracks[(size_t) take.track]->name; }
-        if (take.lost > 0 && take.track >= 0 && take.track < (int) session.tracks.size()) lossTracks.add (session.tracks[(size_t) take.track]->name);
+        const bool validTrack = juce::isPositiveAndBelow (take.track, (int) session.tracks.size());
+        const juce::String trackName = validTrack ? session.tracks[(size_t) take.track]->name : ("Track " + juce::String (take.track + 1));
+        if (take.lost > lost) { lost = take.lost; largestTrack = trackName; }
+        if (take.lost > 0 && validTrack) lossTracks.add (trackName);
         if (take.failed) problems.add ("The take could not be written: " + take.file.getFullPathName());
     }
     if (lost > 0)
@@ -952,11 +966,17 @@ void MainComponent::updateMaster (double nowMs)
 {
     const float left = session.masterPeakL.exchange (0.0f), right = session.masterPeakR.exchange (0.0f);
     const float peak = juce::jmax (left, right);
+    const float prevL = masterLeft.level, prevLH = masterLeft.hold;
+    const float prevR = masterRight.level, prevRH = masterRight.hold;
     masterLeft.add ((float) dbOf (left));
     masterRight.add ((float) dbOf (right));
     if (peak >= 1.0f)
         clipLatched = true;             // a sample at or over full scale (0 dBFS): latched until clicked or a new project
-    masterClipLamp.lit = clipLatched;
+    if (masterClipLamp.lit != clipLatched)
+    {
+        masterClipLamp.lit = clipLatched;
+        masterClipLamp.repaint();
+    }
     // the peak read-out: the highest peak of the last kMasterHoldMs, then the current one
     const float db = (float) dbOf (peak);
     if (db >= masterHoldDb || nowMs - masterHoldMs >= kMasterHoldMs)
@@ -964,10 +984,13 @@ void MainComponent::updateMaster (double nowMs)
         masterHoldDb = db;
         masterHoldMs = nowMs;
     }
-    masterPeakLabel.setText (masterHoldDb <= -100.0f ? juce::String ("-inf dB") : juce::String (masterHoldDb, 1) + " dB", juce::dontSendNotification);
-    masterClipLamp.repaint();
+    const auto peakText = masterHoldDb <= -100.0f ? juce::String ("-inf dB") : juce::String (masterHoldDb, 1) + " dB";
+    if (masterPeakLabel.getText() != peakText)
+        masterPeakLabel.setText (peakText, juce::dontSendNotification);
     updateMasterFader();
-    repaint(); // the meter's bars
+    if (std::abs (masterLeft.level - prevL) > 1e-4f || std::abs (masterLeft.hold - prevLH) > 1e-4f
+        || std::abs (masterRight.level - prevR) > 1e-4f || std::abs (masterRight.hold - prevRH) > 1e-4f)
+        repaint (masterBarLeft.getUnion (masterBarRight).expanded (2.0f, 2.0f).toNearestInt()); // the meter's bars
 }
 
 void MainComponent::clearMasterClip()
@@ -1261,6 +1284,7 @@ void MainComponent::seek (juce::int64 sample)
         showError ("Stop the recording before you move the playhead.");
         return;
     }
+    session.clearDelayRings();
     source.position = juce::jmax ((juce::int64) 0, sample);
 }
 
@@ -1289,12 +1313,13 @@ void MainComponent::chooseAndOpen()
     dialogOpen = true;
     chooser = std::make_unique<juce::FileChooser> ("Open a project", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.olympus");
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [this] (const juce::FileChooser& fc)
+                          [safe = juce::Component::SafePointer<MainComponent> (this)] (const juce::FileChooser& fc)
                           {
-                              dialogOpen = false;
+                              if (safe == nullptr) return;
+                              safe->dialogOpen = false;
                               const auto file = fc.getResult();
                               if (file == juce::File()) return;
-                              juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this), file]
+                              juce::MessageManager::callAsync ([safe, file]
                               {
                                   if (safe == nullptr) return;
                                   const auto discarded = safe->autosaveFile();   // the session the answer discarded (still open until now)
@@ -1370,10 +1395,11 @@ void MainComponent::chooseFolder()
     dialogOpen = true;
     chooser = std::make_unique<juce::FileChooser> ("The folder with the built plugins (.vst3), or the repository's plugins folder", defaultPluginFolder());
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                          [this] (const juce::FileChooser& fc)
+                          [safe = juce::Component::SafePointer<MainComponent> (this)] (const juce::FileChooser& fc)
                           {
-                              dialogOpen = false;
-                              addPluginFolder (fc.getResult());
+                              if (safe == nullptr) return;
+                              safe->dialogOpen = false;
+                              safe->addPluginFolder (fc.getResult());
                           });
 }
 
@@ -1398,18 +1424,96 @@ bool MainComponent::askRenderDialog (RenderOptions& options)
     return true;
 }
 
+bool MainComponent::askExportDialog (RenderOptions& options)
+{
+    juce::AlertWindow box ("Export final audio",
+                           "Writes the final mix (mix.wav) with the master gain. No stems are written, and the monitor/headphone chain is never rendered.",
+                           juce::AlertWindow::NoIcon);
+    box.addComboBox ("bits", { "32-bit float", "24-bit", "16-bit" }, "Bit depth:");
+    box.getComboBoxComponent ("bits")->setSelectedItemIndex (options.bits == 16 ? 2 : options.bits == 24 ? 1 : 0, juce::dontSendNotification);
+    box.addButton ("Export", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    box.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    if (box.runModalLoop() != 1)
+        return false;
+    const int index = box.getComboBoxComponent ("bits")->getSelectedItemIndex();
+    options.bits = index == 2 ? 16 : index == 1 ? 24 : 32;
+    options.writeStems = false;
+    options.writeMix = true;
+    return true;
+}
+
+void MainComponent::runRenderJob (const juce::File& folder, RenderOptions choice, const juce::String& title)
+{
+    if (folder == juce::File())
+        return;
+    // the message thread stops the transport and closes the tracks' plugin windows before the worker starts:
+    // a window is never destroyed on the worker (renderTo's editorsClosed)
+    source.playing = false;
+    closeTrackEditors();
+    if (chooseRenderFolder)
+    {
+        RenderResult result;
+        const auto error = renderTo (folder, {}, true, choice, &result);
+        finishRender (folder, result, error);
+        return;
+    }
+    struct Job : juce::ThreadWithProgressWindow
+    {
+        Job (MainComponent& m, juce::File f, RenderOptions o, const juce::String& t)
+            : juce::ThreadWithProgressWindow (t, true, true), owner (m), folder (std::move (f)), options (o) {}
+        void run() override
+        {
+            error = owner.renderTo (folder, [this] (float p) { setProgress ((double) p); return ! threadShouldExit(); }, true, options, &result);
+        }
+        MainComponent& owner;
+        juce::File folder;
+        RenderOptions options;
+        RenderResult result;
+        juce::String error;
+    } job (*this, folder, choice, title);
+    job.runThread();
+    finishRender (folder, job.result, job.error);
+}
+
+void MainComponent::launchRenderChooser (const juce::String& chooserTitle, const juce::String& progressTitle, const juce::File& start, RenderOptions choice)
+{
+    if (dialogOpen) return;
+    dialogOpen = true;
+    auto finish = [safe = juce::Component::SafePointer<MainComponent> (this), choice, progressTitle] (const juce::File& folder)
+    {
+        if (safe == nullptr) return;
+        struct BusyReset
+        {
+            juce::Component::SafePointer<MainComponent> s;
+            ~BusyReset() { if (s != nullptr) s->dialogOpen = false; }
+        } reset { safe };
+        safe->runRenderJob (folder, choice, progressTitle);
+    };
+    if (chooseRenderFolder)
+    {
+        chooseRenderFolder (chooserTitle, start, std::move (finish));
+        return;
+    }
+    chooser = std::make_unique<juce::FileChooser> (chooserTitle, start);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [finishCb = std::move (finish)] (const juce::FileChooser& fc)
+                          {
+                              finishCb (fc.getResult());
+                          });
+}
+
 void MainComponent::chooseAndRender()
 {
+    if (refuseWhileBusy()) return;
     if (session.tracks.empty()) { showError ("There are no tracks to render."); return; }
     if (recorder.isRecording()) { showError ("Stop the recording before you render the stems."); return; }
     RenderOptions choice;
     choice.bits = settings.renderBits;
     choice.writeStems = settings.renderStems;
-    if (dialogOpen) return;
     bool chosen = true;
     {
         const DialogBusy busy (dialogOpen);
-        chosen = ! chooseRenderOptions || chooseRenderOptions (choice);
+        chosen = chooseRenderOptions ? chooseRenderOptions (choice) : askRenderDialog (choice);
     }
     if (! chosen)
         return;
@@ -1417,35 +1521,31 @@ void MainComponent::chooseAndRender()
     settings.renderStems = choice.writeStems;
     settings.save (opts.settingsFile);
     const auto start = session.projectFile != juce::File() ? session.projectFile.getParentDirectory().getChildFile (session.name + " stems") : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
-    if (dialogOpen) return;
-    dialogOpen = true;
-    chooser = std::make_unique<juce::FileChooser> ("Render the stems into this folder", start);
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                          [this, choice] (const juce::FileChooser& fc)
-                          {
-                              dialogOpen = false;
-                              const auto folder = fc.getResult();
-                              if (folder == juce::File()) return;
-                              // the message thread stops the transport and closes the tracks' plugin windows before the worker starts:
-                              // a window is never destroyed on the worker (renderTo's editorsClosed)
-                              source.playing = false;
-                              closeTrackEditors();
-                              struct Job : juce::ThreadWithProgressWindow
-                              {
-                                  Job (MainComponent& m, juce::File f, RenderOptions o) : juce::ThreadWithProgressWindow ("Rendering the stems", true, true), owner (m), folder (std::move (f)), options (o) {}
-                                  void run() override
-                                  {
-                                      error = owner.renderTo (folder, [this] (float p) { setProgress ((double) p); return ! threadShouldExit(); }, true, options, &result);
-                                  }
-                                  MainComponent& owner;
-                                  juce::File folder;
-                                  RenderOptions options;
-                                  RenderResult result;
-                                  juce::String error;
-                              } job (*this, folder, choice);
-                              job.runThread();
-                              finishRender (folder, job.result, job.error);
-                          });
+    launchRenderChooser ("Render the stems into this folder", "Rendering the stems", start, choice);
+}
+
+void MainComponent::chooseAndExport()
+{
+    if (refuseWhileBusy()) return;
+    if (session.tracks.empty()) { showError ("There are no tracks to export."); return; }
+    if (recorder.isRecording()) { showError ("Stop the recording before you export the mix."); return; }
+    RenderOptions choice;
+    choice.bits = settings.renderBits;
+    choice.writeStems = false;
+    choice.writeMix = true;
+    bool chosen = true;
+    {
+        const DialogBusy busy (dialogOpen);
+        chosen = chooseRenderOptions ? chooseRenderOptions (choice) : askExportDialog (choice);
+    }
+    if (! chosen)
+        return;
+    choice.writeStems = false;
+    choice.writeMix = true;
+    settings.renderBits = choice.bits;
+    settings.save (opts.settingsFile);
+    const auto start = session.projectFile != juce::File() ? session.projectFile.getParentDirectory() : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    launchRenderChooser ("Export final audio into this folder", "Exporting final audio", start, choice);
 }
 
 // After a render: a cancel is quiet (its files are gone); a failure is shown; a success names the folder and the files and reveals it.
@@ -1740,6 +1840,7 @@ void MainComponent::setMonitorBypassed (bool bypass)
 // by its own click); the names, the lamps and the CORRECTION switch are set each time.
 void MainComponent::refreshMonitorStrip()
 {
+    bool changed = false;
     const int count = (int) session.monitor.size();
     if (monitorButtons.size() != count)
     {
@@ -1755,23 +1856,36 @@ void MainComponent::refreshMonitorStrip()
             b->onMenu = [this, b] { if (const int at = monitorButtons.indexOf (b); at >= 0) showMonitorMenu (at); };
         }
         resized();
+        changed = true;
     }
     for (int i = 0; i < count; ++i)
     {
         auto* b = monitorButtons[i];
         const auto& slot = *session.monitor[(size_t) i];
-        if (b->getButtonText() != slot.plugin) b->setButtonText (slot.plugin);
-        b->missing = slot.instance == nullptr;
+        if (b->getButtonText() != slot.plugin) { b->setButtonText (slot.plugin); changed = true; }
+        const bool isMissing = slot.instance == nullptr;
+        if (b->missing != isMissing) { b->missing = isMissing; b->repaint(); changed = true; }
         // lit when it is installed and on; a bypassed or missing plugin is dark (a missing one reads in red)
-        b->setToggleState (slot.instance != nullptr && ! slot.bypass, juce::dontSendNotification);
-        const auto tip = slot.instance == nullptr ? juce::String ("Not installed on this computer: its name is in red. It passes the audio through and keeps its settings.")
-                                                 : juce::String ("Click: open its window. Shift-click: bypass. Right-click: the menu.");
-        b->setTooltip (tip);
+        const bool lit = slot.instance != nullptr && ! slot.bypass;
+        if (b->getToggleState() != lit) { b->setToggleState (lit, juce::dontSendNotification); changed = true; }
+        const auto tip = isMissing ? juce::String ("Not installed on this computer: its name is in red. It passes the audio through and keeps its settings.")
+                                   : juce::String ("Click: open its window. Shift-click: bypass. Right-click: the menu.");
+        if (b->getTooltip() != tip) b->setTooltip (tip);
     }
     const auto correction = juce::String (session.monitorBypass ? "Bypass" : "Correction on");
-    if (monitorBypassButton.getButtonText() != correction) monitorBypassButton.setButtonText (correction);
-    monitorBypassButton.setToggleState (! session.monitorBypass, juce::dontSendNotification);
-    repaint (monitorStrip);
+    if (monitorBypassButton.getButtonText() != correction) { monitorBypassButton.setButtonText (correction); changed = true; }
+    if (monitorBypassButton.getToggleState() != ! session.monitorBypass) { monitorBypassButton.setToggleState (! session.monitorBypass, juce::dontSendNotification); changed = true; }
+    const double latMs = monitorLatencyMs();
+    if (std::abs (latMs - lastMonitorLatencyMs) > 1e-6)
+    {
+        lastMonitorLatencyMs = latMs;
+        changed = true;
+    }
+    if (changed)
+    {
+        repaint (monitorStrip);
+        repaint (noteStrip);
+    }
 }
 
 // The menu of a monitor plugin: its window, its bypass, its place, and its removal (the chain is saved after each).
@@ -1993,6 +2107,7 @@ void MainComponent::timerCallback()
     {
         session.updateLatencies();
         syncTransport(); // the end of the audio includes the longest chain's latency: the callback's copy follows it
+        repaint (noteStrip);
     }
     arrange.refresh();
     updateTransport();
@@ -2054,21 +2169,15 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (is ('v')) { syncPlayhead(); arrange.pasteAtPlayhead(); return true; }
         return false;
     }
+    if (typing)
+        return false;
     if (code == juce::KeyPress::spaceKey) { togglePlay(); updateTransport(); return true; }
     if (code == juce::KeyPress::returnKey) { rewind(); updateTransport(); return true; }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { arrange.deleteSelected(); return true; }
-    if (! typing)
-    {
-        if (code == juce::KeyPress::homeKey) { seek (0); syncPlayhead(); updateTransport(); return true; }
-        if (code == juce::KeyPress::endKey) { seek (session.length()); syncPlayhead(); updateTransport(); return true; }
-        if (is (',') || is ('.')) { jumpToMarker (is ('.')); syncPlayhead(); updateTransport(); return true; }
-    }
-    if (is ('r'))
-    {
-        if (bpmField.hasKeyboardFocus (true)) return false;   // typing a tempo: the R is a letter there
-        toggleRecord();
-        return true;
-    }
+    if (code == juce::KeyPress::homeKey) { seek (0); syncPlayhead(); updateTransport(); return true; }
+    if (code == juce::KeyPress::endKey) { seek (session.length()); syncPlayhead(); updateTransport(); return true; }
+    if (is (',') || is ('.')) { jumpToMarker (is ('.')); syncPlayhead(); updateTransport(); return true; }
+    if (is ('r')) { toggleRecord(); return true; }
     if (is ('s')) { syncPlayhead(); arrange.splitAtPlayhead(); return true; }
     if (is ('m')) { syncPlayhead(); arrange.addMarkerAtPlayhead(); return true; }
     if (is ('l')) { toggleLoop(); return true; }
@@ -2097,8 +2206,11 @@ void MainComponent::resized()
     x += 110;
     pluginsButton.setBounds (x, rowA, 80, h);
     x += 86;
-    renderButton.setBounds (x, rowA, 112, h);
-    audioButton.setBounds (x + 118, rowA, 76, h);
+    renderButton.setBounds (x, rowA, 104, h);
+    x += 110;
+    exportButton.setBounds (x, rowA, 76, h);
+    x += 82;
+    audioButton.setBounds (x, rowA, 76, h);
     guideButton.setBounds (w - kMargin - 70, rowA, 70, h);
 
     // row B: the transport, then the zoom
@@ -2119,8 +2231,8 @@ void MainComponent::resized()
     zoomFitButton.setBounds (x, rowB, 44, hb);
 
     // row C: the device's summary, the take's time or the track count, and the position
-    deviceLabel.setBounds (290, kRowC, 620, hc);
     positionBox = { w - kMargin - 184, kRowC, 184, hc };
+    deviceLabel.setBounds (290, kRowC, juce::jmax (120, positionBox.getX() - 154 - 290), hc);
     // the master section, in row C left of the device line (x 16 to 282): MASTER (painted), the fader, the stereo meter's two bars, the peak
     // read-out and the CLIP lamp
     masterFader.setBounds (68, kRowC + 6, 80, 16);
@@ -2170,7 +2282,7 @@ void MainComponent::paint (juce::Graphics& g)
         readout = juce::String ((int) session.tracks.size()) + (session.tracks.size() == 1 ? " track" : " tracks")
                   + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String());
     }
-    ui::hw::drawLabel (g, readout, { 930, kRowC, 140, 28 }, juce::Justification::centredRight, colour, 10.5f);
+    ui::hw::drawLabel (g, readout, { positionBox.getX() - 148, kRowC, 140, 28 }, juce::Justification::centredRight, colour, 10.5f);
     // the MONITOR strip: its label, a hint while the chain is empty, and the chain's latency beside the CORRECTION switch
     ui::hw::drawLabel (g, "MONITOR", { monitorStrip.getX(), monitorStrip.getY(), 90, monitorStrip.getHeight() }, juce::Justification::centredLeft, colours::dim, 10.5f);
     if (monitorButtons.isEmpty())
