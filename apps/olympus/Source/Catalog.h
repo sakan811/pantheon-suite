@@ -48,6 +48,7 @@ public:
     }
 
     // On: only the bundles and plugins named as one of the suite's are read and listed (Settings::scanSuiteOnly).
+    bool suiteOnly() const { return suiteOnlyMode; }
     void setSuiteOnly (bool suiteOnly)
     {
         suiteOnlyMode = suiteOnly;

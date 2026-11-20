@@ -66,8 +66,9 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
             if (slot->instance == nullptr) ++missingPlugins;
         anyAudible += s.audible (*t) ? 1 : 0;
     }
-    if (s.catalog.names().isEmpty())
-        add (ui::Severity::warning, "No plugin found. PLUGINS: look in a folder that holds the built .vst3 files, or rescan.");
+    // the scan found nothing at all (names() holds the scan's plugins, and the suite-only setting narrows them: then this note is not about the scan)
+    if (s.catalog.names().isEmpty() && ! s.catalog.suiteOnly())
+        add (ui::Severity::warning, "No plugin found. PLUGINS > Look in a folder... adds a folder with VST3 plugins.");
     if (missingPlugins > 0)
         add (ui::Severity::warning, juce::String (missingPlugins) + " plugin(s) in this project are not installed here: they pass the audio through and keep their settings.");
     if (! s.tracks.empty() && anyAudible == 0)

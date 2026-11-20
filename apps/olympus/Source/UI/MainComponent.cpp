@@ -153,6 +153,10 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
     juce::AudioBuffer<float> buffer (out, numOut, n);
     juce::AudioSourceChannelInfo info (&buffer, 0, n);
     owner.source.getNextAudioBlock (info);
+    // the device's output ceiling: no sample leaves above full scale (the mix is over 1.0 when the master is raised). Only this path is held:
+    // the stems and mix.wav are rendered by Session::renderStems and stay float. The master's peak was read before this (Session::processBlock).
+    for (int ch = 0; ch < numOut; ++ch)
+        juce::FloatVectorOperations::clip (out[ch], out[ch], -1.0f, 1.0f, n);
 }
 
 // Message thread, before the device's callbacks start (also when the device changes). A take cannot go on across a change of rate or
@@ -254,6 +258,25 @@ MainComponent::MainComponent (Options options) : opts (options)
     addAndMakeVisible (deviceLabel);
     deviceLabel.setFont (ui::font (10.5f));
     deviceLabel.setColour (juce::Label::textColourId, colours::dim);
+    // the master section: the fader (a drag is one undo step: its Gesture lives from the drag's start to its end), the peak read-out and CLIP
+    addAndMakeVisible (masterFader);
+    masterFader.setSliderStyle (juce::Slider::LinearHorizontal);
+    masterFader.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+    masterFader.setRange (-100.0, 12.0, 0.01);     // -100 is silence (-inf); the Editor clamps the same range
+    masterFader.setDoubleClickReturnValue (true, 0.0);
+    masterFader.setWantsKeyboardFocus (false);
+    masterFader.setTooltip ("Master gain: drag, double-click for 0 dB. It applies to the playback and to mix.wav, never to the stems.");
+    masterFader.onDragStart = [this] { masterGesture = std::make_unique<Editor::Gesture> (editor, "Master gain"); };
+    masterFader.onDragEnd = [this] { masterGesture.reset(); };
+    masterFader.onValueChange = [this] { editor.setMasterDb ((float) masterFader.getValue()); };
+    addAndMakeVisible (masterPeakLabel);
+    masterPeakLabel.setFont (ui::font (10.5f));
+    masterPeakLabel.setColour (juce::Label::textColourId, colours::dim);
+    masterPeakLabel.setJustificationType (juce::Justification::centred);
+    masterPeakLabel.setTooltip ("The master's peak over the last 2 seconds, dBFS, read before the output ceiling of the device.");
+    addAndMakeVisible (masterClipLamp);
+    masterClipLamp.setTooltip ("CLIP: lit once the master reaches 0 dBFS (the device's output is held at full scale). Click to clear it.");
+    masterClipLamp.onClick = [this] { clearMasterClip(); };
     // a focused button would take Space and Return for itself: the keys stay with the window
     for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton,
                                                              &renderButton, &audioButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton,
@@ -817,6 +840,19 @@ void MainComponent::stopRecording (const juce::String& problem)
 
     juce::StringArray problems;
     if (error.isNotEmpty()) problems.add (error);
+    // the disk problems of the takes: a gap where the disk could not keep up (the largest of the takes, which hear the same blocks), and a file
+    // whose writes failed (it keeps what was written)
+    juce::int64 lost = 0;
+    for (const auto& take : takes)
+    {
+        lost = juce::jmax (lost, take.lost);
+        if (take.failed) problems.add ("The take could not be written: " + take.file.getFullPathName());
+    }
+    if (lost > 0)
+    {
+        const double ms = device.rate > 0.0 ? 1000.0 * (double) lost / device.rate : 0.0;
+        problems.add (juce::String (lost) + " samples (" + juce::String (ms, 0) + " ms) of the take were lost because the disk could not keep up: the take has a gap.");
+    }
     if (problem.isNotEmpty()) problems.add (problem);
     if (problems.size() > 0)
         showError (problems.joinIntoString ("\n"));
@@ -841,6 +877,50 @@ void MainComponent::updateRecording()
     repaint();
 }
 
+// The master section, on the timer. The session's peaks are read here and only here (exchange resets them). They are read before the device's
+// output ceiling, so an over shows on CLIP although the device is held at full scale.
+void MainComponent::updateMaster (double nowMs)
+{
+    const float left = session.masterPeakL.exchange (0.0f), right = session.masterPeakR.exchange (0.0f);
+    const float peak = juce::jmax (left, right);
+    masterLeft.add ((float) dbOf (left));
+    masterRight.add ((float) dbOf (right));
+    if (peak >= 1.0f)
+        clipLatched = true;             // a sample at or over full scale (0 dBFS): latched until clicked or a new project
+    masterClipLamp.lit = clipLatched;
+    // the peak read-out: the highest peak of the last kMasterHoldMs, then the current one
+    const float db = (float) dbOf (peak);
+    if (db >= masterHoldDb || nowMs - masterHoldMs >= kMasterHoldMs)
+    {
+        masterHoldDb = db;
+        masterHoldMs = nowMs;
+    }
+    masterPeakLabel.setText (masterHoldDb <= -100.0f ? juce::String ("-inf dB") : juce::String (masterHoldDb, 1) + " dB", juce::dontSendNotification);
+    masterClipLamp.repaint();
+    updateMasterFader();
+    repaint(); // the meter's bars
+}
+
+void MainComponent::clearMasterClip()
+{
+    clipLatched = false;
+    masterClipLamp.lit = false;
+    masterClipLamp.repaint();
+}
+
+// The fader shows the session's gain (undo, a project, the server): it is not moved while the user drags it, and not while a block or a render
+// holds the lock (the next tick looks again).
+void MainComponent::updateMasterFader()
+{
+    if (masterFader.isMouseButtonDown())
+        return;
+    const juce::ScopedTryLock sl (session.lock);
+    if (! sl.isLocked())
+        return;
+    if (std::abs (masterFader.getValue() - (double) session.masterDb) > 1.0e-4)
+        masterFader.setValue (session.masterDb, juce::dontSendNotification);
+}
+
 // ---- actions -----------------------------------------------------------------------------------------------------------------
 void MainComponent::newProject()
 {
@@ -850,6 +930,7 @@ void MainComponent::newProject()
     source.playing = false;
     session.newProject ("Untitled");
     editor.clearUndo();
+    clearMasterClip();   // a new project starts with no CLIP latched
     adoptDeviceRate();
     seek (0);
     arrange.selected = {};
@@ -1691,6 +1772,7 @@ void MainComponent::timerCallback()
     syncPlayhead();
     arrange.showInputLevels = ! isPlaying() || recorder.isRecording();
     updateRecording();
+    updateMaster (juce::Time::getMillisecondCounterHiRes());   // the master's meter, peak read-out and CLIP: the only reader of the master's peaks
     // a plugin reported a new latency (its listener only sets a flag): the tracks' delays follow it, and the read-outs below show it
     if (! rendering && session.takeLatencyChange())
     {
@@ -1805,6 +1887,13 @@ void MainComponent::resized()
     // row C: the device's summary, the take's time or the track count, and the position
     deviceLabel.setBounds (290, kRowC, 620, hc);
     positionBox = { w - kMargin - 184, kRowC, 184, hc };
+    // the master section, in row C left of the device line (x 16 to 282): MASTER (painted), the fader, the stereo meter's two bars, the peak
+    // read-out and the CLIP lamp
+    masterFader.setBounds (68, kRowC + 6, 80, 16);
+    masterBarLeft = { 152.0f, (float) kRowC + 4.0f, 36.0f, 9.0f };
+    masterBarRight = { 152.0f, (float) kRowC + 15.0f, 36.0f, 9.0f };
+    masterPeakLabel.setBounds (192, kRowC, 46, hc);
+    masterClipLamp.setBounds (240, kRowC, 42, hc);
 
     noteStrip = { kMargin, r.getHeight() - kMargin - ui::kNoteStripHeight, w - 2 * kMargin, ui::kNoteStripHeight };
     bodyArea = { kMargin, kBodyTop, w - 2 * kMargin, noteStrip.getY() - 10 - kBodyTop };
@@ -1855,6 +1944,15 @@ void MainComponent::paint (juce::Graphics& g)
                            juce::Justification::centredLeft, colours::dim, 10.0f);
     ui::hw::drawLabel (g, "latency " + juce::String (monitorLatencyMs(), 1) + " ms", monitorLatencyArea (monitorStrip), juce::Justification::centredRight,
                        colours::dim, 10.0f);
+    // the master section: its label, and the stereo meter's bars (the track meter's ballistics and colours, on the kit's dark slot)
+    ui::hw::drawLabel (g, "MASTER", { kMargin, kRowC, 50, 28 }, juce::Justification::centredLeft, colours::dim, 10.5f);
+    for (const auto* bar : { &masterBarLeft, &masterBarRight })
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.85f));
+        g.fillRoundedRectangle (bar->expanded (0.0f, 1.0f), 2.0f);
+    }
+    paintLevelBar (g, masterBarLeft, masterLeft);
+    paintLevelBar (g, masterBarRight, masterRight);
     ui::drawNoteStrip (g, noteStrip, notes());
 }
 }

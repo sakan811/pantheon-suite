@@ -500,6 +500,8 @@ public:
 
     // The label of the edit that undo would revert ("Split clip"), or "" when there is none.
     juce::String undoLabel() const { return undoSteps.empty() ? juce::String() : undoSteps.back().label; }
+    // The label of the edit that redo would make again, or "" when there is none.
+    juce::String redoLabel() const { return redoSteps.empty() ? juce::String() : redoSteps.back().label; }
 
     // Groups every edit made while it lives into ONE undo step, labelled `label`. Gestures nest: only the outermost one counts. The step
     // is pushed when the outermost one ends, and only if something in it changed.

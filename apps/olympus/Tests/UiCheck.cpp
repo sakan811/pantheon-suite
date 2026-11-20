@@ -193,7 +193,43 @@ void layoutCheck (MainComponent& w, const char* label)
             ok = ok && ! controls[i]->getBounds().intersects (controls[j]->getBounds());
     }
     ok = ok && w.positionBox.getRight() <= w.getWidth() - 16 && w.positionBox.getY() >= 0;
+    // the master section (row C, left of the device line): its controls and its meter inside the window, over no other control
+    const std::vector<juce::Component*> master { &w.masterFader, &w.masterPeakLabel, &w.masterClipLamp };
+    for (auto* m : master)
+    {
+        ok = ok && inside (*m, w) && m->getBottom() <= w.arrange.getY() && ! m->getBounds().intersects (w.deviceLabel.getBounds());
+        for (auto* c : controls)
+            ok = ok && ! m->getBounds().intersects (c->getBounds());
+    }
+    ok = ok && w.masterMeterArea().getRight() <= (float) w.deviceLabel.getX() && w.masterMeterArea().getBottom() <= (float) w.arrange.getY()
+         && w.masterMeterArea().getY() >= 0.0f;
     test::check (ok, juce::String ("layout at ") + label + ": every control inside the window and above the arrangement, none over another");
+}
+
+// A one-second stereo WAV of a 330 Hz sine at `level` (its peak is `level`): a clip at a known level for the master's meter.
+juce::File makeLevelWav (const juce::String& name, float level, int length = 48000)
+{
+    juce::AudioBuffer<float> b (2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i)
+            b.setSample (ch, i, level * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 330.0 * i / 48000.0));
+    auto file = tempFolder().getChildFile (name);
+    file.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (24));
+    writer->writeFromAudioSampleBuffer (b, 0, length);
+    return file;
+}
+
+// One block of playback through the transport's own path (renderAudioBlock, the code the device's callback runs), then the master's meter
+// read at `ms`. The transport must be playing for the block to carry sound.
+void masterBlock (MainComponent& w, double ms, int frames = 4800)
+{
+    juce::AudioBuffer<float> block (2, frames);
+    block.clear();
+    w.renderAudioBlock (block);
+    w.updateMaster (ms);
 }
 
 // The arrangement's own mouse event, at a point of its own coordinates.
@@ -1480,6 +1516,110 @@ int main()
         w->session.renderBusy = false;
         test::check (! proceeded && gErrors.size() == 1 && gErrors[0] == "A render is running: wait for it or cancel it first.",
                      "a NEW, OPEN or Quit while a render runs is refused with the reason");
+    }
+
+    std::printf ("[29] Master section: the meter and the peak read-out follow the master; CLIP latches at 0 dBFS until clicked; a fader drag is one undo step\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeLevelWav ("master-6.wav", 0.5f).getFullPathName() });   // a peak of 0.5: -6.0 dBFS
+        w->seek (0);
+        if (! w->isPlaying()) w->togglePlay();
+        masterBlock (*w, 0.0);
+        test::check (std::abs (w->masterPeakDb() + 6.0f) < 0.3f && ! w->masterClipLatched(), "a signal at -6 dBFS reads about -6 dB on the master, and does not clip");
+
+        w->editor.setMasterDb (12.0f);
+        w->seek (0);
+        if (! w->isPlaying()) w->togglePlay();
+        masterBlock (*w, 100.0);
+        test::check (w->masterClipLatched() && w->masterPeakDb() > 5.0f, "with the master at +12 dB the CLIP lamp latches");
+        if (w->isPlaying()) w->togglePlay();
+        masterBlock (*w, 200.0, 512);   // the signal has stopped
+        test::check (w->masterClipLatched() && w->masterPeakDb() > 5.0f, "the lamp stays latched after the signal stops, and the read-out holds the peak");
+        masterBlock (*w, 2500.0, 512);  // two seconds on: the hold has run out
+        test::check (w->masterPeakDb() <= -99.9f && w->masterClipLatched(), "after two seconds the read-out falls back to the silence; the lamp is still lit");
+        layoutCheck (*w, "the master section at the design size");
+        press (w->masterClipLamp);
+        test::check (! w->masterClipLatched(), "a click on CLIP clears the lamp");
+
+        // the fader: one drag is one undo step, and undo puts back the gain the drag started from
+        w->updateMaster (2600.0);
+        test::check (std::abs (w->masterFader.getValue() - 12.0) < 0.01, "the fader shows the master's gain (+12 dB)");
+        const float before = w->session.masterDb;
+        w->masterFader.onDragStart();
+        w->masterFader.setValue (-6.0, juce::sendNotificationSync);
+        w->masterFader.setValue (-9.0, juce::sendNotificationSync);
+        w->masterFader.onDragEnd();
+        test::check (std::abs (w->session.masterDb + 9.0f) < 0.01f && w->editor.undoLabel() == "Master gain", "a drag sets the gain and is the step Master gain");
+        test::check (w->editor.undo() && std::abs (w->session.masterDb - before) < 0.01f, "one undo restores the gain from before the drag");
+        w->updateMaster (2700.0);
+        test::check (std::abs (w->masterFader.getValue() - (double) before) < 0.01, "and the fader follows the restored gain");
+    }
+
+    std::printf ("[30] Output ceiling: the device's output is held at full scale at +12 dB; the master's peak is read before it; the mix of a render keeps its samples over 1.0\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeLevelWav ("ceiling.wav", 0.5f).getFullPathName() });
+        w->editor.setMasterDb (12.0f);
+        w->seek (0);
+        if (! w->isPlaying()) w->togglePlay();
+        juce::AudioBuffer<float> through (2, 4800);
+        w->renderAudioBlock (through);   // the transport's own path: no ceiling
+        test::check (through.getMagnitude (0, 0, 4800) > 1.5f, "the transport's samples go over full scale at +12 dB (about 2.0)");
+        const float devicePeak = playPeak (*w);   // the device's path: held
+        test::check (devicePeak <= 1.0f && devicePeak > 0.999f, "the device's output is held at full scale");
+        w->updateMaster (0.0);
+        test::check (w->masterClipLatched() && w->masterPeakDb() > 5.0f, "the master's peak is read before the ceiling, so CLIP lights although the device is held");
+
+        const auto folder = takesFolder().getChildFile ("ceiling-render");
+        test::check (w->renderTo (folder).isEmpty(), "the render of the same session is written");
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (folder.getChildFile ("mix.wav")));
+        juce::AudioBuffer<float> mix (2, reader != nullptr ? (int) reader->lengthInSamples : 0);
+        if (reader != nullptr) reader->read (&mix, 0, mix.getNumSamples(), 0, true, true);
+        const float mixPeak = juce::jmax (mix.getMagnitude (0, 0, mix.getNumSamples()), mix.getMagnitude (1, 0, mix.getNumSamples()));
+        test::check (mixPeak > 1.5f, "mix.wav keeps its samples over full scale: the ceiling is the device's alone");
+    }
+
+    std::printf ("[31] Disk problems of a take: the frames the disk could not take, and a file whose writes failed, are reported when the take stops; a clean take says nothing\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("disk.wav").getFullPathName() });
+        juce::String error;
+        w->setDeviceForTest (fakeDevice());   // 48 kHz
+        test::check (w->session.setTrackArm (0, true, error) && w->session.setTrackInput (0, 0, -1, error), "the track is armed on input 1");
+        juce::int64 fed = 0;
+        gErrors.clear();
+        test::check (w->startRecording(), "REC starts a take");
+        feedDevice (*w, fed, 48000.0, 4800);
+        w->recorderForChecks().lostForTest (0, 480);   // the disk refused 480 frames (10 ms)
+        w->stopRecording();
+        test::check (gErrors.size() == 1 && gErrors[0].contains ("480 samples (10 ms) of the take were lost because the disk could not keep up: the take has a gap."),
+                     "a take the disk could not keep up with says how much is lost");
+
+        gErrors.clear();
+        test::check (w->startRecording(), "a second take starts");
+        feedDevice (*w, fed, 48000.0, 1024);
+        w->recorderForChecks().failedForTest (0);      // its file's writes failed
+        w->stopRecording();
+        test::check (gErrors.size() == 1 && gErrors[0].startsWith ("The take could not be written: ") && gErrors[0].contains ("-take-"),
+                     "a take whose file could not be written is said, with its file");
+
+        gErrors.clear();
+        test::check (w->startRecording(), "a third take starts");
+        feedDevice (*w, fed, 48000.0, 1024);
+        w->stopRecording();
+        test::check (gErrors.empty(), "a clean take says nothing");
+    }
+
+    std::printf ("[32] The empty scan: with no plugin found the foot says where to look, unless the scan is suite-only (then it says nothing about the scan)\n");
+    {
+        auto none = makeWindow (false);
+        test::check (noteMentions (*none, "PLUGINS > Look in a folder", ui::Severity::warning), "no plugin found: the note says where to look");
+        none->session.catalog.setSuiteOnly (true);
+        test::check (! noteMentions (*none, "No plugin found", ui::Severity::warning), "suite only, with none of the suite found: no note about the scan");
+        auto found = makeWindow (true);
+        test::check (! noteMentions (*found, "No plugin found", ui::Severity::warning), "with plugins found there is no note");
     }
 
     tempFolder().deleteRecursively();

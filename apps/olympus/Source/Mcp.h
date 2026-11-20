@@ -185,6 +185,8 @@ private:
                           { "end_seconds", pos ("in seconds") }, { "end_beats", pos ("in quarter notes") }, { "on", prop ("boolean", "Default true") } }, {}));
         list.add (tool ("set_master", "The master gain: applied to the playback and to mix.wav, never to the stems.",
                         { { "master_db", prop ("number", "-100 to +12 dB") } }, { "master_db" }));
+        list.add (tool ("undo", "Undoes the last timeline edit (a clip, the mix, the master, the tempo, a marker, the loop...). Tracks and plugins are not undone, and adding or removing one clears the history.", {}));
+        list.add (tool ("redo", "Redoes the edit that undo took back.", {}));
         return list;
     }
 
@@ -283,6 +285,28 @@ private:
             editor.setMasterDb ((float) db);
             return session.describe();
         }
+        if (name == "undo" || name == "redo")
+        {
+            // the same history as the window's Undo and Redo (Editor): the answer names the edit, and both flags say what is left
+            const bool undoing = name == "undo";
+            const auto label = undoing ? editor.undoLabel() : editor.redoLabel();
+            if (undoing ? ! editor.canUndo() : ! editor.canRedo())
+            {
+                error = undoing ? "Nothing to undo: no edit is in the history (tracks and plugins are not undone)."
+                                : "Nothing to redo: no edit has been undone.";
+                return {};
+            }
+            if (! (undoing ? editor.undo() : editor.redo()))
+            {
+                error = "The edit cannot be " + juce::String (undoing ? "undone" : "redone") + ": the number of tracks changed since it was made.";
+                return {};
+            }
+            auto d = session.describe();
+            d.getDynamicObject()->setProperty (undoing ? "undone" : "redone", label);
+            d.getDynamicObject()->setProperty ("can_undo", editor.canUndo());
+            d.getDynamicObject()->setProperty ("can_redo", editor.canRedo());
+            return d;
+        }
 
         // everything below names a track
         const auto trackArg = a.hasProperty ("from_track") ? a["from_track"] : a["track"];
@@ -316,6 +340,7 @@ private:
                 to.push_back (i);
             }
             if (! session.copyChain (from, to, error)) return {};
+            editor.clearUndo(); // a chain is not undone (see Edit.h)
             return session.describe();
         }
         const int track = session.findTrack (trackArg, error);
@@ -458,13 +483,19 @@ private:
             return session.describe();
         }
         if (name == "add_plugin")
-            return session.addPlugin (track, a["plugin"].toString(), a.hasProperty ("position") ? (int) a["position"] : -1, error) ? session.describe() : juce::var();
+        {
+            if (! session.addPlugin (track, a["plugin"].toString(), a.hasProperty ("position") ? (int) a["position"] : -1, error)) return {};
+            editor.clearUndo(); // plugins are not undone (see Edit.h)
+            return session.describe();
+        }
         if (name == "set_chain")
         {
             juce::StringArray plugins;
             if (auto* arr = a["plugins"].getArray())
                 for (auto& p : *arr) plugins.add (p.toString());
-            return session.setChain (track, plugins, error) ? session.describe() : juce::var();
+            if (! session.setChain (track, plugins, error)) return {};
+            editor.clearUndo(); // plugins are not undone (see Edit.h)
+            return session.describe();
         }
         if (name == "move_plugin")
             return session.movePlugin (track, (int) a["from"], (int) a["to"], error) ? session.describe() : juce::var();
@@ -472,7 +503,11 @@ private:
         const int slot = findSlot (track, a["slot"], error);
         if (slot < 0) return {};
         if (name == "remove_plugin")
-            return session.removePlugin (track, slot, error) ? session.describe() : juce::var();
+        {
+            if (! session.removePlugin (track, slot, error)) return {};
+            editor.clearUndo(); // plugins are not undone (see Edit.h)
+            return session.describe();
+        }
         if (name == "bypass_plugin")
             return session.setBypass (track, slot, (bool) a["bypass"], error) ? session.describe() : juce::var();
 

@@ -409,7 +409,7 @@ void mcpChecks()
     juce::var list;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}", list);
     const auto tools = server.handle (list)["result"]["tools"];
-    test::check (tools.size() == 31 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
+    test::check (tools.size() == 33 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
 
     juce::var note;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", note);
@@ -465,6 +465,38 @@ juce::var toolCall (McpServer& server, const juce::String& tool, const juce::Str
 juce::String toolText (const juce::var& result) { return result["content"][0]["text"].toString(); }
 juce::var toolJson (const juce::var& result) { juce::var v; juce::JSON::parse (toolText (result), v); return v; }
 
+// [40] The MCP server's undo and redo: the same history as the window's (Editor). An edit is undone and redone by name; an empty history is an
+// error result with the reason; adding a plugin clears the history, as the window does.
+void mcpUndoChecks()
+{
+    std::printf ("[40] MCP undo and redo: an edit is undone and redone through the Editor; an empty history is an error result; a plugin change clears it\n");
+    tempFolder().getChildFile ("mcp-undo").createDirectory();
+    juce::String err;
+    const auto wav = makeWav ("mcp-undo/a.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+    const auto path = wav.getFullPathName().replace ("\\", "\\\\");
+    Session s;
+    test::addTestPlugins (s.catalog);
+    s.addTrack (wav, "A", err);
+    McpServer server (s);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+    const auto said = [] (const juce::var& r, const char* words) { return toolText (r).contains (words); };
+
+    test::check (failed (call ("undo", "{}")) && said (call ("undo", "{}"), "Nothing to undo"), "undo with an empty history is an error result with the reason");
+    test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1}")) && s.tracks[0]->clips.size() == 2, "add_clip: one clip more");
+    const auto undone = call ("undo", "{}");
+    test::check (! failed (undone) && s.tracks[0]->clips.size() == 1 && toolJson (undone)["undone"].toString() == "Add clip",
+                 "undo takes the clip off again and names the edit it undid");
+    test::check ((bool) toolJson (undone)["can_redo"] && ! (bool) toolJson (undone)["can_undo"], "after the undo, redo is possible and undo is not");
+    const auto redone = call ("redo", "{}");
+    test::check (! failed (redone) && s.tracks[0]->clips.size() == 2 && toolJson (redone)["redone"].toString() == "Add clip", "redo brings the clip back and names it");
+    test::check (failed (call ("redo", "{}")) && said (call ("redo", "{}"), "Nothing to redo"), "redo with nothing undone is an error result with the reason");
+
+    test::check (! failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\"}")), "add_plugin puts a plugin on the track");
+    test::check (failed (call ("undo", "{}")) && said (call ("undo", "{}"), "Nothing to undo"), "adding a plugin clears the history: the clip is not undone");
+    tempFolder().getChildFile ("mcp-undo").deleteRecursively();
+}
+
 // The timeline tools of the MCP server (added with the clip model): every one goes through the Editor and answers an error result with a
 // reason when a track, clip or marker is not there. A one-second file is at 48 kHz, and the tempo is 120 bpm: a beat is 24000 samples.
 void mcpTimelineChecks()
@@ -490,7 +522,7 @@ void mcpTimelineChecks()
                            "add_marker", "remove_marker", "set_loop", "set_master" })
         for (auto& t : *tools.getArray())
             if (t["name"].toString() == n) ++known;
-    test::check (tools.size() == 31 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
+    test::check (tools.size() == 33 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
 
     // clips
     test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1}")) && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 48000,
@@ -1939,6 +1971,7 @@ int main()
     addClipLockChecks();
     latencyChecks();
     settingsFileChecks();
+    mcpUndoChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
