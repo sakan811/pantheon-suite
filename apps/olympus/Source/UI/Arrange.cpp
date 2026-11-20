@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 
+#include "LevelMeter.h"
 #include <pantheon/ui/MeterCell.h>
 #include <pantheon/ui/ValueKnob.h>
 
@@ -23,8 +24,6 @@ constexpr double kMinZoom = 0.05, kMaxZoom = 4000.0;
 constexpr double kFallbackRate = 48000.0;
 
 bool isAudioFile (const juce::File& f) { return f.hasFileExtension ("wav;aif;aiff;flac;mp3;m4a;ogg;caf"); }
-
-double dbOf (double linear) { return linear > 1.0e-5 ? 20.0 * std::log10 (linear) : -100.0; }
 
 juce::String panText (double v)
 {
@@ -254,12 +253,10 @@ public:
         if (inputButton.getButtonText() != input) inputButton.setButtonText (input);
     }
 
-    // The meter: the level falls back by a few dB between reads, the held mark more slowly.
+    // The meter: the level falls back by a few dB between reads, the held mark more slowly (MeterBallistics, shared with the master).
     void addPeaks (float peakL, float peakR)
     {
-        const float db = (float) dbOf (std::max (peakL, peakR));
-        level = std::max (db, level - 3.0f);
-        hold = std::max (db, hold - 0.4f);
+        meter.add ((float) dbOf (std::max (peakL, peakR)));
         repaint();
     }
 
@@ -286,11 +283,7 @@ public:
 
         ui::MeterCell cell;
         cell.area = juce::Rectangle<float> (172.0f, 17.0f, 80.0f, ui::MeterCell::kTitleHeight + ui::MeterCell::kWindowHeight);
-        const auto bar = cell.drawTrack (g);
-        const auto x = [&bar] (float db) { return bar.getX() + bar.getWidth() * juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f); };
-        const juce::Colour colour = level > -3.0f ? colours::bad : level > -12.0f ? colours::warn : colours::good;
-        ui::MeterCell::fillSpan (g, bar, bar.getX(), x (level), colour);
-        if (hold > -60.0f) ui::MeterCell::drawMarker (g, bar, x (hold), colour);
+        paintLevelBar (g, cell.drawTrack (g), meter);
     }
 
     ArrangeView& view;
@@ -300,7 +293,7 @@ public:
 
 private:
     bool editingName = false;
-    float level = -100.0f, hold = -100.0f;
+    MeterBallistics meter;
     juce::Label nameLabel;
     ArrangeLamp muteButton { "M" }, soloButton { "S" }, fxButton { "FX" }, removeButton { "X" };
     ui::ValueKnob panKnob;

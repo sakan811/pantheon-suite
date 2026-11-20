@@ -22,6 +22,30 @@
 // for a push that is in flight (the `busy` flag) before it lets the writers go, so a file never receives a block after it is closed.
 namespace olympus
 {
+// The take's file writer: JUCE's ThreadedWriter ignores the result of the writes it makes on its thread, so this one records a failed write in
+// `failed` (set on the writer thread, read at stop). It passes every block on to the WAV writer it holds.
+class CheckedWriter : public juce::AudioFormatWriter
+{
+public:
+    CheckedWriter (juce::AudioFormatWriter* inner, std::shared_ptr<std::atomic<bool>> failedFlag)
+        : AudioFormatWriter (nullptr, "checked", inner->getSampleRate(), (unsigned int) inner->getNumChannels(), 32),
+          writer (inner), failed (std::move (failedFlag))
+    {
+        usesFloatingPointData = writer->isFloatingPoint(); // writeFromFloatArrays converts to ints unless this is set
+    }
+
+    bool write (const int** samples, int numSamples) override
+    {
+        const bool ok = writer->write (samples, numSamples);
+        if (! ok) failed->store (true);
+        return ok;
+    }
+
+private:
+    std::unique_ptr<juce::AudioFormatWriter> writer;
+    std::shared_ptr<std::atomic<bool>> failed;
+};
+
 class Recorder
 {
 public:
@@ -36,12 +60,15 @@ public:
         juce::String name;
     };
 
-    // A take that has stopped: its track, its file and the frames in it (the frames the file holds, which is what was accepted).
+    // A take that has stopped: its track, its file and the frames in it (the frames the file holds, which is what was accepted). `lost` is the
+    // frames the disk could not take (a gap in the file); `failed` says the file's writes failed at some point.
     struct Finished
     {
         int track = -1;
         juce::File file;
         juce::int64 frames = 0;
+        juce::int64 lost = 0;
+        bool failed = false;
     };
 
     Recorder() : thread ("Olympus recorder")
@@ -129,7 +156,7 @@ public:
             Lane lane;
             lane.take = t;
             lane.file = file;
-            lane.writer = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (writer.release(), thread, bufferSamples);
+            lane.writer = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (new CheckedWriter (writer.release(), lane.failed), thread, bufferSamples);
             built.push_back (std::move (lane));
         }
 
@@ -174,7 +201,10 @@ public:
                     if (lane.writer->write (channels, n))
                         lane.accepted += n;
                     else
-                        dropped.fetch_add (n); // the writer's FIFO was full: the disk did not keep up
+                    {
+                        lane.lost += n;        // the writer's FIFO was full: the disk did not keep up
+                        dropped.fetch_add (n);
+                    }
                 }
                 framesPushed.fetch_add (n);
             }
@@ -190,12 +220,31 @@ public:
         recording.store (false);
         while (busy.load())
             juce::Thread::sleep (1);
+        std::vector<std::shared_ptr<std::atomic<bool>>> flags;
         for (auto& lane : lanes)
-            done.push_back ({ lane.take.track, lane.file, lane.accepted });
-        lanes.clear(); // each writer writes what is left into its file when it goes
+        {
+            done.push_back ({ lane.take.track, lane.file, lane.accepted, lane.lost, false });
+            flags.push_back (lane.failed);
+        }
+        lanes.clear(); // each writer writes what is left into its file when it goes: a write that fails there sets its flag
+        for (size_t i = 0; i < done.size(); ++i)
+            done[i].failed = flags[i]->load();
         if (thread.isThreadRunning())
             thread.stopThread (5000);
         return done;
+    }
+
+    // Checks only (the message thread, no take running): counts `frames` lost on lane `lane` as push() would when the FIFO was full, or marks
+    // its file as failed as a write that failed would. Lets the checks test the window's report without a slow disk.
+    void lostForTest (int lane, juce::int64 frames)
+    {
+        if (! juce::isPositiveAndBelow (lane, (int) lanes.size())) return;
+        lanes[(size_t) lane].lost += frames;
+        dropped.fetch_add (frames);
+    }
+    void failedForTest (int lane)
+    {
+        if (juce::isPositiveAndBelow (lane, (int) lanes.size())) lanes[(size_t) lane].failed->store (true);
     }
 
     bool isRecording() const { return recording.load(); }
@@ -213,6 +262,8 @@ private:
         juce::File file;
         std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writer;
         juce::int64 accepted = 0; // frames the writer took (touched by the audio thread while recording only)
+        juce::int64 lost = 0;     // frames the writer's FIFO refused (the audio thread only, while recording)
+        std::shared_ptr<std::atomic<bool>> failed = std::make_shared<std::atomic<bool>> (false); // a write to the file failed (CheckedWriter)
     };
 
     // The file of a take: "<track name>-take-<n>.wav" with the first n that is not taken in the folder.

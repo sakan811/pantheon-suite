@@ -7,6 +7,7 @@
 #include "Arrange.h"
 #include "../Edit.h"
 #include "../Record.h"
+#include "LevelMeter.h"
 #include "Session.h"
 #include "Settings.h"
 
@@ -81,6 +82,21 @@ public:
 
 private:
     bool shiftDown = false;
+};
+
+// The CLIP lamp of the master section: lit red once the master has reached 0 dBFS, until it is clicked (or a new project).
+class ClipLamp : public juce::Button
+{
+public:
+    ClipLamp() : juce::Button ("Clip") {}
+    bool lit = false;
+    void paintButton (juce::Graphics& g, bool, bool) override
+    {
+        ui::hw::drawLamp (g, { 7.0f, (float) getHeight() * 0.5f }, 4.0f, colours::bad, lit);
+        g.setFont (ui::labelFont (10.0f));
+        g.setColour (lit ? colours::bad : colours::dim);
+        g.drawText ("CLIP", getLocalBounds().withTrimmedLeft (16), juce::Justification::centredLeft);
+    }
 };
 
 class PluginWindow : public juce::DocumentWindow
@@ -304,6 +320,19 @@ public:
     juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
     juce::ComboBox signatureBox, gridBox;
     juce::Label deviceLabel;                         // the device summary, under the buttons
+    // the master section, in row C left of the device line: the MASTER fader (one undo step a drag), a stereo meter, the peak read-out and CLIP
+    juce::Slider masterFader;
+    juce::Label masterPeakLabel;
+    ClipLamp masterClipLamp;
+    // The master section's read-outs. updateMaster (the timer) reads the session's peaks, the only reader; the checks call it with their own times.
+    static constexpr double kMasterHoldMs = 2000.0;  // the peak read-out holds the highest peak this long
+    void updateMaster (double nowMs);
+    float masterPeakDb() const { return masterHoldDb; }   // the held peak, dBFS (-100 when silent)
+    bool masterClipLatched() const { return clipLatched; }
+    void clearMasterClip();                               // CLIP's click: the lamp goes out
+    juce::Rectangle<float> masterMeterArea() const { return masterBarLeft.getUnion (masterBarRight); }
+    // Checks only: the recorder, so a check can make a disk problem happen (Recorder::lostForTest, failedForTest).
+    Recorder& recorderForChecks() { return recorder; }
     juce::Rectangle<int> positionBox;                // the position read-out (bars.beats.ticks and mm:ss.ss)
     // the MONITOR strip: one button per plugin of the monitor chain, '+', the CORRECTION switch and the chain's latency
     juce::Rectangle<int> monitorStrip;
@@ -390,5 +419,13 @@ private:
     juce::int64 takeLatency = 0, takeFrom = 0;
     std::atomic<bool> deviceStopped { false };
     juce::String monitorProblem;                    // why monitor.xml could not be read (shown on the foot), empty when it was
+    // the master section's state: the meter's two bars, the held peak and its time, the latched CLIP, and the fader's one undo step while dragged
+    MeterBallistics masterLeft, masterRight;
+    juce::Rectangle<float> masterBarLeft, masterBarRight;   // where the meter's bars are drawn (set by resized)
+    float masterHoldDb = -100.0f;
+    double masterHoldMs = -1.0e9;
+    bool clipLatched = false;
+    std::unique_ptr<Editor::Gesture> masterGesture;
+    void updateMasterFader();                       // the fader follows the session (undo, a project): not while it is dragged
 };
 }
