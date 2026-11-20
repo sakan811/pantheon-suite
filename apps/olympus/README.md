@@ -1,4 +1,4 @@
-# Olympus Session Host
+# Olympus Basic DAW
 
 A **basic DAW for the Pantheon plugins**, as a standalone macOS app. Audio goes on tracks as clips on a timeline with a tempo map, a grid,
 markers and a loop; each track has a chain of plugins (the suite's own, and any VST3 or, on macOS, Audio Unit plugin the scan finds); you set
@@ -12,7 +12,7 @@ the same clips, tempo, markers, loop and master.
 *Olympus* is the mountain where the Greek gods lived together; here it is the one place where the suite's plugins (Hermes, Hestia, Aegis and the others) sit side by side on a song.
 (CMake targets and namespaces use the short name "Olympus". It is an app, not a plugin: it lives in `apps/`.)
 
-![Olympus Session Host](docs/screenshot.png)
+![Olympus Basic DAW](docs/screenshot.png)
 
 *Headless render of the window (the hardware-style interface shared with the plugins) over a small song: four tracks cut from synthetic stems into clips, on a 96 bpm
 timeline with the bars and beats on the ruler, three markers (Intro, Verse, Chorus), the loop lit from bar 3 to bar 9, and the snap on. The Chords clips have fades; the

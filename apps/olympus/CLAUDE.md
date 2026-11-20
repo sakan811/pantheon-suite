@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Olympus Session Host: a JUCE standalone app (macOS, builds on Linux for CI) that holds a timeline of clips on tracks (with a tempo map, markers, a loop and undo), a chain of plugins on each track, and writes the stems out; plus an MCP server over the same
+Olympus Basic DAW: a JUCE standalone app (macOS, builds on Linux for CI) that holds a timeline of clips on tracks (with a tempo map, markers, a loop and undo), a chain of plugins on each track, and writes the stems out; plus an MCP server over the same
 session so an agent can place the chains. See `README.md` for what it does; this file is what you need to change it safely. It is an **app**, so it lives in `apps/`; the dependency rule of the root CLAUDE.md
 applies (`apps/*` -> `shared/*`, never a plugin or another app). It **hosts** plugins, but only at run time: it loads VST3 bundles (and Audio Units on macOS) that its scan finds, and links none of their code, so no dependency on `plugins/*` exists in
 CMake. Third-party plugins are scanned at run time; that was decided by the user. The one place it knows about the suite's own plugins is `suiteNames()` in `Source/Catalog.h` (their product
