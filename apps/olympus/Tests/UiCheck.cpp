@@ -8,6 +8,7 @@
 
 #include "Check.h"
 #include "TestPlugin.h"
+#include "UI/Arrange.h"
 #include "UI/MainComponent.h"
 
 using namespace olympus;
@@ -251,6 +252,120 @@ int main()
         auto other = makeWindow();
         other->openProject (file);
         test::check (noteMentions (*other, "audio file is missing", ui::Severity::warning), "a missing audio file is said, and the track stays");
+    }
+
+    std::printf ("[6] Arrange view\n");
+    {
+        olympus::Session session;
+        test::addTestPlugins (session.catalog);
+        olympus::Editor editor (session);
+        juce::String error;
+        const auto a = makeWav ("arrange-a.wav"), b = makeWav ("arrange-b.wav");
+        test::check (session.addTrack (a, "Vocal", error) && session.addTrack (b, "Drums", error), "two tracks from two files");
+        test::check (session.addClip (0, a, 30000, error) == 1, "a second clip on the first track, at 30000");
+        session.addPlugin (0, "test gain", -1, error);
+
+        ArrangeView view (session, editor);
+        view.setSize (ArrangeView::kDesignWidth, ArrangeView::kDesignHeight);
+        view.zoomToFit();
+        view.refresh();
+        const double rate = session.sampleRate;
+        auto same = [] (ClipRef r, int t, int c) { return r.track == t && r.clip == c; };
+        auto mouse = [&view] (juce::Point<int> p, juce::ModifierKeys mods = {})
+        {
+            const auto now = juce::Time::getCurrentTime();
+            return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), p.toFloat(), mods, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                     &view, &view, now, p.toFloat(), now, 1, false);
+        };
+        auto clipCount = [&session] (int t) { return (int) session.tracks[(size_t) t]->clips.size(); };
+
+        // geometry: after zoomToFit everything is across the lanes, and clipAt and clipBounds agree with the model
+        {
+            bool fits = true, agrees = true, scaled = true;
+            const double pps = view.zoom / rate;
+            for (int t = 0; t < 2; ++t)
+                for (int c = 0; c < clipCount (t); ++c)
+                {
+                    const auto r = view.clipBounds ({ t, c });
+                    const auto& clip = session.tracks[(size_t) t]->clips[(size_t) c];
+                    fits = fits && r.getRight() <= view.getWidth() && r.getX() >= ArrangeView::kHeaderWidth;
+                    agrees = agrees && same (view.clipAt (r.getCentre()), t, c);
+                    scaled = scaled && std::abs (r.getWidth() - (double) clip.length * pps) <= 1.5;
+                }
+            test::check (fits, "zoomToFit: every clip is across the lanes, inside the window");
+            test::check (agrees, "clipAt of a clip's centre is that clip (clipBounds)");
+            test::check (scaled, "a clip's width is its length at the zoom");
+            test::check (! view.clipAt ({ 10, 10 }).valid() && view.clipBounds ({ 0, 9 }).isEmpty() && ! view.clipAt ({ 400, 2 }).valid(), "nothing in the header column, the ruler or past the last clip");
+        }
+
+        // a drag moves the clip, snapped to the grid (a quarter note, 24000 samples at 120 bpm); undo puts it back
+        {
+            const auto p = view.clipBounds ({ 0, 0 }).getCentre();
+            view.mouseDown (mouse (p));
+            view.mouseDrag (mouse (p + juce::Point<int> (400, 0)));
+            view.mouseUp (mouse (p + juce::Point<int> (400, 0)));
+            const auto moved = session.tracks[0]->clips[0].start;
+            test::check (moved == 24000, "a drag moves the clip, snapped to the grid: " + juce::String (moved));
+            test::check (editor.undo() && session.tracks[0]->clips[0].start == 0, "undo restores the clip's place");
+            view.refresh();
+        }
+
+        // a drag of the right edge trims the clip (snap off so the new length is not moved to the grid)
+        {
+            editor.setSnap (false);
+            const auto r = view.clipBounds ({ 1, 0 });
+            const auto p = juce::Point<int> (r.getRight() - 2, r.getCentreY());
+            view.mouseDown (mouse (p));
+            view.mouseDrag (mouse (p + juce::Point<int> (-200, 0)));
+            view.mouseUp (mouse (p + juce::Point<int> (-200, 0)));
+            const auto length = session.tracks[1]->clips[0].length;
+            test::check (length > 0 && length < 24000, "an edge drag trims the clip: " + juce::String (length));
+            test::check (editor.undo() && session.tracks[1]->clips[0].length == 24000, "undo restores the length");
+            editor.setSnap (true);
+            view.refresh();
+        }
+
+        // split at the playhead gives two clips
+        {
+            view.playhead = 12000;
+            view.selected = { 0, 0 };
+            view.splitAtPlayhead();
+            const auto& t0 = session.tracks[0]->clips;
+            test::check (t0.size() == 3 && t0[0].length == 12000 && t0[1].start == 12000 && t0[1].length == 12000, "split at the playhead gives two clips");
+            test::check (editor.undo() && clipCount (0) == 2, "undo joins them again");
+        }
+
+        // delete removes the selected clip, and undo brings it back
+        {
+            view.selected = { 1, 0 };
+            test::check (view.keyPressed (juce::KeyPress (juce::KeyPress::deleteKey)) && clipCount (1) == 0, "the Delete key removes the clip");
+            test::check (editor.undo() && clipCount (1) == 1, "undo brings it back");
+        }
+
+        // Cmd+D duplicates the selected clip, after its end
+        {
+            view.selected = { 0, 0 };
+            test::check (view.keyPressed (juce::KeyPress ('d', juce::ModifierKeys::commandModifier, 'd')) && clipCount (0) == 3, "Cmd+D duplicates the clip");
+            test::check (session.tracks[0]->clips.back().start == 24000, "the copy starts where the original ends");
+            editor.undo();
+            view.refresh();
+        }
+
+        // snapping: the nearest grid line, halfway going up
+        test::check (editor.snap (12345) == 24000 && editor.snap (11000) == 0, "snap: the nearest quarter note");
+
+        // painting, at several zooms, to an image
+        {
+            bool ok = true;
+            for (double z : { 0.05, 80.0, 4000.0 })
+            {
+                view.zoom = z;
+                view.refresh();
+                auto img = view.createComponentSnapshot (view.getLocalBounds());
+                ok = ok && ! img.isNull() && img.getWidth() == ArrangeView::kDesignWidth;
+            }
+            test::check (ok, "painting to an image does not crash, at the smallest, a normal and the largest zoom");
+        }
     }
 
     tempFolder().deleteRecursively();
