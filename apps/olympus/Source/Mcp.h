@@ -94,6 +94,13 @@ private:
     {
         return object ({ { "jsonrpc", "2.0" }, { "id", id }, { "error", object ({ { "code", code }, { "message", message } }) } });
     }
+    static juce::File resolvePath (const juce::String& p)
+    {
+        if (p.isEmpty())
+            return {};
+        return juce::File::isAbsolutePath (p) ? juce::File (p)
+                                              : juce::File::getCurrentWorkingDirectory().getChildFile (p);
+    }
 
     static juce::String instructions()
     {
@@ -230,7 +237,7 @@ private:
         }
         if (name == "open_project")
         {
-            if (! session.load (juce::File (a["path"].toString()), error)) return {};
+            if (! session.load (resolvePath (a["path"].toString()), error)) return {};
             editor.clearUndo();
             auto d = session.describe();
             juce::Array<juce::var> w;
@@ -241,14 +248,14 @@ private:
         if (name == "save_project")
         {
             const auto path = a["path"].toString();
-            const auto file = path.isNotEmpty() ? juce::File (path) : session.projectFile;
+            const auto file = path.isNotEmpty() ? resolvePath (path) : session.projectFile;
             if (file == juce::File()) { error = "No path: this project has not been saved yet."; return {}; }
             if (! session.save (file.hasFileExtension ("olympus") ? file : file.withFileExtension ("olympus"), error)) return {};
             return object ({ { "saved", session.projectFile.getFullPathName() } });
         }
         if (name == "add_track")
         {
-            if (! session.addTrack (juce::File (a["file"].toString()), a["name"].toString(), error)) return {};
+            if (! session.addTrack (resolvePath (a["file"].toString()), a["name"].toString(), error)) return {};
             editor.clearUndo(); // tracks are not undone (see Edit.h)
             return session.describe();
         }
@@ -409,7 +416,7 @@ private:
             {
                 juce::AudioBuffer<float> buf;
                 double rate = 0.0;
-                if (! readWavFile (juce::File (a["file"].toString()), buf, rate, error))
+                if (! readWavFile (resolvePath (a["file"].toString()), buf, rate, error))
                     return {};
                 return analyze::analyzeBuffer (buf, rate, target, targetLufs).toVar();
             }
@@ -510,7 +517,7 @@ private:
             if (name == "render_stems")
             {
                 RenderOptions o;
-                o.folder = juce::File (a["folder"].toString());
+                o.folder = resolvePath (a["folder"].toString());
                 o.tailSeconds = a.hasProperty ("tail_seconds") ? (double) a["tail_seconds"] : 0.0;
                 o.writeMix = a.hasProperty ("mix") ? (bool) a["mix"] : true;
                 o.bits = a.hasProperty ("bits") ? (int) a["bits"] : 32;
@@ -568,7 +575,7 @@ private:
         // clips: numbered from 0 on the track; positions as seconds or beats (see position)
         if (name == "add_clip")
         {
-            const auto file = juce::File (a["file"].toString());
+            const auto file = resolvePath (a["file"].toString());
             if (! a.hasProperty ("file") || a["file"].toString().isEmpty()) { error = "Give 'file': the absolute path of an audio file."; return {}; }
             const auto start = position (a, "start", error);
             if (! start) return {};

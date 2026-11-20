@@ -150,6 +150,7 @@ public:
         options.deadMansPedal.getParentDirectory().createDirectory();
         if (options.cacheFile != juce::File())
             saveCache (options.cacheFile);
+        int scannedSinceSave = 0;
         for (int f = 0; f < formats.getNumFormats(); ++f)
         {
             auto& format = *formats.getFormat (f);
@@ -175,8 +176,11 @@ public:
             {
                 name.clear();
                 more = scanner.scanNextFile (! options.rescan, name);
-                if (options.cacheFile != juce::File())
+                if (name.isNotEmpty() && options.cacheFile != juce::File() && ++scannedSinceSave >= 10)
+                {
                     saveCache (options.cacheFile);
+                    scannedSinceSave = 0;
+                }
                 if (options.progress && name.isNotEmpty())
                     options.progress (name);
             }

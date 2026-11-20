@@ -437,11 +437,17 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
 
     std::vector<pdsp::TruePeakReader> tpReaders (static_cast<size_t> (numChannels));
     std::vector<double> dcSums (static_cast<size_t> (numChannels), 0.0);
-    std::vector<double> kWeightedPrefix (static_cast<size_t> (numSamples + 1), 0.0);
+    const int stepSamples = std::max (1, static_cast<int> (std::llround (0.1 * sampleRate)));
+    const int numSteps = numSamples / stepSamples;
+    std::vector<double> kStepPrefix (static_cast<size_t> (numSteps + 1), 0.0);
 
     double maxSamplePeak = 0.0;
     double maxTruePeak = 0.0;
     double totalSumSq = 0.0;
+    double totalKWeightedPower = 0.0;
+    double stepKPower = 0.0;
+    int stepPos = 0;
+    size_t stepIdx = 0;
     int64_t clipped = 0;
 
     for (int i = 0; i < numSamples; ++i)
@@ -467,7 +473,15 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
                 kSamplePower += kx * kx;
             }
         }
-        kWeightedPrefix[static_cast<size_t> (i + 1)] = kWeightedPrefix[static_cast<size_t> (i)] + kSamplePower;
+        totalKWeightedPower += kSamplePower;
+        stepKPower += kSamplePower;
+        if (++stepPos == stepSamples)
+        {
+            kStepPrefix[stepIdx + 1] = kStepPrefix[stepIdx] + stepKPower;
+            ++stepIdx;
+            stepKPower = 0.0;
+            stepPos = 0;
+        }
     }
 
     // Flush true-peak interpolator delay tail
@@ -491,23 +505,26 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
     // -------------------------------------------------------------------------
     // 2. ITU-R BS.1770-4 Integrated Loudness, Short-Term Max/Min, LRA
     // -------------------------------------------------------------------------
-    const int stepSamples = std::max (1, static_cast<int> (std::llround (0.1 * sampleRate)));
     const int blockSamples = std::max (1, static_cast<int> (std::llround (0.4 * sampleRate)));
     const int stSamples = std::max (1, static_cast<int> (std::llround (3.0 * sampleRate)));
+    const int blockSteps = std::max (1, static_cast<int> (std::llround (static_cast<double> (blockSamples) / static_cast<double> (stepSamples))));
+    const int stSteps = std::max (1, static_cast<int> (std::llround (static_cast<double> (stSamples) / static_cast<double> (stepSamples))));
+    const int actualBlockSamples = blockSteps * stepSamples;
+    const int actualStSamples = stSteps * stepSamples;
 
     std::vector<double> blockPowers;
-    if (numSamples < blockSamples)
+    if (numSamples < blockSamples || numSteps < blockSteps)
     {
-        const double z = kWeightedPrefix[static_cast<size_t> (numSamples)] / static_cast<double> (numSamples);
+        const double z = totalKWeightedPower / static_cast<double> (numSamples);
         if (z > 0.0)
             blockPowers.push_back (z);
     }
     else
     {
-        for (int start = 0; start + blockSamples <= numSamples; start += stepSamples)
+        for (int b = 0; b + blockSteps <= numSteps; ++b)
         {
-            const double sum = kWeightedPrefix[static_cast<size_t> (start + blockSamples)] - kWeightedPrefix[static_cast<size_t> (start)];
-            blockPowers.push_back (sum / static_cast<double> (blockSamples));
+            const double sum = kStepPrefix[static_cast<size_t> (b + blockSteps)] - kStepPrefix[static_cast<size_t> (b)];
+            blockPowers.push_back (sum / static_cast<double> (actualBlockSamples));
         }
     }
 
@@ -550,9 +567,9 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
     res.plrDb = (res.integratedLufs > -70.0 && res.truePeakDb > -120.0) ? (res.truePeakDb - res.integratedLufs) : 0.0;
 
     std::vector<double> stLufs;
-    if (numSamples < stSamples)
+    if (numSamples < stSamples || numSteps < stSteps)
     {
-        const double z = kWeightedPrefix[static_cast<size_t> (numSamples)] / static_cast<double> (numSamples);
+        const double z = totalKWeightedPower / static_cast<double> (numSamples);
         if (z > 1e-12)
         {
             const double l = -0.691 + 10.0 * std::log10 (z);
@@ -562,10 +579,10 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
     }
     else
     {
-        for (int start = 0; start + stSamples <= numSamples; start += stepSamples)
+        for (int b = 0; b + stSteps <= numSteps; ++b)
         {
-            const double sum = kWeightedPrefix[static_cast<size_t> (start + stSamples)] - kWeightedPrefix[static_cast<size_t> (start)];
-            const double z = sum / static_cast<double> (stSamples);
+            const double sum = kStepPrefix[static_cast<size_t> (b + stSteps)] - kStepPrefix[static_cast<size_t> (b)];
+            const double z = sum / static_cast<double> (actualStSamples);
             if (z > 1e-12)
             {
                 const double l = -0.691 + 10.0 * std::log10 (z);
