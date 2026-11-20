@@ -34,6 +34,20 @@ holders. JUCE bundles further components (the VST3 SDK, the Audio Unit SDK, FLAC
 their own licences; they are listed in JUCE's own [LICENSE.md](https://github.com/juce-framework/JUCE/blob/master/LICENSE.md)
 and apply to any binary you build.
 
+## Third-party plugins hosted by Olympus
+
+*Status: pending the maintainer's decision. The licence review is still open; see [docs/daw-assessment.md](docs/daw-assessment.md).*
+
+Olympus Session Host (`apps/olympus`) hosts VST3 plugins and, on macOS, Audio Units, through the plugin host code of JUCE. It loads the
+plugins found on the machine it runs on, at run time, from the system's plugin folders and the folders the user chooses. Nothing of them is
+bundled: this repository does not contain, download or redistribute any third-party plugin, and Olympus links none of their code. The
+plugins stay under their own licences. The scan reads them on the user's machine (see [apps/olympus/README.md](apps/olympus/README.md)).
+
+The VST3 and Audio Unit SDK code that JUCE uses for this hosting is under the licences described above for JUCE's bundled components. Whether
+it can be used this way with this repository's licence has not been reviewed; that review is the open point.
+
+VST is a trademark of Steinberg Media Technologies GmbH, and Audio Units is a trademark of Apple Inc. (see Trademarks below).
+
 ## Trademarks
 
 Product and company names are the property of their owners and are used here only to describe what the plugins work with or
