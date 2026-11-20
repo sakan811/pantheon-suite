@@ -105,7 +105,10 @@ int main (int argc, char** argv)
         if (juce::String (argv[i]).startsWith ("plugins="))
             pluginFolder = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false);
 
+    // starts empty every time: the window reads monitor.xml from here, and each run adds its own stand-in plugin to the strip, so a kept
+    // folder would grow the picture's strip by one button per run
     const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("olympus-snapshot");
+    folder.deleteRecursively();
     folder.createDirectory();
     olympus::gui::MainComponent::Options options;
     options.audioDevice = false;

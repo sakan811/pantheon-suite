@@ -37,10 +37,24 @@ struct Settings
     static juce::File scanPedalFile (const juce::File& settingsFile = defaultFile()) { return settingsFile.getSiblingFile ("plugin-scan.pedal"); }
     // The monitor chain (the headphone correction plugins, Session::saveMonitor) is kept beside this file too: it belongs to the headphones.
     static juce::File monitorFile (const juce::File& settingsFile = defaultFile()) { return settingsFile.getSiblingFile ("monitor.xml"); }
+    // Safe start: a pedal is written before a thing that can crash the app while it is loaded (the monitor chain, the last project) and
+    // removed when that returns. A pedal found at the next start means the last start died inside it: that thing is skipped this time.
+    static juce::File monitorPedalFile (const juce::File& settingsFile = defaultFile()) { return settingsFile.getSiblingFile ("monitor-load.pedal"); }
+    static juce::File projectPedalFile (const juce::File& settingsFile = defaultFile()) { return settingsFile.getSiblingFile ("project-load.pedal"); }
+    // True when the pedal was there at start (and it is removed): the last start died inside the thing it stood for.
+    static bool takePedal (const juce::File& pedal)
+    {
+        if (! pedal.existsAsFile())
+            return false;
+        pedal.deleteFile();
+        return true;
+    }
 
     static Settings load (const juce::File& file = defaultFile())
     {
         Settings s;
+        if (! file.existsAsFile())
+            return s;
         if (auto xml = juce::parseXML (file); xml != nullptr && xml->hasTagName ("OlympusSettings"))
         {
             for (auto* f : xml->getChildWithTagNameIterator ("PluginFolder"))
@@ -51,9 +65,17 @@ struct Settings
             if (auto* device = xml->getChildByName ("AudioDevice"); device != nullptr && device->getFirstChildElement() != nullptr)
                 s.audioDeviceState = device->getFirstChildElement()->toString();
         }
+        else
+        {
+            // a file that is not settings (or is damaged) is kept, once, as settings.xml.bad: the next save replaces settings.xml, not that copy
+            const auto bad = file.getSiblingFile (file.getFileName() + ".bad");
+            if (! bad.exists())
+                file.copyFileTo (bad);
+        }
         return s;
     }
 
+    // Written beside the file and moved over it, so a crash in the write leaves the previous settings (as the monitor chain's save does).
     void save (const juce::File& file = defaultFile()) const
     {
         juce::XmlElement xml ("OlympusSettings");
@@ -65,7 +87,9 @@ struct Settings
         if (auto device = juce::parseXML (audioDeviceState); device != nullptr)
             xml.createNewChildElement ("AudioDevice")->addChildElement (device.release());
         file.getParentDirectory().createDirectory();
-        xml.writeTo (file);
+        juce::TemporaryFile temp (file);
+        if (xml.writeTo (temp.getFile()))
+            temp.overwriteTargetFileWithTemporary();
     }
 
     // The folders to search besides the system's: the chosen ones and those named in OLYMPUS_PLUGIN_PATH.

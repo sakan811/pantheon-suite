@@ -136,11 +136,20 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
 // of its first block, so the position is read here, before the block plays.
 void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int numIn, float* const* out, int numOut, int n)
 {
-    if (owner.recorder.isRecording() && owner.source.recordStart.load() < 0)
+    // the take's first sample is the playhead of the first block the recorder wrote: push says which block that was, so the start and the
+    // write are one decision. The position is read before this block plays.
+    if (owner.recorder.push (in, numIn, n) && owner.source.recordStart.load() < 0)
         owner.source.recordStart = owner.source.position.load();
-    owner.recorder.push (in, numIn, n);
     if (out == nullptr || numOut <= 0)
-        return; // a device with no outputs has nothing to play into; the take still has its inputs
+    {
+        // no outputs: nothing is heard, but the transport still advances, so a take on an input-only device runs and the playhead with it
+        if (n <= scratch.getNumSamples())
+        {
+            juce::AudioSourceChannelInfo info (&scratch, 0, n);
+            owner.source.getNextAudioBlock (info);
+        }
+        return;
+    }
     juce::AudioBuffer<float> buffer (out, numOut, n);
     juce::AudioSourceChannelInfo info (&buffer, 0, n);
     owner.source.getNextAudioBlock (info);
@@ -155,7 +164,8 @@ void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice
     if (started == nullptr)
         return;
     owner.deviceRate = started->getCurrentSampleRate();
-    owner.recorder.prepare (started->getCurrentSampleRate(), started->getCurrentBufferSizeSamples());
+    prepareScratch (started->getCurrentBufferSizeSamples());
+    owner.recorder.prepare (started->getCurrentSampleRate(), started->getCurrentBufferSizeSamples(), started->getActiveInputChannels());
     // the session follows the device's rate; its plugins are set up on the message thread
     if (juce::MessageManager::getInstance()->isThisTheMessageThread())
         owner.adoptDeviceRate();
@@ -177,6 +187,9 @@ MainComponent::MainComponent (Options options) : opts (options)
     setLookAndFeel (&look);
     setWantsKeyboardFocus (true);
     settings = Settings::load (opts.settingsFile);
+    // a pedal the last start left: it died loading the monitor chain or the last project, which are skipped this time (Settings.h)
+    monitorSkipped = Settings::takePedal (Settings::monitorPedalFile (opts.settingsFile));
+    projectSkipped = Settings::takePedal (Settings::projectPedalFile (opts.settingsFile));
 
     ask = [] (const juce::String& message, const juce::String& button, std::function<void()> proceed)
     {
@@ -373,8 +386,11 @@ void MainComponent::scanPlugins (bool rescan)
     session.catalog.saveCache (Settings::pluginCacheFile (opts.settingsFile));
     scanning = false;
     loadMonitorChain();   // the first scan fills the catalog the chain's plugins are made from
-    // a project opened before the scan finished: give its missing plugins another try
-    repaint();
+    // a project opened before the scan finished, or a chain read before it: their missing plugins get another try now. Adding one is not an
+    // undo step (Editor::clearUndo), and the notes and the strip are read again by refreshNow.
+    if (session.retryMissing() > 0)
+        editor.clearUndo();
+    refreshNow();
 }
 
 void MainComponent::updateTitle()
@@ -395,6 +411,8 @@ std::vector<ui::Note> MainComponent::notes() const
     advice.inputs = device.inputs;
     advice.roundTripMs = roundTripMs();
     advice.monitorProblem = monitorProblem;
+    advice.monitorSkipped = monitorSkipped && ! monitorLoaded;
+    advice.projectSkipped = projectSkipped;
     return adviceFor (session, advice);
 }
 
@@ -496,7 +514,9 @@ std::vector<MainComponent::InputChoice> MainComponent::inputChoices (const Devic
     {
         if (! state.activeInputs[i])
             continue;
-        out.push_back ({ "In " + juce::String (i + 1), i, -1 });
+        // the device's own name for the input, when it has one ("In 3: Guitar"); the number is the device's, as the take records it
+        const auto name = i < state.inputNames.size() ? state.inputNames[i].trim() : juce::String();
+        out.push_back ({ "In " + juce::String (i + 1) + (name.isNotEmpty() ? ": " + name : juce::String()), i, -1 });
         if (state.activeInputs[i + 1])
             out.push_back ({ "In " + juce::String (i + 1) + "+" + juce::String (i + 2), i, i + 1 });
     }
@@ -534,6 +554,7 @@ void MainComponent::readDevice()
         state.rate = current->getCurrentSampleRate();
         state.bufferSize = current->getCurrentBufferSizeSamples();
         state.activeInputs = current->getActiveInputChannels();
+        state.inputNames = current->getInputChannelNames();
         state.inputs = state.activeInputs.countNumberOfSetBits();
         state.outputs = current->getActiveOutputChannels().countNumberOfSetBits();
         state.inputLatency = current->getInputLatencyInSamples();
@@ -591,8 +612,9 @@ void MainComponent::setDeviceForTest (const DeviceState& state)
 {
     device = state;
     deviceRate = state.running ? state.rate : 0.0;
+    io.prepareScratch (state.bufferSize);
     if (state.running && state.rate > 0.0)
-        recorder.prepare (state.rate, state.bufferSize);
+        recorder.prepare (state.rate, state.bufferSize, state.activeInputs);
     updateTransport();
 }
 
@@ -641,11 +663,17 @@ juce::File MainComponent::recordingFolder() const
     return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Olympus Recordings").getChildFile (name + " " + stamp);
 }
 
-// The latency the takes are placed earlier by: the device's input and output latency, the extra latency in the settings and the monitor
-// chain's (what is heard late). Fixed at REC, so the take lines up with what was heard then.
+// The latency the takes are placed earlier by: the device's input and output latency, the extra latency in the settings, the monitor
+// chain's (what is heard late) and the longest track chain's (the tracks are delayed to line up with it, Session::updateLatenciesLocked,
+// so the mix is heard that much late). Fixed at REC, so the take lines up with what was heard then.
 void MainComponent::setTakeLatency()
 {
-    takeLatency = (juce::int64) device.inputLatency + device.outputLatency + settings.extraLatencySamples + session.monitorLatency();
+    int chains = 0;
+    {
+        const juce::ScopedLock sl (session.lock);
+        chains = session.maxLatency();
+    }
+    takeLatency = (juce::int64) device.inputLatency + device.outputLatency + settings.extraLatencySamples + session.monitorLatency() + chains;
 }
 
 bool MainComponent::startRecording()
@@ -773,6 +801,7 @@ void MainComponent::newProject()
 
 void MainComponent::openProject (const juce::File& file)
 {
+    projectSkipped = false;   // the user opened one: the note about the last start's project is no longer news
     stopRecording();
     closeTrackEditors();
     source.playing = false;
@@ -924,10 +953,13 @@ void MainComponent::removeTrack (int index)
     requestRefresh();
 }
 
-juce::String MainComponent::renderTo (const juce::File& folder, const std::function<bool (float)>& progress)
+// editorsClosed: the caller (chooseAndRender) has already closed the tracks' windows on the message thread, so this may run on the progress
+// window's worker thread; a direct call (the checks, on the message thread) closes them here.
+juce::String MainComponent::renderTo (const juce::File& folder, const std::function<bool (float)>& progress, bool editorsClosed)
 {
     source.playing = false;
-    closeTrackEditors();
+    if (! editorsClosed)
+        closeTrackEditors();
     RenderOptions options;
     options.folder = folder;
     RenderResult result;
@@ -1029,12 +1061,16 @@ void MainComponent::chooseAndRender()
                           {
                               const auto folder = fc.getResult();
                               if (folder == juce::File()) return;
+                              // the message thread stops the transport and closes the tracks' plugin windows before the worker starts:
+                              // a window is never destroyed on the worker (renderTo's editorsClosed)
+                              source.playing = false;
+                              closeTrackEditors();
                               struct Job : juce::ThreadWithProgressWindow
                               {
                                   Job (MainComponent& m, juce::File f) : juce::ThreadWithProgressWindow ("Rendering the stems", true, true), owner (m), folder (std::move (f)) {}
                                   void run() override
                                   {
-                                      error = owner.renderTo (folder, [this] (float p) { setProgress ((double) p); return ! threadShouldExit(); });
+                                      error = owner.renderTo (folder, [this] (float p) { setProgress ((double) p); return ! threadShouldExit(); }, true);
                                   }
                                   MainComponent& owner;
                                   juce::File folder;
@@ -1055,6 +1091,10 @@ void MainComponent::showPluginsMenu()
     menu.addSeparator();
     menu.addItem ("Look in a folder...", [this] { chooseFolder(); });
     menu.addItem ("Rescan plugins", [this] { scanPlugins (true); requestRefresh(); });
+    if (! session.catalog.blacklisted().isEmpty())
+        menu.addItem ("Forget blacklisted plugins", [this] { session.catalog.clearBlacklist(); scanPlugins (true); requestRefresh(); });
+    if (monitorChainSkipped())
+        menu.addItem ("Load saved monitor chain", [this] { loadSkippedMonitorChain(); requestRefresh(); });
     if (! settings.pluginFolders.isEmpty())
     {
         menu.addSeparator();
@@ -1141,7 +1181,11 @@ void MainComponent::openEditor (int track, int slot)
     }
     if (auto it = windows.find (s); it != windows.end()) { it->second->toFront (true); return; }
     juce::AudioProcessorEditor* pluginEditor = s->instance->hasEditor() ? s->instance->createEditorAndMakeActive() : new juce::GenericAudioProcessorEditor (*s->instance);
-    if (pluginEditor == nullptr) return;
+    if (pluginEditor == nullptr)
+    {
+        showError (s->plugin + " has no editor window");   // a plugin that says it has one but gives none: said, not silent
+        return;
+    }
     const auto owner = track < 0 ? juce::String ("Monitor") : session.tracks[(size_t) track]->name;
     windows[s] = makeEditorWindow (owner + " - " + s->plugin, pluginEditor,
                                    [this, s, safe = juce::Component::SafePointer<MainComponent> (this)]
@@ -1171,15 +1215,41 @@ void MainComponent::closeTrackEditors()
 
 // ---- the monitor chain ---------------------------------------------------------------------------------------------------------------
 // Read once, after the catalog has its plugins. A file that is not a monitor chain (or is newer) is kept as it is: nothing is saved over it.
+// Safe start: the pedal is written around the read, so a crash in a plugin's load leaves it for the next start, which then skips the chain
+// (monitorSkipped, set in the constructor). A skipped chain is unread: nothing is saved over monitor.xml until PLUGINS loads it.
 void MainComponent::loadMonitorChain()
 {
-    if (monitorLoaded)
+    if (monitorLoaded || monitorSkipped)
         return;
+    const auto pedal = Settings::monitorPedalFile (opts.settingsFile);
+    pedal.replaceWithText ("loading the monitor chain\n");
     juce::StringArray problems;
     monitorLoaded = session.loadMonitor (Settings::monitorFile (opts.settingsFile), problems);
+    pedal.deleteFile();
     monitorProblem = monitorLoaded ? juce::String() : problems.joinIntoString (" ");
     refreshMonitorStrip();
     adoptDeviceRate(); // the chain's plugins were made at the session's rate, which may not be the device's yet
+}
+
+// PLUGINS > Load saved monitor chain: the chain the last start skipped, read now (the pedal around it, as at start).
+void MainComponent::loadSkippedMonitorChain()
+{
+    monitorSkipped = false;
+    loadMonitorChain();
+    updateTransport();
+    repaint();
+}
+
+// The last project, at start (the window's own startup, unless the command line named one). Skipped when the last start died opening it.
+void MainComponent::openLastProjectAtStart()
+{
+    const juce::File last (settings.lastProject);
+    if (! last.existsAsFile() || projectSkipped)
+        return;
+    const auto pedal = Settings::projectPedalFile (opts.settingsFile);
+    pedal.replaceWithText ("opening the last project\n");
+    openProject (last);
+    pedal.deleteFile();
 }
 
 // Writes the chain beside settings.xml. Never before the chain was read: an unread file is not overwritten.
@@ -1365,6 +1435,9 @@ void MainComponent::timerCallback()
     syncPlayhead();
     arrange.showInputLevels = ! isPlaying() || recorder.isRecording();
     updateRecording();
+    // a plugin reported a new latency (its listener only sets a flag): the tracks' delays follow it, and the read-outs below show it
+    if (session.takeLatencyChange())
+        session.updateLatencies();
     arrange.refresh();
     updateTransport();
     // A plugin edited in its own window changes the project: notice it by what the plugins would save.

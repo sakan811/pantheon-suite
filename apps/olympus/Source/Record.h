@@ -48,19 +48,31 @@ public:
     {
         for (auto& m : meters)
             m.store (0.0f);
+        for (auto& p : position)
+            p.store (-1);
     }
     Recorder (const Recorder&) = delete;
     Recorder& operator= (const Recorder&) = delete;
     ~Recorder() { stop(); }
 
-    // Message thread, with the device stopped: the largest block push() will be given, and the rate the buffers are sized for.
-    void prepare (double rate, int maxBlock)
+    // Message thread, with the device stopped: the largest block push() will be given, the rate the buffers are sized for, and which device
+    // inputs are switched on (by absolute number). The device's callback gets only the active inputs, in order, so input i is at the number
+    // of active inputs below it; an input that is not active maps to -1 (silence, and REC refuses it).
+    void prepare (double rate, int maxBlock, const juce::BigInteger& activeInputs = allInputs())
     {
         if (recording.load())
             return;
         blockMax = juce::jmax (1, maxBlock);
         bufferSamples = (int) juce::jmax (65536.0, rate * 6.0); // six seconds of a disk stall before a take drops audio
         silence.assign ((size_t) blockMax, 0.0f);
+        int active = 0;
+        for (int i = 0; i < kMaxInputs; ++i)
+        {
+            const bool on = activeInputs[i];
+            position[(size_t) i].store (on ? active : -1);
+            if (on)
+                ++active;
+        }
         prepared.store (true);
     }
 
@@ -76,6 +88,13 @@ public:
         {
             if (t.track < 0) { error = "A take needs a track."; return false; }
             if (t.inLeft < 0 || t.inRight < -1) { error = "A take needs its inputs: the left 0 or more, the right 0 or more, or -1 for mono."; return false; }
+            for (const int input : { t.inLeft, t.inRight })
+                if (input >= 0 && positionOf (input) < 0)
+                {
+                    error = (t.name.isNotEmpty() ? t.name : "Track " + juce::String (t.track + 1)) + " records input " + juce::String (input + 1)
+                            + ", which is not switched on in AUDIO";
+                    return false;
+                }
         }
         if (! folder.createDirectory().wasOk()) { error = "Cannot make the folder " + folder.getFullPathName(); return false; }
 
@@ -99,7 +118,14 @@ public:
                                                            .withNumChannels (2)
                                                            .withBitsPerSample (32)
                                                            .withSampleFormat (juce::AudioFormatWriterOptions::SampleFormat::floatingPoint));
-            if (writer == nullptr) { error = "Cannot create a WAV writer for " + file.getFileName(); abandon(); return false; }
+            if (writer == nullptr)
+            {
+                stream.reset();      // the file was created by createOutputStream: it goes too, so no empty take is left behind
+                file.deleteFile();
+                error = "Cannot create a WAV writer for " + file.getFileName();
+                abandon();
+                return false;
+            }
             Lane lane;
             lane.take = t;
             lane.file = file;
@@ -114,25 +140,32 @@ public:
         return true;
     }
 
-    // Audio thread. The inputs of one device block: inputs[i] holds numSamples samples of device input i. Blocks longer than the prepared
-    // maximum are cut. Meters are kept whether or not a take runs; takes are written only while one runs.
-    void push (const float* const* inputs, int numInputs, int numSamples)
+    // Audio thread. The inputs of one device block: inputs[k] holds numSamples samples of the k-th ACTIVE device input (the callback's order,
+    // see prepare); takes and meters name inputs by their absolute number. Blocks longer than the prepared maximum are cut. Meters are kept
+    // whether or not a take runs; takes are written only while one runs. Returns true when the block's first frame went to the takes: the
+    // caller places a take's start by that same decision (DeviceCallback::deviceBlock).
+    bool push (const float* const* inputs, int numInputs, int numSamples)
     {
+        bool first = false;
         if (! prepared.load() || inputs == nullptr || numSamples <= 0)
-            return;
+            return first;
         for (int offset = 0; offset < numSamples; offset += blockMax)
         {
             const int n = juce::jmin (blockMax, numSamples - offset);
-            const int metered = juce::jmin (numInputs, kMaxInputs);
-            for (int i = 0; i < metered; ++i)
+            for (int input = 0; input < kMaxInputs; ++input)
             {
-                const float p = peakOf (inputs[i] + offset, n);
-                if (p > meters[(size_t) i].load())
-                    meters[(size_t) i].store (p);
+                const int at = positionOf (input);
+                if (at < 0 || at >= numInputs)
+                    continue;
+                const float p = peakOf (inputs[at] + offset, n);
+                if (p > meters[(size_t) input].load())
+                    meters[(size_t) input].store (p);
             }
             busy.store (true);
             if (recording.load())
             {
+                if (offset == 0)
+                    first = true;
                 for (auto& lane : lanes)
                 {
                     const float* channels[2];
@@ -147,6 +180,7 @@ public:
             }
             busy.store (false);
         }
+        return first;
     }
 
     // Message thread. Ends the takes: waits for a push in flight, flushes every file, and returns them. Nothing when no take runs.
@@ -201,10 +235,24 @@ private:
         return p;
     }
 
-    // The block of device input `index` at `offset`, or silence for an input the device does not have.
-    const float* inputPointer (const float* const* inputs, int numInputs, int index, int offset) const
+    static juce::BigInteger allInputs()
     {
-        return index >= 0 && index < numInputs ? inputs[index] + offset : silence.data();
+        juce::BigInteger all;
+        all.setRange (0, kMaxInputs, true);
+        return all;
+    }
+
+    // The callback's position of device input `input` (by absolute number), or -1 when it is not switched on.
+    int positionOf (int input) const
+    {
+        return juce::isPositiveAndBelow (input, kMaxInputs) ? position[(size_t) input].load() : -1;
+    }
+
+    // The block of device input `input` (absolute) at `offset`, or silence for an input that is not active or not in this block.
+    const float* inputPointer (const float* const* inputs, int numInputs, int input, int offset) const
+    {
+        const int at = positionOf (input);
+        return at >= 0 && at < numInputs ? inputs[at] + offset : silence.data();
     }
 
     juce::TimeSliceThread thread;        // declared first: the lanes (and their writers) go before it
@@ -215,6 +263,7 @@ private:
     std::atomic<bool> prepared { false }, recording { false }, busy { false };
     std::atomic<juce::int64> framesPushed { 0 }, dropped { 0 };
     std::array<std::atomic<float>, kMaxInputs> meters;
+    std::array<std::atomic<int>, kMaxInputs> position;   // per absolute input: its position in the callback, or -1
 };
 
 // Starts a take on every armed track of the session, each on its own inputs. Refused, with the reason, when no track is armed. Takes the
@@ -240,21 +289,33 @@ inline bool beginRecording (Recorder& recorder, Session& session, const juce::Fi
 }
 
 // Puts each finished take on its track as a clip, all as one undo step. A take begins `latencyCompensation` samples before `startSample`
-// (the point where recording began), so it lines up with what was heard; never before 0. When the session has no rate yet, the first clip
-// read sets it to the take's rate (Session::loadPooled), as for any clip. A take with no frames is skipped (its file is kept). Returns false
-// with the reason if a clip cannot be added; the clips added before it stay (the step is still one undo step).
+// (the point where recording began), so it lines up with what was heard. Where that is before 0, the clip starts at 0 and the head of the
+// file that falls before 0 is skipped (its offset), so the rest still plays on time. When the session has no rate yet, the first clip
+// read sets it to the take's rate (Session::loadPooled), as for any clip. A take with no frames is skipped (its file is kept); a take
+// that is all before 0 is skipped too, with a note in `error`. Returns false with the reason if a clip cannot be added; the clips added
+// before it stay (the step is still one undo step).
 inline bool finishRecording (const std::vector<Recorder::Finished>& takes, juce::int64 startSample, int latencyCompensation, Editor& editor,
                              juce::String& error)
 {
     Editor::Gesture gesture (editor, "Record");
-    const juce::int64 begin = juce::jmax ((juce::int64) 0, startSample - (juce::int64) latencyCompensation);
+    const juce::int64 latency = juce::jmax ((juce::int64) 0, (juce::int64) latencyCompensation);
+    const juce::int64 begin = juce::jmax ((juce::int64) 0, startSample - latency);
+    const juce::int64 skip = juce::jmax ((juce::int64) 0, latency - startSample); // samples of each take's head before the timeline's 0
+    bool placed = true;
     for (const auto& take : takes)
     {
         if (take.frames <= 0)
             continue;
-        if (! editor.addClip (take.track, take.file, begin, 0, 0, error).valid())
+        if (take.frames - skip < 1)
+        {
+            error = "A take on track " + juce::String (take.track + 1) + " was shorter than the latency and was not placed: "
+                    + take.file.getFileName() + " is kept.";
+            placed = false;
+            continue;
+        }
+        if (! editor.addClip (take.track, take.file, begin, skip, take.frames - skip, error).valid())
             return false;
     }
-    return true;
+    return placed;
 }
 } // namespace olympus

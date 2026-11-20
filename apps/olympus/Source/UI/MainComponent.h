@@ -118,7 +118,8 @@ public:
         int bufferSize = 0;
         int inputs = 0, outputs = 0;               // the active channels
         int inputLatency = 0, outputLatency = 0;   // samples
-        juce::BigInteger activeInputs;             // which of the device's inputs are active
+        juce::BigInteger activeInputs;             // which of the device's inputs are active (absolute numbers)
+        juce::StringArray inputNames;              // the device's name for each of its inputs (absolute numbers), may be empty
     };
 
     // One entry of the IN menu: a device input alone (right -1) or a pair of neighbouring inputs.
@@ -142,9 +143,12 @@ public:
         }
         void audioDeviceAboutToStart (juce::AudioIODevice* device) override;
         void audioDeviceStopped() override;
+        // Message thread, before the callbacks run: the scratch a device with no outputs runs the transport into, for blocks of `samples`.
+        void prepareScratch (int samples) { scratch.setSize (2, juce::jmax (1, samples), false, true, false); }
 
     private:
         MainComponent& owner;
+        juce::AudioBuffer<float> scratch;   // silent, never heard: the transport's output on a device with no outputs
     };
 
     MainComponent();
@@ -174,7 +178,9 @@ public:
     void zoomBy (double factor);
     void removeTrack (int index);
     // Writes the stems and the mix. Returns the reason when it fails, an empty string when it worked.
-    juce::String renderTo (const juce::File& folder, const std::function<bool (float)>& progress = {});
+    // Called on the message thread (the checks) it closes the tracks' plugin windows first; the progress window's worker passes
+    // editorsClosed = true, after chooseAndRender closed them on the message thread.
+    juce::String renderTo (const juce::File& folder, const std::function<bool (float)>& progress = {}, bool editorsClosed = false);
     void togglePlay();
     void rewind();                                   // to the loop's start when the loop is on, else to 0
     void seek (juce::int64 sample);
@@ -247,6 +253,11 @@ public:
     void showAddMonitorMenu();
     void refreshMonitorStrip();                                 // the strip's buttons and read-outs, from the session
     bool monitorChainLoaded() const { return monitorLoaded; }
+    // Safe start (Settings.h): the last start died loading the chain, so it is skipped and PLUGINS > Load saved monitor chain reads it now.
+    bool monitorChainSkipped() const { return monitorSkipped && ! monitorLoaded; }
+    void loadSkippedMonitorChain();
+    // The last project opens at start, unless the last start died opening it (then a note says so and OPEN opens it).
+    void openLastProjectAtStart();
     double monitorLatencyMs() const;                           // the chain's latency in ms at the device's rate (0 when bypassed)
 
     bool keyPressed (const juce::KeyPress& key) override;
@@ -317,6 +328,8 @@ private:
 
     Options opts;
     bool monitorLoaded = false;                     // the chain is read: until then no save writes monitor.xml
+    bool monitorSkipped = false;                    // a pedal found at start: the chain is not read until PLUGINS reads it
+    bool projectSkipped = false;                    // a pedal found at start: the last project is not opened again
     Source source { *this };
     Recorder recorder;
     std::unique_ptr<juce::FileChooser> chooser;
