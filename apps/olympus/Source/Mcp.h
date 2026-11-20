@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "Advice.h"
 #include "Edit.h"
 #include "Session.h"
 #include "Tempo.h"
@@ -96,7 +97,7 @@ private:
     static juce::String instructions()
     {
         return "Olympus is a session host for the Pantheon plugin suite. Typical use: new_project, add_track for each stem (a WAV or other audio file), "
-               "set_chain or add_plugin to put plugins on a stem, set_parameter / load_preset to set them, save_project (the user opens the .olympus file "
+               "set_chain or add_plugin to put plugins on a stem, set_parameter / load_preset to set them (get_plugin_state / set_plugin_state keep and restore a whole plugin state; plugin_notes gives the GUIDE and the session's notes), save_project (the user opens the .olympus file "
                "in the Olympus window to edit further), render_stems to write one WAV per stem. The timeline: add_clip places a file on a track at a "
                "position (seconds or beats), split_clip / move_clip / trim_clip / delete_clip / set_clip edit clips, set_tempo, set_time_signature, "
                "add_marker / remove_marker, set_loop and set_master set the rest. Tracks, clips, markers and plugin slots are numbered from 0; a track may also "
@@ -146,6 +147,10 @@ private:
                           { "value", prop ("number", "0..1") }, { "text", prop ("string", "As the plugin shows it, e.g. '-3.0 dB'") } }, { "track", "slot", "parameter" }));
         list.add (tool ("list_presets", "The factory presets of a plugin, where it has any.", { { "track", trackRef }, { "slot", slotRef } }, { "track", "slot" }));
         list.add (tool ("load_preset", "Loads a preset into a plugin (it replaces the plugin's settings).", { { "track", trackRef }, { "slot", slotRef }, { "preset", prop ("string", "Name or number") } }, { "track", "slot", "preset" }));
+        list.add (tool ("get_plugin_state", "A plugin's complete state (every setting, and what the plugin keeps besides) as base64 text, to keep or to hand to set_plugin_state.", { { "track", trackRef }, { "slot", slotRef } }, { "track", "slot" }));
+        list.add (tool ("set_plugin_state", "Restores a state from get_plugin_state into a plugin of the same kind (it replaces all the plugin's settings).",
+                        { { "track", trackRef }, { "slot", slotRef }, { "state", prop ("string", "Base64 text from get_plugin_state") } }, { "track", "slot", "state" }));
+        list.add (tool ("plugin_notes", "What Olympus is for and not for (the GUIDE text), and the notes it gives about this session (warnings first).", {}));
         list.add (tool ("render_stems", "Writes one WAV per audible track (after its chain and fader, aligned to the audio) and mix.wav, into a folder.",
                         { { "folder", prop ("string", "Absolute path of the folder (made if needed)") }, { "tail_seconds", prop ("number", "Extra time at the end for tails; default 0") },
                           { "mix", prop ("boolean", "Also write mix.wav; default true") }, { "bits", prop ("integer", "16, 24 or 32 (float, default)") } }, { "folder" }));
@@ -201,6 +206,13 @@ private:
         }
         if (name == "project_info")
             return session.describe();
+        if (name == "plugin_notes")
+        {
+            juce::Array<juce::var> list;
+            for (auto& n : adviceFor (session))
+                list.add (object ({ { "severity", n.severity == ui::Severity::warning ? "warning" : "info" }, { "text", juce::String (n.text) } }));
+            return object ({ { "guide", guideText() }, { "notes", list } });
+        }
         if (name == "new_project")
         {
             session.newProject (a["name"].toString());
@@ -546,6 +558,25 @@ private:
             return parameters (*instance);
         if (name == "set_parameter")
             return setParameter (*instance, a, error);
+        if (name == "get_plugin_state")
+        {
+            juce::MemoryBlock state;
+            instance->getStateInformation (state);
+            return object ({ { "plugin", instance->getName() }, { "bytes", (int) state.getSize() }, { "state", state.toBase64Encoding() } });
+        }
+        if (name == "set_plugin_state")
+        {
+            const auto text = a["state"].toString().trim();
+            juce::MemoryBlock state;
+            if (text.isEmpty() || ! state.fromBase64Encoding (text) || state.getSize() == 0)
+            {
+                error = "Give 'state' as the base64 text from get_plugin_state.";
+                return {};
+            }
+            session.dirty = true;
+            instance->setStateInformation (state.getData(), (int) state.getSize());
+            return parameters (*instance);
+        }
         if (name == "list_presets")
         {
             juce::Array<juce::var> list;

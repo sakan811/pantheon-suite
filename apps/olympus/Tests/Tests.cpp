@@ -410,7 +410,7 @@ void mcpChecks()
     juce::var list;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}", list);
     const auto tools = server.handle (list)["result"]["tools"];
-    test::check (tools.size() == 33 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
+    test::check (tools.size() == 36 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
 
     juce::var note;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", note);
@@ -433,6 +433,18 @@ void mcpChecks()
     test::check (parsed (call ("list_presets", "{\"track\":0,\"slot\":0}"))["presets"].size() == 2, "list_presets");
     call ("load_preset", "{\"track\":0,\"slot\":0,\"preset\":\"boost\"}");
     test::check (std::abs (gainOf (s, 0, 0) - 6.0) < 0.01, "load_preset by name");
+    {
+        const auto st = parsed (call ("get_plugin_state", "{\"track\":0,\"slot\":0}"));
+        const auto stateText = st["state"].toString();
+        test::check (stateText.isNotEmpty() && st["plugin"].toString().isNotEmpty(), "get_plugin_state returns base64 text");
+        call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"Gain\",\"value\":0.5}");
+        call ("set_plugin_state", "{\"track\":0,\"slot\":0,\"state\":\"" + stateText + "\"}");
+        test::check (std::abs (gainOf (s, 0, 0) - 6.0) < 0.01, "set_plugin_state restores the saved settings");
+        test::check ((bool) call ("set_plugin_state", "{\"track\":0,\"slot\":0,\"state\":\"\"}")["isError"], "set_plugin_state with no state is an error");
+        test::check ((bool) call ("set_plugin_state", "{\"track\":0,\"slot\":0,\"state\":\"!!not base64!!\"}")["isError"], "set_plugin_state with bad text is an error");
+        const auto notes = parsed (call ("plugin_notes", "{}"));
+        test::check (notes["guide"].toString().isNotEmpty() && notes["notes"].isArray(), "plugin_notes gives the guide and a list of notes");
+    }
     call ("set_track", "{\"track\":0,\"gain_db\":-1.5,\"name\":\"Pad 1\"}");
     test::check (std::abs (s.tracks[0]->gainDb + 1.5f) < 1e-6f && s.tracks[0]->name == "Pad 1", "set_track");
 
@@ -523,7 +535,7 @@ void mcpTimelineChecks()
                            "add_marker", "remove_marker", "set_loop", "set_master" })
         for (auto& t : *tools.getArray())
             if (t["name"].toString() == n) ++known;
-    test::check (tools.size() == 33 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
+    test::check (tools.size() == 36 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
 
     // clips
     test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1}")) && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 48000,
