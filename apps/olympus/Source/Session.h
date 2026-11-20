@@ -32,6 +32,7 @@
 namespace olympus
 {
 inline constexpr int kProjectVersion = 2;
+inline constexpr int kMonitorVersion = 1; // monitor.xml, separate from the project's version
 inline constexpr int kBlockSize = 512;
 
 struct Slot
@@ -74,6 +75,10 @@ struct Track
     float gainDb = 0.0f;                                 // the fader
     float pan = 0.0f;                                    // -1 (left) .. 1 (right), a balance: see Session::panGains
     bool mute = false, solo = false;
+    // Recording (Record.h): armed tracks take the device inputs inputLeft and inputRight (-1 = mono, the left input on both sides). Session
+    // state, saved in the project as attributes; not undone.
+    bool armed = false;
+    int inputLeft = 0, inputRight = 1;
     std::vector<std::unique_ptr<Slot>> chain;
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };   // post fader and pan; the audio thread keeps the max, the display resets them
 
@@ -157,12 +162,20 @@ public:
     bool snapOn = true;             // view settings, saved with the project
     Grid grid = Grid::Quarter;
 
+    // ---- the monitor chain ----------------------------------------------------------------------------------------------
+    // The plugins the headphones hear (a correction plugin, say): run on the playback block by processMonitor, after processBlock, and
+    // by nothing else. Not in the project, not in a render, not an undo step: it belongs to the headphones. Saved in its own file (saveMonitor).
+    std::vector<std::unique_ptr<Slot>> monitor;
+    bool monitorBypass = false;
+
     Session() { formats.registerBasicFormats(); }
     ~Session()
     {
         for (auto& t : tracks)
             for (auto& s : t->chain)
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        for (auto& s : monitor)
+            if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
     }
 
     // ---- tracks ---------------------------------------------------------------------------------------------------------
@@ -273,6 +286,28 @@ public:
     }
 
     // ---- markers --------------------------------------------------------------------------------------------------------
+    // Recording set-up of a track (Record.h). Under the lock; a refusal changes nothing and says why. Saved with the project, not undone.
+    bool setTrackArm (int track, bool on, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        auto& t = *tracks[(size_t) track];
+        if (t.armed != on) { t.armed = on; dirty = true; }
+        return true;
+    }
+
+    // `right` is -1 for a mono input (the left input is taken on both channels).
+    bool setTrackInput (int track, int left, int right, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        if (left < 0) { error = "The left input must be 0 or more."; return false; }
+        if (right < -1) { error = "The right input must be 0 or more, or -1 for a mono input."; return false; }
+        auto& t = *tracks[(size_t) track];
+        if (t.inputLeft != left || t.inputRight != right) { t.inputLeft = left; t.inputRight = right; dirty = true; }
+        return true;
+    }
+
     // Adds a marker, kept sorted. Returns its index.
     int addMarker (const juce::String& markerName, juce::int64 sample)
     {
@@ -424,6 +459,156 @@ public:
     }
 
     // ---- time -----------------------------------------------------------------------------------------------------------
+    // ---- the monitor chain ----------------------------------------------------------------------------------------------
+    // Puts a plugin in the monitor chain at `position` (-1 = the end). Message thread only: the plugin is made here.
+    bool addMonitorPlugin (const juce::String& query, int position, juce::String& error)
+    {
+        const auto exact = catalog.resolve (query, error);
+        if (exact.isEmpty()) return false;
+        auto slot = makeSlot (exact, nullptr, error);
+        if (slot == nullptr) return false;
+        const juce::ScopedLock sl (lock);
+        position = position < 0 || position > (int) monitor.size() ? (int) monitor.size() : position;
+        monitor.insert (monitor.begin() + position, std::move (slot));
+        return true;
+    }
+
+    bool removeMonitorPlugin (int index, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (index, (int) monitor.size())) { error = "No monitor plugin " + juce::String (index); return false; }
+        if (monitor[(size_t) index]->instance != nullptr) monitor[(size_t) index]->instance->setPlayHead (nullptr);
+        monitor.erase (monitor.begin() + index);
+        return true;
+    }
+
+    // Bypasses one plugin of the monitor chain (its own flag, saved in monitor.xml).
+    bool setMonitorPluginBypass (int index, bool bypass, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (index, (int) monitor.size())) { error = "No monitor plugin " + juce::String (index); return false; }
+        monitor[(size_t) index]->bypass = bypass;
+        return true;
+    }
+
+    // Bypasses the whole monitor chain. It does not dirty the project: the chain is not part of it.
+    void setMonitorBypass (bool bypass)
+    {
+        const juce::ScopedLock sl (lock);
+        monitorBypass = bypass;
+    }
+
+    // The latency the monitor path adds (a bypassed plugin or chain adds none). The takes are not moved by it: see Record.h.
+    int monitorLatency() const
+    {
+        const juce::ScopedLock sl (lock);
+        if (monitorBypass) return 0;
+        int sum = 0;
+        for (auto& s : monitor) sum += s->latency();
+        return sum;
+    }
+
+    // Runs the monitor chain in place over one playback block of any length (cut into kBlockSize pieces). The audio callback calls it after
+    // processBlock and nowhere else. If the lock is busy the block is left as it is; a bypassed or empty chain does nothing.
+    void processMonitor (juce::AudioBuffer<float>& out)
+    {
+        constexpr int kMaxMonitorChannels = 8;
+        const int n = out.getNumSamples();
+        const int channels = juce::jmin (out.getNumChannels(), kMaxMonitorChannels);
+        if (monitorBypass || n <= 0 || channels <= 0)
+            return;
+        const juce::ScopedTryLock sl (lock);
+        if (! sl.isLocked())
+            return;
+        bool active = false;
+        for (auto& s : monitor)
+            active = active || (s->instance != nullptr && ! s->bypass);
+        if (! active)
+            return;
+        for (int start = 0; start < n; start += kBlockSize)
+        {
+            const int count = juce::jmin (kBlockSize, n - start);
+            float* pointers[kMaxMonitorChannels];
+            for (int ch = 0; ch < channels; ++ch)
+                pointers[ch] = out.getWritePointer (ch) + start;
+            juce::AudioBuffer<float> view (pointers, channels, count);
+            juce::MidiBuffer midi;
+            for (auto& s : monitor)
+                if (s->instance != nullptr && ! s->bypass)
+                    s->instance->processBlock (view, midi);
+        }
+    }
+
+    // The monitor chain in its own file: the plugins' names, their bypass flags and each one's settings (a plugin that is not installed keeps
+    // its saved settings). The chain's own bypass is saved too. Message thread.
+    bool saveMonitor (const juce::File& file, juce::String& error)
+    {
+        auto xml = std::make_unique<juce::XmlElement> ("OlympusMonitor");
+        xml->setAttribute ("version", kMonitorVersion);
+        xml->setAttribute ("bypass", monitorBypass);
+        {
+            // every plugin's state is read here: not while processBlock runs beside it
+            const juce::ScopedLock sl (lock);
+            for (auto& s : monitor)
+            {
+                auto* e = xml->createNewChildElement ("Plugin");
+                e->setAttribute ("plugin", s->plugin);
+                e->setAttribute ("bypass", s->bypass);
+                e->setAttribute ("state", stateOf (*s).toBase64Encoding());
+            }
+        }
+        file.getParentDirectory().createDirectory();
+        juce::TemporaryFile temp (file);
+        if (! xml->writeTo (temp.getFile()) || ! temp.overwriteTargetFileWithTemporary())
+        {
+            error = "Cannot write " + file.getFullPathName();
+            return false;
+        }
+        return true;
+    }
+
+    // Replaces the monitor chain with the one in `file`. A plugin that cannot be made stays as a slot with its saved settings and a line in
+    // `problems`. A missing file means an empty chain. Returns false (the chain unchanged) when the file is not a monitor chain, or is newer.
+    bool loadMonitor (const juce::File& file, juce::StringArray& problems)
+    {
+        if (! file.existsAsFile())
+        {
+            const juce::ScopedLock sl (lock);
+            for (auto& s : monitor)
+                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+            monitor.clear();
+            return true;
+        }
+        const auto xml = juce::parseXML (file);
+        if (xml == nullptr || ! xml->hasTagName ("OlympusMonitor")) { problems.add (file.getFileName() + " is not an Olympus monitor chain."); return false; }
+        if (xml->getIntAttribute ("version", 1) > kMonitorVersion) { problems.add ("This monitor chain is from a newer Olympus."); return false; }
+
+        std::vector<std::unique_ptr<Slot>> fresh;
+        for (auto* e : xml->getChildWithTagNameIterator ("Plugin"))
+        {
+            juce::MemoryBlock state;
+            state.fromBase64Encoding (e->getStringAttribute ("state"));
+            const auto pluginName = e->getStringAttribute ("plugin");
+            juce::String problem;
+            auto slot = makeSlot (pluginName, &state, problem);
+            if (slot == nullptr)
+            {
+                problems.add ("Monitor '" + pluginName + "': " + problem);
+                slot = std::make_unique<Slot>();
+                slot->plugin = pluginName;
+                slot->savedState = state;
+            }
+            slot->bypass = e->getBoolAttribute ("bypass");
+            fresh.push_back (std::move (slot));
+        }
+        const juce::ScopedLock sl (lock);
+        for (auto& s : monitor)
+            if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        monitor = std::move (fresh);
+        monitorBypass = xml->getBoolAttribute ("bypass");
+        return true;
+    }
+
     // The end of the last clip of any track (and of the tails the chains do not count): what the window plays to.
     juce::int64 length() const
     {
@@ -663,6 +848,9 @@ public:
             e->setAttribute ("gainDb", (double) t->gainDb);
             e->setAttribute ("mute", t->mute);
             e->setAttribute ("solo", t->solo);
+            e->setAttribute ("armed", t->armed);
+            e->setAttribute ("inputLeft", t->inputLeft);
+            e->setAttribute ("inputRight", t->inputRight);
             for (auto& c : t->clips)
             {
                 auto* k = e->createNewChildElement ("Clip");
@@ -731,6 +919,9 @@ public:
             t->pan = (float) juce::jlimit (-1.0, 1.0, e->getDoubleAttribute ("pan", 0.0));
             t->mute = e->getBoolAttribute ("mute");
             t->solo = e->getBoolAttribute ("solo");
+            t->armed = e->getBoolAttribute ("armed");
+            t->inputLeft = juce::jmax (0, e->getIntAttribute ("inputLeft", 0));
+            t->inputRight = juce::jmax (-1, e->getIntAttribute ("inputRight", 1));
             const bool legacy = e->getChildByName ("Clip") == nullptr && (e->hasAttribute ("file") || e->hasAttribute ("path"));
             if (legacy)
                 t->clips.push_back (readClip (*e, file.getParentDirectory(), rate, true, t->name, problems));
@@ -951,6 +1142,9 @@ public:
             o->setProperty ("mute", t->mute);
             o->setProperty ("solo", t->solo);
             o->setProperty ("latency_samples", t->latency());
+            o->setProperty ("armed", t->armed);
+            o->setProperty ("input_left", t->inputLeft);
+            o->setProperty ("input_right", t->inputRight);
 
             juce::Array<juce::var> clips;
             int k = 0;
@@ -986,6 +1180,20 @@ public:
             list.add (juce::var (o));
         }
         root->setProperty ("tracks", list);
+
+        // the monitor chain: what the headphones hear, not part of the project
+        juce::Array<juce::var> monitorList;
+        for (auto& s : monitor)
+        {
+            auto* entry = new juce::DynamicObject();
+            entry->setProperty ("plugin", s->plugin);
+            entry->setProperty ("bypass", s->bypass);
+            entry->setProperty ("latency_samples", s->latency());
+            entry->setProperty ("installed", s->instance != nullptr);
+            monitorList.add (juce::var (entry));
+        }
+        root->setProperty ("monitor", monitorList);
+        root->setProperty ("monitor_bypass", monitorBypass);
         return juce::var (root);
     }
 
@@ -1140,9 +1348,19 @@ private:
 
     void setSampleRateLocked (double r)
     {
+        const bool changed = std::abs (r - sampleRate) > 0.5;
         sampleRate = r;
         if (r > 0.0)
             tempo.sampleRate = r;
+        // the monitor chain is made before the rate may be known: it is set up again for the new one (never by a render, which leaves it alone)
+        if (changed && r > 0.0)
+            for (auto& s : monitor)
+                if (s->instance != nullptr)
+                {
+                    s->instance->releaseResources();
+                    configure (*s->instance, r, false);
+                    s->instance->reset();
+                }
     }
 
     // Stereo in and out, the rate and block, the playhead; for a plugin that has been made or that must start from a clean state.

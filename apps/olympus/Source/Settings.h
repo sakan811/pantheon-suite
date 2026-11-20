@@ -17,6 +17,10 @@ struct Settings
     // false: every VST3 (and AU on macOS) the folders hold is scanned and can be hosted. true: only bundles named as one of the suite's are
     // read, as before the scan looked at everything (a scan then never opens a third-party plugin).
     bool scanSuiteOnly = false;
+    // The audio device's settings as XML text (juce::AudioDeviceManager::createStateXml), so the device comes back as it was chosen.
+    juce::String audioDeviceState;
+    // A round-trip latency the user types in, added to the device's own when a take is placed (Record.h). Saved as an attribute.
+    int extraLatencySamples = 0;
 
     // OLYMPUS_SETTINGS names another file (the tests use it, so they never touch the real one).
     static juce::File defaultFile()
@@ -31,6 +35,8 @@ struct Settings
     // plugin that crashes in that read is blacklisted the next time. Both sit in the settings folder.
     static juce::File pluginCacheFile (const juce::File& settingsFile = defaultFile()) { return settingsFile.getSiblingFile ("plugins.xml"); }
     static juce::File scanPedalFile (const juce::File& settingsFile = defaultFile()) { return settingsFile.getSiblingFile ("plugin-scan.pedal"); }
+    // The monitor chain (the headphone correction plugins, Session::saveMonitor) is kept beside this file too: it belongs to the headphones.
+    static juce::File monitorFile (const juce::File& settingsFile = defaultFile()) { return settingsFile.getSiblingFile ("monitor.xml"); }
 
     static Settings load (const juce::File& file = defaultFile())
     {
@@ -41,6 +47,9 @@ struct Settings
                 s.pluginFolders.addIfNotAlreadyThere (f->getStringAttribute ("path"));
             s.lastProject = xml->getStringAttribute ("lastProject");
             s.scanSuiteOnly = xml->getBoolAttribute ("scanSuiteOnly", false);
+            s.extraLatencySamples = juce::jlimit (0, 1000000, xml->getIntAttribute ("extraLatency", 0));
+            if (auto* device = xml->getChildByName ("AudioDevice"); device != nullptr && device->getFirstChildElement() != nullptr)
+                s.audioDeviceState = device->getFirstChildElement()->toString();
         }
         return s;
     }
@@ -50,8 +59,11 @@ struct Settings
         juce::XmlElement xml ("OlympusSettings");
         xml.setAttribute ("lastProject", lastProject);
         xml.setAttribute ("scanSuiteOnly", scanSuiteOnly ? 1 : 0);
+        xml.setAttribute ("extraLatency", extraLatencySamples);
         for (auto& f : pluginFolders)
             xml.createNewChildElement ("PluginFolder")->setAttribute ("path", f);
+        if (auto device = juce::parseXML (audioDeviceState); device != nullptr)
+            xml.createNewChildElement ("AudioDevice")->addChildElement (device.release());
         file.getParentDirectory().createDirectory();
         xml.writeTo (file);
     }

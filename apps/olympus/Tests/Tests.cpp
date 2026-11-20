@@ -7,10 +7,14 @@
 #include "Check.h"
 #include "Edit.h"
 #include "Mcp.h"
+#include "Record.h"
+#include "Settings.h"
 #include "TempoTests.h"
 #include "TestPlugin.h"
 
+#include <chrono>
 #include <sstream>
+#include <thread>
 
 using namespace olympus;
 
@@ -1218,6 +1222,381 @@ void fixChecks()
     }
 }
 
+// ---- the monitor chain, recording, and the settings they keep ----------------------------------------------------------------------------------
+
+void setMonitorGain (Session& s, int slot, double db)
+{
+    auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.monitor[(size_t) slot]->instance->getParameters()[0]);
+    p->setValue (p->convertTo0to1 ((float) db));
+}
+
+double monitorGainOf (Session& s, int slot)
+{
+    auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.monitor[(size_t) slot]->instance->getParameters()[0]);
+    return (double) p->convertFrom0to1 (p->getValue());
+}
+
+// Two buffers hold the same samples, exactly.
+bool sameAudio (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+{
+    if (a.getNumChannels() != b.getNumChannels() || a.getNumSamples() != b.getNumSamples())
+        return false;
+    for (int ch = 0; ch < a.getNumChannels(); ++ch)
+        for (int i = 0; i < a.getNumSamples(); ++i)
+            if (a.getSample (ch, i) != b.getSample (ch, i))
+                return false;
+    return true;
+}
+
+// Every sample of `out` is `in` times `gain` (to 1e-5).
+bool scaledBy (const juce::AudioBuffer<float>& out, const juce::AudioBuffer<float>& in, float gain)
+{
+    for (int ch = 0; ch < out.getNumChannels(); ++ch)
+        for (int i = 0; i < out.getNumSamples(); ++i)
+            if (std::abs (out.getSample (ch, i) - in.getSample (ch, i) * gain) > 1e-5f)
+                return false;
+    return true;
+}
+
+void fillSine (juce::AudioBuffer<float>& b, double freq, float level, double rate)
+{
+    for (int ch = 0; ch < b.getNumChannels(); ++ch)
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            b.setSample (ch, i, level * (float) std::sin (2.0 * juce::MathConstants<double>::pi * freq * i / rate));
+}
+
+// The largest difference between channel `ch` of `b` and `x`; a length that differs counts as a large error.
+double maxError (const juce::AudioBuffer<float>& b, int ch, const std::vector<float>& x)
+{
+    if (b.getNumSamples() != (int) x.size())
+        return 1e9;
+    double worst = 0.0;
+    for (int i = 0; i < b.getNumSamples(); ++i)
+        worst = juce::jmax (worst, std::abs ((double) b.getSample (ch, i) - (double) x[(size_t) i]));
+    return worst;
+}
+
+bool isFloatFile (const juce::File& file)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (file));
+    return r != nullptr && r->usesFloatingPointData;
+}
+
+// Pushes `in` into the recorder in blocks of 100, 512, 37 and 1100 frames: the last is longer than the recorder's block, so it is cut.
+void feedRecorder (Recorder& rec, const std::vector<std::vector<float>>& in, int frames)
+{
+    const int sizes[] = { 100, 512, 37, 1100 };
+    int pos = 0, k = 0;
+    while (pos < frames)
+    {
+        const int n = juce::jmin (sizes[k++ % 4], frames - pos);
+        const float* ptrs[2] = { in[0].data() + pos, in[1].data() + pos };
+        rec.push (ptrs, 2, n);
+        pos += n;
+    }
+}
+
+void monitorChecks()
+{
+    std::printf ("[30] Monitor chain: a gain changes the playback block, bypass restores it, a delay is in time across blocks, a busy lock or an empty chain leaves the block alone\n");
+    tempFolder().getChildFile ("mon").createDirectory();
+    const auto wav = makeWav ("mon/m.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    s.addTrack (wav, "M", err);
+    test::check (s.addMonitorPlugin ("test gain", -1, err) && s.monitor.size() == 1 && s.monitor[0]->instance != nullptr, "a plugin goes in the monitor chain");
+    test::check (! s.addMonitorPlugin ("nope", -1, err) && err.isNotEmpty() && s.monitor.size() == 1, "an unknown plugin is refused and nothing is added");
+
+    juce::AudioBuffer<float> in (2, 1300), out (2, 1300);
+    fillSine (in, 440.0, 0.5f, 48000.0);
+    setMonitorGain (s, 0, 6.0);
+    const float six = juce::Decibels::decibelsToGain (6.0f);
+    out.makeCopyOf (in);
+    s.processMonitor (out);
+    test::check (scaledBy (out, in, six), "the playback block goes through the monitor gain (+6 dB, 1300 samples in one call)");
+    s.setMonitorBypass (true);
+    out.makeCopyOf (in);
+    s.processMonitor (out);
+    test::check (sameAudio (out, in), "the chain's bypass leaves the block as it was");
+    s.setMonitorBypass (false);
+    test::check (s.setMonitorPluginBypass (0, true, err), "a plugin of the chain can be bypassed");
+    out.makeCopyOf (in);
+    s.processMonitor (out);
+    test::check (sameAudio (out, in) && s.monitorLatency() == 0, "a bypassed plugin does nothing");
+    test::check (s.setMonitorPluginBypass (0, false, err), "and it is put back");
+    out.makeCopyOf (in);
+    s.processMonitor (out);
+    test::check (scaledBy (out, in, six), "with the bypass off the gain is back");
+
+    Session d;
+    test::addTestPlugins (d.catalog);
+    d.addTrack (wav, "D", err);
+    test::check (d.addMonitorPlugin ("test delay", -1, err) && d.monitorLatency() == 64, "a delay in the monitor chain reports its latency");
+    juce::AudioBuffer<float> impulse (2, 1300);
+    impulse.clear();
+    impulse.setSample (0, 0, 0.5f);
+    impulse.setSample (1, 0, 0.5f);
+    d.processMonitor (impulse);
+    bool inTime = true;
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < 1300; ++i)
+            if (std::abs (impulse.getSample (ch, i) - (i == 64 ? 0.5f : 0.0f)) > 1e-6f)
+                inTime = false;
+    test::check (inTime, "the delay plays the impulse 64 samples later, across the block boundaries at 512 and 1024");
+
+    {
+        std::atomic<bool> held { false }, release { false };
+        std::thread holder ([&s, &held, &release]
+        {
+            const juce::ScopedLock sl (s.lock);
+            held = true;
+            while (! release.load())
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        });
+        while (! held.load())
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        out.makeCopyOf (in);
+        s.processMonitor (out);
+        test::check (sameAudio (out, in), "while the lock is busy the block is left as it is");
+        release = true;
+        holder.join();
+    }
+    test::check (s.removeMonitorPlugin (0, err) && ! s.removeMonitorPlugin (0, err), "a plugin leaves the chain; a place that is not there is refused");
+    out.makeCopyOf (in);
+    s.processMonitor (out);
+    test::check (sameAudio (out, in), "an empty chain leaves the block as it was");
+}
+
+void monitorStateChecks()
+{
+    std::printf ("[31] Monitor chain: processBlock and the renders are the same with it; it is not in the project; saved apart, a missing plugin keeps its settings; described\n");
+    const auto dir = tempFolder().getChildFile ("monst");
+    dir.createDirectory();
+    const auto wav = makeWav ("monst/a.wav", 48000.0, 2, 9600, 0.4f, 300.0);
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    s.addTrack (wav, "R", err);
+    test::check (s.setChain (0, { "test gain" }, err), "a track with a plugin");
+    setGain (s, 0, 0, -4.0);
+
+    const auto play = [&s]
+    {
+        juce::AudioBuffer<float> all (2, 9600);
+        for (juce::int64 start = 0; start < 9600; start += kBlockSize)
+        {
+            const int n = (int) juce::jmin ((juce::int64) kBlockSize, 9600 - start);
+            juce::AudioBuffer<float> block (2, n);
+            s.processBlock (block, start);
+            for (int ch = 0; ch < 2; ++ch)
+                all.copyFrom (ch, (int) start, block, ch, 0, n);
+        }
+        return all;
+    };
+    const auto before = play();
+    test::check (s.addMonitorPlugin ("test delay", -1, err), "a delay goes in the monitor chain");
+    test::check (sameAudio (before, play()), "processBlock plays the same with the monitor chain in place");
+
+    RenderOptions o;
+    RenderResult without, with;
+    s.removeMonitorPlugin (0, err);
+    o.folder = dir.getChildFile ("without");
+    test::check (s.renderStems (o, without, err), "a render with no monitor chain: " + err);
+    s.addMonitorPlugin ("test delay", -1, err);
+    o.folder = dir.getChildFile ("with");
+    test::check (s.renderStems (o, with, err), "a render with the monitor chain: " + err);
+    test::check (with.stems.size() == 1 && without.stems.size() == 1
+                     && sameAudio (readWav (juce::File (with.stems[0].file)), readWav (juce::File (without.stems[0].file)))
+                     && sameAudio (readWav (juce::File (with.mixFile)), readWav (juce::File (without.mixFile))),
+                 "the stem and the mix are the same sample for sample with the monitor chain");
+
+    const auto project = dir.getChildFile ("p.olympus");
+    test::check (s.save (project, err) && ! project.loadFileAsString().contains ("Test Delay"), "the project file does not hold the monitor chain");
+
+    const auto settings = dir.getChildFile ("settings.xml");
+    const auto file = Settings::monitorFile (settings);
+    test::check (file.getFileName() == "monitor.xml" && file.getParentDirectory() == settings.getParentDirectory(), "the monitor chain is kept beside the settings, as monitor.xml");
+    s.addMonitorPlugin ("test gain", -1, err);
+    setMonitorGain (s, 1, -3.0);
+    s.setMonitorPluginBypass (0, true, err);
+    test::check (s.saveMonitor (file, err), "the chain is saved: " + err);
+
+    Session t;
+    test::addTestPlugins (t.catalog);
+    juce::StringArray warnings;
+    test::check (t.loadMonitor (file, warnings) && warnings.isEmpty() && t.monitor.size() == 2 && t.monitor[0]->bypass && ! t.monitor[1]->bypass
+                     && std::abs (monitorGainOf (t, 1) + 3.0) < 1e-3,
+                 "the chain comes back: its plugins, their bypass and their settings");
+
+    juce::MemoryBlock kept;
+    kept.append ("abc", 3);
+    dir.getChildFile ("gone.xml").replaceWithText ("<OlympusMonitor version=\"1\" bypass=\"0\"><Plugin plugin=\"Gone Plugin\" bypass=\"1\" state=\""
+                                                   + kept.toBase64Encoding() + "\"/></OlympusMonitor>");
+    Session u;
+    test::addTestPlugins (u.catalog);
+    juce::StringArray gone;
+    test::check (u.loadMonitor (dir.getChildFile ("gone.xml"), gone) && u.monitor.size() == 1 && u.monitor[0]->instance == nullptr && gone.size() == 1
+                     && u.monitor[0]->savedState.matches ("abc", 3),
+                 "a missing plugin is a warning, stays in the chain and keeps its settings");
+    const auto again = dir.getChildFile ("again.xml");
+    test::check (u.saveMonitor (again, err), "saved again");
+    Session v;
+    test::addTestPlugins (v.catalog);
+    juce::StringArray twice;
+    test::check (v.loadMonitor (again, twice) && v.monitor.size() == 1 && v.monitor[0]->savedState.matches ("abc", 3) && v.monitor[0]->bypass,
+                 "and loaded again its settings and bypass are still there");
+
+    dir.getChildFile ("project.xml").replaceWithText ("<OlympusProject version=\"2\"/>");
+    juce::StringArray bad;
+    test::check (! v.loadMonitor (dir.getChildFile ("project.xml"), bad) && bad.size() == 1 && v.monitor.size() == 1, "a file that is not a monitor chain is refused, and the chain stays");
+
+    const auto d = v.describe();
+    test::check (d["monitor"].size() == 1 && d["monitor"][0]["plugin"].toString() == "Gone Plugin" && ! (bool) d["monitor"][0]["installed"] && (bool) d["monitor"][0]["bypass"],
+                 "describe() lists the monitor chain with its plugins, bypass and installed flags");
+}
+
+void recorderChecks()
+{
+    std::printf ("[32] Recorder: two inputs in odd blocks, a mono take, two armed tracks, a second take never overwrites, no armed track is refused\n");
+    const auto dir = tempFolder().getChildFile ("rec");
+    dir.deleteRecursively();
+    const double rate = 48000.0;
+    const int frames = 24000; // half a second
+    std::vector<std::vector<float>> in (2, std::vector<float> ((size_t) frames));
+    for (int i = 0; i < frames; ++i)
+    {
+        in[0][(size_t) i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / rate);
+        in[1][(size_t) i] = 0.25f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 2000.0 * i / rate);
+    }
+
+    Recorder rec;
+    rec.prepare (rate, 512);
+    juce::String err;
+    Session s;
+    s.addEmptyTrack ("Vox");
+    s.addEmptyTrack ("Gtr");
+    test::check (! beginRecording (rec, s, dir, rate, err) && err.contains ("armed") && ! rec.isRecording(), "no armed track: the start is refused, and the reason says why");
+    test::check (s.setTrackArm (0, true, err) && s.setTrackArm (1, true, err) && s.setTrackInput (0, 0, 1, err) && s.setTrackInput (1, 1, -1, err),
+                 "two tracks are armed, on different inputs");
+    test::check (! s.setTrackInput (0, -1, 0, err) && ! s.setTrackArm (9, true, err) && s.tracks[0]->inputLeft == 0, "a bad input or track is refused and changes nothing");
+    err.clear();
+    test::check (beginRecording (rec, s, dir, rate, err) && rec.isRecording(), "the armed tracks start recording: " + err);
+
+    feedRecorder (rec, in, frames);
+    test::check (rec.framesRecorded() == frames, "every frame pushed is counted");
+    test::check (std::abs (rec.inputPeak (0) - 0.5f) < 0.01f && rec.inputPeak (0) == 0.0f, "the meter reads the peak of input 0, and reading it resets it");
+
+    const auto first = rec.stop();
+    test::check (! rec.isRecording() && first.size() == 2 && rec.samplesDropped() == 0, "stop ends both takes, and nothing was dropped");
+    test::check (first.size() == 2 && first[0].file.getFileName() == "Vox-take-1.wav" && first[1].file.getFileName() == "Gtr-take-1.wav"
+                     && first[0].track == 0 && first[1].track == 1 && first[0].frames == frames && first[1].frames == frames,
+                 "one file per take, named after its track, with every frame in it");
+    if (first.size() == 2)
+    {
+        double fileRate = 0.0;
+        const auto vox = readWav (first[0].file, &fileRate);
+        const auto gtr = readWav (first[1].file);
+        test::check (vox.getNumSamples() == frames && fileRate == rate && isFloatFile (first[0].file), "the file has the length, the rate and float samples");
+        test::check (maxError (vox, 0, in[0]) < 1e-6 && maxError (vox, 1, in[1]) < 1e-6, "Vox holds input 0 on the left and input 1 on the right, within 1e-6");
+        test::check (maxError (gtr, 0, in[1]) < 1e-6 && maxError (gtr, 1, in[1]) < 1e-6, "a mono take (input 1) is copied to both channels");
+    }
+
+    std::vector<std::vector<float>> quieter = in;
+    for (auto& ch : quieter)
+        for (auto& x : ch)
+            x *= 0.1f;
+    Recorder again;
+    again.prepare (rate, 512);
+    err.clear();
+    test::check (beginRecording (again, s, dir, rate, err), "a second start in the same folder: " + err);
+    feedRecorder (again, quieter, frames);
+    const auto second = again.stop();
+    test::check (second.size() == 2 && second[0].file.getFileName() == "Vox-take-2.wav" && second[1].file.getFileName() == "Gtr-take-2.wav",
+                 "the second take gets the next number");
+    test::check (first.size() == 2 && readWav (first[0].file).getNumSamples() == frames && maxError (readWav (first[0].file), 0, in[0]) < 1e-6,
+                 "and the first take is not overwritten");
+}
+
+void finishChecks()
+{
+    std::printf ("[33] Finish: a take lands on its track minus the latency (never before 0); a session without a rate takes the take's; one undo removes all takes\n");
+    const auto dir = tempFolder().getChildFile ("fin");
+    dir.createDirectory();
+    const auto file44 = makeWav ("fin/t.wav", 44100.0, 2, 44100, 0.5f, 440.0);
+    const auto file44b = makeWav ("fin/u.wav", 44100.0, 2, 22050, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addEmptyTrack ("A");
+    s.addEmptyTrack ("B");
+    test::check (s.sampleRate == 0.0, "a new session has no rate");
+    Editor ed (s);
+    const std::vector<Recorder::Finished> takes { { 0, file44, 44100 }, { 1, file44b, 22050 } };
+    test::check (finishRecording (takes, 10000, 2000, ed, err) && s.sampleRate == 44100.0, "both takes are added, and the session takes the recording's rate: " + err);
+    test::check (s.tracks[0]->clips.size() == 1 && s.tracks[0]->clips[0].start == 8000 && s.tracks[0]->clips[0].length == 44100,
+                 "track A: the take starts 2000 samples before where recording began");
+    test::check (s.tracks[1]->clips.size() == 1 && s.tracks[1]->clips[0].start == 8000 && s.tracks[1]->clips[0].length == 22050, "track B: the same place, its own length");
+    test::check (ed.undoLabel() == "Record" && ed.undo() && s.tracks[0]->clips.empty() && s.tracks[1]->clips.empty(), "one undo step removes both takes");
+    test::check (ed.redo() && s.tracks[0]->clips.size() == 1 && s.tracks[1]->clips.size() == 1, "and redo puts them back");
+
+    Session c;
+    c.addEmptyTrack ("C");
+    Editor ec (c);
+    const std::vector<Recorder::Finished> early { { 0, file44, 44100 }, { 0, file44b, 0 } };
+    test::check (finishRecording (early, 500, 2000, ec, err) && c.tracks[0]->clips.size() == 1 && c.tracks[0]->clips[0].start == 0 && c.sampleRate == 44100.0,
+                 "a take that would start before 0 starts at 0; an empty take adds nothing");
+}
+
+void recordSettingsChecks()
+{
+    std::printf ("[34] Arm and inputs in the project (version 2; an old project loads with the defaults); the audio device and extra latency in settings, and an old settings file\n");
+    const auto dir = tempFolder().getChildFile ("set");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("set/s.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "Vox", err);
+    s.addEmptyTrack ("Gtr");
+    test::check (s.setTrackArm (1, true, err) && s.setTrackInput (1, 3, -1, err), "a track is armed, on input 3 in mono");
+    test::check (! s.setTrackInput (0, -2, 0, err) && err.isNotEmpty() && s.tracks[0]->inputLeft == 0, "a bad input is refused and changes nothing");
+    const auto project = dir.getChildFile ("p.olympus");
+    test::check (s.save (project, err), "the project is saved");
+
+    Session t;
+    test::check (t.load (project, err) && ! t.tracks[0]->armed && t.tracks[1]->armed && t.tracks[1]->inputLeft == 3 && t.tracks[1]->inputRight == -1
+                     && t.tracks[0]->inputRight == 1,
+                 "they come back, and a track that had none keeps the defaults");
+    const auto d = t.describe();
+    test::check ((bool) d["tracks"][1]["armed"] && (int) d["tracks"][1]["input_left"] == 3 && (int) d["tracks"][1]["input_right"] == -1, "describe() reports them");
+
+    dir.getChildFile ("old.olympus").replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"48000\"><Track name=\"Old\"/></OlympusProject>");
+    Session o;
+    test::check (o.load (dir.getChildFile ("old.olympus"), err) && o.tracks.size() == 1 && ! o.tracks[0]->armed && o.tracks[0]->inputLeft == 0 && o.tracks[0]->inputRight == 1,
+                 "a project without the attributes loads with the defaults");
+
+    const auto settings = dir.getChildFile ("settings.xml");
+    Settings st;
+    st.lastProject = "x.olympus";
+    st.extraLatencySamples = 128;
+    juce::XmlElement device ("DEVICESETUP");
+    device.setAttribute ("deviceType", "CoreAudio");
+    device.setAttribute ("audioOutputDeviceName", "Built-in");
+    st.audioDeviceState = device.toString();
+    st.save (settings);
+    const auto back = Settings::load (settings);
+    const auto parsed = juce::parseXML (back.audioDeviceState);
+    test::check (back.extraLatencySamples == 128 && back.lastProject == "x.olympus" && parsed != nullptr && parsed->isEquivalentTo (&device, true),
+                 "the audio device state and the extra latency come back");
+
+    dir.getChildFile ("old-settings.xml").replaceWithText ("<OlympusSettings lastProject=\"y.olympus\" scanSuiteOnly=\"1\"/>");
+    const auto old = Settings::load (dir.getChildFile ("old-settings.xml"));
+    test::check (old.lastProject == "y.olympus" && old.scanSuiteOnly && old.extraLatencySamples == 0 && old.audioDeviceState.isEmpty(),
+                 "a settings file without the new fields loads with the defaults");
+}
+
 void realPlugins()
 {
     const auto dir = juce::SystemStats::getEnvironmentVariable ("OLYMPUS_PLUGIN_DIR", {});
@@ -1281,6 +1660,11 @@ int main()
     snapChecks();
     undoChecks();
     fixChecks();
+    monitorChecks();
+    monitorStateChecks();
+    recorderChecks();
+    finishChecks();
+    recordSettingsChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
