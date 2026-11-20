@@ -22,7 +22,6 @@
 namespace olympus::gui
 {
 class MainComponent;
-class AudioDialog;
 
 // A push switch whose lamp has the colour it is given (the kit's look-and-feel lights every switch in one colour): amber for the transport
 // switches, red for a mute, green for a solo, red for a plugin that is not installed.
@@ -99,10 +98,28 @@ public:
     }
 };
 
+// The audio device's settings dialog: a window that stays open beside the arrangement (no modal loop).
+class AudioDialog : public juce::DialogWindow
+{
+public:
+    explicit AudioDialog (std::unique_ptr<juce::Component> content, bool addToDesktop = true)
+        : juce::DialogWindow ("Audio devices", colours::background, true, addToDesktop)
+    {
+        setUsingNativeTitleBar (true);
+        if (content != nullptr)
+            content->setSize (540, 440);
+        setContentOwned (content.release(), true);
+        setResizable (true, true);
+        setResizeLimits (420, 320, 1200, 1000);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
 class PluginWindow : public juce::DocumentWindow
 {
 public:
-    PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed);
+    PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed, bool addToDesktop = true);
+    ~PluginWindow() override { setConstrainer (nullptr); }
     void closeButtonPressed() override { if (onClosed) onClosed(); }
     std::function<void()> onClosed;
 };
@@ -161,10 +178,15 @@ public:
         void audioDeviceAboutToStart (juce::AudioIODevice* device) override;
         void audioDeviceStopped() override;
         // Message thread, before the callbacks run: the scratch a device with no outputs runs the transport into, for blocks of `samples`.
-        void prepareScratch (int samples) { scratch.setSize (2, juce::jmax (1, samples), false, true, false); }
+        void prepareScratch (int samples)
+        {
+            const juce::SpinLock::ScopedLockType sl (scratchLock);
+            scratch.setSize (2, juce::jmax (1, samples), false, true, false);
+        }
 
     private:
         MainComponent& owner;
+        juce::SpinLock scratchLock;
         juce::AudioBuffer<float> scratch;   // silent, never heard: the transport's output on a device with no outputs
     };
 
@@ -282,6 +304,8 @@ public:
     std::function<void (const juce::File& start, std::function<void (const juce::StringArray&)> done)> chooseImportFiles;
     // Before the render's folder chooser: the bit depth and the mix-only choice in `options` (false when cancelled). Remembered in settings.
     std::function<bool (RenderOptions&)> chooseRenderOptions;
+    // Folder chooser for render/export (replaceable so the checks can supply a folder without a native dialog).
+    std::function<void (const juce::String& title, const juce::File& start, std::function<void (const juce::File&)> done)> chooseRenderFolder;
     // "Olympus found unsaved work from the last session. Open it?": true to open it.
     std::function<bool (const juce::String&)> askRecover;
     // "The project file was changed on disk (for example by the MCP server). Reload it and lose the unsaved changes in this window?": true to reload.
@@ -329,7 +353,7 @@ public:
     // ---- the controls (public so the checks can find and press them) ---------------------------------------------------------------
     ui::GuideButton guideButton { guideTitle(), guideText() };
     juce::TextButton newButton { "New" }, openButton { "Open" }, saveButton { "Save" }, saveAsButton { "Save as" }, addTrackButton { "Add track" },
-        importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, audioButton { "Audio" };
+        importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, exportButton { "Export" }, audioButton { "Audio" };
     juce::TextButton rewindButton { "|<" }, undoButton { "Undo" }, redoButton { "Redo" }, zoomOutButton { "-" }, zoomInButton { "+" }, zoomFitButton { "Fit" };
     LampButton playButton { "Play" }, recordButton { "Rec" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" };
     juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
@@ -385,8 +409,13 @@ private:
     void chooseAndImport();
     void chooseFolder();
     void chooseAndRender();
+    void chooseAndExport();
+    void launchRenderChooser (const juce::String& chooserTitle, const juce::String& progressTitle, const juce::File& start, RenderOptions choice);
+    void runRenderJob (const juce::File& folder, RenderOptions choice, const juce::String& title);
     // The render dialog's default: bit depth and mix-only, as AlertWindow (modal). Returns false when cancelled.
     static bool askRenderDialog (RenderOptions& options);
+    // The export dialog's default: bit depth only, as AlertWindow (modal). Returns false when cancelled.
+    static bool askExportDialog (RenderOptions& options);
     // Autosave and recovery (the file names are in autosaveFile and offerRecovery).
     juce::File autosaveFileFor (const juce::File& project) const;
     juce::File untitledAutosaveFile() const;
@@ -402,6 +431,7 @@ private:
     void deviceChanged();                           // a change of the device: read it, save its state, end a take that cannot go on
     void saveAudioState();
     void updateRecording();                         // the timer's part of a take: its strip, its time, a device that stopped
+    void finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, const juce::String& problem);
     void setTakeLatency();
     void loadMonitorChain();                        // reads monitor.xml once the catalog is filled
     void saveMonitorChain();                        // writes monitor.xml; nothing before the chain was read (never overwrites an unread file)
@@ -425,6 +455,9 @@ private:
     std::unique_ptr<AudioDialog> audioDialog;
     std::map<const Slot*, std::unique_ptr<juce::Component>> windows;
     juce::String shownTitle;
+    juce::String lastPositionText;
+    bool lastRecordingState = false;
+    double lastMonitorLatencyMs = -1.0;
     juce::int64 lastEditorHash = 0;
     int tick = 0;
     double lastAutosaveMs = 0.0;                    // juce::Time::getMillisecondCounterHiRes at the last autosave (or at start)

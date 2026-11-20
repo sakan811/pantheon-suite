@@ -16,7 +16,7 @@ inline const char* guideText()
     return "Olympus is a basic DAW for the Pantheon plugins and for any VST3 (on macOS also Audio Unit) plugin the scan finds.\n\n"
            "It is for arranging audio on a timeline: IMPORT AUDIO, or drop files on the window, puts each file on a track at the playhead; drag clips "
            "to move them, edges to trim them, S splits at the playhead. Set the tempo, the grid, markers and a loop. Each track has a chain of "
-           "plugins (FX), a fader and a pan. RENDER STEMS writes one WAV per track and the mix.\n\n"
+           "plugins (FX), a fader and a pan. RENDER STEMS writes one WAV per track and the mix; EXPORT writes the final mix (mix.wav) alone, without stems or the monitor chain.\n\n"
            "It records from your audio interface: AUDIO chooses the input and the output device. Arm a track (R) and choose its input (IN); REC "
            "(or the R key) records every armed track into a take, one file per track, kept on disk. When you stop, each take is placed on its track, "
            "earlier by the device's round trip, so it lines up with what you heard.\n\n"
