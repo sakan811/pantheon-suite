@@ -1,0 +1,6 @@
+{
+  "name": "pantheon",
+  "displayName": "Pantheon",
+  "version": "1.0.0",
+  "description": "Pantheon repository subagents for bug hunting, code checking, feature checking, fixing, and topic-grouped commits."
+}
