@@ -30,6 +30,8 @@ struct ScanOptions
 {
     bool includeSystem = true;
     bool rescan = false;
+    bool suiteOnly = false;
+    juce::File cacheFile;
     juce::File deadMansPedal = Settings::scanPedalFile();
     std::function<void (const juce::String&)> progress; // told the name of each plugin as it is read
 };
@@ -37,6 +39,7 @@ struct ScanOptions
 class Catalog
 {
 public:
+    static constexpr int kMaxBundleDepth = 5;
     using Factory = std::function<std::unique_ptr<juce::AudioPluginInstance> (double sampleRate, int blockSize)>;
 
     Catalog()
@@ -45,6 +48,90 @@ public:
 #if JUCE_PLUGINHOST_AU && JUCE_MAC
         formats.addFormat (std::make_unique<juce::AudioUnitPluginFormat>());
 #endif
+    }
+
+    static juce::String candidatePluginName (juce::AudioPluginFormat& format, const juce::String& fileOrIdentifier)
+    {
+        if (format.getName() == "VST3" || fileOrIdentifier.endsWithIgnoreCase (".vst3"))
+            return juce::File (fileOrIdentifier).getFileNameWithoutExtension().trim();
+        auto n = format.getNameOfPluginFromIdentifier (fileOrIdentifier).trim();
+        if (n.contains (": "))
+            n = n.fromFirstOccurrenceOf (": ", false, false).trim();
+        return n;
+    }
+
+    static bool isTccProtectedDir (const juce::File& dir)
+    {
+        if (dir == juce::File())
+            return false;
+        const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+        if (dir == juce::File::getSpecialLocation (juce::File::userDesktopDirectory)
+            || dir == juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+            || dir == juce::File::getSpecialLocation (juce::File::userMusicDirectory)
+            || dir == juce::File::getSpecialLocation (juce::File::userMoviesDirectory)
+            || dir == juce::File::getSpecialLocation (juce::File::userPicturesDirectory)
+            || dir == home.getChildFile ("Downloads"))
+            return true;
+
+        const auto name = dir.getFileName();
+        static const char* const kProtectedNames[] = {
+            "Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies", "Photos", "Photo Booth Library",
+            "Mail", "Messages", "Safari", "Calendars", "Contacts", "Reminders", "Notes", "Mobile Documents",
+            "CloudStorage", "Containers", "Group Containers", "Application Support", "Caches", "Saved Application State",
+            "Trash", ".Trash"
+        };
+        for (const char* p : kProtectedNames)
+            if (name.equalsIgnoreCase (p))
+                return true;
+        return false;
+    }
+
+    static bool isForbiddenPluginRoot (const juce::File& dir)
+    {
+        const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+        return dir == juce::File()
+            || dir == juce::File ("/")
+            || dir == juce::File ("/Volumes")
+            || dir == juce::File ("/Users")
+            || dir == juce::File ("/System")
+            || dir == juce::File ("/Library")
+            || dir == juce::File ("/Applications")
+            || dir == home
+            || dir == home.getChildFile ("Library")
+            || dir == home.getChildFile ("Applications")
+            || isTccProtectedDir (dir);
+    }
+
+    static bool isUnsafePluginRoot (const juce::File& dir)
+    {
+        return isForbiddenPluginRoot (dir) || ! dir.isDirectory();
+    }
+
+    static bool shouldSkipBundleDir (const juce::File& dir)
+    {
+        const auto name = dir.getFileName();
+        return name.startsWithChar ('.')
+            || isForbiddenPluginRoot (dir)
+            || isTccProtectedDir (dir)
+            || name.equalsIgnoreCase ("_deps")
+            || name.equalsIgnoreCase ("CMakeFiles")
+            || name.equalsIgnoreCase ("node_modules")
+            || dir.hasFileExtension ("app;component;framework;dSYM;xcodeproj;xcworkspace;vst;lv2;clap");
+    }
+
+    static juce::Array<juce::File> findBundlesIn (const juce::File& dir)
+    {
+        juce::Array<juce::File> out;
+        findBundles (dir, 0, out);
+        return out;
+    }
+
+    juce::StringArray candidatesForFormat (const juce::String& formatName, const juce::FileSearchPath& extra, bool includeSystem, bool onlySuite = false) const
+    {
+        for (int f = 0; f < formats.getNumFormats(); ++f)
+            if (auto* fmt = formats.getFormat (f); fmt != nullptr && fmt->getName().equalsIgnoreCase (formatName))
+                return candidatesFor (*fmt, extra, includeSystem, onlySuite);
+        return {};
     }
 
     // On: only the bundles and plugins named as one of the suite's are read and listed (Settings::scanSuiteOnly).
@@ -61,6 +148,8 @@ public:
     void scan (const juce::FileSearchPath& extra, const ScanOptions& options = {})
     {
         options.deadMansPedal.getParentDirectory().createDirectory();
+        if (options.cacheFile != juce::File())
+            saveCache (options.cacheFile);
         for (int f = 0; f < formats.getNumFormats(); ++f)
         {
             auto& format = *formats.getFormat (f);
@@ -68,11 +157,14 @@ public:
             if (! isVst3 && ! options.includeSystem)
                 continue;
 
-            const auto candidates = candidatesFor (format, extra, options.includeSystem);
+            const auto candidates = candidatesFor (format, extra, options.includeSystem, options.suiteOnly);
             // a plugin no longer where it was (or, with a rescan, every one of this format) is taken out before it is read again
+            const bool filterSuite = suiteOnlyMode || options.suiteOnly;
             const auto types = list.getTypes();
             for (const auto& t : types)
-                if (t.pluginFormatName == format.getName() && (options.rescan || ! candidates.contains (t.fileOrIdentifier)))
+                if (t.pluginFormatName == format.getName()
+                    && (! filterSuite || suiteNames().contains (t.name))
+                    && (options.rescan || ! candidates.contains (t.fileOrIdentifier)))
                     list.removeType (t);
 
             juce::PluginDirectoryScanner scanner (list, format, juce::FileSearchPath(), false, options.deadMansPedal, false);
@@ -83,11 +175,15 @@ public:
             {
                 name.clear();
                 more = scanner.scanNextFile (! options.rescan, name);
+                if (options.cacheFile != juce::File())
+                    saveCache (options.cacheFile);
                 if (options.progress && name.isNotEmpty())
                     options.progress (name);
             }
         }
         refresh();
+        if (options.cacheFile != juce::File())
+            saveCache (options.cacheFile);
     }
 
     // The catalog as the last save left it (Settings::pluginCacheFile): what the window starts from, so it does not look again at every start.
@@ -106,8 +202,11 @@ public:
     bool saveCache (const juce::File& file) const
     {
         auto xml = list.createXml();
+        if (xml == nullptr)
+            return false;
         file.getParentDirectory().createDirectory();
-        return xml != nullptr && xml->writeTo (file);
+        juce::TemporaryFile temp (file);
+        return xml->writeTo (temp.getFile()) && temp.overwriteTargetFileWithTemporary();
     }
 
     // A plugin that is made in code, for the tests (it takes the place of a built bundle).
@@ -233,8 +332,8 @@ private:
     }
 
     // The files of `format` to read: the VST3 bundles under the system's folders and `extra`, or the Audio Units the system registers. Only the
-    // suite's when suiteOnlyMode is on.
-    juce::StringArray candidatesFor (juce::AudioPluginFormat& format, const juce::FileSearchPath& extra, bool includeSystem) const
+    // suite's when suiteOnlyMode or onlySuite is on.
+    juce::StringArray candidatesFor (juce::AudioPluginFormat& format, const juce::FileSearchPath& extra, bool includeSystem, bool onlySuite = false) const
     {
         juce::StringArray out;
         if (format.getName() == "VST3")
@@ -251,10 +350,19 @@ private:
         {
             out = format.searchPathsForPlugins (juce::FileSearchPath(), false, false);
         }
+        const bool filterSuite = suiteOnlyMode || onlySuite;
+        const bool isAu = format.getName() == "AudioUnit";
+        const auto currentTypes = list.getTypes();
         juce::StringArray kept;
         for (const auto& c : out)
-            if (! suiteOnlyMode || suiteNames().contains (format.getNameOfPluginFromIdentifier (c)))
-                kept.add (c);
+        {
+            const auto candidateName = candidatePluginName (format, c);
+            if (filterSuite && ! suiteNames().contains (candidateName) && ! suiteNames().contains (format.getNameOfPluginFromIdentifier (c)))
+                continue;
+            if (isAu && candidateName.isNotEmpty() && hasVst3Named (currentTypes, candidateName))
+                continue;
+            kept.add (c);
+        }
         return kept;
     }
 
@@ -293,7 +401,7 @@ private:
     static bool hasVst3Named (const juce::Array<juce::PluginDescription>& types, const juce::String& name)
     {
         for (const auto& t : types)
-            if (t.pluginFormatName == "VST3" && t.name == name)
+            if (t.pluginFormatName == "VST3" && t.name.equalsIgnoreCase (name))
                 return true;
         return false;
     }
@@ -301,11 +409,13 @@ private:
     // The .vst3 bundles under `dir`, not looking inside a bundle or a build's own dependency folders.
     static void findBundles (const juce::File& dir, int depth, juce::Array<juce::File>& out)
     {
+        if (depth == 0 && (isForbiddenPluginRoot (dir) || ! dir.isDirectory()))
+            return;
         for (const auto& f : dir.findChildFiles (juce::File::findFilesAndDirectories, false))
         {
             if (f.hasFileExtension ("vst3"))
                 out.add (f);
-            else if (f.isDirectory() && ! f.isSymbolicLink() && depth < 9 && f.getFileName() != "_deps" && f.getFileName() != "CMakeFiles")
+            else if (f.isDirectory() && ! f.isSymbolicLink() && depth < kMaxBundleDepth && ! shouldSkipBundleDir (f))
                 findBundles (f, depth + 1, out);
         }
     }
