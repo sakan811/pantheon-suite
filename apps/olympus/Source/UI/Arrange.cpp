@@ -31,6 +31,12 @@ juce::String panText (double v)
     return (v < 0 ? "L" : "R") + juce::String (juce::roundToInt (std::abs (v) * 100.0));
 }
 
+juce::String trackFaderTooltip (double db)
+{
+    const juce::String value = db <= -100.0 ? juce::String ("-inf") : (db >= 0.0 ? "+" : "") + juce::String (db, 1);
+    return "Fader " + value + " dB (drag, double-click for 0 dB)";
+}
+
 // "L30", "R30", "C" or a plain number from -1 to 1; NaN for anything else.
 double panFromText (const juce::String& text)
 {
@@ -224,13 +230,14 @@ public:
         faderSlider.setLookAndFeel (&view.look);
         faderSlider.setRange (-100.0, 12.0, 0.01);
         faderSlider.setDoubleClickReturnValue (true, 0.0);
-        faderSlider.setTooltip ("Fader: drag, double-click for 0 dB");
+        faderSlider.setTooltip (trackFaderTooltip (0.0));
         faderSlider.onDragStart = [this] { gainGesture = std::make_unique<Gesture> (view.editor, "Track gain"); };
         faderSlider.onDragEnd = [this] { gainGesture.reset(); };
         faderSlider.onValueChange = [this]
         {
             juce::String error;
             if (! view.editor.setTrackGain (index, (float) faderSlider.getValue(), error)) view.report (error);
+            faderSlider.setTooltip (trackFaderTooltip (faderSlider.getValue()));
             view.changed();
         };
         addAndMakeVisible (faderSlider);
@@ -245,7 +252,11 @@ public:
     {
         if (! editingName && nameLabel.getText() != title)
             nameLabel.setText (title, juce::dontSendNotification);
-        faderSlider.setValue (gainDb, juce::dontSendNotification);
+        if (! faderSlider.isMouseButtonDown())
+        {
+            faderSlider.setValue (gainDb, juce::dontSendNotification);
+            faderSlider.setTooltip (trackFaderTooltip (gainDb));
+        }
         panKnob.setValue (panValue);
         muteButton.setToggleState (isMuted, juce::dontSendNotification);
         soloButton.setToggleState (isSoloed, juce::dontSendNotification);
@@ -290,6 +301,8 @@ public:
     int index;
     ArrangeLamp armButton { "R" };
     juce::TextButton inputButton { "IN" };
+    juce::Slider& fader() { return faderSlider; }
+    bool isInteracting() const { return editingName || faderSlider.isMouseButtonDown() || panGesture != nullptr || gainGesture != nullptr; }
 
 private:
     bool editingName = false;
@@ -338,6 +351,21 @@ juce::Button* ArrangeView::armButton (int track)
 juce::Button* ArrangeView::inputButton (int track)
 {
     return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->inputButton : nullptr;
+}
+
+juce::Slider* ArrangeView::faderSlider (int track)
+{
+    return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->fader() : nullptr;
+}
+
+bool ArrangeView::isInteracting() const
+{
+    if (mode != Mode::none || gesture != nullptr || hasOpenDialog())
+        return true;
+    for (const auto& h : headers)
+        if (h->isInteracting())
+            return true;
+    return false;
 }
 
 ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const

@@ -249,6 +249,10 @@ MainComponent::MainComponent (Options options) : opts (options)
     {
         return juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "Olympus", message, "Open it", "Ignore");
     };
+    askReload = [] (const juce::String& message)
+    {
+        return juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "Olympus", message, "Reload", "Keep mine");
+    };
     notify = [] (const juce::String& message) { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Olympus", message); };
     reveal = [] (const juce::File& folder) { folder.revealToUser(); };
     reportError = [] (const juce::String& message) { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Olympus", message); };
@@ -999,6 +1003,7 @@ void MainComponent::newProject()
     source.playing = false;
     session.newProject ("Untitled");
     lastEditorHash = 0;
+    loadedProjectMtime = {};
     editor.clearUndo();
     editor.clearClipboard();
     clearMasterClip();   // a new project starts with no CLIP latched
@@ -1010,7 +1015,7 @@ void MainComponent::newProject()
     refreshNow();
 }
 
-void MainComponent::openProject (const juce::File& file)
+bool MainComponent::openProject (const juce::File& file)
 {
     projectSkipped = false;   // the user opened one: the note about the last start's project is no longer news
     stopRecording();
@@ -1020,9 +1025,10 @@ void MainComponent::openProject (const juce::File& file)
     if (! session.load (file, error))
     {
         showError (error);
-        return;
+        return false;
     }
     lastEditorHash = 0;
+    loadedProjectMtime = file.getLastModificationTime();
     editor.clearUndo();
     editor.clearClipboard();
     clearMasterClip(); // a project opened starts with no CLIP latched, as NEW does
@@ -1036,6 +1042,7 @@ void MainComponent::openProject (const juce::File& file)
     arrange.repaint();
     if (session.warnings.size() > 0)
         showError ("Opened with notes:\n\n" + session.warnings.joinIntoString ("\n"));
+    return true;
 }
 
 void MainComponent::openProjectRequested (const juce::File& file)
@@ -1045,8 +1052,7 @@ void MainComponent::openProjectRequested (const juce::File& file)
     {
         if (safe == nullptr) return;
         const auto discarded = safe->autosaveFile();
-        safe->openProject (file);
-        if (safe->session.projectFile == file)
+        if (safe->openProject (file))
             discarded.deleteFile();
     });
 }
@@ -1073,6 +1079,7 @@ bool MainComponent::saveTo (const juce::File& file)
     juce::String error;
     if (! session.save (file, error)) { showError (error); return false; }
     lastEditorHash = 0;
+    loadedProjectMtime = file.getLastModificationTime();
     settings.lastProject = file.getFullPathName();
     settings.save (opts.settingsFile);
     deleteAutosaves();   // the project is on disk: its autosave is no longer news
@@ -1291,9 +1298,8 @@ void MainComponent::chooseAndOpen()
                               {
                                   if (safe == nullptr) return;
                                   const auto discarded = safe->autosaveFile();   // the session the answer discarded (still open until now)
-                                  safe->openProject (file);
                                   // a failed open keeps it: only an open that happened discards the work
-                                  if (safe->session.projectFile == file)
+                                  if (safe->openProject (file))
                                       discarded.deleteFile();
                               });
                           });
@@ -1883,7 +1889,11 @@ bool MainComponent::offerRecovery()
         autosave = untitledAutosaveFile();
     if (autosave == juce::File())
         return false;
-    const bool open = askRecover && askRecover ("Olympus found unsaved work from the last session. Open it?");
+    bool open = false;
+    {
+        const DialogBusy busy (dialogOpen);
+        open = askRecover && askRecover ("Olympus found unsaved work from the last session. Open it?");
+    }
     if (open)
         recoverFrom (autosave, project);
     else
@@ -1905,6 +1915,7 @@ void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& p
         return;
     }
     lastEditorHash = 0;
+    loadedProjectMtime = project != juce::File() ? project.getLastModificationTime() : juce::Time();
     session.projectFile = project;
     session.dirty = true;
     editor.clearUndo();
@@ -1916,6 +1927,53 @@ void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& p
     arrange.repaint();
     if (session.warnings.size() > 0)
         showError ("Recovered with notes:\n\n" + session.warnings.joinIntoString ("\n"));
+}
+
+bool MainComponent::checkExternalProjectChange()
+{
+    if (session.projectFile == juce::File() || session.renderRunning() || dialogOpen || recorder.isRecording() || isPlaying()
+        || masterGesture != nullptr || masterFader.isMouseButtonDown() || arrange.isInteracting())
+        return false;
+    if (! session.projectFile.existsAsFile())
+        return false;
+    const auto mtime = session.projectFile.getLastModificationTime();
+    if (loadedProjectMtime == juce::Time())
+    {
+        loadedProjectMtime = mtime;
+        return false;
+    }
+    if (mtime == loadedProjectMtime)
+        return false;
+    if (! windows.empty())
+    {
+        const juce::ScopedTryLock sl (session.lock);
+        if (! sl.isLocked())
+            return false;
+        juce::int64 hash = 0;
+        for (auto& t : session.tracks)
+            for (auto& s : t->chain)
+                hash = hash * 31 + session.stateOf (*s).toBase64Encoding().hashCode64();
+        if (lastEditorHash != 0 && hash != lastEditorHash)
+            session.dirty = true;
+        lastEditorHash = hash;
+    }
+    loadedProjectMtime = mtime;
+    if (session.dirty)
+    {
+        bool reload = false;
+        {
+            const DialogBusy busy (dialogOpen);
+            reload = askReload && askReload ("The project file was changed on disk (for example by the MCP server). Reload it and lose the unsaved changes in this window?");
+        }
+        if (! reload)
+            return false;
+    }
+    const auto file = session.projectFile;
+    const auto discarded = autosaveFile();
+    if (! openProject (file))
+        return false;
+    discarded.deleteFile();
+    return true;
 }
 
 // ---- timer, keys, layout -----------------------------------------------------------------------------------------------------
@@ -1950,18 +2008,24 @@ void MainComponent::timerCallback()
     // open, and once more when the last one closes (so an edit made just before the close is not lost). The plugins are read under the
     // lock, which is only tried: processBlock may run beside it, and a busy lock is looked at again on the next tick.
     const bool closing = windows.empty();
-    if (closing ? lastEditorHash == 0 : (++tick % 15 != 0))
-        return;
-    juce::int64 hash = 0;
+    if (! (closing ? lastEditorHash == 0 : (++tick % 15 != 0)))
     {
         const juce::ScopedTryLock sl (session.lock);
-        if (! sl.isLocked()) return;
-        for (auto& t : session.tracks)
-            for (auto& s : t->chain)
-                hash = hash * 31 + session.stateOf (*s).toBase64Encoding().hashCode64();
+        if (sl.isLocked())
+        {
+            juce::int64 hash = 0;
+            for (auto& t : session.tracks)
+                for (auto& s : t->chain)
+                    hash = hash * 31 + session.stateOf (*s).toBase64Encoding().hashCode64();
+            if (lastEditorHash != 0 && hash != lastEditorHash) session.dirty = true;
+            lastEditorHash = closing ? 0 : hash;
+        }
     }
-    if (lastEditorHash != 0 && hash != lastEditorHash) session.dirty = true;
-    lastEditorHash = closing ? 0 : hash;
+    if (++externalCheckTick >= 15)
+    {
+        externalCheckTick = 0;
+        checkExternalProjectChange();
+    }
 }
 
 // The keys. The window owns the transport and the clip keys; the arrangement takes only its selection and nudges (arrows, Escape).
