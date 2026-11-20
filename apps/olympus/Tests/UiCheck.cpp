@@ -1594,7 +1594,7 @@ int main()
         feedDevice (*w, fed, 48000.0, 4800);
         w->recorderForChecks().lostForTest (0, 480);   // the disk refused 480 frames (10 ms)
         w->stopRecording();
-        test::check (gErrors.size() == 1 && gErrors[0].contains ("480 samples (10 ms) of the take were lost because the disk could not keep up: the take has a gap."),
+        test::check (gErrors.size() == 1 && gErrors[0].contains ("480 samples (10 ms) of the take were lost because the disk could not keep up: the take is shorter by that much and what follows the loss sits that much early."),
                      "a take the disk could not keep up with says how much is lost");
 
         gErrors.clear();
@@ -1620,6 +1620,107 @@ int main()
         test::check (! noteMentions (*none, "No plugin found", ui::Severity::warning), "suite only, with none of the suite found: no note about the scan");
         auto found = makeWindow (true);
         test::check (! noteMentions (*found, "No plugin found", ui::Severity::warning), "with plugins found there is no note");
+        // a scan queued or running (the start's scan, before the first one finished) says nothing about the plugins yet
+        auto busy = makeWindow (false);
+        busy->setScanStateForChecks (true, false);
+        test::check (! noteMentions (*busy, "No plugin found", ui::Severity::warning), "a scan queued at the start: no note yet");
+        busy->setScanStateForChecks (false, true);
+        test::check (! noteMentions (*busy, "No plugin found", ui::Severity::warning), "a scan running: no note yet");
+        busy->setScanStateForChecks (false, false);
+        test::check (noteMentions (*busy, "PLUGINS > Look in a folder", ui::Severity::warning), "the scan finished with none: the note says where to look");
+    }
+
+    std::printf ("[33] The device's output, the master's load and the CLIP latch: NaN is 0 and an infinity the rail; a master above +12 dB is set to +12 dB with a warning and the fader is set once; its tooltip shows the value; OPEN clears CLIP; two takes that lose samples name their tracks\n");
+    {
+        // a float clip with a NaN, +inf and -inf: the device's output has none of them and the NaN is 0
+        const auto file = tempFolder().getChildFile ("nonfinite.wav");
+        file.deleteFile();
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+            auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions {}
+                                                           .withSampleRate (48000.0)
+                                                           .withNumChannels (2)
+                                                           .withBitsPerSample (32)
+                                                           .withSampleFormat (juce::AudioFormatWriterOptions::SampleFormat::floatingPoint));
+            juce::AudioBuffer<float> b (2, 4800);
+            b.clear();
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                b.setSample (ch, 100, std::numeric_limits<float>::quiet_NaN());
+                b.setSample (ch, 200, std::numeric_limits<float>::infinity());
+                b.setSample (ch, 300, -std::numeric_limits<float>::infinity());
+            }
+            writer->writeFromAudioSampleBuffer (b, 0, 4800);
+        }
+        auto w = makeWindow();
+        w->addTracks ({ file.getFullPathName() });
+        w->seek (0);
+        if (! w->isPlaying()) w->togglePlay();
+        std::vector<std::vector<float>> in (4, std::vector<float> (1000, 0.0f));
+        std::vector<std::vector<float>> out (2, std::vector<float> (1000, 0.0f));
+        const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+        float* outPtr[2] = { out[0].data(), out[1].data() };
+        w->io.deviceBlock (inPtr, 4, outPtr, 2, 1000);
+        bool clean = true;
+        for (auto& channel : out)
+            for (float v : channel)
+                clean = clean && std::isfinite (v) && v >= -1.0f && v <= 1.0f;
+        test::check (clean, "the device's output has no NaN and no value outside [-1, 1] when the clip holds a NaN and infinities");
+        // the clip's frames come out 64 samples later than the file's (the transport's own offset), so the rails are found, then the NaN is
+        // 100 samples before the +inf and the -inf 100 after it: a NaN that the old clip turned into +1.0 would show here
+        int plus = -1;
+        for (int i = 0; i < 1000 && plus < 0; ++i)
+            if (out[0][(size_t) i] == 1.0f) plus = i;
+        const bool rails = plus >= 100 && plus + 100 < 1000 && out[0][(size_t) (plus + 100)] == -1.0f && out[1][(size_t) plus] == 1.0f;
+        test::check (rails, "+inf and -inf are the rails: +1 at one sample, -1 a hundred samples later");
+        test::check (rails && out[0][(size_t) (plus - 100)] == 0.0f && out[1][(size_t) (plus - 100)] == 0.0f, "the NaN sample is 0");
+
+        // two takes that lose samples: the message names the largest loss and the other track
+        auto disk = makeWindow();
+        disk->addTracks ({ makeWav ("lossA.wav").getFullPathName(), makeWav ("lossB.wav").getFullPathName() });
+        juce::String error;
+        disk->setDeviceForTest (fakeDevice());
+        test::check (disk->session.setTrackArm (0, true, error) && disk->session.setTrackInput (0, 0, -1, error)
+                         && disk->session.setTrackArm (1, true, error) && disk->session.setTrackInput (1, 0, -1, error), "both tracks are armed");
+        juce::int64 fed = 0;
+        gErrors.clear();
+        test::check (disk->startRecording(), "REC starts a take on two tracks");
+        feedDevice (*disk, fed, 48000.0, 4800);
+        disk->recorderForChecks().lostForTest (0, 480);
+        disk->recorderForChecks().lostForTest (1, 240);
+        disk->stopRecording();
+        const auto expected = "480 samples (10 ms) of the take on track '" + disk->session.tracks[0]->name + "' (the largest loss; the takes on "
+                              + disk->session.tracks[1]->name + " lost some too) were lost";
+        test::check (gErrors.size() == 1 && gErrors[0].contains (expected), "two takes that lost samples: the largest is named, and the other track too");
+
+        // a project with +18 dB opens at +12 dB with a warning; the fader shows 12 and is not set again on the next tick
+        const auto project = tempFolder().getChildFile ("master18.olympus");
+        {
+            Session saved;
+            saved.masterDb = 18.0f;
+            juce::String saveError;
+            test::check (saved.save (project, saveError), "a project with +18 dB is saved: " + saveError);
+        }
+        auto m = makeWindow();
+        m->openProject (project);
+        test::check (std::abs (m->session.masterDb - 12.0f) < 0.01f, "the project opens at +12 dB");
+        test::check (m->session.warnings.joinIntoString ("\n").contains ("The master gain was above +12 dB and is set to +12 dB."), "and a warning says so");
+        m->updateMaster (2600.0);
+        test::check (std::abs (m->masterFader.getValue() - 12.0) < 0.01, "the fader shows +12");
+        test::check (m->masterFader.getTooltip() == "Master gain +12.0 dB (double-click for 0 dB)", "the fader's tooltip shows +12.0 dB");
+        m->masterFader.setValue (11.97, juce::dontSendNotification);   // within 0.05 dB of the session: the next tick leaves it alone
+        m->updateMaster (2700.0);
+        test::check (std::abs (m->masterFader.getValue() - 11.97) < 1.0e-6, "a tick within 0.05 dB of the session does not set the fader again");
+        m->masterFader.setValue (3.0, juce::sendNotificationSync);
+        test::check (m->masterFader.getTooltip() == "Master gain +3.0 dB (double-click for 0 dB)", "a change of the fader updates its tooltip");
+
+        // CLIP latches on a sample at full scale and OPEN clears it, as NEW does
+        m->session.masterPeakL = 1.0f;
+        m->updateMaster (2800.0);
+        test::check (m->masterClipLatched(), "a sample at full scale latches CLIP");
+        m->openProject (project);
+        test::check (! m->masterClipLatched(), "OPEN of a project clears the CLIP latch");
     }
 
     tempFolder().deleteRecursively();

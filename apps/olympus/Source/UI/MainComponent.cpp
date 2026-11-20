@@ -8,6 +8,13 @@ namespace olympus::gui
 namespace
 {
 const char* const kAudioWildcard = "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.caf";
+
+// The master fader's tooltip: its current value, so the fader can be read without the mouse on the scale.
+juce::String masterTooltip (double db)
+{
+    const juce::String value = db <= -100.0 ? juce::String ("-inf") : (db >= 0.0 ? "+" : "") + juce::String (db, 1);
+    return "Master gain " + value + " dB (double-click for 0 dB)";
+}
 constexpr int kMargin = 16, kHeaderHeight = 116, kRowC = 80; // kRowC: the top bar's third row (the device, the position)
 constexpr int kMonitorTop = kHeaderHeight + 2, kMonitorHeight = 28; // the MONITOR strip, under the header
 constexpr int kBodyTop = kMonitorTop + kMonitorHeight + 8;
@@ -155,8 +162,14 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
     owner.source.getNextAudioBlock (info);
     // the device's output ceiling: no sample leaves above full scale (the mix is over 1.0 when the master is raised). Only this path is held:
     // the stems and mix.wav are rendered by Session::renderStems and stay float. The master's peak was read before this (Session::processBlock).
+    // FloatVectorOperations::clip does not define NaN (SSE turns it into +1.0, full-scale DC), so each sample is limited here: NaN becomes 0,
+    // an infinity the rail. No allocation, no lock.
     for (int ch = 0; ch < numOut; ++ch)
-        juce::FloatVectorOperations::clip (out[ch], out[ch], -1.0f, 1.0f, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const float x = out[ch][i];
+            out[ch][i] = juce::jlimit (-1.0f, 1.0f, x == x ? x : 0.0f);
+        }
 }
 
 // Message thread, before the device's callbacks start (also when the device changes). A take cannot go on across a change of rate or
@@ -265,10 +278,14 @@ MainComponent::MainComponent (Options options) : opts (options)
     masterFader.setRange (-100.0, 12.0, 0.01);     // -100 is silence (-inf); the Editor clamps the same range
     masterFader.setDoubleClickReturnValue (true, 0.0);
     masterFader.setWantsKeyboardFocus (false);
-    masterFader.setTooltip ("Master gain: drag, double-click for 0 dB. It applies to the playback and to mix.wav, never to the stems.");
+    masterFader.setTooltip (masterTooltip (0.0));
     masterFader.onDragStart = [this] { masterGesture = std::make_unique<Editor::Gesture> (editor, "Master gain"); };
     masterFader.onDragEnd = [this] { masterGesture.reset(); };
-    masterFader.onValueChange = [this] { editor.setMasterDb ((float) masterFader.getValue()); };
+    masterFader.onValueChange = [this]
+    {
+        editor.setMasterDb ((float) masterFader.getValue());
+        masterFader.setTooltip (masterTooltip (masterFader.getValue()));
+    };
     addAndMakeVisible (masterPeakLabel);
     masterPeakLabel.setFont (ui::font (10.5f));
     masterPeakLabel.setColour (juce::Label::textColourId, colours::dim);
@@ -371,7 +388,10 @@ MainComponent::MainComponent (Options options) : opts (options)
         session.catalog.setSuiteOnly (settings.scanSuiteOnly);
         const bool cached = session.catalog.loadCache (Settings::pluginCacheFile (opts.settingsFile));
         if (! cached || session.catalog.names().isEmpty())
+        {
+            scanQueued = true;   // the note of an empty scan waits for this scan (notes())
             juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->scanPlugins (false); });
+        }
     }
     // the checks fill the catalog here, before the monitor chain is read (the app's scan does it above, or after the first scan)
     if (opts.fillCatalog)
@@ -417,6 +437,7 @@ MainComponent::~MainComponent()
 void MainComponent::scanPlugins (bool rescan)
 {
     if (scanning) return;
+    scanQueued = false;
     scanning = true;
     session.catalog.setSuiteOnly (settings.scanSuiteOnly);
     ScanOptions options;
@@ -453,6 +474,7 @@ std::vector<ui::Note> MainComponent::notes() const
     advice.monitorProblem = monitorProblem;
     advice.monitorSkipped = monitorSkipped && ! monitorLoaded;
     advice.projectSkipped = projectSkipped;
+    advice.scanning = scanning || scanQueued;
     monitorLatencyMs();   // refreshes the cache with a try-lock (never waits: notes() runs in paint)
     advice.monitorLatencySamples = monitorLatencyCacheSamples;
     return adviceFor (session, advice);
@@ -840,18 +862,28 @@ void MainComponent::stopRecording (const juce::String& problem)
 
     juce::StringArray problems;
     if (error.isNotEmpty()) problems.add (error);
-    // the disk problems of the takes: a gap where the disk could not keep up (the largest of the takes, which hear the same blocks), and a file
+    // the disk problems of the takes: the samples lost where the disk could not keep up (the largest of the takes, which hear the same blocks), and a file
     // whose writes failed (it keeps what was written)
+    // Dropped frames are not written, so a lossy take is shorter by that much and what follows the loss sits that much early: no silence is
+    // padded in. Several takes that lost samples name their tracks; the largest loss is the one reported by number.
     juce::int64 lost = 0;
+    juce::StringArray lossTracks;
+    juce::String largestTrack;
     for (const auto& take : takes)
     {
-        lost = juce::jmax (lost, take.lost);
+        if (take.lost > lost) { lost = take.lost; largestTrack = session.tracks[(size_t) take.track]->name; }
+        if (take.lost > 0 && take.track >= 0 && take.track < (int) session.tracks.size()) lossTracks.add (session.tracks[(size_t) take.track]->name);
         if (take.failed) problems.add ("The take could not be written: " + take.file.getFullPathName());
     }
     if (lost > 0)
     {
         const double ms = device.rate > 0.0 ? 1000.0 * (double) lost / device.rate : 0.0;
-        problems.add (juce::String (lost) + " samples (" + juce::String (ms, 0) + " ms) of the take were lost because the disk could not keep up: the take has a gap.");
+        const juce::String amount = juce::String (lost) + " samples (" + juce::String (ms, 0) + " ms) of the take";
+        lossTracks.removeString (largestTrack);
+        const juce::String where = lossTracks.size() > 0
+            ? " on track '" + largestTrack + "' (the largest loss; the takes on " + lossTracks.joinIntoString (", ") + " lost some too)"
+            : juce::String();
+        problems.add (amount + where + " were lost because the disk could not keep up: the take is shorter by that much and what follows the loss sits that much early.");
     }
     if (problem.isNotEmpty()) problems.add (problem);
     if (problems.size() > 0)
@@ -917,8 +949,12 @@ void MainComponent::updateMasterFader()
     const juce::ScopedTryLock sl (session.lock);
     if (! sl.isLocked())
         return;
-    if (std::abs (masterFader.getValue() - (double) session.masterDb) > 1.0e-4)
+    // within 0.05 dB is the same gain: the slider snaps to its interval (0.01), and a tighter test would set it again on every tick
+    if (std::abs (masterFader.getValue() - (double) session.masterDb) > 0.05)
+    {
         masterFader.setValue (session.masterDb, juce::dontSendNotification);
+        masterFader.setTooltip (masterTooltip (masterFader.getValue()));
+    }
 }
 
 // ---- actions -----------------------------------------------------------------------------------------------------------------
@@ -952,6 +988,7 @@ void MainComponent::openProject (const juce::File& file)
         return;
     }
     editor.clearUndo();
+    clearMasterClip(); // a project opened starts with no CLIP latched, as NEW does
     adoptDeviceRate(); // a project at another rate is converted to the device's
     arrange.selected = {};
     seek (0);

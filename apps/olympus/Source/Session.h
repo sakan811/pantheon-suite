@@ -1166,7 +1166,11 @@ public:
         tempo = map;
         if (sampleRate > 0.0) tempo.sampleRate = sampleRate;
         markers = std::move (markerList);
-        masterDb = (float) juce::jlimit (-100.0, 24.0, xml->getDoubleAttribute ("masterDb", 0.0));
+        // the same range as the fader and Editor::setMasterDb (-100 is silence, +12 the top)
+        const double savedMasterDb = xml->getDoubleAttribute ("masterDb", 0.0);
+        if (savedMasterDb > 12.0)
+            problems.add ("The master gain was above +12 dB and is set to +12 dB.");
+        masterDb = (float) juce::jlimit (-100.0, 12.0, savedMasterDb);
         loopStart = juce::jmax ((juce::int64) 0, xml->getStringAttribute ("loopStart", "0").getLargeIntValue());
         loopEnd = juce::jmax ((juce::int64) 0, xml->getStringAttribute ("loopEnd", "0").getLargeIntValue());
         loopOn = xml->getBoolAttribute ("loopOn");

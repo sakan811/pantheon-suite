@@ -61,7 +61,7 @@ public:
     };
 
     // A take that has stopped: its track, its file and the frames in it (the frames the file holds, which is what was accepted). `lost` is the
-    // frames the disk could not take (a gap in the file); `failed` says the file's writes failed at some point.
+    // frames the disk could not take (not written, so the file is shorter by that much); `failed` says the file's writes failed at some point.
     struct Finished
     {
         int track = -1;
@@ -343,8 +343,8 @@ inline bool beginRecording (Recorder& recorder, Session& session, const juce::Fi
 // (the point where recording began), so it lines up with what was heard. Where that is before 0, the clip starts at 0 and the head of the
 // file that falls before 0 is skipped (its offset), so the rest still plays on time. When the session has no rate yet, the first clip
 // read sets it to the take's rate (Session::loadPooled), as for any clip. A take with no frames is skipped (its file is kept); a take
-// that is all before 0 is skipped too, with a note in `error`. Returns false with the reason if a clip cannot be added; the clips added
-// before it stay (the step is still one undo step).
+// that is all before 0 is skipped too. A take that cannot be placed is skipped and the rest are still placed; the first reason is returned
+// in `error` (false), and the files stay on disk. The clips added stay (the step is still one undo step).
 inline bool finishRecording (const std::vector<Recorder::Finished>& takes, juce::int64 startSample, int latencyCompensation, Editor& editor,
                              juce::String& error)
 {
@@ -352,21 +352,28 @@ inline bool finishRecording (const std::vector<Recorder::Finished>& takes, juce:
     const juce::int64 latency = juce::jmax ((juce::int64) 0, (juce::int64) latencyCompensation);
     const juce::int64 begin = juce::jmax ((juce::int64) 0, startSample - latency);
     const juce::int64 skip = juce::jmax ((juce::int64) 0, latency - startSample); // samples of each take's head before the timeline's 0
-    bool placed = true;
+    // a take that cannot be placed does not stop the others: the first reason is reported after the loop, the files stay on disk
+    juce::String firstProblem;
+    const auto note = [&firstProblem] (const juce::String& problem) { if (firstProblem.isEmpty()) firstProblem = problem; };
     for (const auto& take : takes)
     {
         if (take.frames <= 0)
             continue;
         if (take.frames - skip < 1)
         {
-            error = "A take on track " + juce::String (take.track + 1) + " was shorter than the latency and was not placed: "
-                    + take.file.getFileName() + " is kept.";
-            placed = false;
+            note ("A take on track " + juce::String (take.track + 1) + " was shorter than the latency and was not placed: "
+                  + take.file.getFileName() + " is kept.");
             continue;
         }
-        if (! editor.addClip (take.track, take.file, begin, skip, take.frames - skip, error).valid())
-            return false;
+        juce::String clipError;
+        if (! editor.addClip (take.track, take.file, begin, skip, take.frames - skip, clipError).valid())
+        {
+            note (clipError.isNotEmpty() ? clipError : "A take on track " + juce::String (take.track + 1) + " could not be placed: " + take.file.getFileName() + " is kept.");
+            continue;
+        }
     }
-    return placed;
+    if (firstProblem.isNotEmpty())
+        error = firstProblem;
+    return firstProblem.isEmpty();
 }
 } // namespace olympus
