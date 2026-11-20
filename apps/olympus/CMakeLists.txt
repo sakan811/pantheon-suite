@@ -28,6 +28,25 @@ if(APPLE)
 endif()
 
 # ---------------------------------------------------------------------------------------
+# The core: JUCE and the window code, compiled once and linked by every Olympus target below
+# (before, each of the five targets compiled its own copy of JUCE and of the two UI files).
+# Static, so each executable links only what it uses. JUCE_STANDALONE_APPLICATION is the define
+# juce_add_gui_app / juce_add_console_app set on each executable; it is repeated here so the
+# core and the executables compile JUCE with the same definitions.
+# ---------------------------------------------------------------------------------------
+add_library(OlympusCore STATIC)
+target_sources(OlympusCore PRIVATE
+    Source/UI/MainComponent.cpp
+    Source/UI/Arrange.cpp)
+target_include_directories(OlympusCore PUBLIC Source)
+target_compile_definitions(OlympusCore PUBLIC ${OLYMPUS_DEFINITIONS} JUCE_STANDALONE_APPLICATION=1)
+target_link_libraries(OlympusCore
+    PRIVATE
+        pantheon_ui
+        ${OLYMPUS_LIBRARIES}
+        juce::juce_recommended_config_flags)
+
+# ---------------------------------------------------------------------------------------
 # The app (standalone, not a plugin)
 # ---------------------------------------------------------------------------------------
 juce_add_gui_app(Olympus
@@ -37,19 +56,12 @@ juce_add_gui_app(Olympus
     DOCUMENT_EXTENSIONS olympus
     DESCRIPTION "Session host for the Pantheon plugin suite")
 
-target_sources(Olympus PRIVATE
-    Source/Main.cpp
-    Source/UI/MainComponent.cpp
-    Source/UI/Arrange.cpp)
-target_include_directories(Olympus PRIVATE Source)
+target_sources(Olympus PRIVATE Source/Main.cpp)
 target_compile_definitions(Olympus PRIVATE
-    ${OLYMPUS_DEFINITIONS}
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:Olympus,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
 target_link_libraries(Olympus
-    PRIVATE
-        pantheon_ui
-        ${OLYMPUS_LIBRARIES}
+    PRIVATE OlympusCore
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -61,10 +73,8 @@ target_link_libraries(Olympus
 # ---------------------------------------------------------------------------------------
 juce_add_console_app(OlympusMcp PRODUCT_NAME "OlympusMcp")
 target_sources(OlympusMcp PRIVATE Source/McpMain.cpp)
-target_include_directories(OlympusMcp PRIVATE Source)
-target_compile_definitions(OlympusMcp PRIVATE ${OLYMPUS_DEFINITIONS})
 target_link_libraries(OlympusMcp
-    PRIVATE ${OLYMPUS_LIBRARIES}
+    PRIVATE OlympusCore
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -76,10 +86,10 @@ target_link_libraries(OlympusMcp
 # ---------------------------------------------------------------------------------------
 juce_add_console_app(OlympusTests PRODUCT_NAME "OlympusTests")
 target_sources(OlympusTests PRIVATE Tests/Tests.cpp)
-target_include_directories(OlympusTests PRIVATE Source Tests)
-target_compile_definitions(OlympusTests PRIVATE ${OLYMPUS_DEFINITIONS} PANTHEON_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../..")
+target_include_directories(OlympusTests PRIVATE Tests)
+target_compile_definitions(OlympusTests PRIVATE PANTHEON_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../..")
 target_link_libraries(OlympusTests
-    PRIVATE ${OLYMPUS_LIBRARIES}
+    PRIVATE OlympusCore
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
@@ -90,13 +100,10 @@ set_target_properties(OlympusTests PROPERTIES EXCLUDE_FROM_ALL TRUE OSX_ARCHITEC
 #   cmake --build build --target OlympusUiCheck
 # ---------------------------------------------------------------------------------------
 juce_add_console_app(OlympusUiCheck PRODUCT_NAME "OlympusUiCheck")
-target_sources(OlympusUiCheck PRIVATE Tests/UiCheck.cpp Source/UI/MainComponent.cpp Source/UI/Arrange.cpp)
-target_include_directories(OlympusUiCheck PRIVATE Source Tests)
-target_compile_definitions(OlympusUiCheck PRIVATE ${OLYMPUS_DEFINITIONS})
+target_sources(OlympusUiCheck PRIVATE Tests/UiCheck.cpp)
+target_include_directories(OlympusUiCheck PRIVATE Tests)
 target_link_libraries(OlympusUiCheck
-    PRIVATE
-        pantheon_ui
-        ${OLYMPUS_LIBRARIES}
+    PRIVATE OlympusCore
     PUBLIC
         juce::juce_recommended_config_flags)
 set_target_properties(OlympusUiCheck PROPERTIES EXCLUDE_FROM_ALL TRUE OSX_ARCHITECTURES "${CMAKE_HOST_SYSTEM_PROCESSOR}")
@@ -106,13 +113,10 @@ set_target_properties(OlympusUiCheck PROPERTIES EXCLUDE_FROM_ALL TRUE OSX_ARCHIT
 #   cmake --build build --target OlympusSnapshot
 # ---------------------------------------------------------------------------------------
 juce_add_console_app(OlympusSnapshot PRODUCT_NAME "OlympusSnapshot")
-target_sources(OlympusSnapshot PRIVATE Tests/Snapshot.cpp Source/UI/MainComponent.cpp Source/UI/Arrange.cpp)
-target_include_directories(OlympusSnapshot PRIVATE Source Tests)
-target_compile_definitions(OlympusSnapshot PRIVATE ${OLYMPUS_DEFINITIONS})
+target_sources(OlympusSnapshot PRIVATE Tests/Snapshot.cpp)
+target_include_directories(OlympusSnapshot PRIVATE Tests)
 target_link_libraries(OlympusSnapshot
-    PRIVATE
-        pantheon_ui
-        ${OLYMPUS_LIBRARIES}
+    PRIVATE OlympusCore
     PUBLIC
         juce::juce_recommended_config_flags)
 set_target_properties(OlympusSnapshot PROPERTIES EXCLUDE_FROM_ALL TRUE OSX_ARCHITECTURES "${CMAKE_HOST_SYSTEM_PROCESSOR}")
