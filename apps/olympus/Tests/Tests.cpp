@@ -405,7 +405,7 @@ void mcpChecks()
     juce::var list;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}", list);
     const auto tools = server.handle (list)["result"]["tools"];
-    test::check (tools.size() == 19 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
+    test::check (tools.size() == 31 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
 
     juce::var note;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", note);
@@ -448,6 +448,122 @@ void mcpChecks()
     const auto lines = juce::StringArray::fromLines (out.str());
     test::check (lines.size() >= 2 && (int) juce::JSON::parse (lines[0])["id"] == 9 && (int) juce::JSON::parse (lines[1])["error"]["code"] == -32700 && ! out.str().empty() && out.str().back() == '\n', "stdio: one line per answer, a parse error answered, a notification not");
     test::check (juce::JSON::toString (juce::JSON::parse (lines[0]), true).indexOfChar ('\n') < 0, "an answer is a single line");
+}
+
+// A tools/call of `server`, as a client makes it: the result (content and isError).
+juce::var toolCall (McpServer& server, const juce::String& tool, const juce::String& argsJson)
+{
+    static int id = 1000;
+    juce::var req;
+    juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":" + juce::String (++id) + ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + tool + "\",\"arguments\":" + argsJson + "}}", req);
+    return server.handle (req)["result"];
+}
+juce::String toolText (const juce::var& result) { return result["content"][0]["text"].toString(); }
+juce::var toolJson (const juce::var& result) { juce::var v; juce::JSON::parse (toolText (result), v); return v; }
+
+// The timeline tools of the MCP server (added with the clip model): every one goes through the Editor and answers an error result with a
+// reason when a track, clip or marker is not there. A one-second file is at 48 kHz, and the tempo is 120 bpm: a beat is 24000 samples.
+void mcpTimelineChecks()
+{
+    std::printf ("[29] MCP timeline tools: clips, tempo, markers, loop and master; a bad index is an error result with the reason\n");
+    tempFolder().getChildFile ("mcp-tl").createDirectory();
+    juce::String err;
+    const auto wav = makeWav ("mcp-tl/a.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+    const auto path = wav.getFullPathName().replace ("\\", "\\\\");
+    Session s;
+    s.addTrack (wav, "A", err);
+    s.addTrack (wav, "B", err);
+    McpServer server (s);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+    const auto said = [] (const juce::var& r, const char* words) { return toolText (r).contains (words); };
+
+    juce::var list;
+    juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", list);
+    const auto tools = server.handle (list)["result"]["tools"];
+    int known = 0;
+    for (const char* n : { "add_clip", "move_clip", "split_clip", "trim_clip", "delete_clip", "set_clip", "set_tempo", "set_time_signature",
+                           "add_marker", "remove_marker", "set_loop", "set_master" })
+        for (auto& t : *tools.getArray())
+            if (t["name"].toString() == n) ++known;
+    test::check (tools.size() == 31 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
+
+    // clips
+    test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1}")) && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 48000,
+                 "add_clip: a file placed at one second");
+    test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_beats\":4,\"offset_seconds\":0.25,\"length_seconds\":0.5}"))
+                     && s.tracks[0]->clips.size() == 3 && s.tracks[0]->clips[2].start == 96000 && s.tracks[0]->clips[2].offset == 12000 && s.tracks[0]->clips[2].length == 24000,
+                 "add_clip: at beat 4 (two seconds), from 0.25 s in the file, for 0.5 s");
+    test::check (failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":0,\"length_seconds\":0}")) && said (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":0,\"length_seconds\":0}"), "more than 0")
+                     && s.tracks[0]->clips.size() == 3, "add_clip: a zero length is refused, and nothing is added");
+    test::check (failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":0,\"offset_seconds\":10}")) && s.tracks[0]->clips.size() == 3,
+                 "add_clip: an offset past the end of the file is refused, and nothing is added");
+    test::check (failed (call ("add_clip", "{\"track\":9,\"file\":\"" + path + "\",\"start_seconds\":0}")) && said (call ("add_clip", "{\"track\":9,\"file\":\"" + path + "\",\"start_seconds\":0}"), "No track 9"),
+                 "add_clip: a track that is not there is an error result");
+    test::check (failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1,\"start_beats\":2}")) && said (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1,\"start_beats\":2}"), "exactly one"),
+                 "add_clip: a start in seconds and in beats at once is refused");
+    test::check (failed (call ("split_clip", "{\"track\":0,\"clip\":0,\"at_seconds\":0.5}")) == false && s.tracks[0]->clips.size() == 4 && s.tracks[0]->clips[0].length == 24000
+                     && s.tracks[0]->clips[1].start == 24000 && s.tracks[0]->clips[1].offset == 24000 && s.tracks[0]->clips[1].length == 24000,
+                 "split_clip: the left piece keeps number 0, the right one is number 1 at the cut");
+    test::check (failed (call ("split_clip", "{\"track\":0,\"clip\":0,\"at_seconds\":5}")) && said (call ("split_clip", "{\"track\":0,\"clip\":0,\"at_seconds\":5}"), "inside"),
+                 "split_clip: a point outside the clip is refused with the reason");
+    test::check (! failed (call ("move_clip", "{\"track\":0,\"clip\":3,\"to_track\":1,\"start_seconds\":0.5}")) && s.tracks[0]->clips.size() == 3 && s.tracks[1]->clips.size() == 2
+                     && s.tracks[1]->clips[1].start == 24000, "move_clip: a clip goes to another track, appended there");
+    test::check (failed (call ("move_clip", "{\"track\":0,\"clip\":9,\"start_seconds\":0}")) && said (call ("move_clip", "{\"track\":0,\"clip\":9,\"start_seconds\":0}"), "No clip 9"),
+                 "move_clip: a clip that is not there is an error result");
+    test::check (failed (call ("move_clip", "{\"track\":0,\"clip\":0,\"to_track\":7,\"start_seconds\":1}")) && said (call ("move_clip", "{\"track\":0,\"clip\":0,\"to_track\":7,\"start_seconds\":1}"), "No track 7"),
+                 "move_clip: a track that is not there is an error result");
+    test::check (! failed (call ("move_clip", "{\"track\":1,\"clip\":0,\"start_seconds\":0.25}")) && s.tracks[1]->clips[0].start == 12000, "move_clip: along its own track");
+    test::check (! failed (call ("trim_clip", "{\"track\":0,\"clip\":0,\"end_seconds\":0.25}")) && s.tracks[0]->clips[0].length == 12000, "trim_clip: the right edge to 0.25 s");
+    test::check (failed (call ("trim_clip", "{\"track\":0,\"clip\":0}")) && said (call ("trim_clip", "{\"track\":0,\"clip\":0}"), "Give the new"), "trim_clip: no edge given is refused");
+    test::check (! failed (call ("trim_clip", "{\"track\":0,\"clip\":0,\"start_seconds\":0.1}")) && s.tracks[0]->clips[0].start == 4800 && s.tracks[0]->clips[0].offset == 4800
+                     && s.tracks[0]->clips[0].length == 7200, "trim_clip: the left edge to 0.1 s, the audio stays where it is");
+    test::check (failed (call ("trim_clip", "{\"track\":0,\"clip\":9,\"start_seconds\":0.1}")) && said (call ("trim_clip", "{\"track\":0,\"clip\":9,\"start_seconds\":0.1}"), "No clip 9"),
+                 "trim_clip: a clip that is not there is an error result");
+    test::check (! failed (call ("delete_clip", "{\"track\":0,\"clip\":1}")) && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 48000, "delete_clip");
+    test::check (failed (call ("delete_clip", "{\"track\":0,\"clip\":42}")) && said (call ("delete_clip", "{\"track\":0,\"clip\":42}"), "No clip 42"), "delete_clip: a clip that is not there is an error result");
+    test::check (! failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_db\":-6,\"mute\":true,\"name\":\"Intro\"}")) && std::abs (s.tracks[0]->clips[0].gainDb + 6.0f) < 1e-4f
+                     && s.tracks[0]->clips[0].mute && s.tracks[0]->clips[0].name == "Intro", "set_clip: gain, mute and name");
+    test::check (! failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"fade_in_seconds\":0.01}")) && s.tracks[0]->clips[0].fadeIn == 480 && s.tracks[0]->clips[0].fadeOut == 0,
+                 "set_clip: a fade in of 0.01 s, the fade out left as it was");
+    test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0}")) && said (call ("set_clip", "{\"track\":0,\"clip\":0}"), "Give at least one"), "set_clip: nothing to set is refused");
+    test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"name\":\"  \"}")) && s.tracks[0]->clips[0].name == "Intro", "set_clip: an empty name is refused and nothing changes");
+
+    // tempo, time signature, markers, loop, master
+    test::check (! failed (call ("set_tempo", "{\"bpm\":140,\"beat\":4}")) && std::abs (s.tempo.bpmAtBeat (4.0) - 140.0) < 1e-6 && std::abs (s.tempo.bpmAtBeat (0.0) - 120.0) < 1e-6,
+                 "set_tempo: 140 bpm from beat 4, 120 before it");
+    test::check (failed (call ("set_tempo", "{\"bpm\":500}")) && said (call ("set_tempo", "{\"bpm\":500}"), "20 to 300"), "set_tempo: a tempo outside 20 to 300 is refused");
+    test::check (failed (call ("set_tempo", "{\"bpm\":100,\"beat\":-1}")) && said (call ("set_tempo", "{\"bpm\":100,\"beat\":-1}"), "0 or more"), "set_tempo: a beat before the start is refused");
+    test::check (failed (call ("set_tempo", "{\"beat\":4}")) && said (call ("set_tempo", "{\"beat\":4}"), "Give 'bpm'"), "set_tempo: no bpm is refused");
+    test::check (! failed (call ("set_time_signature", "{\"numerator\":6,\"denominator\":8}")) && s.tempo.numerator == 6 && s.tempo.denominator == 8, "set_time_signature: 6/8");
+    test::check (failed (call ("set_time_signature", "{\"numerator\":3,\"denominator\":3}")) && said (call ("set_time_signature", "{\"numerator\":3,\"denominator\":3}"), "denominator")
+                     && s.tempo.denominator == 8, "set_time_signature: a denominator that is not a power of two is refused");
+    const auto verse = call ("add_marker", "{\"name\":\"Verse\",\"at_beats\":2}");
+    test::check (! failed (verse) && (int) toolJson (verse)["added_index"] == 0 && s.markers.size() == 1 && s.markers[0].start == 48000, "add_marker: at beat 2, with its number in the answer");
+    const auto unnamed = call ("add_marker", "{\"at_seconds\":0.5}");
+    test::check (! failed (unnamed) && s.markers.size() == 2 && s.markers[0].name == "Marker" && s.markers[1].name == "Verse" && (int) toolJson (unnamed)["added_index"] == 0,
+                 "add_marker: no name gives 'Marker'; the markers stay in time order");
+    test::check (! failed (call ("remove_marker", "{\"marker\":0}")) && s.markers.size() == 1 && s.markers[0].name == "Verse", "remove_marker");
+    test::check (failed (call ("remove_marker", "{\"marker\":5}")) && said (call ("remove_marker", "{\"marker\":5}"), "No marker 5"), "remove_marker: a marker that is not there is an error result");
+    test::check (! failed (call ("set_loop", "{\"start_beats\":0,\"end_seconds\":1}")) && s.loopOn && s.loopStart == 0 && s.loopEnd == 48000, "set_loop: from 0 to one second, on by default");
+    test::check (failed (call ("set_loop", "{\"start_seconds\":1,\"end_seconds\":0.5}")) && said (call ("set_loop", "{\"start_seconds\":1,\"end_seconds\":0.5}"), "after its start"),
+                 "set_loop: an end before the start is refused");
+    test::check (! failed (call ("set_loop", "{\"start_seconds\":0,\"end_seconds\":1,\"on\":false}")) && ! s.loopOn, "set_loop: on false switches it off");
+    test::check (! failed (call ("set_master", "{\"master_db\":-3}")) && std::abs (s.masterDb + 3.0f) < 1e-4f, "set_master: -3 dB");
+    test::check (failed (call ("set_master", "{\"master_db\":20}")) && said (call ("set_master", "{\"master_db\":20}"), "-100 to +12") && std::abs (s.masterDb + 3.0f) < 1e-4f,
+                 "set_master: out of range is refused and the master stays");
+
+    // the track settings go through the Editor too
+    test::check (! failed (call ("set_track", "{\"track\":0,\"gain_db\":-2,\"pan\":0.5,\"mute\":true,\"solo\":true,\"name\":\"Lead\"}")) && std::abs (s.tracks[0]->gainDb + 2.0f) < 1e-4f
+                     && std::abs (s.tracks[0]->pan - 0.5f) < 1e-6f && s.tracks[0]->mute && s.tracks[0]->solo && s.tracks[0]->name == "Lead", "set_track: fader, pan, mute, solo and name");
+    test::check (! failed (call ("set_track", "{\"track\":0,\"name\":\"\"}")) && s.tracks[0]->name == "Lead", "set_track: an empty name leaves the name");
+    test::check (failed (call ("set_track", "{\"track\":9,\"gain_db\":-1}")) && said (call ("set_track", "{\"track\":9,\"gain_db\":-1}"), "No track 9"), "set_track: a track that is not there is an error result");
+
+    // project_info shows all of it
+    const auto d = toolJson (call ("project_info", "{}"));
+    test::check (d["tracks"][0]["clips"].size() == 2 && d["tempo"].size() == 2 && d["markers"].size() == 1 && ! (bool) d["loop"]["on"]
+                     && std::abs ((double) d["master_db"] + 3.0) < 1e-4 && d["time_signature"].toString() == "6/8",
+                 "project_info: the clips, tempo, markers, loop, master and time signature");
 }
 
 bool close (double a, double b) { return std::abs (a - b) < 1e-4; }
@@ -1156,6 +1272,7 @@ int main()
     masterChecks();
     describeChecks();
     mcpChecks();
+    mcpTimelineChecks();
     realPlugins();
     splitChecks();
     moveChecks();
