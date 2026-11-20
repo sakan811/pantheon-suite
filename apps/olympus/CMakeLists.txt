@@ -81,7 +81,16 @@ target_link_libraries(OlympusCore
         juce::juce_recommended_config_flags
     PRIVATE
         juce::juce_recommended_warning_flags) # the app compiled its window code with these; the core is that code now
-olympus_move_juce_sources(OlympusCore pantheon_ui ${OLYMPUS_LIBRARIES})
+# Compile JUCE once (about 3x faster cold build on Linux). Off by default on macOS, where JUCE's Objective-C++ module files have not been tried here:
+# -DOLYMPUS_SHARE_JUCE_BUILD=ON turns it on there, OFF turns it off anywhere (every target then compiles JUCE itself, as before).
+if(APPLE)
+    option(OLYMPUS_SHARE_JUCE_BUILD "Compile the JUCE modules once, in OlympusCore" OFF)
+else()
+    option(OLYMPUS_SHARE_JUCE_BUILD "Compile the JUCE modules once, in OlympusCore" ON)
+endif()
+if(OLYMPUS_SHARE_JUCE_BUILD)
+    olympus_move_juce_sources(OlympusCore pantheon_ui ${OLYMPUS_LIBRARIES})
+endif()
 
 # ---------------------------------------------------------------------------------------
 # The app (standalone, not a plugin)
