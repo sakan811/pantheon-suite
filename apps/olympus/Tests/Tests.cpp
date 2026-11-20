@@ -1627,6 +1627,177 @@ void realPlugins()
 }
 } // namespace
 
+void deviceRateChecks()
+{
+    std::printf ("[35] The session follows the device's rate: an empty session takes it, its monitor chain is set up again, a session with clips is converted once\n");
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    test::check (s.addMonitorPlugin ("test gain", -1, err) && s.monitor.size() == 1 && s.monitor[0]->instance != nullptr, "a monitor plugin is added before any rate is known");
+    auto* mon = dynamic_cast<test::GainPlugin*> (s.monitor[0]->instance.get());
+    test::check (mon != nullptr && mon->preparedRate == 48000.0, "it is set up at 48 kHz, the default, while the session has no rate");
+    test::check (s.adoptRate (44100.0, err) && s.sampleRate == 44100.0 && s.tempo.sampleRate == 44100.0, "an empty session takes the device's 44.1 kHz");
+    test::check (mon != nullptr && mon->preparedRate == 44100.0, "and the monitor chain is set up again at it");
+    s.addEmptyTrack ("Empty");
+    test::check (s.addPlugin (0, "test gain", -1, err), "a plugin on the empty track");
+    auto* g = dynamic_cast<test::GainPlugin*> (s.tracks[0]->chain[0]->instance.get());
+    test::check (g != nullptr && g->preparedRate == 44100.0, "the track's plugin is set up at 44.1 kHz");
+    test::check (s.adoptRate (96000.0, err) && g->preparedRate == 96000.0 && mon->preparedRate == 96000.0, "96 kHz: the track's plugin and the monitor chain are set up again");
+    test::check (s.adoptRate (96000.0, err) && s.sampleRate == 96000.0, "the same rate changes nothing");
+    test::check (! s.adoptRate (0.0, err) && err.isNotEmpty() && s.sampleRate == 96000.0, "a rate of zero is refused, with the reason");
+
+    Session c;
+    test::addTestPlugins (c.catalog);
+    auto src = makeWav ("rate-src.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+    test::check (c.addTrack (src, "Shared", err) && c.addClip (0, src, 24000, err) == 1, "a track with two clips of one file, the second at 0.5 s");
+    c.tracks[0]->clips[0].fadeIn = 480;
+    test::check (c.addMarker ("Mid", 24000) == 0, "a marker at 0.5 s");
+    c.loopStart = 12000;
+    c.loopEnd = 36000;
+    c.loopOn = true;
+    test::check (c.length() == 72000, "the session is 1.5 s long at 48 kHz");
+    test::check (c.adoptRate (44100.0, err) && c.sampleRate == 44100.0, "the session is converted to 44.1 kHz");
+    auto& a = c.tracks[0]->clips[0];
+    auto& b = c.tracks[0]->clips[1];
+    test::check (a.audio != nullptr && a.audio.get() == b.audio.get() && std::abs (a.audio->getNumSamples() - 44100) <= 1, "the one buffer is still shared by both clips, now 44100 samples");
+    test::check (std::abs (a.length - 44100) <= 1 && std::abs (b.start - 22050) <= 1 && std::abs (b.length - 44100) <= 1,
+                 test::fmt ("the clips keep their seconds: 1 s, the second at 0.5 s (%d, %d, %d samples)", (int) a.length, (int) b.start, (int) b.length));
+    test::check (std::abs (c.markers[0].start - 22050) <= 1 && std::abs (c.loopStart - 11025) <= 1 && std::abs (c.loopEnd - 33075) <= 1 && std::abs (a.fadeIn - 441) <= 1,
+                 "the marker, the loop and the fade are scaled by the same ratio");
+    test::check (std::abs (c.tempo.sampleRate - 44100.0) < 0.5 && c.length() == b.end() && std::abs (c.length() - 66150) <= 1, "the tempo's rate follows, and the session's length is 1.5 s");
+
+    RenderOptions o;
+    o.folder = tempFolder().getChildFile ("converted");
+    RenderResult r;
+    test::check (c.renderStems (o, r, err) && r.stems.size() == 1, "a render after the conversion writes its stem");
+    double renderedRate = 0.0;
+    const auto rendered = readWav (juce::File (r.stems[0].file), &renderedRate);
+    test::check (std::abs (renderedRate - 44100.0) < 0.5 && std::abs (rendered.getNumSamples() - (int) c.length()) <= 1,
+                 test::fmt ("the stem is 44.1 kHz and as long as the session (%d samples)", rendered.getNumSamples()));
+
+    const auto file = tempFolder().getChildFile ("converted.olympus");
+    test::check (c.save (file, err), "saved after the conversion");
+    Session d;
+    test::addTestPlugins (d.catalog);
+    test::check (d.load (file, err) && std::abs (d.sampleRate - 44100.0) < 0.5 && d.tracks[0]->clips.size() == 2 && d.tracks[0]->clips[0].audio != nullptr
+                     && std::abs (d.tracks[0]->length() - 66150) <= 1, "the project reloads at 44.1 kHz with its clips and length");
+    test::check (c.adoptRate (48000.0, err) && std::abs (c.tracks[0]->length() - 72000) <= 2, "back to 48 kHz: the length is 72000 samples again");
+    test::check (c.adoptRate (44100.0, err) && c.tracks[0]->clips[0].audio.get() == c.tracks[0]->clips[1].audio.get(), "and to 44.1 kHz again, the buffer still shared");
+}
+
+void busChecks()
+{
+    std::printf ("[36] Bus layouts: a sidechain is switched off and the plugin runs stereo; a mono plugin is refused with the reason; a project with one keeps it unusable; no plugin is handed more channels than it has\n");
+    juce::String err;
+    const auto wav = makeWav ("bus-src.wav", 48000.0, 2, 48000, 0.3f, 300.0);
+    Session s;
+    test::addTestPlugins (s.catalog);
+    test::addBusPlugins (s.catalog);
+    test::check (s.addTrack (wav, "Bus", err), "a track with audio");
+    test::check (s.addPlugin (0, "test aux", -1, err) && s.tracks[0]->chain.size() == 1 && s.tracks[0]->chain[0]->instance != nullptr, "a plugin with a sidechain is added");
+    auto* aux = dynamic_cast<test::PassPlugin*> (s.tracks[0]->chain[0]->instance.get());
+    test::check (aux != nullptr && aux->getTotalNumInputChannels() == 2 && aux->getChannelCountOfBus (true, 1) == 0, "its sidechain is switched off, and its main pair is stereo");
+    test::check (aux != nullptr && std::abs (aux->preparedRate - 48000.0) < 0.5, "it is set up at the session's rate");
+
+    juce::AudioBuffer<float> out (2, kBlockSize);
+    for (int i = 0; i < 200; ++i)
+    {
+        s.processBlock (out, (juce::int64) i * kBlockSize);
+        if (i % 3 == 0) { juce::AudioBuffer<float> mono (1, kBlockSize); mono.clear(); s.processMonitor (mono); }
+    }
+    test::check (aux != nullptr && aux->blocks >= 200 && aux->shortBlocks == 0 && aux->lastChannels >= 2, "playing 200 blocks: every block had the plugin's two channels");
+
+    test::check (s.addMonitorPlugin ("test aux", -1, err) && s.monitor.size() == 1, "the same plugin in the monitor chain");
+    auto* monAux = dynamic_cast<test::PassPlugin*> (s.monitor[0]->instance.get());
+    juce::AudioBuffer<float> device (1, kBlockSize);  // a mono device: the plugin still gets its two channels
+    for (int i = 0; i < 50; ++i)
+    {
+        device.clear();
+        s.processMonitor (device);
+        out.clear();
+        s.processMonitor (out);
+    }
+    test::check (monAux != nullptr && monAux->shortBlocks == 0 && monAux->lastChannels == 2, "the monitor chain is run on two channels, for a mono device too");
+
+    const bool monoAdded = s.addPlugin (0, "test mono", -1, err);
+    test::check (! monoAdded && err.contains ("cannot run on a stereo track") && err.contains ("1 in, 1 out"), "a mono plugin is refused on a track, with the reason: " + err);
+    test::check (s.tracks[0]->chain.size() == 1, "and nothing is added");
+    test::check (! s.addMonitorPlugin ("test mono", -1, err) && s.monitor.size() == 1, "and refused on the monitor chain");
+
+    // a project that holds a mono plugin (made by hand: the chain was stereo when it was saved) keeps the slot, unusable, with its state
+    Session p;
+    test::addTestPlugins (p.catalog);
+    test::addBusPlugins (p.catalog);
+    test::check (p.addTrack (wav, "Mono", err) && p.addPlugin (0, "test gain", -1, err), "a project with a plugin on a track");
+    tempFolder().getChildFile ("bus").createDirectory();
+    const auto file = tempFolder().getChildFile ("bus/mono.olympus");
+    test::check (p.save (file, err), "saved");
+    auto xml = juce::parseXML (file);
+    if (xml != nullptr && xml->getChildByName ("Track") != nullptr && xml->getChildByName ("Track")->getChildByName ("Slot") != nullptr)
+        xml->getChildByName ("Track")->getChildByName ("Slot")->setAttribute ("plugin", "Test Mono");
+    test::check (xml != nullptr && xml->writeTo (file), "the saved plugin is renamed to the mono one");
+    Session q;
+    test::addTestPlugins (q.catalog);
+    test::addBusPlugins (q.catalog);
+    const bool loaded = q.load (file, err);
+    test::check (loaded && q.tracks.size() == 1 && q.tracks[0]->chain.size() == 1, "the project loads");
+    if (loaded && q.tracks.size() == 1 && q.tracks[0]->chain.size() == 1)
+    {
+        test::check (q.tracks[0]->chain[0]->instance == nullptr && q.tracks[0]->chain[0]->plugin == "Test Mono" && q.tracks[0]->chain[0]->savedState.getSize() > 0,
+                     "the mono slot is kept unusable, with its saved state");
+        test::check (q.warnings.size() == 1 && q.warnings[0].contains ("cannot run on a stereo track"), "a warning says why");
+        const auto again = tempFolder().getChildFile ("bus/mono-again.olympus");
+        test::check (q.save (again, err), "saved again");
+        auto back = juce::parseXML (again);
+        test::check (back != nullptr && back->getChildByName ("Track") != nullptr && back->getChildByName ("Track")->getChildByName ("Slot") != nullptr
+                         && back->getChildByName ("Track")->getChildByName ("Slot")->getStringAttribute ("plugin") == "Test Mono"
+                         && back->getChildByName ("Track")->getChildByName ("Slot")->getStringAttribute ("state").isNotEmpty(),
+                     "and it is still in the project with its state");
+    }
+}
+
+void addClipLockChecks()
+{
+    std::printf ("[37] Adding a clip: the file is read with the session's lock free (a decode under it would silence the audio callback), and a refusal changes nothing\n");
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    test::check (s.adoptRate (48000.0, err), "the session is at 48 kHz");
+    s.addEmptyTrack ("Lane");
+    Editor editor (s);
+    const auto big = makeWav ("big-read.wav", 44100.0, 2, 44100 * 20, 0.3f, 330.0); // 20 s at 44.1 kHz: read and resampled to 48 kHz
+    std::atomic<bool> reading { false }, done { false };
+    std::atomic<int> freeTries { 0 };
+    std::thread spy ([&]
+    {
+        while (! done.load())
+            if (reading.load() && s.lock.tryEnter())
+            {
+                if (reading.load()) ++freeTries;
+                s.lock.exit();
+            }
+    });
+    reading = true;
+    const auto clip = editor.addClip (0, big, 0, 0, 0, err);
+    reading = false;
+    done = true;
+    spy.join();
+    test::check (clip.valid() && s.tracks[0]->clips.size() == 1 && s.tracks[0]->clips[0].audio->getNumSamples() == 960000,
+                 test::fmt ("the 20 s file is added, resampled (%d samples)", clip.valid() ? (int) s.tracks[0]->clips[0].audio->getNumSamples() : -1));
+    // the spy gets the lock only while the read runs outside it: a read under the lock leaves it one or two tries, in the window before the add takes it
+    test::check (freeTries.load() > 1000, test::fmt ("the lock was free %d times while the file was read (a read under it allows one or two)", freeTries.load()));
+
+    s.dirty = false;
+    const bool wasUndoable = editor.undo();   // the add is one undo step
+    test::check (wasUndoable && s.tracks[0]->clips.empty(), "the add is one undo step");
+    s.dirty = false;
+    test::check (! editor.addClip (0, big, 0, 999999999, 0, err).valid() && ! err.isEmpty() && s.tracks[0]->clips.empty() && ! s.dirty,
+                 "a clip from past the end of the file is refused, and the session is untouched");
+    test::check (! editor.addClip (5, big, 0, 0, 0, err).valid() && err.contains ("No track 5") && ! s.dirty, "a track that is not there is refused, and nothing changes");
+    test::check (! editor.addClip (0, tempFolder().getChildFile ("bus/none.wav"), 0, 0, 0, err).valid() && err.isNotEmpty() && s.tracks[0]->clips.empty(),
+                 "a file that is not there is refused with the reason");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -1665,6 +1836,9 @@ int main()
     recorderChecks();
     finishChecks();
     recordSettingsChecks();
+    deviceRateChecks();
+    busChecks();
+    addClipLockChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

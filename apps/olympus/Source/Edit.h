@@ -39,23 +39,17 @@ public:
     // is read into the pool first, so the first file sets the session's rate. A clip that does not fit in the file is refused.
     ClipRef addClip (int track, const juce::File& file, juce::int64 start, juce::int64 offset, juce::int64 length, juce::String& error)
     {
-        const juce::ScopedLock sl (session.lock);
-        if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
-        const auto before = session.captureEdit();
-        const int index = session.addClip (track, file, juce::jmax ((juce::int64) 0, start), error);
-        if (index < 0) return {};
-        auto& clips = session.tracks[(size_t) track]->clips;
-        const juce::int64 available = clips.back().audio != nullptr ? clips.back().audio->getNumSamples() : 0;
-        const juce::int64 play = length > 0 ? length : available - offset;
-        if (offset < 0 || offset >= available || play < 1 || offset + play > available)
+        EditState before;
         {
-            clips.pop_back();
-            error = "The file is " + juce::String (available) + " samples long: a clip from sample " + juce::String (offset) + " for "
-                    + juce::String (play) + " samples does not fit in it.";
-            return {};
+            const juce::ScopedLock sl (session.lock);
+            if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
+            before = session.captureEdit();
         }
-        clips.back().offset = offset;
-        clips.back().length = play;
+        // The file is decoded by the session with the lock free (the audio callback would be silent for the whole decode otherwise), and the
+        // clip is checked and inserted under it in one step: a refusal leaves the session as it was, and nothing is recorded.
+        const int index = session.addClip (track, file, juce::jmax ((juce::int64) 0, start), error, offset, length);
+        if (index < 0) return {};
+        const juce::ScopedLock sl (session.lock);
         record (before, "Add clip");
         return { track, index };
     }
