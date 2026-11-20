@@ -60,7 +60,7 @@ public:
     {
         const auto path = commandLine.unquoted().trim();
         if (path.isNotEmpty() && juce::File (path).existsAsFile() && window != nullptr)
-            window->content->openProject (juce::File (path));
+            window->content->openProjectRequested (juce::File (path));
     }
 
 private:

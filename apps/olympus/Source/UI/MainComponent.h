@@ -119,6 +119,7 @@ public:
     {
         bool audioDevice = true;           // false for the checks and the snapshots
         bool scanPlugins = true;           // false when the caller fills the catalog
+        bool includeSystemPlugins = true;  // false in headless checks so a test scan looks only in pluginFolders
         juce::File settingsFile = Settings::defaultFile();
         juce::File recordings;             // where takes go when set (the checks); else the project's folder, or ~/Music
         // the plugins the catalog holds, filled before the monitor chain is read (the checks; the app scans instead)
@@ -178,6 +179,7 @@ public:
     // ---- what the buttons do (public so the checks can press them) ----------------------------------------------------------------
     void newProject();
     void openProject (const juce::File& file);
+    void openProjectRequested (const juce::File& file);
     bool saveProject();
     // `done` (optional) gets whether the file was written; it runs after the chooser, which is asynchronous.
     void saveProjectAs (std::function<void (bool)> done = {});
@@ -221,7 +223,11 @@ public:
     void syncTransport();
     // What the audio callback does for one block: the same code, so the checks can drive the loop and the end of the audio.
     void renderAudioBlock (juce::AudioBuffer<float>& buffer) { juce::AudioSourceChannelInfo info (&buffer, 0, buffer.getNumSamples()); source.getNextAudioBlock (info); }
-    void scanPlugins (bool rescan = false);
+    void scanPlugins (bool rescan = false, bool suiteOnlyScan = false);
+    juce::File defaultPluginFolder() const;
+    bool addPluginFolder (const juce::File& folder);
+    bool isScanQueued() const { return scanQueued; }
+    bool isScanning() const { return scanning; }
     // Opens the editor of a plugin: track `track`'s chain slot `slot`, or with track -1 a plugin of the monitor chain. One window per plugin.
     void openEditor (int track, int slot);
     int openEditors() const { return (int) windows.size(); }
@@ -263,12 +269,14 @@ public:
     void askToDiscard (const juce::String& action, std::function<void()> proceed);
     // True (and shows the reason when a render runs) when NEW, OPEN or Quit must wait: a render is running or a dialog is open.
     bool refuseWhileBusy();
+    bool isDialogOpen() const { return dialogOpen; }
     // Quit with the changes dropped: deletes this session's autosave (the action that drops it goes through only after the question).
     void dropAutosave() { deleteAutosaves(); }
     // The questions, replaceable so the checks answer them without a dialog (the defaults show the real ones).
     enum class Unsaved { cancel, save, discard };
     std::function<Unsaved (const juce::String&)> askUnsaved;
     std::function<void (const juce::String& title, const juce::File& start, std::function<void (const juce::File&)> done)> chooseSaveFile;
+    std::function<void (const juce::File& start, std::function<void (const juce::StringArray&)> done)> chooseImportFiles;
     // Before the render's folder chooser: the bit depth and the mix-only choice in `options` (false when cancelled). Remembered in settings.
     std::function<bool (RenderOptions&)> chooseRenderOptions;
     // "Olympus found unsaved work from the last session. Open it?": true to open it.
@@ -305,6 +313,7 @@ public:
     void openLastProjectAtStart();
     double monitorLatencyMs() const;                           // the chain's latency in ms at the device's rate (0 when bypassed)
     mutable int monitorLatencyCacheSamples = 0;                // the last latency read with the lock (kept while a render or a busy lock)
+    mutable std::vector<ui::Note> notesCache;                  // the last notes read with the lock (kept while a render or a busy lock)
 
     bool keyPressed (const juce::KeyPress& key) override;
     void paint (juce::Graphics&) override;

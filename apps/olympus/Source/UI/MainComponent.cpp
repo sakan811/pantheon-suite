@@ -176,18 +176,39 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
 // block size, so it ends here with what it has; the recorder is then prepared for the new device.
 void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice* started)
 {
-    if (owner.recorder.isRecording())
-        owner.stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
-    if (started == nullptr)
-        return;
-    owner.deviceRate = started->getCurrentSampleRate();
-    prepareScratch (started->getCurrentBufferSizeSamples());
-    owner.recorder.prepare (started->getCurrentSampleRate(), started->getCurrentBufferSizeSamples(), started->getActiveInputChannels());
-    // the session follows the device's rate; its plugins are set up on the message thread
-    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    const bool onMessageThread = mm == nullptr || mm->isThisTheMessageThread();
+    const bool hasDevice = started != nullptr;
+    const double rate = hasDevice ? started->getCurrentSampleRate() : 0.0;
+    const int bufSize = hasDevice ? started->getCurrentBufferSizeSamples() : 0;
+    const juce::BigInteger activeIn = hasDevice ? started->getActiveInputChannels() : juce::BigInteger();
+
+    if (onMessageThread)
+    {
+        if (owner.recorder.isRecording())
+            owner.stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
+        if (! hasDevice)
+            return;
+        owner.deviceRate = rate;
+        prepareScratch (bufSize);
+        owner.recorder.prepare (rate, bufSize, activeIn);
         owner.adoptDeviceRate();
-    else
-        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (&owner)] { if (safe != nullptr) safe->adoptDeviceRate(); });
+        return;
+    }
+
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (&owner), hasDevice, rate, bufSize, activeIn]
+    {
+        if (safe == nullptr)
+            return;
+        if (safe->recorder.isRecording())
+            safe->stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
+        if (! hasDevice)
+            return;
+        safe->deviceRate = rate;
+        safe->io.prepareScratch (bufSize);
+        safe->recorder.prepare (rate, bufSize, activeIn);
+        safe->adoptDeviceRate();
+    });
 }
 
 // Device thread. Only a flag: the timer ends a take that the device stopped under (on the message thread).
@@ -237,6 +258,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     };
 
     // the arrangement reports what the user did; the window owns the transport, the files, the menus and the plugin windows
+    arrange.dialogOpen = &dialogOpen;
     arrange.onSeek = [this] (juce::int64 s) { seek (s); };
     arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); };
     arrange.onTrackMenu = [this] (int track) { showTrackMenu (track); };
@@ -247,6 +269,8 @@ MainComponent::MainComponent (Options options) : opts (options)
     // an armed track's meter shows its input: the larger of its one or two device inputs, since the last read
     arrange.inputLevel = [this] (int track)
     {
+        const juce::ScopedTryLock sl (session.lock);
+        if (! sl.isLocked() || session.renderRunning()) return 0.0f;
         if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return 0.0f;
         const auto& t = *session.tracks[(size_t) track];
         float peak = recorder.inputPeak (t.inputLeft);
@@ -387,10 +411,10 @@ MainComponent::MainComponent (Options options) : opts (options)
         // the last scan is loaded; the folders are read again only when there is none, or when the user asks (PLUGINS > Rescan plugins)
         session.catalog.setSuiteOnly (settings.scanSuiteOnly);
         const bool cached = session.catalog.loadCache (Settings::pluginCacheFile (opts.settingsFile));
-        if (! cached || session.catalog.names().isEmpty())
+        if (! cached)
         {
             scanQueued = true;   // the note of an empty scan waits for this scan (notes())
-            juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->scanPlugins (false); });
+            juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->scanPlugins (false, true); });
         }
     }
     // the checks fill the catalog here, before the monitor chain is read (the app's scan does it above, or after the first scan)
@@ -434,17 +458,20 @@ MainComponent::~MainComponent()
     setLookAndFeel (nullptr);
 }
 
-void MainComponent::scanPlugins (bool rescan)
+void MainComponent::scanPlugins (bool rescan, bool suiteOnlyScan)
 {
     if (scanning) return;
     scanQueued = false;
     scanning = true;
     session.catalog.setSuiteOnly (settings.scanSuiteOnly);
     ScanOptions options;
+    options.includeSystem = opts.includeSystemPlugins;
     options.rescan = rescan;
+    options.suiteOnly = settings.scanSuiteOnly || suiteOnlyScan;
+    options.cacheFile = Settings::pluginCacheFile (opts.settingsFile);
     options.deadMansPedal = Settings::scanPedalFile (opts.settingsFile);
     session.catalog.scan (settings.searchPath(), options);
-    session.catalog.saveCache (Settings::pluginCacheFile (opts.settingsFile));
+    session.catalog.saveCache (options.cacheFile);
     scanning = false;
     loadMonitorChain();   // the first scan fills the catalog the chain's plugins are made from
     // a project opened before the scan finished, or a chain read before it: their missing plugins get another try now. Adding one is not an
@@ -477,7 +504,13 @@ std::vector<ui::Note> MainComponent::notes() const
     advice.scanning = scanning || scanQueued;
     monitorLatencyMs();   // refreshes the cache with a try-lock (never waits: notes() runs in paint)
     advice.monitorLatencySamples = monitorLatencyCacheSamples;
-    return adviceFor (session, advice);
+    const juce::ScopedTryLock sl (session.lock);
+    if (sl.isLocked() && ! session.renderRunning())
+    {
+        notesCache = adviceFor (session, advice);
+        return notesCache;
+    }
+    return ! notesCache.empty() ? notesCache : adviceFor (session, advice);
 }
 
 void MainComponent::askToDiscard (const juce::String& action, std::function<void()> proceed)
@@ -791,14 +824,17 @@ bool MainComponent::startRecording()
         showError (error);
         return false;
     }
+    takeFrom = position();
+    setTakeLatency();
+    syncTransport();
+    session.prepare (false);
     source.recordStart = -1;   // set by the first device block the recorder runs in
     if (! beginRecording (recorder, session, recordingFolder(), device.rate, error))
     {
         showError (error);
         return false;
     }
-    takeFrom = position();
-    setTakeLatency();
+    source.playing = true;
     session.dirty = true;   // a take's WAV is on disk from its first block: the project is dirty now, so a quit asks and the autosave runs
     {
         const juce::ScopedLock sl (session.lock);
@@ -808,9 +844,6 @@ bool MainComponent::startRecording()
                 arrange.recordingTracks.push_back (i);
     }
     arrange.recordingFrom = arrange.recordingTo = (double) takeFrom;
-    syncTransport();
-    session.prepare (false);
-    source.playing = true;
     updateTransport();
     return true;
 }
@@ -965,6 +998,7 @@ void MainComponent::newProject()
     closeTrackEditors();
     source.playing = false;
     session.newProject ("Untitled");
+    lastEditorHash = 0;
     editor.clearUndo();
     editor.clearClipboard();
     clearMasterClip();   // a new project starts with no CLIP latched
@@ -988,6 +1022,7 @@ void MainComponent::openProject (const juce::File& file)
         showError (error);
         return;
     }
+    lastEditorHash = 0;
     editor.clearUndo();
     editor.clearClipboard();
     clearMasterClip(); // a project opened starts with no CLIP latched, as NEW does
@@ -1001,6 +1036,19 @@ void MainComponent::openProject (const juce::File& file)
     arrange.repaint();
     if (session.warnings.size() > 0)
         showError ("Opened with notes:\n\n" + session.warnings.joinIntoString ("\n"));
+}
+
+void MainComponent::openProjectRequested (const juce::File& file)
+{
+    if (refuseWhileBusy()) return;
+    askToDiscard ("Open another project and lose them?", [safe = juce::Component::SafePointer<MainComponent> (this), file]
+    {
+        if (safe == nullptr) return;
+        const auto discarded = safe->autosaveFile();
+        safe->openProject (file);
+        if (safe->session.projectFile == file)
+            discarded.deleteFile();
+    });
 }
 
 bool MainComponent::saveProject()
@@ -1024,6 +1072,7 @@ bool MainComponent::saveTo (const juce::File& file)
     const juce::File before = session.projectFile;   // the file this session was saved to until now (none when untitled)
     juce::String error;
     if (! session.save (file, error)) { showError (error); return false; }
+    lastEditorHash = 0;
     settings.lastProject = file.getFullPathName();
     settings.save (opts.settingsFile);
     deleteAutosaves();   // the project is on disk: its autosave is no longer news
@@ -1255,32 +1304,70 @@ void MainComponent::chooseAndImport()
     const auto at = position();
     if (dialogOpen) return;
     dialogOpen = true;
-    if (dialogOpen) return;
-    dialogOpen = true;
-    chooser = std::make_unique<juce::FileChooser> ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), kAudioWildcard);
+    const auto start = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    auto finish = [safe = juce::Component::SafePointer<MainComponent> (this), at] (const juce::StringArray& files)
+    {
+        if (safe == nullptr) return;
+        safe->dialogOpen = false;
+        if (! files.isEmpty()) safe->importFiles (files, -1, at);
+    };
+    if (chooseImportFiles)
+    {
+        chooseImportFiles (start, std::move (finish));
+        return;
+    }
+    chooser = std::make_unique<juce::FileChooser> ("Import audio", start, kAudioWildcard);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
-                          [this, at] (const juce::FileChooser& fc)
+                          [finishCb = std::move (finish)] (const juce::FileChooser& fc)
                           {
-                              dialogOpen = false;
                               juce::StringArray files;
                               for (auto& f : fc.getResults()) files.add (f.getFullPathName());
-                              if (! files.isEmpty()) importFiles (files, -1, at);
+                              finishCb (files);
                           });
+}
+
+juce::File MainComponent::defaultPluginFolder() const
+{
+    if (! settings.pluginFolders.isEmpty())
+    {
+        const juce::File last (settings.pluginFolders[settings.pluginFolders.size() - 1]);
+        if (last.isDirectory() && ! Catalog::isForbiddenPluginRoot (last))
+            return last;
+    }
+    const juce::File sysVst3 ("/Library/Audio/Plug-Ins/VST3");
+    if (sysVst3.isDirectory())
+        return sysVst3;
+    const juce::File userVst3 = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile ("Library/Audio/Plug-Ins/VST3");
+    if (userVst3.isDirectory())
+        return userVst3;
+    return opts.settingsFile.getParentDirectory();
+}
+
+bool MainComponent::addPluginFolder (const juce::File& folder)
+{
+    if (folder == juce::File())
+        return false;
+    if (Catalog::isForbiddenPluginRoot (folder))
+    {
+        showError ("Choose a specific plugin folder (such as a VST3 or build folder), not your home or a protected folder.");
+        return false;
+    }
+    settings.pluginFolders.addIfNotAlreadyThere (folder.getFullPathName());
+    settings.save (opts.settingsFile);
+    scanPlugins (false, false);
+    return true;
 }
 
 void MainComponent::chooseFolder()
 {
     if (dialogOpen) return;
     dialogOpen = true;
-    chooser = std::make_unique<juce::FileChooser> ("The folder with the built plugins (.vst3), or the repository's plugins folder", juce::File::getSpecialLocation (juce::File::userHomeDirectory));
+    chooser = std::make_unique<juce::FileChooser> ("The folder with the built plugins (.vst3), or the repository's plugins folder", defaultPluginFolder());
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                           [this] (const juce::FileChooser& fc)
                           {
                               dialogOpen = false;
-                              if (fc.getResult() == juce::File()) return;
-                              settings.pluginFolders.addIfNotAlreadyThere (fc.getResult().getFullPathName());
-                              settings.save (opts.settingsFile);
-                              scanPlugins();
+                              addPluginFolder (fc.getResult());
                           });
 }
 
@@ -1384,6 +1471,13 @@ void MainComponent::showPluginsMenu()
     menu.addSectionHeader ("Found: " + juce::String (session.catalog.names().size()) + " plugins");
     for (auto& n : session.catalog.names()) menu.addItem (n, false, false, nullptr);
     menu.addSeparator();
+    menu.addItem ("Suite plugins only", true, settings.scanSuiteOnly, [this]
+    {
+        settings.scanSuiteOnly = ! settings.scanSuiteOnly;
+        session.catalog.setSuiteOnly (settings.scanSuiteOnly);
+        settings.save (opts.settingsFile);
+        requestRefresh();
+    });
     menu.addItem ("Look in a folder...", [this] { chooseFolder(); });
     menu.addItem ("Rescan plugins", [this] { scanPlugins (true); requestRefresh(); });
     if (! session.catalog.blacklisted().isEmpty())
@@ -1810,6 +1904,7 @@ void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& p
         showError (error);
         return;
     }
+    lastEditorHash = 0;
     session.projectFile = project;
     session.dirty = true;
     editor.clearUndo();
