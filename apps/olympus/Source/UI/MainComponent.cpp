@@ -1225,10 +1225,10 @@ void MainComponent::loadMonitorChain()
     pedal.replaceWithText ("loading the monitor chain\n");
     juce::StringArray problems;
     monitorLoaded = session.loadMonitor (Settings::monitorFile (opts.settingsFile), problems);
-    pedal.deleteFile();
     monitorProblem = monitorLoaded ? juce::String() : problems.joinIntoString (" ");
     refreshMonitorStrip();
-    adoptDeviceRate(); // the chain's plugins were made at the session's rate, which may not be the device's yet
+    adoptDeviceRate(); // the chain's plugins were made at the session's rate, which may not be the device's yet: they are prepared again here, so the pedal stays until it is done
+    pedal.deleteFile();
 }
 
 // PLUGINS > Load saved monitor chain: the chain the last start skipped, read now (the pedal around it, as at start).
@@ -1437,7 +1437,10 @@ void MainComponent::timerCallback()
     updateRecording();
     // a plugin reported a new latency (its listener only sets a flag): the tracks' delays follow it, and the read-outs below show it
     if (session.takeLatencyChange())
+    {
         session.updateLatencies();
+        syncTransport(); // the end of the audio includes the longest chain's latency: the callback's copy follows it
+    }
     arrange.refresh();
     updateTransport();
     // A plugin edited in its own window changes the project: notice it by what the plugins would save.
