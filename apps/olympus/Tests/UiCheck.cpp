@@ -1723,7 +1723,7 @@ int main()
         test::check (! m->masterClipLatched(), "OPEN of a project clears the CLIP latch");
     }
 
-    std::printf ("[34] Clipboard and navigation keys: Cmd+C, Cmd+X and Cmd+V on the selected clip (the paste at the playhead, the new clip selected, one undo step); Home, End, comma and full stop move the playhead (no marker, one marker, three markers); the tempo field keeps its keys; a paste during a take is refused\n");
+    std::printf ("[34] Clipboard and navigation keys: Cmd+C, Cmd+X and Cmd+V on the selected clip (the paste at the playhead, the new clip selected, one undo step); Home, End, comma and full stop move the playhead (no marker, one marker, three markers); removing a track clears the clipboard; a paste during a take is refused\n");
     {
         auto w = makeWindow();
         w->addTracks ({ makeWav ("clip34.wav", 48000).getFullPathName() });
@@ -1785,7 +1785,7 @@ int main()
         nav->keyPressed (juce::KeyPress ('.'));
         test::check (pos() == 4000, "with one marker, full stop goes to it from before it");
         nav->keyPressed (juce::KeyPress (','));
-        test::check (pos() == 4000, "and comma does nothing before the first marker");
+        test::check (pos() == 4000, "and comma does nothing with the playhead on the first marker");
         nav->editor.addMarker ("B", 20000);
         nav->editor.addMarker ("C", 36000);
         nav->seek (12000);
@@ -1799,6 +1799,23 @@ int main()
 
         // The tempo field's guard (keys typed there never jump or copy) is not checked here: a headless window has no peer, so the
         // field cannot take the keyboard focus. keyPressed reads it with hasKeyboardFocus (true), as the R key does.
+
+        // a removed track would leave the clipboard pointing at the track that moved into its place: removing a track clears it
+        {
+            auto two = makeWindow();
+            two->addTracks ({ makeWav ("rm34a.wav", 48000).getFullPathName(), makeWav ("rm34b.wav", 48000).getFullPathName() });
+            two->refreshNow();
+            juce::String err;
+            test::check (two->session.tracks.size() == 2 && two->editor.copyClip ({ 1, 0 }, err), "two tracks, a clip of the second is copied");
+            two->removeTrack (0);
+            test::check (! two->editor.hasClipboard(), "removing a track clears the clipboard");
+            two->arrange.selected = {};
+            const auto before = two->session.tracks[0]->clips.size();
+            gErrors.clear();
+            two->keyPressed (juce::KeyPress ('v', cmd(), 'v'));
+            test::check (two->session.tracks[0]->clips.size() == before, "and a paste with nothing selected adds nothing to the track that took its place");
+            gErrors.clear();
+        }
 
         // a paste while a take runs is refused with the reason, and the take is placed as usual when it stops
         auto rec = makeWindow();

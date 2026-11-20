@@ -2,7 +2,9 @@
 
 Working document, not user documentation. Delete it when the last box is ticked and move what stays true into `README.md` and `CLAUDE.md`.
 Goal (from the user): turn Olympus from a stem host into a **basic DAW**: scan third-party plugins, grid, audio editing, a tempo system, markers, faders, panning, and the rest of a basic audio workflow.
-Status: the **engine and the window are on the clip model** (steps 1, 3 and 4 are done). The mixer (step 2) is not.
+Status: the **engine and the window are on the clip model** (steps 1, 3 and 4 are done). The mixer view (step 2) is not: the arrangement's track headers carry the faders, pans and meters, and the window has a master fader, meter and CLIP lamp.
+
+Readiness pass (branch `olympus/daw-readiness`): the render no longer freezes the window or reports a cancel as an error, with bit-depth and mix-only options; quit, NEW and OPEN ask Save / Don't save / Cancel and keep a running take; autosave and recovery; the device output is held to full scale (NaN is 0); master meter with a latching CLIP lamp; MCP `undo` and `redo` (33 tools); lost-sample and write-failure messages for a take; clip copy, cut and paste; Home, End and marker keys. Still open: the mixer view, multi-select, crossfades between clips, track colours and reordering, an undo for add and remove track, real-device and real-plugin checks by a person (see CLAUDE.md, Not done yet).
 
 ## Decisions already made (keep them; they are what the code does)
 
@@ -51,4 +53,4 @@ Each step is one agent (Haiku was used so far) with a precise brief; only one ag
 scripts/build.sh olympus            # OlympusTests + OlympusUiCheck, must pass
 scripts/build.sh olympus snap app OlympusMcp   # all targets compile (snap rewrites docs/screenshot.png: look at it, or git checkout it)
 ```
-Next action: step 2 (MixerView). The brief is the list above plus the interface; give the agent `Source/Session.h`, `Source/Edit.h`, `Source/Tempo.h`, `Source/UI/Arrange.h`, `Tests/UiCheck.cpp` and the kit headers to read first.
+Next action: step 2 (MixerView), or multi-select clips. The brief is the list above plus the interface; give the agent `Source/Session.h`, `Source/Edit.h`, `Source/Tempo.h`, `Source/UI/Arrange.h`, `Tests/UiCheck.cpp` and the kit headers to read first.

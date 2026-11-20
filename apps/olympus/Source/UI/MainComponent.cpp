@@ -1134,6 +1134,7 @@ void MainComponent::removeTrack (int index)
     if (session.removeTrack (index, error))
     {
         editor.clearUndo();
+        editor.clearClipboard();   // it remembers the copy's track by number: the tracks after the removed one have moved up
         arrange.selected = {};
     }
     else showError (error);
