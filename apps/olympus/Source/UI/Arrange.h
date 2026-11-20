@@ -89,9 +89,11 @@ public:
     // The label of a track's input: "IN 1" for a mono input, "IN 1+2" for a pair (inputs are numbered from 1 here).
     static juce::String inputText (int left, int right);
 
-    // The header's ARM and IN buttons (the checks press them; nullptr when there is no such track).
+    // The header's ARM and IN buttons and fader (the checks press and read them; nullptr when there is no such track).
     juce::Button* armButton (int track);
     juce::Button* inputButton (int track);
+    juce::Slider* faderSlider (int track);
+    bool isInteracting() const;
 
     // Checks only: drive an open askText box (clip gain, rename clip, rename marker) without clicking its native modal buttons.
     bool hasOpenDialog() const { return activeDialog != nullptr || (bool) pendingDialogEnd; }

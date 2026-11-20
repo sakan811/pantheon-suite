@@ -178,7 +178,7 @@ public:
 
     // ---- what the buttons do (public so the checks can press them) ----------------------------------------------------------------
     void newProject();
-    void openProject (const juce::File& file);
+    bool openProject (const juce::File& file);
     void openProjectRequested (const juce::File& file);
     bool saveProject();
     // `done` (optional) gets whether the file was written; it runs after the chooser, which is asynchronous.
@@ -193,6 +193,9 @@ public:
     // At start, after the last project: unsaved work of the last session (an autosave newer than its project, or an untitled one) is offered;
     // "Open it" loads it as the session with changes, its project file kept, and "Ignore" deletes it. Returns true when an autosave was found.
     bool offerRecovery();
+    // Notices when the project file on disk was saved outside this window (by the MCP server, say): reloads it at once when this window has
+    // no unsaved changes, or asks (`askReload`) when it has. Returns true when the project was reloaded. Called by the timer, and by checks.
+    bool checkExternalProjectChange();
     // One new track per file, its clip at sample 0 (the checks' way in; the buttons use importFiles at the playhead).
     void addTracks (const juce::StringArray& files);
     // Audio files as clips: with `track` -1 each file is a new track named after it, else the files go on that track one after another.
@@ -281,6 +284,8 @@ public:
     std::function<bool (RenderOptions&)> chooseRenderOptions;
     // "Olympus found unsaved work from the last session. Open it?": true to open it.
     std::function<bool (const juce::String&)> askRecover;
+    // "The project file was changed on disk (for example by the MCP server). Reload it and lose the unsaved changes in this window?": true to reload.
+    std::function<bool (const juce::String&)> askReload;
     // A message that is not a problem (the render's result): a box by default.
     std::function<void (const juce::String&)> notify;
     std::function<void (const juce::File&)> reveal;   // the render's folder, shown in the file manager (replaceable: the checks show nothing)
@@ -423,6 +428,8 @@ private:
     juce::int64 lastEditorHash = 0;
     int tick = 0;
     double lastAutosaveMs = 0.0;                    // juce::Time::getMillisecondCounterHiRes at the last autosave (or at start)
+    juce::Time loadedProjectMtime;                  // the project file's modification time when this window last loaded, saved or checked it
+    int externalCheckTick = 0;
     bool scanning = false;                          // the scan runs (scanPlugins)
     bool scanQueued = false;                        // the start's scan is queued and has not begun
     juce::StringArray signatures { "4/4", "3/4", "2/4", "5/4", "6/8", "7/8", "12/8" };

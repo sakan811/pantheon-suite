@@ -30,6 +30,7 @@ std::vector<std::function<void()>> gClosers;   // the "closed" callbacks of the 
 bool gAnswer = false;                          // the answer the checks give to the questions (Discard / Open it / the save target)
 juce::File gSaveTarget;                        // what the Save As chooser of a check returns (empty: cancelled)
 bool gRecoverAnswer = false;                   // "Open it" when true
+bool gReloadAnswer = false;                    // "Reload" when true
 
 juce::File tempFolder()
 {
@@ -91,6 +92,7 @@ std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true, const juce::
     w->chooseSaveFile = [] (const juce::String&, const juce::File&, std::function<void (const juce::File&)> done) { done (gSaveTarget); };
     w->chooseRenderOptions = [] (RenderOptions&) { return true; };   // the dialog is answered by the checks: the options as they are
     w->askRecover = [] (const juce::String&) { return gRecoverAnswer; };
+    w->askReload = [] (const juce::String&) { return gReloadAnswer; };
     w->notify = [] (const juce::String& message) { gNotes.push_back (message); };
     w->reveal = [] (const juce::File&) {};
     return w;
@@ -2277,6 +2279,88 @@ int main()
                              && w->defaultPluginFolder() == validFolder,
                          "addPluginFolder accepts a valid plugin folder and defaultPluginFolder() returns it");
         }
+    }
+
+    std::printf ("[37] External project reload and track fader tooltips\n");
+    {
+        const auto dir = tempFolder().getChildFile ("ext-reload");
+        dir.createDirectory();
+        const auto proj = dir.getChildFile ("live.olympus");
+        auto w = makeWindow (true, dir.getChildFile ("settings.xml"));
+        const auto wav = makeWav ("ext-reload.wav", 24000);
+        w->addTracks ({ wav.getFullPathName() });
+        juce::String err;
+        test::check (w->session.addPlugin (0, "Test Gain", -1, err) && w->saveTo (proj) && ! w->session.dirty,
+                     "external reload: project saved with track and plugin");
+        test::check (w->arrange.faderSlider (0) != nullptr
+                         && w->arrange.faderSlider (0)->getTooltip() == "Fader +0.0 dB (drag, double-click for 0 dB)",
+                     "external reload: initial track 0 fader tooltip is +0.0 dB");
+
+        // External process (e.g. OlympusMcp) modifies the project file on disk with a newer mtime.
+        Session mcp;
+        test::addTestPlugins (mcp.catalog);
+        test::check (mcp.load (proj, err), "external reload: MCP loads project");
+        Editor mcpEd (mcp);
+        test::check (mcpEd.setTrackGain (0, -5.4f, err), "external reload: MCP sets track gain to -5.4 dB");
+        mcp.tracks[0]->chain[0]->instance->setCurrentProgram (1);
+        test::check (mcp.save (proj, err), "external reload: MCP saves project");
+        proj.setLastModificationTime (juce::Time::getCurrentTime() + juce::RelativeTime::seconds (10.0));
+
+        // While playback or render is active, checkExternalProjectChange defers without consuming the mtime change.
+        w->togglePlay();
+        test::check (w->isPlaying() && ! w->checkExternalProjectChange() && std::abs (w->session.tracks[0]->gainDb) < 0.01f,
+                     "external reload: deferred while playing");
+        w->togglePlay();
+        w->session.renderBusy.store (true);
+        test::check (! w->checkExternalProjectChange() && std::abs (w->session.tracks[0]->gainDb) < 0.01f,
+                     "external reload: deferred while rendering");
+        w->session.renderBusy.store (false);
+
+        // Clean window auto-reloads immediately without asking.
+        test::check (w->checkExternalProjectChange()
+                         && std::abs (w->session.tracks[0]->gainDb - (-5.4f)) < 0.01f
+                         && w->session.tracks[0]->chain[0]->instance->getCurrentProgram() == 1
+                         && ! w->session.dirty,
+                     "external reload: clean window reloads track gain (-5.4 dB) and plugin preset (1) automatically");
+        test::check (w->arrange.faderSlider (0) != nullptr
+                         && w->arrange.faderSlider (0)->getTooltip() == "Fader -5.4 dB (drag, double-click for 0 dB)",
+                     "external reload: track 0 fader tooltip updated to -5.4 dB after reload");
+
+        // Dirty window prompts via askReload: "Keep mine" (false) keeps local changes and does not prompt again for the same mtime.
+        test::check (w->editor.setTrackGain (0, -12.0f, err) && w->session.dirty, "external reload: window makes local edit (-12 dB)");
+        test::check (w->autosaveNow() && w->autosaveFile().existsAsFile(), "external reload: autosave written for dirty window");
+        test::check (mcpEd.setTrackGain (0, -3.0f, err) && mcp.save (proj, err), "external reload: MCP saves -3.0 dB");
+        proj.setLastModificationTime (juce::Time::getCurrentTime() + juce::RelativeTime::seconds (20.0));
+        int reloadPrompts = 0;
+        w->askReload = [&] (const juce::String&) { ++reloadPrompts; return gReloadAnswer; };
+        gReloadAnswer = false;
+        test::check (! w->checkExternalProjectChange() && reloadPrompts == 1
+                         && std::abs (w->session.tracks[0]->gainDb - (-12.0f)) < 0.01f && w->session.dirty,
+                     "external reload: dirty window with Keep mine preserves local -12 dB and dirty flag");
+        test::check (! w->checkExternalProjectChange() && reloadPrompts == 1,
+                     "external reload: same mtime does not prompt a second time");
+
+        // Newer external save with "Reload" (true) reloads the disk file, clears dirty, and deletes the discarded autosave.
+        proj.setLastModificationTime (juce::Time::getCurrentTime() + juce::RelativeTime::seconds (30.0));
+        gReloadAnswer = true;
+        test::check (w->checkExternalProjectChange() && reloadPrompts == 2
+                         && std::abs (w->session.tracks[0]->gainDb - (-3.0f)) < 0.01f
+                         && ! w->session.dirty && ! w->autosaveFile().existsAsFile(),
+                     "external reload: dirty window with Reload loads external -3.0 dB, clears dirty, and deletes autosave");
+        test::check (w->arrange.faderSlider (0) != nullptr
+                         && w->arrange.faderSlider (0)->getTooltip() == "Fader -3.0 dB (drag, double-click for 0 dB)",
+                     "external reload: track 0 fader tooltip updated to -3.0 dB after second reload");
+
+        // Failed reload (corrupt XML on disk) returns false, keeps current session in w, and does NOT delete w->autosaveFile().
+        test::check (w->editor.setTrackGain (0, -9.0f, err) && w->session.dirty && w->autosaveNow() && w->autosaveFile().existsAsFile(),
+                     "external reload: dirty session (-9 dB) and autosave prepared before failed reload");
+        proj.replaceWithText ("<not-valid-project-xml");
+        proj.setLastModificationTime (juce::Time::getCurrentTime() + juce::RelativeTime::seconds (40.0));
+        gReloadAnswer = true;
+        test::check (! w->checkExternalProjectChange()
+                         && std::abs (w->session.tracks[0]->gainDb - (-9.0f)) < 0.01f
+                         && w->session.dirty && w->autosaveFile().existsAsFile(),
+                     "external reload: failed reload returns false, keeps session state, and preserves autosave");
     }
 
     tempFolder().deleteRecursively();
