@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Advice.h"
+#include "Analyze.h"
 #include "Edit.h"
 #include "Session.h"
 #include "Tempo.h"
@@ -102,7 +103,9 @@ private:
                "position (seconds or beats), split_clip / move_clip / trim_clip / delete_clip / set_clip edit clips, set_tempo, set_time_signature, "
                "add_marker / remove_marker, set_loop and set_master set the rest. Tracks, clips, markers and plugin slots are numbered from 0; a track may also "
                "be named, a plugin may be given by the start of its name ('hermes'). Call list_plugins first: only plugins that are installed can be used. "
-               "Parameter values are 0..1, or text as the plugin shows it ('-3.0 dB'). Nothing is played: this server only edits and renders.";
+               "Parameter values are 0..1, or text as the plugin shows it ('-3.0 dB'). Nothing is played: this server only edits and renders. "
+               "Use analyze_audio for DSP mixing and mastering analysis of the session mix/stems, a single track, or an audio file "
+               "(loudness, true peak, tonal balance, resonance, harshness, phase/mono compatibility, and inter-track masking).";
     }
 
     // ---- the tools ------------------------------------------------------------------------------------------------------
@@ -154,6 +157,12 @@ private:
         list.add (tool ("render_stems", "Writes one WAV per audible track (after its chain and fader, aligned to the audio) and mix.wav, into a folder.",
                         { { "folder", prop ("string", "Absolute path of the folder (made if needed)") }, { "tail_seconds", prop ("number", "Extra time at the end for tails; default 0") },
                           { "mix", prop ("boolean", "Also write mix.wav; default true") }, { "bits", prop ("integer", "16, 24 or 32 (float, default)") } }, { "folder" }));
+        list.add (tool ("analyze_audio",
+                        "DSP mixing and mastering analysis (BS.1770-4 LUFS, true peak, LRA, crest/PLR, 1/6-oct tonal balance vs target curve, resonance rings, 4-10 kHz harshness, stereo correlation/mono loss, inter-track masking, and plugin recommendations). Analyzes the session mix and stems by default, or a specific 'track' or audio 'file'.",
+                        { { "track", trackRef },
+                          { "file", prop ("string", "Optional absolute path of an audio file to analyze directly") },
+                          { "target", prop ("string", "Tonal target curve: modern_pop (default), electronic, rock, acoustic, flat") },
+                          { "target_lufs", prop ("number", "Target integrated loudness in LUFS (default -14.0)") } }));
 
         // the timeline: a position is given as seconds or as beats (quarter notes from the start), exactly one of the two
         const auto pos = [] (const char* what) { return prop ("number", what); };
@@ -319,6 +328,179 @@ private:
             d.getDynamicObject()->setProperty ("can_undo", editor.canUndo());
             d.getDynamicObject()->setProperty ("can_redo", editor.canRedo());
             return d;
+        }
+
+        if (name == "analyze_audio")
+        {
+            const bool hasFile = a.hasProperty ("file") && a["file"].toString().isNotEmpty();
+            const bool hasTrack = a.hasProperty ("track") && ! a["track"].isVoid() && a["track"].toString().isNotEmpty();
+            if (hasFile && hasTrack)
+            {
+                error = "Give either 'file' or 'track', not both.";
+                return {};
+            }
+
+            juce::String target = "modern_pop";
+            if (a.hasProperty ("target") && ! a["target"].isVoid())
+            {
+                const auto t = a["target"].toString().trim();
+                if (t.isNotEmpty())
+                {
+                    const auto lower = t.toLowerCase();
+                    if (lower != "modern_pop" && lower != "pop" && lower != "streaming"
+                        && lower != "electronic" && lower != "rock" && lower != "acoustic" && lower != "flat")
+                    {
+                        error = "Unknown 'target' curve '" + t + "'. Use: modern_pop, electronic, rock, acoustic, or flat.";
+                        return {};
+                    }
+                    target = lower;
+                }
+            }
+
+            double targetLufs = -14.0;
+            if (a.hasProperty ("target_lufs") && ! a["target_lufs"].isVoid())
+            {
+                if (! (a["target_lufs"].isDouble() || a["target_lufs"].isInt() || a["target_lufs"].isInt64()))
+                {
+                    error = "'target_lufs' must be a number in [-60.0, 0.0].";
+                    return {};
+                }
+                const double v = (double) a["target_lufs"];
+                if (! std::isfinite (v) || v < -60.0 || v > 0.0)
+                {
+                    error = "'target_lufs' must be between -60.0 and 0.0.";
+                    return {};
+                }
+                targetLufs = v;
+            }
+
+            auto readWavFile = [] (const juce::File& f, juce::AudioBuffer<float>& buf, double& rate, juce::String& err) -> bool
+            {
+                if (! f.existsAsFile())
+                {
+                    err = "Audio file not found: " + f.getFullPathName();
+                    return false;
+                }
+                juce::AudioFormatManager fm;
+                fm.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> reader (fm.createReaderFor (f));
+                if (reader == nullptr)
+                {
+                    err = "Cannot read audio file: " + f.getFullPathName();
+                    return false;
+                }
+                if (reader->sampleRate <= 0.0 || reader->numChannels == 0)
+                {
+                    err = "Invalid audio format in: " + f.getFullPathName();
+                    return false;
+                }
+                const int n = (int) juce::jmin<juce::int64> (reader->lengthInSamples, (juce::int64) std::numeric_limits<int>::max());
+                buf.setSize ((int) reader->numChannels, n);
+                if (n > 0 && ! reader->read (&buf, 0, n, 0, true, true))
+                {
+                    err = "Failed to read audio samples from: " + f.getFullPathName();
+                    return false;
+                }
+                rate = reader->sampleRate;
+                return true;
+            };
+
+            if (hasFile)
+            {
+                juce::AudioBuffer<float> buf;
+                double rate = 0.0;
+                if (! readWavFile (juce::File (a["file"].toString()), buf, rate, error))
+                    return {};
+                return analyze::analyzeBuffer (buf, rate, target, targetLufs).toVar();
+            }
+
+            struct TempDirGuard
+            {
+                juce::File dir;
+                ~TempDirGuard() { dir.deleteRecursively(); }
+            };
+            const TempDirGuard tempGuard {
+                juce::File::getSpecialLocation (juce::File::tempDirectory)
+                    .getChildFile ("olympus-analyze-" + juce::Uuid().toString())
+            };
+
+            if (hasTrack)
+            {
+                const int trackIdx = session.findTrack (a["track"], error);
+                if (trackIdx < 0)
+                    return {};
+                juce::String trackName;
+                {
+                    const juce::ScopedLock sl (session.lock);
+                    if (trackIdx < (int) session.tracks.size())
+                        trackName = session.tracks[(size_t) trackIdx]->name;
+                }
+
+                RenderOptions opts;
+                opts.folder = tempGuard.dir;
+                opts.writeStems = true;
+                opts.writeMix = false;
+                opts.bits = 32;
+                RenderResult res;
+                if (! session.renderStems (opts, res, error))
+                    return {};
+
+                const juce::String prefix = juce::String (trackIdx + 1).paddedLeft ('0', 2) + "-";
+                juce::File stemFile;
+                for (const auto& s : res.stems)
+                {
+                    const juce::File f (s.file);
+                    if (f.getFileName().startsWith (prefix))
+                    {
+                        stemFile = f;
+                        break;
+                    }
+                }
+                if (! stemFile.existsAsFile())
+                {
+                    error = "Track '" + trackName + "' is muted or not soloed, so it produces no audio.";
+                    return {};
+                }
+
+                juce::AudioBuffer<float> buf;
+                double rate = 0.0;
+                if (! readWavFile (stemFile, buf, rate, error))
+                    return {};
+                return analyze::analyzeBuffer (buf, rate > 0.0 ? rate : session.sampleRate, target, targetLufs).toVar();
+            }
+
+            RenderOptions opts;
+            opts.folder = tempGuard.dir;
+            opts.writeStems = true;
+            opts.writeMix = true;
+            opts.bits = 32;
+            RenderResult res;
+            if (! session.renderStems (opts, res, error))
+                return {};
+
+            juce::AudioBuffer<float> mixBuf;
+            double mixRate = 0.0;
+            if (! readWavFile (juce::File (res.mixFile), mixBuf, mixRate, error))
+                return {};
+            const double effectiveRate = mixRate > 0.0 ? mixRate : session.sampleRate;
+            const auto mixAnalysis = analyze::analyzeBuffer (mixBuf, effectiveRate, target, targetLufs);
+
+            std::vector<analyze::TrackAudio> stemBuffers;
+            stemBuffers.reserve (res.stems.size());
+            for (const auto& s : res.stems)
+            {
+                juce::AudioBuffer<float> sb;
+                double sRate = 0.0;
+                if (! readWavFile (juce::File (s.file), sb, sRate, error))
+                    return {};
+                stemBuffers.push_back ({ s.track, std::move (sb) });
+            }
+            const auto masking = analyze::analyzeMasking (stemBuffers, effectiveRate);
+            const auto maskingVar = masking.toVar();
+
+            return object ({ { "mix", mixAnalysis.toVar() },
+                             { "tracks", maskingVar["tracks"] },
+                             { "masking", maskingVar } });
         }
 
         // everything below names a track

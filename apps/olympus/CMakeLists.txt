@@ -15,8 +15,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # JUCE is not vendored: cmake/Juce.cmake fetches it (and owns the version).
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/Juce.cmake) # JUCE, one version for the repository
 
-# The interface kit shared with the plugins and the other app.
+# The interface kit and DSP shared with the plugins and the other app.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/ui ${CMAKE_BINARY_DIR}/shared/ui)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../shared/dsp ${CMAKE_BINARY_DIR}/shared/dsp)
 
 # Olympus hosts the suite's plugins: it loads built VST3 bundles at run time, and links none of them.
 # Every Olympus target needs the plugin-hosting switches; the rest are the repository's own (cmake/Juce.cmake).
@@ -77,6 +78,7 @@ target_compile_definitions(OlympusCore PUBLIC ${OLYMPUS_DEFINITIONS} JUCE_STANDA
 target_link_libraries(OlympusCore
     PUBLIC
         pantheon_ui
+        pantheon_dsp
         ${OLYMPUS_LIBRARIES}
         juce::juce_recommended_config_flags
     PRIVATE
@@ -89,7 +91,7 @@ else()
     option(OLYMPUS_SHARE_JUCE_BUILD "Compile the JUCE modules once, in OlympusCore" ON)
 endif()
 if(OLYMPUS_SHARE_JUCE_BUILD)
-    olympus_move_juce_sources(OlympusCore pantheon_ui ${OLYMPUS_LIBRARIES})
+    olympus_move_juce_sources(OlympusCore pantheon_ui pantheon_dsp ${OLYMPUS_LIBRARIES})
 endif()
 
 # ---------------------------------------------------------------------------------------
