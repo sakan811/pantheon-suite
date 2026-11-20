@@ -313,6 +313,13 @@ ArrangeView::ArrangeView (Session& s, Editor& e) : session (s), editor (e), wave
 
 ArrangeView::~ArrangeView()
 {
+    pendingDialogEnd = nullptr;
+    if (activeDialog != nullptr)
+    {
+        activeDialog->exitModalState (0);
+        delete activeDialog.getComponent();
+    }
+    dialogFlag() = false;
     gesture.reset();
     headers.clear();
 }
@@ -1103,6 +1110,12 @@ void ArrangeView::nudgeSelected (int dx, int dy, bool bar)
         if (dx != 0) seekTo ((juce::int64) juce::jmax (0.0, (double) playhead + dx * stepSamples));
         return;
     }
+    if (! juce::isPositiveAndBelow (selected.track, (int) s.tracks.size())
+        || ! juce::isPositiveAndBelow (selected.clip, (int) s.tracks[(size_t) selected.track].clips.size()))
+    {
+        selected = {};
+        return;
+    }
     const auto& c = s.tracks[(size_t) selected.track].clips[(size_t) selected.clip];
     if (dx != 0)
     {
@@ -1130,6 +1143,9 @@ void ArrangeView::splitAtPlayhead()
 
     const auto inside = [&] (ClipRef r)
     {
+        if (! r.valid() || ! juce::isPositiveAndBelow (r.track, (int) s.tracks.size())
+            || ! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].clips.size()))
+            return false;
         const auto& c = s.tracks[(size_t) r.track].clips[(size_t) r.clip];
         return at > c.start && at < c.end();
     };
@@ -1279,22 +1295,50 @@ void ArrangeView::clipAction (ClipRef ref, int action)
             if (! editor.setClipMute (ref.track, ref.clip, ! c.mute, error)) report (error);
             break;
         case 6:
-            askText ("Clip gain", "Gain in dB, from -100 to +24", juce::String (c.gainDb, 1), [this, ref] (const juce::String& text)
-            {
-                if (! text.containsAnyOf ("0123456789")) { report ("Type a number of dB."); return; }
-                juce::String e;
-                if (! editor.setClipGain (ref.track, ref.clip, text.getFloatValue(), e)) report (e);
-                edited();
-            });
+        {
+            const auto clipStart = c.start, clipLength = c.length, clipOffset = c.offset;
+            const auto clipName = c.name;
+            juce::Component::SafePointer<ArrangeView> safe (this);
+            askText ("Clip gain", "Gain in dB, from -100 to +24", juce::String (c.gainDb, 1),
+                     [safe, ref, clipStart, clipLength, clipOffset, clipName] (const juce::String& text)
+                     {
+                         if (safe == nullptr) return;
+                         if (! text.containsAnyOf ("0123456789")) { safe->report ("Type a number of dB."); return; }
+                         const auto now = safe->snapshot();
+                         if (! ref.valid() || ! juce::isPositiveAndBelow (ref.track, (int) now.tracks.size())
+                             || ! juce::isPositiveAndBelow (ref.clip, (int) now.tracks[(size_t) ref.track].clips.size()))
+                             return;
+                         const auto& cur = now.tracks[(size_t) ref.track].clips[(size_t) ref.clip];
+                         if (cur.start != clipStart || cur.length != clipLength || cur.offset != clipOffset || cur.name != clipName)
+                             return;
+                         juce::String e;
+                         if (! safe->editor.setClipGain (ref.track, ref.clip, text.getFloatValue(), e)) safe->report (e);
+                         safe->edited();
+                     });
             return;
+        }
         case 7:
-            askText ("Rename clip", "The new name", c.name, [this, ref] (const juce::String& text)
-            {
-                juce::String e;
-                if (! editor.renameClip (ref.track, ref.clip, text, e)) report (e);
-                edited();
-            });
+        {
+            const auto clipStart = c.start, clipLength = c.length, clipOffset = c.offset;
+            const auto clipName = c.name;
+            juce::Component::SafePointer<ArrangeView> safe (this);
+            askText ("Rename clip", "The new name", c.name,
+                     [safe, ref, clipStart, clipLength, clipOffset, clipName] (const juce::String& text)
+                     {
+                         if (safe == nullptr) return;
+                         const auto now = safe->snapshot();
+                         if (! ref.valid() || ! juce::isPositiveAndBelow (ref.track, (int) now.tracks.size())
+                             || ! juce::isPositiveAndBelow (ref.clip, (int) now.tracks[(size_t) ref.track].clips.size()))
+                             return;
+                         const auto& cur = now.tracks[(size_t) ref.track].clips[(size_t) ref.clip];
+                         if (cur.start != clipStart || cur.length != clipLength || cur.offset != clipOffset || cur.name != clipName)
+                             return;
+                         juce::String e;
+                         if (! safe->editor.renameClip (ref.track, ref.clip, text, e)) safe->report (e);
+                         safe->edited();
+                     });
             return;
+        }
         case 8:
             if (editor.deleteClip (ref.track, ref.clip, error)) selected = {};
             else report (error);
@@ -1328,25 +1372,62 @@ void ArrangeView::markerAction (int index, int action)
         edited();
         return;
     }
-    askText ("Rename marker", "The new name", s.markers[(size_t) index].name, [this, index] (const juce::String& text)
+    const auto markerStart = s.markers[(size_t) index].start;
+    const auto markerName = s.markers[(size_t) index].name;
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    askText ("Rename marker", "The new name", markerName, [safe, index, markerStart, markerName] (const juce::String& text)
     {
+        if (safe == nullptr) return;
+        const auto now = safe->snapshot();
+        if (! juce::isPositiveAndBelow (index, (int) now.markers.size())
+            || now.markers[(size_t) index].start != markerStart || now.markers[(size_t) index].name != markerName)
+            return;
         juce::String e;
-        if (! editor.renameMarker (index, text, e)) report (e);
-        edited();
+        if (! safe->editor.renameMarker (index, text, e)) safe->report (e);
+        safe->edited();
     });
 }
 
 // A small text box in a modal window; the answer goes to `onOk` when it is OK.
 void ArrangeView::askText (const juce::String& title, const juce::String& prompt, const juce::String& initial, std::function<void (const juce::String&)> onOk)
 {
+    if (dialogFlag()) return;
+    dialogFlag() = true;
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    pendingDialogEnd = [safe, okCb = std::move (onOk)] (bool accept, const juce::String& text)
+    {
+        if (safe == nullptr) return;
+        safe->pendingDialogEnd = nullptr;
+        safe->activeDialog = nullptr;
+        safe->dialogFlag() = false;
+        if (accept && okCb) okCb (text);
+    };
     auto* box = new juce::AlertWindow (title, prompt, juce::MessageBoxIconType::NoIcon);
     box->addTextEditor ("text", initial, {});
     box->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    box->enterModalState (true, juce::ModalCallbackFunction::create ([box, onOk] (int result)
+    activeDialog = box;
+    box->enterModalState (true, juce::ModalCallbackFunction::create ([safe, box] (int result)
     {
-        if (result == 1) onOk (box->getTextEditorContents ("text"));
+        if (safe == nullptr || ! safe->pendingDialogEnd) return;
+        const auto text = result == 1 ? box->getTextEditorContents ("text") : juce::String();
+        auto done = std::move (safe->pendingDialogEnd);
+        done (result == 1, text);
     }), true);
+}
+
+void ArrangeView::finishOpenDialogForTest (bool accept, const juce::String& text)
+{
+    if (! pendingDialogEnd) return;
+    auto done = std::move (pendingDialogEnd);
+    if (activeDialog != nullptr)
+    {
+        auto* box = activeDialog.getComponent();
+        activeDialog = nullptr;
+        box->exitModalState (0);
+        delete box;
+    }
+    done (accept, text);
 }
 
 // ---- files ---------------------------------------------------------------------------------------------------------------------------
