@@ -130,6 +130,7 @@ struct RenderOptions
     juce::File folder;
     double tailSeconds = 0.0; // after the audio ends, so a reverb or delay can ring out
     bool writeMix = true;     // mix.wav, the sum of the stems, with the master gain
+    bool writeStems = true;   // the stems; off, only mix.wav is written (the mix still runs every track together)
     int bits = 32;            // 16, 24 or 32 (32 is float: it cannot clip, and stems are for editing later)
 };
 
@@ -140,6 +141,7 @@ struct RenderResult
     juce::String mixFile;
     double mixPeakDb = -200.0;
     double seconds = 0.0;
+    bool stopped = false;     // the progress callback asked for the render to stop; its files of this run were deleted
 };
 
 // What an edit changes, copied out and back for undo. Clips share their audio, so a copy is cheap.
@@ -167,6 +169,10 @@ public:
     LatencyWatch latencyWatch;                 // declared before the slots: they remove their listener from it (Slot::~Slot)
     Catalog catalog;
     mutable juce::CriticalSection lock;
+    // true while renderStems runs: it holds `lock` for the whole render, so the message thread (the timer, the paint) must not wait for
+    // it: it tries the lock or skips, and reads the plugins only when this is false.
+    std::atomic<bool> renderBusy { false };
+    bool renderRunning() const { return renderBusy.load(); }
     std::vector<std::unique_ptr<Track>> tracks;
     double sampleRate = 0.0; // 0 until the first clip is added
     juce::File projectFile;
@@ -851,9 +857,12 @@ public:
     // false to stop. Covers [0, length() + tail).
     bool renderStems (const RenderOptions& options, RenderResult& result, juce::String& error, const std::function<bool (float)>& progress = {})
     {
+        struct Busy { std::atomic<bool>& flag; explicit Busy (std::atomic<bool>& f) : flag (f) { flag = true; } ~Busy() { flag = false; } };
+        const Busy busy (renderBusy);   // set before the lock is taken: the message thread sees it while this waits for the lock too
         const juce::ScopedLock sl (lock);
         if (tracks.empty()) { error = "There are no tracks."; return false; }
         if (sampleRate <= 0.0) { error = "Nothing to render: no audio has been added."; return false; }
+        if (! options.writeStems && ! options.writeMix) { error = "Nothing to write: stems and mix are both off."; return false; }
         // The tail is at most a minute: a reverb or delay ringing out, not a way to write hours of silence.
         const double tail = std::isfinite (options.tailSeconds) ? juce::jlimit (0.0, 60.0, options.tailSeconds) : 0.0;
         const juce::int64 stemLength = length() + (juce::int64) std::llround (tail * sampleRate);
@@ -872,8 +881,11 @@ public:
             o.track = t.get();
             o.latency = t->latency();
             o.file = options.folder.getChildFile (juce::String (index).paddedLeft ('0', 2) + "-" + juce::File::createLegalFileName (t->name) + ".wav");
-            o.writer = makeWriter (o.file, options.bits, error);
-            if (o.writer == nullptr) { return false; }
+            if (options.writeStems)
+            {
+                o.writer = makeWriter (o.file, options.bits, error);
+                if (o.writer == nullptr) { return false; }
+            }
             outs.push_back (std::move (o));
         }
         if (outs.empty()) { error = "No track is audible (all muted, or others soloed)."; return false; }
@@ -906,7 +918,7 @@ public:
                     block.applyGain (ch, 0, count, ch == 0 ? left : right);
                     o.peak = juce::jmax (o.peak, block.getMagnitude (ch, 0, count));
                 }
-                if (! o.writer->writeFromAudioSampleBuffer (block, 0, count)) { error = "Writing " + o.file.getFileName() + " failed."; return false; }
+                if (o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count)) { error = "Writing " + o.file.getFileName() + " failed."; return false; }
                 if (options.writeMix)
                 {
                     const int dest = (int) (start + first - o.latency);
@@ -914,12 +926,21 @@ public:
                         mix.addFrom (ch, dest, block, ch, 0, count);
                 }
             }
-            if (progress && ! progress ((float) ((double) (start + n) / (double) end))) { error = "Stopped."; return false; }
+            if (progress && ! progress ((float) ((double) (start + n) / (double) end)))
+            {
+                // a cancelled render leaves no stem of its run behind: the files it wrote are closed and deleted, and the caller says nothing
+                if (options.writeStems)
+                    for (auto& o : outs) { o.writer.reset(); o.file.deleteFile(); }
+                result.stopped = true;
+                error = "Stopped.";
+                return false;
+            }
         }
         for (auto& o : outs)
         {
             o.writer.reset();
-            result.stems.push_back ({ o.track->name, o.file.getFullPathName(), o.peak > 0.0f ? (double) juce::Decibels::gainToDecibels (o.peak) : -200.0 });
+            if (options.writeStems)
+                result.stems.push_back ({ o.track->name, o.file.getFullPathName(), o.peak > 0.0f ? (double) juce::Decibels::gainToDecibels (o.peak) : -200.0 });
         }
         if (options.writeMix)
         {
@@ -1020,6 +1041,25 @@ public:
         }
         projectFile = file;
         dirty = false;
+        return true;
+    }
+
+    // Writes the project to `file` and leaves the session as it is: the name, the project file and the dirty flag do not change (the
+    // autosave, Olympus' MainComponent). Holds the lock while the XML is made, like save(); the file is written beside and moved over.
+    bool saveCopy (const juce::File& file, juce::String& error)
+    {
+        std::unique_ptr<juce::XmlElement> xml;
+        {
+            const juce::ScopedLock sl (lock);
+            xml = toXml (file);
+        }
+        file.getParentDirectory().createDirectory();
+        juce::TemporaryFile temp (file);
+        if (! xml->writeTo (temp.getFile()) || ! temp.overwriteTargetFileWithTemporary())
+        {
+            error = "Cannot write " + file.getFullPathName();
+            return false;
+        }
         return true;
     }
 

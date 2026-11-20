@@ -45,6 +45,7 @@ public:
             window->content->openProject (juce::File (path));
         else
             window->content->openLastProjectAtStart();   // skipped when the last start died opening it (a pedal, Settings.h)
+        window->content->offerRecovery();                 // unsaved work of the last session (an autosave), if any
     }
 
     void shutdown() override { window.reset(); }

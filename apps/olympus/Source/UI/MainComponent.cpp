@@ -187,15 +187,30 @@ MainComponent::MainComponent (Options options) : opts (options)
     setLookAndFeel (&look);
     setWantsKeyboardFocus (true);
     settings = Settings::load (opts.settingsFile);
+    lastAutosaveMs = juce::Time::getMillisecondCounterHiRes();
     // a pedal the last start left: it died loading the monitor chain or the last project, which are skipped this time (Settings.h)
     monitorSkipped = Settings::takePedal (Settings::monitorPedalFile (opts.settingsFile));
     projectSkipped = Settings::takePedal (Settings::projectPedalFile (opts.settingsFile));
 
-    ask = [] (const juce::String& message, const juce::String& button, std::function<void()> proceed)
+    // The questions. Save / Don't save / Cancel: showYesNoCancelBox returns 1 for the first button, 2 for the second, 0 for the third.
+    askUnsaved = [] (const juce::String& message) -> Unsaved
     {
-        juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "Olympus", message, button, "Cancel", nullptr,
-                                            juce::ModalCallbackFunction::create ([proceed] (int result) { if (result == 1) proceed(); }));
+        const int answer = juce::AlertWindow::showYesNoCancelBox (juce::MessageBoxIconType::QuestionIcon, "Olympus", message, "Save", "Don't save", "Cancel");
+        return answer == 1 ? Unsaved::save : answer == 2 ? Unsaved::discard : Unsaved::cancel;
     };
+    chooseSaveFile = [this] (const juce::String& title, const juce::File& start, std::function<void (const juce::File&)> done)
+    {
+        chooser = std::make_unique<juce::FileChooser> (title, start, "*.olympus");
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [done] (const juce::FileChooser& fc) { done (fc.getResult()); });
+    };
+    chooseRenderOptions = [] (RenderOptions& choice) { return askRenderDialog (choice); };
+    askRecover = [] (const juce::String& message)
+    {
+        return juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "Olympus", message, "Open it", "Ignore");
+    };
+    notify = [] (const juce::String& message) { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Olympus", message); };
+    reveal = [] (const juce::File& folder) { folder.revealToUser(); };
     reportError = [] (const juce::String& message) { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Olympus", message); };
     makeEditorWindow = [] (const juce::String& title, juce::AudioProcessorEditor* pluginEditor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
     {
@@ -418,9 +433,21 @@ std::vector<ui::Note> MainComponent::notes() const
 
 void MainComponent::askToDiscard (const juce::String& action, std::function<void()> proceed)
 {
+    // a take that runs is placed first: its clips are what would be lost, and the question then sees them as changes
+    if (recorder.isRecording())
+        stopRecording();
     if (! session.dirty || session.tracks.empty()) { proceed(); return; }
-    if (ask) ask ("The project has changes that are not saved. " + action, "Discard", std::move (proceed));
-    else proceed();
+    const auto answer = askUnsaved ? askUnsaved ("The project has changes that are not saved. " + action) : Unsaved::discard;
+    if (answer == Unsaved::cancel) return;
+    if (answer == Unsaved::discard) { deleteAutosaves(); proceed(); return; }
+    // Save: a project with a file is written here; one without gets the Save As chooser, and goes on only once its file is written
+    if (session.projectFile != juce::File())
+    {
+        if (saveTo (session.projectFile))
+            proceed();
+        return;
+    }
+    saveProjectAs ([proceed = std::move (proceed)] (bool saved) { if (saved) proceed(); });
 }
 
 // Puts the session's transport on the controls and the audio callback's copy of the loop and the end. The timer calls it; so does every
@@ -787,6 +814,7 @@ void MainComponent::updateRecording()
 void MainComponent::newProject()
 {
     stopRecording();
+    deleteAutosaves();   // the session it replaces is gone: its autosave goes with it
     closeTrackEditors();
     source.playing = false;
     session.newProject ("Untitled");
@@ -830,11 +858,14 @@ bool MainComponent::saveProject()
     return saveTo (session.projectFile);
 }
 
-void MainComponent::saveProjectAs()
+void MainComponent::saveProjectAs (std::function<void (bool)> done)
 {
-    chooser = std::make_unique<juce::FileChooser> ("Save the project", session.projectFile == juce::File() ? juce::File::getSpecialLocation (juce::File::userDocumentsDirectory) : session.projectFile, "*.olympus");
-    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
-                          [this] (const juce::FileChooser& fc) { if (fc.getResult() != juce::File()) saveTo (fc.getResult().withFileExtension ("olympus")); });
+    const auto start = session.projectFile == juce::File() ? juce::File::getSpecialLocation (juce::File::userDocumentsDirectory) : session.projectFile;
+    chooseSaveFile ("Save the project", start, [this, done] (const juce::File& file)
+    {
+        const bool saved = file != juce::File() && saveTo (file.withFileExtension ("olympus"));
+        if (done) done (saved);
+    });
 }
 
 bool MainComponent::saveTo (const juce::File& file)
@@ -843,6 +874,7 @@ bool MainComponent::saveTo (const juce::File& file)
     if (! session.save (file, error)) { showError (error); return false; }
     settings.lastProject = file.getFullPathName();
     settings.save (opts.settingsFile);
+    deleteAutosaves();   // the project is on disk: its autosave is no longer news
     updateTitle();
     return true;
 }
@@ -955,16 +987,16 @@ void MainComponent::removeTrack (int index)
 
 // editorsClosed: the caller (chooseAndRender) has already closed the tracks' windows on the message thread, so this may run on the progress
 // window's worker thread; a direct call (the checks, on the message thread) closes them here.
-juce::String MainComponent::renderTo (const juce::File& folder, const std::function<bool (float)>& progress, bool editorsClosed)
+juce::String MainComponent::renderTo (const juce::File& folder, const std::function<bool (float)>& progress, bool editorsClosed,
+                                     RenderOptions options, RenderResult* result)
 {
     source.playing = false;
     if (! editorsClosed)
         closeTrackEditors();
-    RenderOptions options;
     options.folder = folder;
-    RenderResult result;
+    RenderResult local;
     juce::String error;
-    if (! session.renderStems (options, result, error, progress))
+    if (! session.renderStems (options, result != nullptr ? *result : local, error, progress))
         return error.isNotEmpty() ? error : juce::String ("The render failed.");
     return {};
 }
@@ -1050,14 +1082,43 @@ void MainComponent::chooseFolder()
                           });
 }
 
+// The render dialog's default: bit depth and mix only, the choice remembered in settings.xml. Modal, so the caller gets the answer at once.
+bool MainComponent::askRenderDialog (RenderOptions& options)
+{
+    juce::AlertWindow box ("Render the stems", "The mix is the sum of every audible track, with the master gain. Stems are one file per track.",
+                           juce::AlertWindow::NoIcon);
+    box.addComboBox ("bits", { "32-bit float", "24-bit", "16-bit" }, "Bit depth:");
+    box.getComboBoxComponent ("bits")->setSelectedItemIndex (options.bits == 16 ? 2 : options.bits == 24 ? 1 : 0, juce::dontSendNotification);
+    auto* mixOnly = new juce::ToggleButton ("Mix only (no stems)");   // the box takes ownership of it
+    mixOnly->setToggleState (! options.writeStems, juce::dontSendNotification);
+    box.addCustomComponent (mixOnly);
+    box.addButton ("Render", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    box.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    if (box.runModalLoop() != 1)
+        return false;
+    const int index = box.getComboBoxComponent ("bits")->getSelectedItemIndex();
+    options.bits = index == 2 ? 16 : index == 1 ? 24 : 32;
+    options.writeStems = ! mixOnly->getToggleState();
+    options.writeMix = true;
+    return true;
+}
+
 void MainComponent::chooseAndRender()
 {
     if (session.tracks.empty()) { showError ("There are no tracks to render."); return; }
     if (recorder.isRecording()) { showError ("Stop the recording before you render the stems."); return; }
+    RenderOptions choice;
+    choice.bits = settings.renderBits;
+    choice.writeStems = settings.renderStems;
+    if (chooseRenderOptions && ! chooseRenderOptions (choice))
+        return;
+    settings.renderBits = choice.bits;
+    settings.renderStems = choice.writeStems;
+    settings.save (opts.settingsFile);
     const auto start = session.projectFile != juce::File() ? session.projectFile.getParentDirectory().getChildFile (session.name + " stems") : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
     chooser = std::make_unique<juce::FileChooser> ("Render the stems into this folder", start);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                          [this] (const juce::FileChooser& fc)
+                          [this, choice] (const juce::FileChooser& fc)
                           {
                               const auto folder = fc.getResult();
                               if (folder == juce::File()) return;
@@ -1067,19 +1128,42 @@ void MainComponent::chooseAndRender()
                               closeTrackEditors();
                               struct Job : juce::ThreadWithProgressWindow
                               {
-                                  Job (MainComponent& m, juce::File f) : juce::ThreadWithProgressWindow ("Rendering the stems", true, true), owner (m), folder (std::move (f)) {}
+                                  Job (MainComponent& m, juce::File f, RenderOptions o) : juce::ThreadWithProgressWindow ("Rendering the stems", true, true), owner (m), folder (std::move (f)), options (o) {}
                                   void run() override
                                   {
-                                      error = owner.renderTo (folder, [this] (float p) { setProgress ((double) p); return ! threadShouldExit(); }, true);
+                                      error = owner.renderTo (folder, [this] (float p) { setProgress ((double) p); return ! threadShouldExit(); }, true, options, &result);
                                   }
                                   MainComponent& owner;
                                   juce::File folder;
+                                  RenderOptions options;
+                                  RenderResult result;
                                   juce::String error;
-                              } job (*this, folder);
+                              } job (*this, folder, choice);
                               job.runThread();
-                              if (job.error.isNotEmpty()) showError (job.error);
-                              else folder.revealToUser();
+                              finishRender (folder, job.result, job.error);
                           });
+}
+
+// After a render: a cancel is quiet (its files are gone); a failure is shown; a success names the folder and the files and reveals it.
+void MainComponent::finishRender (const juce::File& folder, const RenderResult& result, const juce::String& error)
+{
+    if (result.stopped)
+        return;
+    if (error.isNotEmpty())
+    {
+        showError (error);
+        return;
+    }
+    const int stems = (int) result.stems.size();
+    juce::String what;
+    if (stems > 0)
+        what = juce::String (stems) + (stems == 1 ? " stem" : " stems");
+    if (! result.mixFile.isEmpty())
+        what = what.isEmpty() ? juce::String ("mix.wav") : what + " and mix.wav";
+    if (notify)
+        notify ("Rendered " + what + " into " + folder.getFullPathName());
+    if (reveal)
+        reveal (folder);
 }
 
 // ---- plugins and tracks ------------------------------------------------------------------------------------------------------
@@ -1427,22 +1511,122 @@ void MainComponent::showAddMonitorMenu()
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&monitorAddButton));
 }
 
+// ---- autosave and recovery ----------------------------------------------------------------------------------------------------------
+juce::File MainComponent::autosaveFileFor (const juce::File& project) const
+{
+    return project.getSiblingFile (project.getFileNameWithoutExtension() + ".autosave.olympus");
+}
+
+juce::File MainComponent::untitledAutosaveFile() const
+{
+    return opts.settingsFile.getSiblingFile ("autosave-untitled.olympus");
+}
+
+juce::File MainComponent::autosaveFile() const
+{
+    return session.projectFile != juce::File() ? autosaveFileFor (session.projectFile) : untitledAutosaveFile();
+}
+
+// Writes the project to its autosave file (Session::saveCopy: the session keeps its name, file and dirty flag). Nothing when there are no
+// changes, or while a render holds the session.
+bool MainComponent::autosaveNow()
+{
+    if (! session.dirty || session.renderRunning())
+        return false;
+    juce::String error;
+    if (! session.saveCopy (autosaveFile(), error))
+    {
+        showError (error);
+        return false;
+    }
+    return true;
+}
+
+void MainComponent::deleteAutosaves()
+{
+    if (session.projectFile != juce::File())
+        autosaveFileFor (session.projectFile).deleteFile();
+    untitledAutosaveFile().deleteFile();
+}
+
+bool MainComponent::offerRecovery()
+{
+    // a named project's autosave counts when it is newer than the project; an untitled one counts when it exists
+    juce::File autosave, project;
+    if (session.projectFile != juce::File())
+    {
+        const auto named = autosaveFileFor (session.projectFile);
+        if (named.existsAsFile() && named.getLastModificationTime() > session.projectFile.getLastModificationTime())
+        {
+            autosave = named;
+            project = session.projectFile;
+        }
+    }
+    if (autosave == juce::File() && untitledAutosaveFile().existsAsFile())
+        autosave = untitledAutosaveFile();
+    if (autosave == juce::File())
+        return false;
+    const bool open = askRecover && askRecover ("Olympus found unsaved work from the last session. Open it?");
+    if (open)
+        recoverFrom (autosave, project);
+    else
+        autosave.deleteFile();   // Ignore: the work is dropped
+    return true;
+}
+
+// Loads an autosave as the session, with changes, and the project file it belongs to (none for an untitled one), so the next Save writes
+// the real file. The settings keep the project as the last one opened.
+void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& project)
+{
+    stopRecording();
+    closeTrackEditors();
+    source.playing = false;
+    juce::String error;
+    if (! session.load (autosave, error))
+    {
+        showError (error);
+        return;
+    }
+    session.projectFile = project;
+    session.dirty = true;
+    editor.clearUndo();
+    adoptDeviceRate();
+    arrange.selected = {};
+    seek (0);
+    refreshNow();
+    arrange.zoomToFit();
+    arrange.repaint();
+    if (session.warnings.size() > 0)
+        showError ("Recovered with notes:\n\n" + session.warnings.joinIntoString ("\n"));
+}
+
 // ---- timer, keys, layout -----------------------------------------------------------------------------------------------------
 void MainComponent::timerCallback()
 {
+    // A render holds the session's lock for its whole run and writes the plugins: while it runs the timer never waits for the lock (the
+    // arrangement tries it) and reads no plugin. The latency flag stays set until the render is over.
+    const bool rendering = session.renderRunning();
     // The audio copy of the transport is not taken here: every change that moves it calls syncTransport (refreshNow, the loop, the arrangement's
     // edits). A timer that took the session's lock would make the audio callback's try-lock miss a block now and then.
     syncPlayhead();
     arrange.showInputLevels = ! isPlaying() || recorder.isRecording();
     updateRecording();
     // a plugin reported a new latency (its listener only sets a flag): the tracks' delays follow it, and the read-outs below show it
-    if (session.takeLatencyChange())
+    if (! rendering && session.takeLatencyChange())
     {
         session.updateLatencies();
         syncTransport(); // the end of the audio includes the longest chain's latency: the callback's copy follows it
     }
     arrange.refresh();
     updateTransport();
+    if (rendering)
+        return;
+    // the autosave: every kAutosaveInterval seconds, the project is written beside its file if it has changes (autosaveNow)
+    if (juce::Time::getMillisecondCounterHiRes() - lastAutosaveMs >= kAutosaveInterval * 1000.0)
+    {
+        lastAutosaveMs = juce::Time::getMillisecondCounterHiRes();
+        autosaveNow();
+    }
     // A plugin edited in its own window changes the project: notice it by what the plugins would save.
     if (! windows.empty() && ++tick % 15 == 0)
     {

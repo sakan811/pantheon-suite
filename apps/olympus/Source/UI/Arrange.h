@@ -124,6 +124,8 @@ private:
     int scrollY = 0;                                    // the lanes' top, in pixels
     double lastPlayhead = 0.0;
 
+    // The model of the last snapshot taken with the lock. While a render holds the session's lock, snapshot returns this instead of waiting.
+    mutable std::shared_ptr<const ArrangeSnapshot> lastSnapshot;
     ArrangeSnapshot snapshot (bool takePeaks = false) const;
     double pxPerSample (double rate) const;
     int sampleToX (double sample, double pps) const;

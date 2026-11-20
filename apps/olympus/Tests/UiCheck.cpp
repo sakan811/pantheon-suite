@@ -9,8 +9,10 @@
 
 #include "Check.h"
 #include "TestPlugin.h"
+#include <thread>
 #include "UI/Arrange.h"
 #include "UI/MainComponent.h"
+#include <atomic>
 
 using namespace olympus;
 using namespace olympus::gui;
@@ -23,9 +25,11 @@ inline void check (bool ok, const juce::String& what) { check (ok, what.toStdStr
 
 namespace
 {
-std::vector<juce::String> gErrors, gAsked;
+std::vector<juce::String> gErrors, gAsked, gNotes;
 std::vector<std::function<void()>> gClosers;   // the "closed" callbacks of the plugin windows the checks opened
-bool gAnswer = false;
+bool gAnswer = false;                          // the answer the checks give to the questions (Discard / Open it / the save target)
+juce::File gSaveTarget;                        // what the Save As chooser of a check returns (empty: cancelled)
+bool gRecoverAnswer = false;                   // "Open it" when true
 
 juce::File tempFolder()
 {
@@ -77,11 +81,17 @@ std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true, const juce::
         holder->setSize (editor->getWidth(), editor->getHeight());
         return holder;
     };
-    w->ask = [] (const juce::String& message, const juce::String&, std::function<void()> onOk)
+    // the questions: Discard when gAnswer, else Cancel (the checks of the unsaved changes); the save chooser returns gSaveTarget
+    w->askUnsaved = [] (const juce::String& message)
     {
         gAsked.push_back (message);
-        if (gAnswer) onOk();
+        return gAnswer ? MainComponent::Unsaved::discard : MainComponent::Unsaved::cancel;
     };
+    w->chooseSaveFile = [] (const juce::String&, const juce::File&, std::function<void (const juce::File&)> done) { done (gSaveTarget); };
+    w->chooseRenderOptions = [] (RenderOptions&) { return true; };   // the dialog is answered by the checks: the options as they are
+    w->askRecover = [] (const juce::String&) { return gRecoverAnswer; };
+    w->notify = [] (const juce::String& message) { gNotes.push_back (message); };
+    w->reveal = [] (const juce::File&) {};
     return w;
 }
 
@@ -1127,6 +1137,253 @@ int main()
             ok = ok && inside (*b, *w) && b->getBottom() <= w->arrange.getY() && b->getBounds().getRight() < w->monitorAddButton.getX();
         test::check (ok, "the strip sits under the header and above the arrangement, the plugins left of '+', CORRECTION on the right");
         test::check (w->monitorButtons[0]->getBounds().getRight() <= w->monitorButtons[1]->getX(), "the plugin buttons do not overlap");
+    }
+
+    std::printf ("[20] Render: a cancel is quiet and leaves no stem of its run; a success names the folder and the files and reveals it; mix only writes exactly mix.wav, the same bytes as the full mix; 16 and 24 bit; the choice is remembered\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("r-a.wav").getFullPathName(), makeWav ("r-b.wav").getFullPathName() });
+        const auto home = tempFolder().getChildFile ("render-options");
+        home.deleteRecursively();
+
+        const auto cancelled = home.getChildFile ("cancelled");
+        RenderResult cres;
+        gErrors.clear();
+        gNotes.clear();
+        const auto cerr = w->renderTo (cancelled, [] (float p) { return p < 0.5f; }, false, {}, &cres);
+        w->finishRender (cancelled, cres, cerr);
+        test::check (cres.stopped && cerr == "Stopped." && gErrors.empty() && gNotes.empty(), "a cancelled render is quiet: no message, no note");
+        test::check (cancelled.findChildFiles (juce::File::findFiles, false, "*.wav").isEmpty(), "and the stems it had written are deleted");
+
+        const auto full = home.getChildFile ("full");
+        juce::File shown;
+        w->reveal = [&shown] (const juce::File& f) { shown = f; };
+        RenderResult fres;
+        const auto ferr = w->renderTo (full, {}, false, {}, &fres);
+        w->finishRender (full, fres, ferr);
+        test::check (ferr.isEmpty() && fres.stems.size() == 2 && ! fres.mixFile.isEmpty(), "the full render writes two stems and the mix");
+        test::check (gNotes.size() == 1 && gNotes.back() == "Rendered 2 stems and mix.wav into " + full.getFullPathName(), "the success names the folder and the files: " + (gNotes.empty() ? juce::String() : gNotes.back()));
+        test::check (shown == full, "and the folder is revealed");
+        w->reveal = [] (const juce::File&) {};
+
+        RenderOptions mixOnly;
+        mixOnly.writeStems = false;
+        const auto only = home.getChildFile ("mix-only");
+        test::check (w->renderTo (only, {}, false, mixOnly).isEmpty(), "mix only renders");
+        const auto written = only.findChildFiles (juce::File::findFiles, false, "*");
+        test::check (written.size() == 1 && written[0].getFileName() == "mix.wav", "mix only writes exactly one file, mix.wav");
+        test::check (bytesOf (only.getChildFile ("mix.wav")) == bytesOf (full.getChildFile ("mix.wav")) && bytesOf (full.getChildFile ("mix.wav")).getSize() > 1000,
+                     "and its bytes are those of the full render's mix");
+
+        RenderOptions nothing;
+        nothing.writeStems = false;
+        nothing.writeMix = false;
+        test::check (! w->renderTo (home.getChildFile ("nothing"), {}, false, nothing).isEmpty(), "with neither stems nor mix it is refused");
+
+        auto bitsOf = [] (const juce::File& f)
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::InputStream> in (f.createInputStream());
+            std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (in.release(), true));
+            return reader != nullptr ? (int) reader->bitsPerSample : 0;
+        };
+        for (int bits : { 16, 24 })
+        {
+            RenderOptions o;
+            o.bits = bits;
+            const auto folder = home.getChildFile ("bits-" + juce::String (bits));
+            test::check (w->renderTo (folder, {}, false, o).isEmpty(), juce::String (bits) + "-bit renders");
+            const auto files = folder.findChildFiles (juce::File::findFiles, false, "*.wav");
+            bool all = files.size() == 3;
+            for (auto& f : files) all = all && bitsOf (f) == bits;
+            test::check (all, "every stem and the mix are " + juce::String (bits) + "-bit: " + juce::String (files.size()) + " files");
+        }
+
+        const auto settingsFile = tempFolder().getChildFile ("render-choice.xml");
+        Settings chosen;
+        chosen.renderBits = 24;
+        chosen.renderStems = false;
+        chosen.save (settingsFile);
+        const auto back = Settings::load (settingsFile);
+        test::check (back.renderBits == 24 && ! back.renderStems, "the render choice is remembered in settings.xml");
+        const auto older = tempFolder().getChildFile ("render-older.xml");
+        older.replaceWithText ("<OlympusSettings lastProject=\"\"/>");
+        const auto old = Settings::load (older);
+        test::check (old.renderBits == 32 && old.renderStems, "an older settings file has the defaults: 32-bit float, stems on");
+    }
+
+    std::printf ("[21] A render holds the session's lock: the message thread does not wait for it (the arrangement shows its last model, the timer runs), and renderRunning is true while it runs\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("nb.wav").getFullPathName() });
+        w->arrange.refresh();
+
+        std::atomic<bool> held { false }, release { false };
+        std::thread holder ([&]
+        {
+            w->session.renderBusy = true;                  // what a render does, then holds the lock for its whole run
+            const juce::ScopedLock sl (w->session.lock);
+            held = true;
+            while (! release)
+                std::this_thread::sleep_for (std::chrono::milliseconds (2));
+            w->session.renderBusy = false;
+        });
+        while (! held)
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        w->arrange.refresh();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);   // the window's timer runs meanwhile
+        const double took = juce::Time::getMillisecondCounterHiRes() - t0;
+        release = true;
+        holder.join();
+        test::check (took < 1000.0, test::fmt ("refresh and the timer return while the lock is held: %d ms", (int) took));
+
+        bool sawBusy = false;
+        w->renderTo (tempFolder().getChildFile ("nb-render"), [&] (float) { sawBusy = sawBusy || w->session.renderRunning(); return true; });
+        test::check (sawBusy && ! w->session.renderRunning(), "renderRunning is true during the render and false after it");
+    }
+
+    std::printf ("[22] A take that runs when the project is quit or NEW is placed first (a clip, the project dirty), then the question is asked\n");
+    {
+        auto w = makeWindow();
+        juce::String error;
+        w->session.addEmptyTrack ("Gtr");
+        w->session.setTrackArm (0, true, error);
+        w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+        w->seek (0);
+        test::check (w->startRecording(), "REC starts");
+        juce::int64 fed = 0;
+        feedDevice (*w, fed, 48000.0, 4800);
+        gAsked.clear();
+        gAnswer = false;
+        bool quit = false;
+        w->askToDiscard ("Quit and lose them?", [&] { quit = true; });
+        test::check (! w->isRecording() && w->session.tracks[0]->clips.size() == 1 && w->session.dirty, "quit: the take is placed as a clip and the project is dirty");
+        test::check (gAsked.size() == 1 && ! quit, "then it is asked, and Cancel keeps the window open");
+        w->editor.undo();
+        test::check (w->session.tracks[0]->clips.empty(), "the take is one undo step");
+
+        auto n = makeWindow();
+        juce::String err2;
+        n->session.addEmptyTrack ("Gtr");
+        n->session.setTrackArm (0, true, err2);
+        n->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+        n->seek (0);
+        test::check (n->startRecording(), "REC starts in a second window");
+        feedDevice (*n, fed, 48000.0, 2400);
+        gAnswer = true;   // Discard
+        n->askToDiscard ("Start a new project and lose them?", [&] { n->newProject(); });
+        test::check (! n->isRecording() && n->session.tracks.empty() && gAsked.size() == 2, "NEW: the take is stopped first, then the question is asked, and Discard starts the new project");
+    }
+
+    std::printf ("[23] Quit, NEW and OPEN with changes ask Save, Don't save or Cancel: Save writes a project with a file; one without gets the Save As chooser and goes on only once it is written; a cancelled chooser cancels the whole action\n");
+    {
+        const auto folder = tempFolder().getChildFile ("save-cases");
+        folder.deleteRecursively();
+        folder.createDirectory();
+        auto w = makeWindow (true, folder.getChildFile ("settings.xml"));
+        w->addTracks ({ makeWav ("sv.wav").getFullPathName() });
+        const auto named = folder.getChildFile ("named.olympus");
+        test::check (w->saveTo (named) && ! w->session.dirty, "a project with a file");
+
+        bool went = false;
+        w->askUnsaved = [] (const juce::String&) { return MainComponent::Unsaved::save; };
+        w->session.dirty = true;
+        w->askToDiscard ("Quit?", [&] { went = true; });
+        test::check (went && ! w->session.dirty && named.existsAsFile(), "Save writes the project with its file, then goes on");
+
+        w->askUnsaved = [] (const juce::String&) { return MainComponent::Unsaved::cancel; };
+        w->session.dirty = true;
+        went = false;
+        w->askToDiscard ("Quit?", [&] { went = true; });
+        test::check (! went && w->session.dirty, "Cancel goes on with nothing, and the changes stay");
+
+        w->askUnsaved = [] (const juce::String&) { return MainComponent::Unsaved::discard; };
+        went = false;
+        w->askToDiscard ("Quit?", [&] { went = true; });
+        test::check (went, "Don't save goes on without writing");
+
+        auto u = makeWindow (true, folder.getChildFile ("settings.xml"));
+        u->addTracks ({ makeWav ("sv2.wav").getFullPathName() });
+        const auto target = folder.getChildFile ("untitled-saved.olympus");
+        gSaveTarget = target;
+        u->askUnsaved = [] (const juce::String&) { return MainComponent::Unsaved::save; };
+        went = false;
+        u->askToDiscard ("Quit?", [&] { went = true; });
+        test::check (went && target.existsAsFile() && u->session.projectFile == target && ! u->session.dirty,
+                     "Save on a project with no file runs the Save As chooser, and goes on once the file is written");
+
+        auto v = makeWindow (true, folder.getChildFile ("settings.xml"));
+        v->addTracks ({ makeWav ("sv3.wav").getFullPathName() });
+        gSaveTarget = juce::File();   // the chooser is cancelled
+        v->askUnsaved = [] (const juce::String&) { return MainComponent::Unsaved::save; };
+        went = false;
+        v->askToDiscard ("Quit?", [&] { went = true; });
+        test::check (! went && v->session.dirty && v->session.projectFile == juce::File(), "a cancelled chooser cancels the whole action");
+        gSaveTarget = juce::File();
+    }
+
+    std::printf ("[24] Autosave: autosaveNow writes beside the project without changing the session; a save deletes it; NEW deletes the untitled one; recovery offers a newer autosave, opens it with changes and its project file, and Ignore deletes it\n");
+    {
+        const auto folder = tempFolder().getChildFile ("autosave-case");
+        folder.deleteRecursively();
+        folder.createDirectory();
+        const auto settings = folder.getChildFile ("settings.xml");
+        auto w = makeWindow (true, settings);
+        w->addTracks ({ makeWav ("au.wav").getFullPathName() });
+        const auto song = folder.getChildFile ("song.olympus");
+        const auto autosave = folder.getChildFile ("song.autosave.olympus");
+        test::check (w->saveTo (song) && ! w->session.dirty, "the project is saved");
+        song.setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::seconds (60));
+        w->editor.setGrid (Grid::Half);
+        const auto name = w->session.name;
+        const auto file = w->session.projectFile;
+        test::check (w->autosaveNow() && autosave.existsAsFile(), "autosaveNow writes song.autosave.olympus beside the project");
+        test::check (w->session.dirty && w->session.projectFile == file && w->session.name == name, "and leaves the session as it was: dirty, its file, its name");
+        Session copy;
+        juce::String err;
+        test::check (copy.load (autosave, err) && copy.tracks.size() == 1 && copy.grid == Grid::Half, "the autosave is a project: it loads with the changes");
+
+        test::check (w->saveProject() && ! autosave.existsAsFile() && ! w->session.dirty, "a save deletes the autosave");
+
+        auto u = makeWindow (true, settings);
+        u->addTracks ({ makeWav ("au2.wav").getFullPathName() });
+        const auto untitled = folder.getChildFile ("autosave-untitled.olympus");
+        test::check (u->autosaveNow() && untitled.existsAsFile() && u->session.projectFile == juce::File() && u->session.dirty,
+                     "an untitled session autosaves as autosave-untitled.olympus beside settings.xml");
+        u->newProject();
+        test::check (! untitled.existsAsFile(), "NEW deletes the untitled autosave");
+
+        // recovery: the project is older than its autosave, so the next start offers it
+        auto a = makeWindow (true, settings);
+        a->addTracks ({ makeWav ("au3.wav").getFullPathName() });
+        a->openProject (song);
+        a->editor.setGrid (Grid::Quarter);
+        song.setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::seconds (60));
+        a->editor.setGrid (Grid::Half);
+        test::check (a->autosaveNow() && autosave.existsAsFile(), "a changed project has its autosave again");
+        auto r = makeWindow (true, settings);
+        r->openProject (song);
+        gRecoverAnswer = true;
+        test::check (r->offerRecovery() && r->session.dirty && r->session.projectFile == song && r->session.grid == Grid::Half,
+                     "recovery opens the autosave with changes, and the project file it belongs to");
+        test::check (r->session.tracks.size() == 1 && r->session.tracks[0]->name == "au", "the recovered session holds what the autosave held: its one track");
+
+        auto ig = makeWindow (true, settings);
+        ig->openProject (song);
+        gRecoverAnswer = false;
+        test::check (ig->offerRecovery() && ! autosave.existsAsFile() && ! ig->session.dirty, "Ignore deletes the autosave, and the project stays as it was");
+
+        auto ut = makeWindow (true, settings);
+        ut->addTracks ({ makeWav ("au4.wav").getFullPathName() });
+        ut->session.dirty = true;
+        ut->autosaveNow();
+        auto ur = makeWindow (true, settings);
+        gRecoverAnswer = true;
+        test::check (ur->offerRecovery() && ur->session.projectFile == juce::File() && ur->session.dirty && ur->session.tracks.size() == 1,
+                     "an untitled autosave is offered and opens as an untitled session with changes");
+        gRecoverAnswer = false;
+        ur->newProject();
     }
 
     tempFolder().deleteRecursively();
