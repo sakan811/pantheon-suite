@@ -13,6 +13,7 @@
 #include <cmath>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 
@@ -316,14 +317,69 @@ public:
     // The track a name or number means (a number, or a name in any case); -1 with the reason in `error`.
     int findTrack (const juce::var& which, juce::String& error) const
     {
-        if (which.isString() && which.toString().containsOnly ("0123456789") == false)
+        int i = -1;
+        if (which.isString())
         {
-            for (int i = 0; i < (int) tracks.size(); ++i)
-                if (tracks[(size_t) i]->name.equalsIgnoreCase (which.toString().trim())) return i;
-            error = "No track called '" + which.toString() + "'";
+            const auto s = which.toString().trim();
+            if (s.isEmpty())
+            {
+                error = "Give 'track' (a track number from 0, or a track name).";
+                return -1;
+            }
+            if (! s.containsOnly ("0123456789"))
+            {
+                for (int t = 0; t < (int) tracks.size(); ++t)
+                    if (tracks[(size_t) t]->name.equalsIgnoreCase (s)) return t;
+                error = "No track called '" + which.toString() + "'";
+                return -1;
+            }
+            juce::int64 parsed = 0;
+            for (int k = 0; k < s.length(); ++k)
+            {
+                const int d = (int) (s[k] - '0');
+                if (parsed > (std::numeric_limits<int>::max() - d) / 10)
+                {
+                    error = "No track " + s + " (there are " + juce::String ((int) tracks.size()) + ", numbered from 0)";
+                    return -1;
+                }
+                parsed = parsed * 10 + d;
+            }
+            i = (int) parsed;
+        }
+        else if (which.isInt())
+        {
+            i = (int) which;
+        }
+        else if (which.isInt64())
+        {
+            const juce::int64 n = (juce::int64) which;
+            if (n < 0 || n > (juce::int64) std::numeric_limits<int>::max())
+            {
+                error = "No track " + which.toString() + " (there are " + juce::String ((int) tracks.size()) + ", numbered from 0)";
+                return -1;
+            }
+            i = (int) n;
+        }
+        else if (which.isDouble())
+        {
+            const double d = (double) which;
+            if (! std::isfinite (d) || std::trunc (d) != d)
+            {
+                error = "Track must be a whole number (from 0) or a track name.";
+                return -1;
+            }
+            if (d < 0.0 || d > (double) std::numeric_limits<int>::max())
+            {
+                error = "No track " + which.toString() + " (there are " + juce::String ((int) tracks.size()) + ", numbered from 0)";
+                return -1;
+            }
+            i = (int) d;
+        }
+        else
+        {
+            error = "Track must be a track number (from 0) or a track name.";
             return -1;
         }
-        const int i = which.isString() ? which.toString().getIntValue() : (int) which;
         if (juce::isPositiveAndBelow (i, (int) tracks.size())) return i;
         error = "No track " + juce::String (i) + " (there are " + juce::String ((int) tracks.size()) + ", numbered from 0)";
         return -1;
@@ -463,30 +519,67 @@ public:
     // Gives each of `to` the same chain as `from`, with the same settings (a copy of every plugin's state).
     bool copyChain (int from, const std::vector<int>& to, juce::String& error)
     {
-        if (! juce::isPositiveAndBelow (from, (int) tracks.size())) { error = "No track " + juce::String (from); return false; }
-        for (int t : to)
-            if (! juce::isPositiveAndBelow (t, (int) tracks.size())) { error = "No track " + juce::String (t); return false; }
-        // Every new chain is built first: a plugin that cannot be made leaves all the targets as they were.
-        std::vector<std::pair<int, std::vector<std::unique_ptr<Slot>>>> built;
-        for (int t : to)
+        struct Snap { juce::String plugin; bool bypass = false; juce::MemoryBlock state; };
+        std::vector<Snap> chainSnap;
+        std::vector<int> targets;
+        double snapRate = 0.0;
         {
-            if (t == from) continue;
-            std::vector<std::unique_ptr<Slot>> fresh;
-            for (auto& s : tracks[(size_t) from]->chain)
+            const juce::ScopedLock sl (lock);
+            if (! juce::isPositiveAndBelow (from, (int) tracks.size())) { error = "No track " + juce::String (from); return false; }
+            for (int t : to)
             {
-                juce::MemoryBlock state = stateOf (*s);
-                auto slot = makeSlot (s->plugin, &state, error);
-                if (slot == nullptr) return false;
-                slot->bypass = s->bypass;
+                if (! juce::isPositiveAndBelow (t, (int) tracks.size())) { error = "No track " + juce::String (t); return false; }
+                if (t != from && std::find (targets.begin(), targets.end(), t) == targets.end())
+                    targets.push_back (t);
+            }
+            snapRate = sampleRate;
+            chainSnap.reserve (tracks[(size_t) from]->chain.size());
+            for (auto& s : tracks[(size_t) from]->chain)
+                chainSnap.push_back ({ s->plugin, s->bypass, stateOf (*s) });
+        }
+
+        // Every new chain is built outside `lock` so plugin creation does not silence the audio callback:
+        // a plugin that cannot be made leaves all the targets as they were.
+        std::vector<std::pair<int, std::vector<std::unique_ptr<Slot>>>> built;
+        auto releaseBuilt = [] (std::vector<std::unique_ptr<Slot>>& slots)
+        {
+            for (auto& s : slots)
+                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        };
+        for (int t : targets)
+        {
+            std::vector<std::unique_ptr<Slot>> fresh;
+            fresh.reserve (chainSnap.size());
+            for (const auto& item : chainSnap)
+            {
+                auto slot = makeSlot (item.plugin, &item.state, error, snapRate);
+                if (slot == nullptr)
+                {
+                    releaseBuilt (fresh);
+                    for (auto& b : built)
+                        releaseBuilt (b.second);
+                    return false;
+                }
+                slot->bypass = item.bypass;
                 fresh.push_back (std::move (slot));
             }
             built.emplace_back (t, std::move (fresh));
         }
+
         const juce::ScopedLock sl (lock);
         for (auto& b : built)
         {
-            for (auto& s : tracks[(size_t) b.first]->chain)
-                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+            if (! juce::isPositiveAndBelow (b.first, (int) tracks.size()))
+            {
+                for (auto& item : built)
+                    releaseBuilt (item.second);
+                error = "No track " + juce::String (b.first);
+                return false;
+            }
+        }
+        for (auto& b : built)
+        {
+            releaseBuilt (tracks[(size_t) b.first]->chain);
             tracks[(size_t) b.first]->chain = std::move (b.second);
         }
         updateLatenciesLocked();
@@ -812,37 +905,44 @@ public:
         prepareLocked (nonRealtime);
     }
 
-    // `out` is overwritten with one block [start, start + n) of the session: n <= kBlockSize, two channels. No loop here: the caller splits
-    // blocks at the loop's end. Used on the audio thread.
+    // `out` is overwritten with [start, start + n) of the session (two channels, cut into kBlockSize pieces so every plugin and track
+    // scratch stays within kBlockSize; n <= 0 does nothing). No loop here: the caller splits blocks at the loop's end. Audio thread.
     void processBlock (juce::AudioBuffer<float>& out, juce::int64 start)
     {
         const int n = out.getNumSamples();
+        if (n <= 0)
+            return;
         out.clear();
         const juce::ScopedTryLock sl (lock);
         if (! sl.isLocked())
             return;
-        publishHead (start, true);
         const int channels = juce::jmin (2, out.getNumChannels());
-        for (auto& t : tracks)
+        for (int done = 0; done < n; done += kBlockSize)
         {
-            if (! audible (*t) || t->clips.empty())
+            const int count = juce::jmin (kBlockSize, n - done);
+            const juce::int64 blockStart = start + done;
+            publishHead (blockStart, true);
+            for (auto& t : tracks)
             {
-                // skipped: its delay must not come back with stale audio when it plays again
-                if (t->delayDirty)
+                if (! audible (*t) || t->clips.empty())
                 {
-                    t->delayRing.clear();
-                    t->delayPos = 0;
-                    t->delayDirty = false;
+                    // skipped: its delay must not come back with stale audio when it plays again
+                    if (t->delayDirty)
+                    {
+                        t->delayRing.clear();
+                        t->delayPos = 0;
+                        t->delayDirty = false;
+                    }
+                    continue;
                 }
-                continue;
+                runChain (*t, blockStart, count);
+                float left = 0.0f, right = 0.0f;
+                trackGains (*t, left, right);
+                for (int ch = 0; ch < channels; ++ch)
+                    out.addFrom (ch, done, t->scratch, ch, 0, count, ch == 0 ? left : right);
+                t->peakL = juce::jmax (t->peakL.load(), t->scratch.getMagnitude (0, 0, count) * left);
+                t->peakR = juce::jmax (t->peakR.load(), t->scratch.getMagnitude (1, 0, count) * right);
             }
-            runChain (*t, start, n);
-            float left = 0.0f, right = 0.0f;
-            trackGains (*t, left, right);
-            for (int ch = 0; ch < channels; ++ch)
-                out.addFrom (ch, 0, t->scratch, ch, 0, n, ch == 0 ? left : right);
-            t->peakL = juce::jmax (t->peakL.load(), t->scratch.getMagnitude (0, 0, n) * left);
-            t->peakR = juce::jmax (t->peakR.load(), t->scratch.getMagnitude (1, 0, n) * right);
         }
         addMetronome (out, start);
         out.applyGain (juce::Decibels::decibelsToGain (masterDb, -100.0f));
@@ -1092,13 +1192,17 @@ public:
         juce::StringArray problems;
         pool.clear(); // the rate of the project may differ from the one the pool was read at
         double rate = xml->getDoubleAttribute ("sampleRate", 0.0);
+        if (! std::isfinite (rate) || rate < 0.0)
+            rate = 0.0;
         std::vector<std::unique_ptr<Track>> loaded;
         for (auto* e : xml->getChildWithTagNameIterator ("Track"))
         {
             auto t = std::make_unique<Track>();
             t->name = e->getStringAttribute ("name");
-            t->gainDb = (float) juce::jlimit (-100.0, 24.0, e->getDoubleAttribute ("gainDb", 0.0));
-            t->pan = (float) juce::jlimit (-1.0, 1.0, e->getDoubleAttribute ("pan", 0.0));
+            const double trackGain = e->getDoubleAttribute ("gainDb", 0.0);
+            const double trackPan = e->getDoubleAttribute ("pan", 0.0);
+            t->gainDb = std::isfinite (trackGain) ? (float) juce::jlimit (-100.0, 24.0, trackGain) : 0.0f;
+            t->pan = std::isfinite (trackPan) ? (float) juce::jlimit (-1.0, 1.0, trackPan) : 0.0f;
             t->mute = e->getBoolAttribute ("mute");
             t->solo = e->getBoolAttribute ("solo");
             t->armed = e->getBoolAttribute ("armed");
@@ -1130,14 +1234,25 @@ public:
             loaded.push_back (std::move (t));
         }
 
+        const double capRate = (std::isfinite (rate) && rate > 0.0) ? rate : 48000.0;
+        const juce::int64 maxMissingSamples = (juce::int64) std::min (capRate * 3600.0 * 2.0, (double) std::numeric_limits<juce::int64>::max() / 2.0);
+        for (auto& t : loaded)
+            for (auto& c : t->clips)
+                if (c.audio == nullptr)
+                {
+                    c.length = juce::jlimit ((juce::int64) 0, maxMissingSamples, c.length);
+                    c.fadeIn = juce::jlimit ((juce::int64) 0, c.length, c.fadeIn);
+                    c.fadeOut = juce::jmin (juce::jlimit ((juce::int64) 0, c.length, c.fadeOut), c.length - c.fadeIn);
+                }
+
         // the timeline
         std::vector<TempoPoint> points;
         for (auto* p : xml->getChildWithTagNameIterator ("Tempo"))
         {
-            const double beat = juce::jmax (0.0, p->getDoubleAttribute ("beat", 0.0));
-            const double bpm = juce::jlimit (TempoMap::kMinBpm, TempoMap::kMaxBpm, p->getDoubleAttribute ("bpm", 120.0));
-            if (std::isfinite (beat) && std::isfinite (bpm))
-                points.push_back ({ beat, bpm });
+            const double rawBeat = p->getDoubleAttribute ("beat", 0.0);
+            const double rawBpm = p->getDoubleAttribute ("bpm", 120.0);
+            if (std::isfinite (rawBeat) && std::isfinite (rawBpm))
+                points.push_back ({ juce::jmax (0.0, rawBeat), juce::jlimit (TempoMap::kMinBpm, TempoMap::kMaxBpm, rawBpm) });
         }
         std::stable_sort (points.begin(), points.end(), [] (const TempoPoint& a, const TempoPoint& b) { return a.beat < b.beat; });
         if (points.empty() || points.front().beat > TempoMap::kBeatEps)
@@ -1168,12 +1283,19 @@ public:
         markers = std::move (markerList);
         // the same range as the fader and Editor::setMasterDb (-100 is silence, +12 the top)
         const double savedMasterDb = xml->getDoubleAttribute ("masterDb", 0.0);
-        if (savedMasterDb > 12.0)
-            problems.add ("The master gain was above +12 dB and is set to +12 dB.");
-        masterDb = (float) juce::jlimit (-100.0, 12.0, savedMasterDb);
+        if (! std::isfinite (savedMasterDb))
+        {
+            masterDb = 0.0f;
+        }
+        else
+        {
+            if (savedMasterDb > 12.0)
+                problems.add ("The master gain was above +12 dB and is set to +12 dB.");
+            masterDb = (float) juce::jlimit (-100.0, 12.0, savedMasterDb);
+        }
         loopStart = juce::jmax ((juce::int64) 0, xml->getStringAttribute ("loopStart", "0").getLargeIntValue());
         loopEnd = juce::jmax ((juce::int64) 0, xml->getStringAttribute ("loopEnd", "0").getLargeIntValue());
-        loopOn = xml->getBoolAttribute ("loopOn");
+        loopOn = xml->getBoolAttribute ("loopOn") && loopEnd > loopStart;
         metronomeOn = xml->getBoolAttribute ("metronome");
         snapOn = xml->getBoolAttribute ("snap", true);
         grid = (Grid) juce::jlimit (0, 5, xml->getIntAttribute ("grid", (int) Grid::Quarter));
@@ -1496,6 +1618,8 @@ private:
     // The buffer of a file from the pool, or read now at `rate` (0 = the file's own rate, which is then written to `rate`).
     std::shared_ptr<const juce::AudioBuffer<float>> pooledAudio (const juce::File& file, double& rate, juce::String& error)
     {
+        if (! std::isfinite (rate) || rate < 0.0)
+            rate = 0.0;
         const auto key = file.getFullPathName();
         if (auto it = pool.find (key); it != pool.end())
             if (auto found = it->second.lock())
@@ -1515,21 +1639,63 @@ private:
     // Reads a file as two channels at `wantedRate` (0 = keep the file's rate); `rateOut` is the rate of the result.
     bool readAudio (const juce::File& file, double wantedRate, juce::AudioBuffer<float>& out, double& rateOut, juce::String& error)
     {
+        const juce::int64 fileSize = file.getSize();
+        if (fileSize <= 0) { error = file.getFileName() + " contains no audio."; return false; }
         std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
         if (reader == nullptr) { error = "Cannot read the audio file " + file.getFullPathName(); return false; }
-        if (reader->lengthInSamples > (juce::int64) reader->sampleRate * 3600 * 2) { error = file.getFileName() + " is longer than two hours."; return false; }
+        if (! std::isfinite (reader->sampleRate) || reader->sampleRate <= 0.0) { error = file.getFileName() + " has an invalid sample rate."; return false; }
+        if (reader->numChannels == 0 || reader->lengthInSamples <= 0) { error = file.getFileName() + " contains no audio."; return false; }
+        if (reader->lengthInSamples > (juce::int64) std::numeric_limits<int>::max()) { error = file.getFileName() + " is too long to load."; return false; }
+        if ((double) reader->lengthInSamples > reader->sampleRate * 3600.0 * 2.0) { error = file.getFileName() + " is longer than two hours."; return false; }
+
+        const bool isWav = reader->getFormatName() == "WAV file";
+        const bool isAiff = reader->getFormatName() == "AIFF file";
+        if (isWav || isAiff)
+        {
+            const juce::int64 minHeader = isWav ? 44 : 54;
+            const juce::int64 bytesPerSample = (juce::int64) (reader->bitsPerSample / 8);
+            if (reader->bitsPerSample < 8 || (reader->bitsPerSample % 8) != 0 || bytesPerSample <= 0
+                || fileSize <= minHeader
+                || (juce::int64) reader->numChannels > (fileSize - minHeader) / bytesPerSample)
+            {
+                error = file.getFileName() + " is truncated or corrupt.";
+                return false;
+            }
+            const juce::int64 frameBytes = (juce::int64) reader->numChannels * bytesPerSample;
+            if (reader->lengthInSamples > (fileSize - minHeader) / frameBytes)
+            {
+                error = file.getFileName() + " is truncated or corrupt.";
+                return false;
+            }
+        }
+        else if (reader->lengthInSamples / 8192 > fileSize)
+        {
+            error = file.getFileName() + " is truncated or corrupt.";
+            return false;
+        }
+
         const int len = (int) reader->lengthInSamples;
         juce::AudioBuffer<float> raw (2, len);
         raw.clear();
-        reader->read (&raw, 0, len, 0, true, true);
+        if (! reader->read (&raw, 0, len, 0, true, true))
+        {
+            error = file.getFileName() + " is truncated or corrupt.";
+            return false;
+        }
         if (reader->numChannels == 1)
             raw.copyFrom (1, 0, raw, 0, 0, len);
-        const double rate = wantedRate > 0.0 ? wantedRate : reader->sampleRate;
+        const double rate = (std::isfinite (wantedRate) && wantedRate > 0.0) ? wantedRate : reader->sampleRate;
         rateOut = rate;
         if (std::abs (rate - reader->sampleRate) < 0.5)
         {
             out = std::move (raw);
             return true;
+        }
+        const double resampledLen = std::ceil ((double) len * (rate / reader->sampleRate));
+        if (! std::isfinite (resampledLen) || resampledLen > (double) std::numeric_limits<int>::max())
+        {
+            error = file.getFileName() + " is too long to resample.";
+            return false;
         }
         out = resampled (raw, reader->sampleRate, rate);
         return true;
@@ -1554,14 +1720,26 @@ private:
     Clip readClip (const juce::XmlElement& e, const juce::File& base, double& rate, bool legacy, const juce::String& trackName, juce::StringArray& problems)
     {
         Clip c;
-        c.file = base.getChildFile (e.getStringAttribute ("file"));
-        if (! c.file.existsAsFile())
-            c.file = juce::File (e.getStringAttribute ("path"));
+        const auto relAttr = e.getStringAttribute ("file").trim();
+        const auto pathAttr = e.getStringAttribute ("path").trim();
+        const juce::File relFile = relAttr.isEmpty() ? juce::File()
+                                                     : (juce::File::isAbsolutePath (relAttr) ? juce::File (relAttr) : base.getChildFile (relAttr));
+        const juce::File absFile = pathAttr.isNotEmpty() && juce::File::isAbsolutePath (pathAttr) ? juce::File (pathAttr) : juce::File();
+        if (relFile.existsAsFile())
+            c.file = relFile;
+        else if (absFile.existsAsFile())
+            c.file = absFile;
+        else if (absFile != juce::File())
+            c.file = absFile;
+        else
+            c.file = relFile;
+
         c.name = legacy ? c.file.getFileNameWithoutExtension() : e.getStringAttribute ("name", c.file.getFileNameWithoutExtension());
         c.start = juce::jmax ((juce::int64) 0, e.getStringAttribute ("start", "0").getLargeIntValue());
         c.offset = juce::jmax ((juce::int64) 0, e.getStringAttribute ("offset", "0").getLargeIntValue());
         const juce::int64 savedLength = e.getStringAttribute ("length", "-1").getLargeIntValue();
-        c.gainDb = (float) juce::jlimit (-100.0, 24.0, e.getDoubleAttribute ("gainDb", 0.0));
+        const double rawGainDb = e.getDoubleAttribute ("gainDb", 0.0);
+        c.gainDb = std::isfinite (rawGainDb) ? (float) juce::jlimit (-100.0, 24.0, rawGainDb) : 0.0f;
         c.fadeIn = juce::jmax ((juce::int64) 0, e.getStringAttribute ("fadeIn", "0").getLargeIntValue());
         c.fadeOut = juce::jmax ((juce::int64) 0, e.getStringAttribute ("fadeOut", "0").getLargeIntValue());
         c.mute = e.getBoolAttribute ("mute");
@@ -1576,10 +1754,20 @@ private:
         }
         else
         {
-            // no audio to take the length from: keep the saved one, but no longer than the limit readAudio applies
-            c.length = juce::jlimit ((juce::int64) 0, (juce::int64) (rate * 3600 * 2), savedLength);
+            // no audio to take the length from: keep the saved one, capped once the session rate is known
+            if (std::isfinite (rate) && rate > 0.0)
+            {
+                const double maxSamplesD = std::min (rate * 3600.0 * 2.0, (double) std::numeric_limits<juce::int64>::max() / 2.0);
+                c.length = juce::jlimit ((juce::int64) 0, (juce::int64) maxSamplesD, savedLength);
+            }
+            else
+            {
+                c.length = juce::jmax ((juce::int64) 0, savedLength);
+            }
             problems.add ("Track '" + trackName + "': " + problem);
         }
+        c.fadeIn = juce::jlimit ((juce::int64) 0, c.length, c.fadeIn);
+        c.fadeOut = juce::jmin (juce::jlimit ((juce::int64) 0, c.length, c.fadeOut), c.length - c.fadeIn);
         return c;
     }
 
