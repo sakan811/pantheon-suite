@@ -42,6 +42,7 @@ struct AdviceDevice
     juce::String monitorProblem;   // the monitor chain could not be read (its file is not one, or is newer): kept as it is
     bool monitorSkipped = false;   // the last start died loading the monitor chain: it is skipped until PLUGINS loads it
     bool projectSkipped = false;   // the last start died opening the last project: it was not opened again
+    int monitorLatencySamples = -1; // the monitor chain's latency as the window last read it (never waits for the lock); -1: ask the session
 };
 
 inline juce::String kiloHertz (double rate) { return juce::String (rate / 1000.0, 1) + " kHz"; }
@@ -97,7 +98,7 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
         if (s.monitorBypass)
             add (ui::Severity::warning, "Monitor: headphone correction is bypassed: you are hearing the uncorrected mix.");
         const double rate = device.rate > 0.0 ? device.rate : (s.sampleRate > 0.0 ? s.sampleRate : 48000.0);
-        const double monitorMs = 1000.0 * s.monitorLatency() / rate;
+        const double monitorMs = 1000.0 * (device.monitorLatencySamples >= 0 ? device.monitorLatencySamples : s.monitorLatency()) / rate;
         if (monitorMs > 30.0)
             add (ui::Severity::warning, "Monitor " + juce::String (juce::roundToInt (monitorMs)) + " ms: a linear-phase correction adds delay; recording is compensated, playback alignment is not.");
         if (missingMonitor > 0)

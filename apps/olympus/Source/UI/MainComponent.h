@@ -167,7 +167,7 @@ public:
     void saveProjectAs (std::function<void (bool)> done = {});
     bool saveTo (const juce::File& file);
     // Autosave (every kAutosaveInterval seconds while the project has changes): the project is written beside the project file as
-    // `<name>.autosave.olympus`, or as `autosave-untitled.olympus` beside settings.xml, and the session's name, file and dirty flag stay.
+    // `<name>.olympus.autosave`, or as `autosave-untitled.olympus` beside settings.xml, and the session's name, file and dirty flag stay.
     // Returns false when nothing was written (no changes, or a render is running). A test calls it directly.
     static constexpr double kAutosaveInterval = 120.0;   // seconds
     bool autosaveNow();
@@ -244,6 +244,10 @@ public:
     // Runs `proceed` now if nothing would be lost, else after the user has chosen: Save (a project without a file gets the Save As chooser,
     // and `proceed` runs only once the file is written), Don't save, or Cancel (`proceed` does not run). A take that runs is placed first.
     void askToDiscard (const juce::String& action, std::function<void()> proceed);
+    // True (and shows the reason when a render runs) when NEW, OPEN or Quit must wait: a render is running or a dialog is open.
+    bool refuseWhileBusy();
+    // Quit with the changes dropped: deletes this session's autosave (the action that drops it goes through only after the question).
+    void dropAutosave() { deleteAutosaves(); }
     // The questions, replaceable so the checks answer them without a dialog (the defaults show the real ones).
     enum class Unsaved { cancel, save, discard };
     std::function<Unsaved (const juce::String&)> askUnsaved;
@@ -283,6 +287,7 @@ public:
     // The last project opens at start, unless the last start died opening it (then a note says so and OPEN opens it).
     void openLastProjectAtStart();
     double monitorLatencyMs() const;                           // the chain's latency in ms at the device's rate (0 when bypassed)
+    mutable int monitorLatencyCacheSamples = 0;                // the last latency read with the lock (kept while a render or a busy lock)
 
     bool keyPressed (const juce::KeyPress& key) override;
     void paint (juce::Graphics&) override;
@@ -364,6 +369,10 @@ private:
     Source source { *this };
     Recorder recorder;
     std::unique_ptr<juce::FileChooser> chooser;
+    bool autosaveFailing = false;              // the last autosave failed: its error was shown, the next failure is not shown again
+    bool dialogOpen = false;                   // a chooser or a question is open: no second one is started, and NEW/OPEN/Quit wait
+    // Sets dialogOpen for its scope and restores the value it found.
+    struct DialogBusy { bool& flag; bool was; explicit DialogBusy (bool& f) : flag (f), was (f) { flag = true; } ~DialogBusy() { flag = was; } };
     juce::AudioDeviceManager deviceManager;
     juce::TooltipWindow tooltips { this, 600 };
     HardwareLookAndFeel look;

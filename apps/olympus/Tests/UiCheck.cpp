@@ -1150,8 +1150,15 @@ int main()
         RenderResult cres;
         gErrors.clear();
         gNotes.clear();
-        const auto cerr = w->renderTo (cancelled, [] (float p) { return p < 0.5f; }, false, {}, &cres);
+        // the cancel comes from the progress callback, and only once a stem of this run is on disk: the test proves the files existed
+        bool stemExisted = false;
+        const auto cerr = w->renderTo (cancelled, [&] (float)
+        {
+            stemExisted = stemExisted || cancelled.findChildFiles (juce::File::findFiles, false, "*.wav").size() > 0;
+            return ! stemExisted;
+        }, false, {}, &cres);
         w->finishRender (cancelled, cres, cerr);
+        test::check (stemExisted, "the cancel came after a stem was written: the files existed when it was asked");
         test::check (cres.stopped && cerr == "Stopped." && gErrors.empty() && gNotes.empty(), "a cancelled render is quiet: no message, no note");
         test::check (cancelled.findChildFiles (juce::File::findFiles, false, "*.wav").isEmpty(), "and the stems it had written are deleted");
 
@@ -1310,6 +1317,7 @@ int main()
         u->askUnsaved = [] (const juce::String&) { return MainComponent::Unsaved::save; };
         went = false;
         u->askToDiscard ("Quit?", [&] { went = true; });
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);   // the action runs on the next message, after the chooser's callback (F2)
         test::check (went && target.existsAsFile() && u->session.projectFile == target && ! u->session.dirty,
                      "Save on a project with no file runs the Save As chooser, and goes on once the file is written");
 
@@ -1332,13 +1340,13 @@ int main()
         auto w = makeWindow (true, settings);
         w->addTracks ({ makeWav ("au.wav").getFullPathName() });
         const auto song = folder.getChildFile ("song.olympus");
-        const auto autosave = folder.getChildFile ("song.autosave.olympus");
+        const auto autosave = folder.getChildFile ("song.olympus.autosave");
         test::check (w->saveTo (song) && ! w->session.dirty, "the project is saved");
         song.setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::seconds (60));
         w->editor.setGrid (Grid::Half);
         const auto name = w->session.name;
         const auto file = w->session.projectFile;
-        test::check (w->autosaveNow() && autosave.existsAsFile(), "autosaveNow writes song.autosave.olympus beside the project");
+        test::check (w->autosaveNow() && autosave.existsAsFile(), "autosaveNow writes song.olympus.autosave beside the project");
         test::check (w->session.dirty && w->session.projectFile == file && w->session.name == name, "and leaves the session as it was: dirty, its file, its name");
         Session copy;
         juce::String err;
@@ -1384,6 +1392,94 @@ int main()
                      "an untitled autosave is offered and opens as an untitled session with changes");
         gRecoverAnswer = false;
         ur->newProject();
+    }
+
+    std::printf ("[25] While a render holds the session's lock, the window paints, updates its transport and runs its timer without waiting for it (a watchdog releases the lock after 3 s, so a regression fails and does not hang)\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("pl.wav").getFullPathName() });
+        w->arrange.refresh();
+
+        std::atomic<bool> held { false }, release { false }, done { false };
+        std::thread holder ([&]
+        {
+            w->session.renderBusy = true;                  // what a render does, then holds the lock for its whole run
+            const juce::ScopedLock sl (w->session.lock);
+            held = true;
+            while (! release)
+                std::this_thread::sleep_for (std::chrono::milliseconds (2));
+            w->session.renderBusy = false;
+        });
+        std::thread watchdog ([&]
+        {
+            const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds (3);
+            while (! done && std::chrono::steady_clock::now() < limit)
+                std::this_thread::sleep_for (std::chrono::milliseconds (5));
+            release = true;
+        });
+        while (! held)
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        const auto snap = w->createComponentSnapshot (w->getLocalBounds());   // paint of the whole window
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);     // the timer (which updates the transport) and the paints run meanwhile
+        const double took = juce::Time::getMillisecondCounterHiRes() - t0;
+        done = true;
+        release = true;
+        holder.join();
+        watchdog.join();
+        test::check (snap.isValid() && took < 1000.0,
+                     test::fmt ("paint, updateTransport and the timer return while a render holds the lock: %d ms", (int) took));
+    }
+
+    std::printf ("[27] Autosave, negative: an autosave older than its project is not offered; saving another project leaves this one's autosave; a failed open keeps the autosave\n");
+    {
+        const auto folder = tempFolder().getChildFile ("autosave-negative");
+        folder.deleteRecursively();
+        folder.createDirectory();
+        const auto settings = folder.getChildFile ("settings.xml");
+        const auto a = folder.getChildFile ("a.olympus"), b = folder.getChildFile ("b.olympus"), c = folder.getChildFile ("c.olympus");
+
+        auto w = makeWindow (true, settings);
+        w->addTracks ({ makeWav ("na.wav").getFullPathName() });
+        test::check (w->saveTo (a), "project A is saved");
+        w->editor.setGrid (Grid::Half);
+        test::check (w->autosaveNow() && a.getSiblingFile ("a.olympus.autosave").existsAsFile(), "A has an autosave");
+        a.getSiblingFile ("a.olympus.autosave").setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::seconds (120));
+        a.setLastModificationTime (juce::Time::getCurrentTime());
+        auto r = makeWindow (true, settings);
+        r->openProject (a);
+        gRecoverAnswer = true;
+        test::check (! r->offerRecovery() && ! r->session.dirty, "an autosave older than its project is not offered");
+        test::check (a.getSiblingFile ("a.olympus.autosave").existsAsFile(), "and it is kept");
+
+        auto wb = makeWindow (true, settings);
+        wb->addTracks ({ makeWav ("nb2.wav").getFullPathName() });
+        test::check (wb->saveTo (b), "project B is saved");
+        wb->editor.setGrid (Grid::Half);
+        test::check (wb->autosaveNow() && b.getSiblingFile ("b.olympus.autosave").existsAsFile(), "B has an autosave");
+        auto wc = makeWindow (true, settings);
+        wc->addTracks ({ makeWav ("nc.wav").getFullPathName() });
+        test::check (wc->saveTo (c) && b.getSiblingFile ("b.olympus.autosave").existsAsFile(),
+                     "saving another project (C) leaves B's autosave");
+
+        wb->openProject (folder.getChildFile ("missing.olympus"));
+        test::check (b.getSiblingFile ("b.olympus.autosave").existsAsFile() && wb->session.projectFile == b,
+                     "a failed open keeps the autosave of the session that stays");
+    }
+
+    std::printf ("[28] NEW, OPEN and Quit wait while a render runs: they are refused with the reason, and nothing proceeds\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("rb.wav").getFullPathName() });
+        w->session.dirty = true;
+        bool proceeded = false;
+        gErrors.clear();
+        w->session.renderBusy = true;
+        w->askToDiscard ("Start a new project and lose them?", [&] { proceeded = true; });
+        w->session.renderBusy = false;
+        test::check (! proceeded && gErrors.size() == 1 && gErrors[0] == "A render is running: wait for it or cancel it first.",
+                     "a NEW, OPEN or Quit while a render runs is refused with the reason");
     }
 
     tempFolder().deleteRecursively();

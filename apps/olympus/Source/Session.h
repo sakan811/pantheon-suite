@@ -872,6 +872,11 @@ public:
 
         struct Out { Track* track; std::unique_ptr<juce::AudioFormatWriter> writer; juce::File file; int latency; juce::int64 written = 0; float peak = 0.0f; };
         std::vector<Out> outs;
+        // an error after files were made: this run's stems go, as a cancel's do, so no partial folder is left (the caller reports the error)
+        auto discardRun = [&outs, &options]
+        {
+            for (auto& o : outs) { o.writer.reset(); if (options.writeStems) o.file.deleteFile(); }
+        };
         int index = 0;
         for (auto& t : tracks)
         {
@@ -884,7 +889,7 @@ public:
             if (options.writeStems)
             {
                 o.writer = makeWriter (o.file, options.bits, error);
-                if (o.writer == nullptr) { return false; }
+                if (o.writer == nullptr) { o.file.deleteFile(); discardRun(); return false; }
             }
             outs.push_back (std::move (o));
         }
@@ -918,7 +923,12 @@ public:
                     block.applyGain (ch, 0, count, ch == 0 ? left : right);
                     o.peak = juce::jmax (o.peak, block.getMagnitude (ch, 0, count));
                 }
-                if (o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count)) { error = "Writing " + o.file.getFileName() + " failed."; return false; }
+                if (o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count))
+                {
+                    error = "Writing " + o.file.getFileName() + " failed.";
+                    discardRun();
+                    return false;
+                }
                 if (options.writeMix)
                 {
                     const int dest = (int) (start + first - o.latency);
@@ -947,7 +957,14 @@ public:
             mix.applyGain (juce::Decibels::decibelsToGain (masterDb, -100.0f));
             const auto file = options.folder.getChildFile ("mix.wav");
             auto writer = makeWriter (file, options.bits, error);
-            if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (mix, 0, mix.getNumSamples())) { if (error.isEmpty()) error = "Writing mix.wav failed."; return false; }
+            if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (mix, 0, mix.getNumSamples()))
+            {
+                if (error.isEmpty()) error = "Writing mix.wav failed.";
+                writer.reset();
+                file.deleteFile();
+                discardRun();
+                return false;
+            }
             writer.reset();
             result.mixFile = file.getFullPathName();
             result.mixPeakDb = (double) juce::Decibels::gainToDecibels (mix.getMagnitude (0, mix.getNumSamples()) > mix.getMagnitude (1, 0, mix.getNumSamples())
