@@ -11,7 +11,7 @@
 #include <vector>
 
 // The one place where the timeline is edited and undone: clips, track mix, master, tempo, time signature, loop and markers. The window
-// and (later) the MCP server call these; none of them touches the session's tracks any other way.
+// and the MCP server call these; none of them touches the session's tracks any other way.
 //
 // Every editing function takes the session's lock, checks its arguments (a refusal changes nothing and says why in `error`), and when it
 // does change something it marks the session dirty and pushes ONE undo step: the state from before the change, the number of tracks and
@@ -35,6 +35,31 @@ public:
     explicit Editor (Session& s) : session (s) {}
 
     // ---- clips ----------------------------------------------------------------------------------------------------------------
+    // Adds a clip of a file to a track, at `start`: from `offset` in the file, for `length` samples (0 = to the end of the file). The file
+    // is read into the pool first, so the first file sets the session's rate. A clip that does not fit in the file is refused.
+    ClipRef addClip (int track, const juce::File& file, juce::int64 start, juce::int64 offset, juce::int64 length, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
+        const auto before = session.captureEdit();
+        const int index = session.addClip (track, file, juce::jmax ((juce::int64) 0, start), error);
+        if (index < 0) return {};
+        auto& clips = session.tracks[(size_t) track]->clips;
+        const juce::int64 available = clips.back().audio != nullptr ? clips.back().audio->getNumSamples() : 0;
+        const juce::int64 play = length > 0 ? length : available - offset;
+        if (offset < 0 || offset >= available || play < 1 || offset + play > available)
+        {
+            clips.pop_back();
+            error = "The file is " + juce::String (available) + " samples long: a clip from sample " + juce::String (offset) + " for "
+                    + juce::String (play) + " samples does not fit in it.";
+            return {};
+        }
+        clips.back().offset = offset;
+        clips.back().length = play;
+        record (before, "Add clip");
+        return { track, index };
+    }
+
     // Cuts a clip in two at `at` (strictly inside it). The left piece keeps the index, the right one is inserted after it and returned.
     // The left piece loses its fade out, the right one its fade in.
     ClipRef splitClip (int track, int clip, juce::int64 at, juce::String& error)
