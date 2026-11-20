@@ -4,6 +4,7 @@
 // Headless checks of the session, the render, the project file and the MCP server, with plugins made in code (TestPlugin.h).
 // Set OLYMPUS_PLUGIN_DIR to a folder with built plugin bundles to add the check against the real ones.
 
+#include "Analyze.h"
 #include "Check.h"
 #include "Edit.h"
 #include "Mcp.h"
@@ -410,7 +411,7 @@ void mcpChecks()
     juce::var list;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}", list);
     const auto tools = server.handle (list)["result"]["tools"];
-    test::check (tools.size() == 36 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
+    test::check (tools.size() == 37 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
 
     juce::var note;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", note);
@@ -535,7 +536,7 @@ void mcpTimelineChecks()
                            "add_marker", "remove_marker", "set_loop", "set_master" })
         for (auto& t : *tools.getArray())
             if (t["name"].toString() == n) ++known;
-    test::check (tools.size() == 36 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
+    test::check (tools.size() == 37 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
 
     // clips
     test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1}")) && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 48000,
@@ -2940,6 +2941,208 @@ static void catalogSafetyAndScanChecks()
     dir.deleteRecursively();
 }
 
+void analyzeChecks()
+{
+    std::printf ("[51] DSP analysis (Analyze.h)\n");
+
+    // 1. Pink-like multi-sine + 1 kHz resonance spike (+12 dB)
+    {
+        constexpr double sr = 48000.0;
+        constexpr int n = 48000 * 2;
+        juce::AudioBuffer<float> buf (2, n);
+        buf.clear();
+
+        // Equal energy per 1/6-octave band (flat in constant-Q)
+        for (int b = 0; b < analyze::kNumSpectrumBands; ++b)
+        {
+            const double f = 20.0 * std::pow (2.0, b / 6.0);
+            if (f > 18000.0)
+                break;
+            const double phase = b * 1.2345;
+            const float amp = (std::abs (f - 1000.0) < 80.0) ? 0.08f : 0.02f;
+            for (int i = 0; i < n; ++i)
+            {
+                const float s = amp * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * f * i / sr + phase));
+                buf.addSample (0, i, s);
+                buf.addSample (1, i, s);
+            }
+        }
+
+        const auto r = analyze::analyzeBuffer (buf, sr, "flat", -14.0);
+        test::check (r.valid, "analyzeBuffer returns valid result");
+        bool found1kRing = false;
+        for (const auto& ring : r.resonanceRings)
+            if (std::abs (ring.freqHz - 1000.0) < 160.0 && ring.standOutDb >= 4.0)
+                found1kRing = true;
+        test::check (found1kRing, "resonance spike at 1 kHz detected as ring");
+        test::check (juce::JSON::toString (r.toVar()).contains ("resonance_rings"), "toVar serializes spectrum and rings");
+    }
+
+    // 2. Out-of-phase stereo sine (L = +sin, R = -sin)
+    {
+        constexpr double sr = 48000.0;
+        constexpr int n = 48000;
+        juce::AudioBuffer<float> buf (2, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const float s = 0.25f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * i / sr));
+            buf.setSample (0, i, s);
+            buf.setSample (1, i, -s);
+        }
+        const auto r = analyze::analyzeBuffer (buf, sr);
+        test::check (r.stereoCorrelationMean < -0.95, "out-of-phase stereo correlation near -1.0");
+        test::check (r.monoLossDb > 40.0, "out-of-phase stereo reports high mono loss");
+        bool hasPhaseRec = false;
+        for (const auto& rec : r.recommendations)
+            if (rec.category == "phase" && rec.severity == "bad")
+                hasPhaseRec = true;
+        test::check (hasPhaseRec, "out-of-phase stereo emits bad phase recommendation");
+    }
+
+    // 3. Clipped / hot signal (1.5f peak)
+    {
+        constexpr double sr = 48000.0;
+        constexpr int n = 24000;
+        juce::AudioBuffer<float> buf (2, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const float s = 1.5f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / sr));
+            buf.setSample (0, i, s);
+            buf.setSample (1, i, s);
+        }
+        const auto r = analyze::analyzeBuffer (buf, sr);
+        test::check (r.truePeakDb > 0.0, "clipped signal true peak > 0 dBTP");
+        test::check (r.clippedSamples > 0, "clipped signal counts clipped samples");
+        bool hasBadHeadroom = false;
+        for (const auto& rec : r.recommendations)
+            if (rec.category == "headroom" && rec.severity == "bad")
+                hasBadHeadroom = true;
+        test::check (hasBadHeadroom, "clipped signal emits bad headroom recommendation");
+    }
+
+    // 4. BS.1770-4 LUFS accuracy at 44.1 kHz and 48 kHz on -20 dBFS 1 kHz stereo sine (amp = 0.1f)
+    for (double sr : { 44100.0, 48000.0 })
+    {
+        const int n = static_cast<int> (sr * 2.0);
+        juce::AudioBuffer<float> buf (2, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const float s = 0.1f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / sr));
+            buf.setSample (0, i, s);
+            buf.setSample (1, i, s);
+        }
+        const auto r = analyze::analyzeBuffer (buf, sr);
+        test::check (std::abs (r.integratedLufs - (-20.0)) <= 0.8,
+                     "LUFS at " + juce::String (sr, 0) + " Hz within +/- 0.8 LU of -20.0 (got " + juce::String (r.integratedLufs, 2) + ")");
+    }
+
+    // 5. Silence & NaN/Inf buffer safety
+    {
+        juce::AudioBuffer<float> nanBuf (2, 8192);
+        nanBuf.clear();
+        nanBuf.setSample (0, 100, std::numeric_limits<float>::quiet_NaN());
+        nanBuf.setSample (1, 200, std::numeric_limits<float>::infinity());
+        const auto rNan = analyze::analyzeBuffer (nanBuf, 48000.0);
+        test::check (rNan.valid && std::isfinite (rNan.integratedLufs) && std::isfinite (rNan.truePeakDb)
+                         && std::isfinite (rNan.stereoCorrelationMean) && std::isfinite (rNan.rmsDistanceDb),
+                     "silence/NaN buffer produces finite outputs without crashing");
+
+        juce::AudioBuffer<float> emptyBuf;
+        const auto rEmpty = analyze::analyzeBuffer (emptyBuf, 0.0);
+        test::check (! rEmpty.valid && std::isfinite (rEmpty.integratedLufs), "empty/0-rate buffer handled safely");
+    }
+
+    // 6. Multitrack masking check at 350 Hz (Low-Mid)
+    {
+        constexpr double sr = 48000.0;
+        constexpr int n = 48000;
+        juce::AudioBuffer<float> t1 (2, n), t2 (2, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const float s1 = 0.2f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 350.0 * i / sr));
+            const float s2 = 0.18f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 355.0 * i / sr));
+            t1.setSample (0, i, s1);
+            t1.setSample (1, i, s1);
+            t2.setSample (0, i, s2);
+            t2.setSample (1, i, s2);
+        }
+        const auto mr = analyze::analyzeMasking ({ { "Guitar", t1 }, { "Keys", t2 } }, sr);
+        test::check (mr.tracks.size() == 2, "analyzeMasking summarizes both tracks");
+        bool foundLowMidConflict = false;
+        for (const auto& c : mr.conflicts)
+            if (c.band == "Low-Mid" && c.overlapDb <= 6.0)
+                foundLowMidConflict = true;
+        test::check (foundLowMidConflict, "analyzeMasking detects Low-Mid masking conflict at 350 Hz");
+        test::check (juce::JSON::toString (mr.toVar()).contains ("Low-Mid"), "MaskingResult::toVar serializes conflicts");
+    }
+}
+
+void mcpAnalyzeAudioChecks()
+{
+    std::printf ("[52] MCP analyze_audio: direct file, session mix/stems/masking, single track, and error validation\n");
+    tempFolder().getChildFile ("mcp-analyze").createDirectory();
+    const auto wavA = makeWav ("mcp-analyze/a.wav", 48000.0, 2, 48000, 0.2f, 400.0);
+    const auto wavB = makeWav ("mcp-analyze/b.wav", 48000.0, 2, 48000, 0.18f, 405.0);
+    const auto pathA = wavA.getFullPathName().replace ("\\", "\\\\");
+
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    s.addTrack (wavA, "Guitar", err);
+    s.addTrack (wavB, "Keys", err);
+    McpServer server (s);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+
+    test::check (! failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\"}")), "add_plugin puts Test Gain on track 0");
+
+    // 1. Direct WAV file analysis
+    {
+        const auto r = call ("analyze_audio", "{\"file\":\"" + pathA + "\",\"target\":\"electronic\",\"target_lufs\":-12.0}");
+        const auto j = toolJson (r);
+        test::check (! failed (r) && (bool) j["valid"] && j["target_name"].toString() == "electronic"
+                         && j["loudness"].isObject() && j["peaks"].isObject()
+                         && j["spectrum"].isObject() && j["stereo"].isObject() && j["recommendations"].isArray(),
+                     "analyze_audio on file returns loudness, peaks, spectrum, stereo, and recommendations");
+    }
+
+    // 2. Full session analysis (mix + tracks + masking)
+    {
+        const auto r = call ("analyze_audio", "{}");
+        const auto j = toolJson (r);
+        test::check (! failed (r) && j["mix"].isObject() && (bool) j["mix"]["valid"]
+                         && j["tracks"].isArray() && j["tracks"].size() == 2
+                         && j["masking"].isObject() && j["masking"]["conflicts"].isArray()
+                         && ! j["masking"]["conflicts"].getArray()->isEmpty(),
+                     "analyze_audio on 2-track session returns mix, 2 track summaries, and masking conflicts");
+    }
+
+    // 3. Single track analysis
+    {
+        const auto r = call ("analyze_audio", "{\"track\":0}");
+        const auto j = toolJson (r);
+        test::check (! failed (r) && (bool) j["valid"] && j["loudness"].isObject() && ! j.hasProperty ("mix"),
+                     "analyze_audio on track 0 returns single-track analysis");
+    }
+
+    // 4. Error cases: muted track, invalid target, and file + track both given
+    {
+        s.tracks[0]->mute = true;
+        const auto rMuted = call ("analyze_audio", "{\"track\":0}");
+        test::check (failed (rMuted) && toolText (rMuted).contains ("muted"),
+                     "analyze_audio on muted track returns error");
+        s.tracks[0]->mute = false;
+
+        const auto rBadTarget = call ("analyze_audio", "{\"file\":\"" + pathA + "\",\"target\":\"unknown_genre\"}");
+        test::check (failed (rBadTarget), "analyze_audio with invalid target returns isError");
+
+        const auto rBoth = call ("analyze_audio", "{\"file\":\"" + pathA + "\",\"track\":0}");
+        test::check (failed (rBoth), "analyze_audio with both file and track returns isError");
+    }
+
+    tempFolder().getChildFile ("mcp-analyze").deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -2994,6 +3197,8 @@ int main()
     mcpIndexValidationChecks();
     projectValidationChecks();
     catalogSafetyAndScanChecks();
+    analyzeChecks();
+    mcpAnalyzeAudioChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
