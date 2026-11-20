@@ -1,8 +1,10 @@
 # Olympus Session Host
 
-A **session host for the Pantheon plugins**, as a standalone macOS app. Add the stems of a song, put a chain of the suite's plugins on each
-stem, save the project, and write the stems out again with their chains. An AI agent can do the placing for you through the built-in
-**MCP server**; you open the saved project here and edit what is left by hand.
+A **basic DAW for the Pantheon plugins**, as a standalone macOS app. Audio goes on tracks as clips on a timeline with a tempo map, a grid,
+markers and a loop; each track has a chain of plugins (the suite's own, and any VST3 or, on macOS, Audio Unit plugin the scan finds); you set
+the faders and pans, save the project, and write the stems out again with their chains. The engine does all of this and is tested; the window
+is being moved over to it, so the window still shows the older one-file-per-track stem view. An AI agent can place the chains for you through
+the built-in **MCP server**, whose 31 tools cover the same clips, tempo, markers, loop and master.
 
 ## Name origin
 
@@ -23,7 +25,8 @@ Regenerate with the command under "Development".*
   Open any plugin from its chain, change it, save.
 - **Any plugin it finds.** It hosts every VST3 (and, on macOS, Audio Unit) plugin the folders hold, the suite's own and third-party ones alike, and nothing else. Hestia's instances
   (which listen to each other) still work across the stems. The setting *scanSuiteOnly* in `settings.xml` narrows this to the suite's own plugins.
-- **Not a DAW.** There is no recording, no MIDI, no instruments, no timeline editing and no automation. It plays the stems from the start and writes them out. Arranging and mixing stay in your own DAW.
+- **A basic DAW, not a full one.** There is no recording, no MIDI, no instruments and no automation, and no time-stretching: audio plays at its
+  own speed, and when the tempo changes the grid moves, not the audio. Instruments and recording stay in your own DAW.
 - **Nothing is hidden from the agent.** The server reads and sets every setting of a plugin by the names the plugin gives them, loads its presets, and says why anything it cannot do failed.
 - **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [the repository notes](../../NOTICE.md)).
 
@@ -31,13 +34,17 @@ Regenerate with the command under "Development".*
 
 | Area | What it does |
 |---|---|
-| **Tracks** | Audio files (WAV, AIFF, FLAC, MP3, M4A, Ogg, CAF), one track each, mono or stereo at any rate. A track becomes stereo at the session's rate, which is the first file's; others are resampled. Drop files on the window or press ADD TRACK. |
+| **Tracks** | Any number of tracks, each with a name, a fader, a balance pan, mute and solo. A track is stereo at the session's rate, which is the first file's; other files are resampled to it. A file longer than two hours is refused. |
+| **Clips** | Audio files (WAV, AIFF, FLAC, MP3, M4A, Ogg, CAF) placed on a track at a position on the timeline. A clip can be moved (also to another track), split, trimmed, duplicated, deleted, renamed, given a gain and fades, and muted. Overlapping clips on a track are summed. A clip whose file is missing keeps its place and plays silence. *The window is being moved over to clips.* |
+| **Tempo and grid** | One tempo map: tempo changes at a beat (20 to 300 bpm) and one time signature for the project. The grid (bar, 1/2 to 1/32) and snap are view settings, saved with the project. Audio is never time-stretched: a tempo change moves the grid, not the audio. *The window is being moved over to it.* |
+| **Markers, loop, metronome** | Named markers, one loop (start, end, on or off) and a metronome (a click on every beat, a higher one on the bar; not in the stems), all saved with the project. The plugins read the tempo, the position and the loop from the playhead. *The window is being moved over to them.* |
+| **Fader, pan, master** | A fader and a balance pan for each track, after its chain (the far side of a pan is attenuated; the centre is unity). One master gain on the sum: it applies to playback and to `mix.wav`, never to the stems. A muted track, or any track not soloed when another is, is not played and gets no stem. |
+| **Undo** | Undo and redo cover every timeline edit, track mix setting, master, tempo, time signature, marker and loop change; a fader drag is one step. Adding or removing a track or a plugin cannot be undone and clears the history. *The window is being moved over to it.* |
 | **Chains** | Any plugin Olympus found, in any order, several of the same kind if you like. Click a plugin to open its own window, shift-click to bypass it, right-click to move or remove it. A plugin that is not installed on this machine stays in the chain (red), passes the audio through and keeps its settings. |
-| **Fader, mute, solo** | A fader for each track after its chain. A muted track, or any track not soloed when another is, is not played and gets no stem. |
-| **Playback** | From the playhead to the end of the stems, through the chains, on the audio device. The plugins read the same playhead. A plugin's reported latency is compensated across the tracks, so the stems stay in time. |
-| **Project** | `.olympus`: a small XML file with the tracks (a relative path to each audio file, and the absolute one as a fallback), faders, and every plugin's complete state. A project opens without its plugins or audio (each is a warning) and saves again without losing what they held. |
-| **Render stems** | One WAV per audible track after its chain and fader, aligned with the audio (the chain's latency is taken off the front), named `01-Vocal.wav`, and `mix.wav`, the sum. 32-bit float by default, so a stem cannot clip and can be edited later; 16 or 24 bit on request, and a tail for reverbs and delays. All tracks run together block by block, which Hestia's bus needs. |
-| **MCP server** | `OlympusMcp`: the same session without a window, 19 tools, over stdio (see below). |
+| **Playback** | From the playhead to the end of the audio, through each track's clips, chain, fader and pan, and the master, on the audio device. The plugins read the same playhead. A plugin's reported latency is compensated across the tracks, so the stems stay in time. *The window is being moved over to clip playback.* |
+| **Project** | `.olympus`: a small XML file (version 2) with the tracks and their clips (a relative path to each audio file, and the absolute one as a fallback), faders, pans and mutes, the master, the tempo map, markers, loop and grid, and every plugin's complete state. A version 1 file opens as one clip at 0. A project opens without its plugins or audio (each is a warning) and saves again without losing what they held. A project from a newer version is refused. |
+| **Render stems** | One WAV per audible track, after its clips, chain, fader and pan, aligned with the audio (the chain's latency is taken off the front), named `01-Vocal.wav`, and `mix.wav`, the sum with the master. 32-bit float by default, so a stem cannot clip and can be edited later; 16 or 24 bit on request. A tail of at most a minute for reverbs and delays; a render longer than three hours is refused. All tracks run together block by block, which Hestia's bus needs. |
+| **MCP server** | `OlympusMcp`: the same session without a window, 31 tools (the clip, tempo, marker, loop and master ones go through the same editor as the window), over stdio (see below). |
 
 ## Where it finds the plugins
 
@@ -65,9 +72,10 @@ claude mcp add olympus -- /path/to/pantheon-suite/apps/olympus/build/OlympusMcp_
 ```
 
 It speaks MCP (JSON-RPC 2.0, one message per line on stdin and stdout; diagnostics go to stderr). The tools: `list_plugins`, `project_info`, `new_project`, `open_project`, `save_project`,
-`add_track`, `remove_track`, `set_track` (fader, mute, solo, name), `add_plugin`, `remove_plugin`, `move_plugin`, `bypass_plugin`, `set_chain`, `copy_chain` (the same chain, with its settings,
-onto other tracks), `list_parameters`, `set_parameter` (by value 0..1 or by the text the plugin shows), `list_presets`, `load_preset` and `render_stems`. Tracks and slots are numbered from 0; a track may be
-named and a plugin given by the start of its name. A failed call comes back as an error result with the reason. It edits and renders; it does not play. A typical request: *"Add the four stems in
+`add_track`, `remove_track`, `set_track` (fader, pan, mute, solo, name), `add_clip` (a file at a position, in seconds or beats), `move_clip` (also to another track), `split_clip`,
+`trim_clip`, `delete_clip`, `set_clip` (gain, fades, mute, name), `set_tempo`, `set_time_signature`, `add_marker`, `remove_marker`, `set_loop`, `set_master`, `add_plugin`, `remove_plugin`,
+`move_plugin`, `bypass_plugin`, `set_chain`, `copy_chain` (the same chain, with its settings, onto other tracks), `list_parameters`, `set_parameter` (by value 0..1 or by the text the plugin shows),
+`list_presets`, `load_preset` and `render_stems`. Tracks, clips, markers and slots are numbered from 0; a track may be named and a plugin given by the start of its name. A failed call comes back as an error result with the reason. It edits and renders; it does not play. A typical request: *"Add the four stems in
 `~/song/`, put Hestia and Hermes on each, Aegis on the vocal, save it as `~/song/song.olympus` and render the stems."* Then open the project here.
 
 ## Development
