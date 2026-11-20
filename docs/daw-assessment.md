@@ -6,7 +6,7 @@ Copyright (C) 2026 The Pantheon authors
 # Assessment: a custom DAW with MCP for the suite?
 
 Status: proposal written 2026-11-19 from three read-only research passes (repository reuse, DAW and MCP landscape,
-design options). apps/olympus (a session host with an MCP server) has since been built, so the options below are partly superseded; claims below were re-checked against it on 2026-11-20. Items marked *unverified* were not confirmed against a primary source.
+design options). apps/olympus (Olympus Basic DAW, with an MCP server) has since been built, so the options below are partly superseded; claims below were re-checked against it on 2026-11-20. Items marked *unverified* were not confirmed against a primary source.
 
 ## The question
 

@@ -10,7 +10,7 @@ The same rule as in the plugins applies here: every fact lives in one place, the
 shared/ui/       the hardware-style interface kit (JUCE GUI only, header-only), target `pantheon_ui`
 shared/dsp/      DSP that more than one plugin uses (header-only, namespace `pdsp`), target `pantheon_dsp`
 plugins/<name>/  one self-contained plugin each: its own CMakeLists.txt, Source/ (Themis: core/ and plugin/), Tests/ (Themis: tests/), README, CLAUDE.md
-apps/<name>/     one self-contained standalone application each (no plugin formats of its own): the same files as a plugin; today Orpheus, the pitch editor, and Olympus, the session host
+apps/<name>/     one self-contained standalone application each (no plugin formats of its own): the same files as a plugin; today Orpheus, the pitch editor, and Olympus, the basic DAW
 .github/         CI for the whole repository (workflows run per plugin with `working-directory`)
 ```
 

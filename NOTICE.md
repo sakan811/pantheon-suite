@@ -4,7 +4,7 @@
 
 Copyright (C) 2026 The Pantheon authors.
 
-Every plugin and app in this repository (Themis Verdict, Hephaestus Forge, Harmonia Pitch, Iris Prism, Atlas Span, Hestia Space, Aegis Ceiling, Apollo Curve, Hera Bond, Castor Pair, Nemesis Hush, Dionysus Warmth, Hermes Level, Orpheus Pitch Editor, Olympus Session Host) and the code they share is free software: you can
+Every plugin and app in this repository (Themis Verdict, Hephaestus Forge, Harmonia Pitch, Iris Prism, Atlas Span, Hestia Space, Aegis Ceiling, Apollo Curve, Hera Bond, Castor Pair, Nemesis Hush, Dionysus Warmth, Hermes Level, Orpheus Pitch Editor, Olympus Basic DAW) and the code they share is free software: you can
 redistribute it and/or modify it under the terms of the **GNU Affero General Public License, version 3 or (at your option)
 any later version**. The full text is in [LICENSE](LICENSE).
 
@@ -38,7 +38,7 @@ and apply to any binary you build.
 
 *Status: pending the maintainer's decision. The licence review is still open; see [docs/daw-assessment.md](docs/daw-assessment.md).*
 
-Olympus Session Host (`apps/olympus`) hosts VST3 plugins and, on macOS, Audio Units, through the plugin host code of JUCE. It loads the
+Olympus Basic DAW (`apps/olympus`) hosts VST3 plugins and, on macOS, Audio Units, through the plugin host code of JUCE. It loads the
 plugins found on the machine it runs on, at run time, from the system's plugin folders and the folders the user chooses. Nothing of them is
 bundled: this repository does not contain, download or redistribute any third-party plugin, and Olympus links none of their code. The
 plugins stay under their own licences. The scan reads them on the user's machine (see [apps/olympus/README.md](apps/olympus/README.md)).
@@ -59,5 +59,5 @@ what a statement is about. This project is **not affiliated with, endorsed by or
 - FL Studio, FabFilter and Pro-Q, iZotope and Ozone, and Ableton and Ableton Live, where a README names them, are trademarks
   of their respective owners.
 
-"Themis Verdict", "Hephaestus Forge", "Harmonia Pitch", "Iris Prism", "Atlas Span", "Hestia Space", "Aegis Ceiling", "Apollo Curve", "Hera Bond", "Castor Pair", "Nemesis Hush", "Dionysus Warmth", "Hermes Level", "Orpheus Pitch Editor" and "Olympus Session Host" are the names of the plugins and the app in this repository. If you publish a fork or a
+"Themis Verdict", "Hephaestus Forge", "Harmonia Pitch", "Iris Prism", "Atlas Span", "Hestia Space", "Aegis Ceiling", "Apollo Curve", "Hera Bond", "Castor Pair", "Nemesis Hush", "Dionysus Warmth", "Hermes Level", "Orpheus Pitch Editor" and "Olympus Basic DAW" are the names of the plugins and the app in this repository. If you publish a fork or a
 build, give it a name of your own where that could be confused with another product.

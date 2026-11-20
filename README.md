@@ -24,7 +24,7 @@ There are also two standalone apps:
 | App | What it is |
 |---|---|
 | [Orpheus Pitch Editor](apps/orpheus/README.md) | An offline pitch editor for solo vocals: the notes of a recording on a piano roll, drag them or correct them to a scale, export the result. |
-| [Olympus Session Host](apps/olympus/README.md) | Hosts the suite's plugins in a basic DAW: clips on a timeline, a chain of plugins on each track, recording from an audio interface, saved as a project and rendered back as stems; with an MCP server so an agent can place the chains. |
+| [Olympus Basic DAW](apps/olympus/README.md) | Hosts the suite's plugins in a basic DAW: clips on a timeline, a chain of plugins on each track, recording from an audio interface, saved as a project and rendered back as stems; with an MCP server so an agent can place the chains. |
 
 [shared/ui](shared/ui) holds the hardware-style interface kit (metal faceplates, glass displays, lamps, knobs) that all the
 plugins and the app draw with, and [shared/dsp](shared/dsp) the DSP more than one of them uses (biquads, the spectrum analyzer, the true-peak reader). The rules for working across plugins, and what is not yet in line, are in [CLAUDE.md](CLAUDE.md).
