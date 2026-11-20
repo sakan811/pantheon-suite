@@ -13,12 +13,14 @@ namespace olympus
 inline const char* guideTitle() { return "Olympus"; }
 inline const char* guideText()
 {
-    return "Olympus puts the Pantheon plugins on stems, so each stem can be edited later.\n\n"
-           "Add the stems as audio files (ADD TRACK, or drop them on the window), click + on a track to put a plugin on it, click a plugin to open it, "
-           "shift-click to bypass it, right-click for more. SAVE keeps the project; RENDER STEMS writes one WAV per stem with its chain, and the mix.\n\n"
-           "An agent can do the placing for you through the MCP server (OlympusMcp, see the README), and you open the saved project here.\n\n"
-           "It is not a recorder or a sequencer: there is no timeline editing, no MIDI and no instruments. It plays the stems from the start, "
-           "hosts the suite's own plugins only, and writes the stems to render them: arranging and mixing stay in your own DAW.";
+    return "Olympus is a basic DAW for the Pantheon plugins and for any VST3 (on macOS also Audio Unit) plugin the scan finds.\n\n"
+           "It is for arranging audio on a timeline: IMPORT AUDIO, or drop files on the window, puts each file on a track at the playhead; drag clips "
+           "to move them, edges to trim them, S splits at the playhead. Set the tempo, the grid, markers and a loop. Each track has a chain of "
+           "plugins (FX), a fader and a pan. RENDER STEMS writes one WAV per track and the mix.\n\n"
+           "It is not for MIDI or instruments, and it does not time-stretch: audio keeps its own speed, and a tempo change moves the grid, not the audio.\n\n"
+           "Keys: Space plays and stops, Return rewinds, L loops, M adds a marker, Delete removes the selected clip, Cmd+D duplicates it, "
+           "Cmd+Z and Shift+Cmd+Z undo and redo, Cmd+S saves.\n\n"
+           "An agent can edit the project through the MCP server (OlympusMcp, see the README); open the saved project here.";
 }
 
 // `deviceRate`: the rate of the audio device, 0 when there is none (tests, snapshots).
@@ -27,10 +29,11 @@ inline std::vector<ui::Note> adviceFor (const Session& s, double deviceRate = 0.
     std::vector<ui::Note> notes;
     const auto add = [&notes] (ui::Severity sev, const juce::String& text) { notes.push_back ({ sev, text.toStdString() }); };
 
-    int missingPlugins = 0, anyAudible = 0;
+    int missingPlugins = 0, anyAudible = 0, clips = 0;
     for (auto& t : s.tracks)
     {
         bool missingAudio = false;
+        clips += (int) t->clips.size();
         for (auto& clip : t->clips)
             missingAudio = missingAudio || clip.audio == nullptr;
         if (missingAudio)
@@ -40,7 +43,7 @@ inline std::vector<ui::Note> adviceFor (const Session& s, double deviceRate = 0.
         anyAudible += s.audible (*t) ? 1 : 0;
     }
     if (s.catalog.names().isEmpty())
-        add (ui::Severity::warning, "No plugin of the suite found. PLUGINS: choose the folder that holds the built .vst3 files (or plugins/).");
+        add (ui::Severity::warning, "No plugin found. PLUGINS: look in a folder that holds the built .vst3 files, or rescan.");
     if (missingPlugins > 0)
         add (ui::Severity::warning, juce::String (missingPlugins) + " plugin(s) in this project are not installed here: they pass the audio through and keep their settings.");
     if (! s.tracks.empty() && anyAudible == 0)
@@ -56,7 +59,12 @@ inline std::vector<ui::Note> adviceFor (const Session& s, double deviceRate = 0.
             break;
         }
     if (s.tracks.empty())
-        add (ui::Severity::info, "Drop the stems (audio files) on the window, or press ADD TRACK.");
+        add (ui::Severity::info, "No audio yet: IMPORT AUDIO, or drop files on the window, puts them on tracks at the playhead.");
+    else if (clips == 0)
+        add (ui::Severity::info, "No audio yet: the tracks are empty. IMPORT AUDIO puts a file at the playhead, or drop one on a lane.");
+    // the strip shows the kit's own "plugin" reminder when there is nothing else: Olympus always has a line of its own
+    if (notes.empty())
+        add (ui::Severity::info, "Space plays and stops, S splits, M marks, L loops. GUIDE says what Olympus is for.");
     return ui::ordered (notes);
 }
 }

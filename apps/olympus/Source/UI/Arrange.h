@@ -64,6 +64,7 @@ public:
     void scrollTo (juce::int64 sample);                 // the left edge of the timeline
 
     // ---- editing from the keyboard and the window (each one is a single undo step) ---------------------------------------------
+    // The window's keys call these (S, Delete, Cmd+D, M); keyPressed takes only the selection and the nudges.
     void splitAtPlayhead();      // the selected clip if the playhead is inside it, else every clip the playhead is inside
     void deleteSelected();
     void duplicateSelected();

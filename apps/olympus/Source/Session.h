@@ -137,6 +137,7 @@ struct EditState
     std::vector<Marker> markers;
     juce::int64 loopStart = 0, loopEnd = 0;
     bool loopOn = false;
+    bool metronomeOn = false;
 };
 
 class Session
@@ -1030,6 +1031,7 @@ public:
         e.loopStart = loopStart;
         e.loopEnd = loopEnd;
         e.loopOn = loopOn;
+        e.metronomeOn = metronomeOn;
         return e;
     }
 
@@ -1057,6 +1059,7 @@ public:
         loopStart = e.loopStart;
         loopEnd = e.loopEnd;
         loopOn = e.loopOn;
+        metronomeOn = e.metronomeOn;
         dirty = true;
     }
 

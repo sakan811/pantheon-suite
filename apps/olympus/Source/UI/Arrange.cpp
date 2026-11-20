@@ -167,6 +167,10 @@ public:
 
         muteButton.setClickingTogglesState (true);
         muteButton.lamp = colours::bad;
+        // a header switch never takes the keyboard: Space and the other transport keys reach the window
+        for (auto* b : { &muteButton, &soloButton, &fxButton, &removeButton }) b->setWantsKeyboardFocus (false);
+        faderSlider.setWantsKeyboardFocus (false);
+        panKnob.setWantsKeyboardFocus (false);
         muteButton.setTooltip ("Mute the track");
         muteButton.onClick = [this]
         {
@@ -1003,13 +1007,11 @@ void ArrangeView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWh
 bool ArrangeView::keyPressed (const juce::KeyPress& key)
 {
     const auto code = key.getKeyCode();
-    const auto ch = key.getTextCharacter();
     const auto mods = key.getModifiers();
 
-    if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { deleteSelected(); return true; }
-    if (mods.isCommandDown() && (ch == 'd' || ch == 'D')) { duplicateSelected(); return true; }
+    // The clip keys (Delete, Cmd+D, S) and the transport keys belong to the window, which calls the methods above; the view takes only
+    // the selection and the nudges, so a key is never handled twice.
     if (mods.isCommandDown()) return false;
-    if (ch == 's' || ch == 'S') { splitAtPlayhead(); return true; }
     if (code == juce::KeyPress::escapeKey) { selected = {}; repaint(); return true; }
     if (code == juce::KeyPress::leftKey) { nudgeSelected (-1, 0, mods.isShiftDown()); return true; }
     if (code == juce::KeyPress::rightKey) { nudgeSelected (1, 0, mods.isShiftDown()); return true; }

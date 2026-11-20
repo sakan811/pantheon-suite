@@ -17,7 +17,8 @@ public:
         setContentOwned (content, true);
         content->onTitleChanged = [this] { setName (content->windowTitle()); };
         setResizable (true, true);
-        setResizeLimits (1024, ui::editorHeightFor (1024), 4000, ui::editorHeightFor (4000)); // the shape stays 16:10, like every window of the suite
+        // the transport row needs the design width: the window grows from it. The shape stays 16:10, like every window of the suite.
+        setResizeLimits (olympus::gui::MainComponent::kDesignWidth, ui::editorHeightFor (olympus::gui::MainComponent::kDesignWidth), 4000, ui::editorHeightFor (4000));
         getConstrainer()->setFixedAspectRatio (ui::kEditorAspect);
         centreWithSize (getWidth(), getHeight());
         setVisible (true);

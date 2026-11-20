@@ -4,6 +4,8 @@
 #pragma once
 
 #include "Advice.h"
+#include "Arrange.h"
+#include "../Edit.h"
 #include "Session.h"
 #include "Settings.h"
 
@@ -19,8 +21,8 @@ namespace olympus::gui
 {
 class MainComponent;
 
-// A push switch whose lamp has the colour it is given (the kit's look-and-feel lights every switch in one colour): red for a mute, green for a solo, red for a
-// plugin that is not installed.
+// A push switch whose lamp has the colour it is given (the kit's look-and-feel lights every switch in one colour): amber for the transport
+// switches, red for a mute, green for a solo, red for a plugin that is not installed.
 class LampButton : public juce::TextButton
 {
 public:
@@ -35,59 +37,14 @@ public:
     }
 };
 
-// One plugin of a chain: click opens it, shift-click bypasses it, right-click (or ctrl-click) for the menu.
+// A plugin switch: click opens it, shift-click bypasses it, right-click (or ctrl-click) for the menu. Kept for the chains' buttons; the
+// window's FX menu lists a track's plugins instead.
 class SlotButton : public LampButton
 {
 public:
     std::function<void()> onMenu;
     void mouseDown (const juce::MouseEvent& e) override { if (e.mods.isPopupMenu()) { if (onMenu) onMenu(); return; } LampButton::mouseDown (e); }
     void mouseUp (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) LampButton::mouseUp (e); }
-};
-
-// The waveform of a track on glass, with the playhead; a click puts the playhead there.
-class WaveStrip : public juce::Component
-{
-public:
-    std::vector<float> envelope;
-    double fraction = 0.0; // playhead, 0..1
-    std::function<void (double)> onSeek;
-    void paint (juce::Graphics& g) override;
-    void mouseDown (const juce::MouseEvent& e) override { if (onSeek) onSeek (juce::jlimit (0.0, 1.0, (double) e.x / (double) juce::jmax (1, getWidth()))); }
-    void mouseDrag (const juce::MouseEvent& e) override { mouseDown (e); }
-};
-
-// One track: name, file, mute and solo, fader, waveform and the chain.
-class TrackRow : public juce::Component
-{
-public:
-    TrackRow (MainComponent& owner, int trackIndex);
-    int heightFor (int width) const;
-    void resized() override;
-    void paint (juce::Graphics& g) override;
-    void refresh();
-    int index;
-    WaveStrip wave;
-    juce::Label nameLabel;
-    LampButton muteButton { "M" }, soloButton { "S" };
-    juce::TextButton removeButton { "X" }, addPluginButton { "+" };
-    juce::Slider gainKnob;
-    juce::OwnedArray<SlotButton> slotButtons;
-
-private:
-    MainComponent& main;
-};
-
-// The tracks, one under the other.
-class TrackList : public juce::Component
-{
-public:
-    explicit TrackList (MainComponent& m) : main (m) {}
-    void rebuild();
-    void resized() override;
-    juce::OwnedArray<TrackRow> rows;
-
-private:
-    MainComponent& main;
 };
 
 class PluginWindow : public juce::DocumentWindow
@@ -98,7 +55,8 @@ public:
     std::function<void()> onClosed;
 };
 
-// The whole window: the controls along the top, the tracks, and the notes at the foot. It owns the session and the audio device.
+// The whole window: the project buttons and the transport along the top, the arrangement (ArrangeView) in the body, and the notes at the
+// foot. It owns the session, the editor that changes it, and the audio device.
 class MainComponent : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer, private juce::AsyncUpdater
 {
 public:
@@ -117,28 +75,45 @@ public:
 
     Session session;
     Settings settings;
+    Editor editor { session };          // every timeline edit, and the undo of it, goes through here
 
-    // ---- what the buttons do (public so the checks can press them) -------------------------------------------
+    // ---- what the buttons do (public so the checks can press them) ----------------------------------------------------------------
     void newProject();
     void openProject (const juce::File& file);
     bool saveProject();
     void saveProjectAs();
     bool saveTo (const juce::File& file);
+    // One new track per file, its clip at sample 0 (the checks' way in; the buttons use importFiles at the playhead).
     void addTracks (const juce::StringArray& files);
+    // Audio files as clips: with `track` -1 each file is a new track named after it, else the files go on that track one after another.
+    // Every file starts at `at`, or after the previous clip on the track. Errors are shown together.
+    void importFiles (const juce::StringArray& files, int track, juce::int64 at);
+    void addEmptyTrack();
+    void undoEdit();
+    void redoEdit();
+    void toggleLoop();
+    void toggleMetronome();
+    void zoomBy (double factor);
+    void removeTrack (int index);
     // Writes the stems and the mix. Returns the reason when it fails, an empty string when it worked.
     juce::String renderTo (const juce::File& folder, const std::function<bool (float)>& progress = {});
     void togglePlay();
+    void rewind();                                   // to the loop's start when the loop is on, else to 0
     void seek (juce::int64 sample);
     juce::int64 position() const { return source.position.load(); }
     bool isPlaying() const { return source.playing.load(); }
+    // Copies what the audio thread needs (the loop, the end of the audio) from the session. Message thread; the timer does it too.
+    void syncTransport();
+    // What the audio callback does for one block: the same code, so the checks can drive the loop and the end of the audio.
+    void renderAudioBlock (juce::AudioBuffer<float>& buffer) { juce::AudioSourceChannelInfo info (&buffer, 0, buffer.getNumSamples()); source.getNextAudioBlock (info); }
     void scanPlugins (bool rescan = false);
     void openEditor (int track, int slot);
     int openEditors() const { return (int) windows.size(); }
     void closeEditors();
-    void removeTrack (int index);
-    // Rebuilds the rows now (the structure of the tracks or a chain changed).
-    void rebuildNow();
-    void requestRebuild() { triggerAsyncUpdate(); }
+    // Brings the arrangement, the transport and the title up to date now.
+    void refreshNow();
+    // The same, after the current event: for a change made from inside a control that the change may remove.
+    void requestRefresh() { triggerAsyncUpdate(); }
 
     // Runs `proceed` now if nothing would be lost, else after the user agrees.
     void askToDiscard (const juce::String& action, std::function<void()> proceed);
@@ -152,24 +127,29 @@ public:
     std::vector<ui::Note> notes() const { return adviceFor (session, deviceRate); }
     double deviceRate = 0.0;
 
+    // The menus of a track: its plugins (open, bypass, move, remove) and the plugins to add.
+    void showAddPluginMenu (int track);
+    void showTrackMenu (int track);
+
     bool keyPressed (const juce::KeyPress& key) override;
     void paint (juce::Graphics&) override;
     void resized() override;
     bool isInterestedInFileDrag (const juce::StringArray& files) override { return ! files.isEmpty(); }
     void filesDropped (const juce::StringArray& files, int, int) override;
 
+    // ---- the controls (public so the checks can find and press them) ---------------------------------------------------------------
     ui::GuideButton guideButton { guideTitle(), guideText() };
-    juce::TextButton newButton { "New" }, openButton { "Open" }, saveButton { "Save" }, saveAsButton { "Save as" }, addButton { "Add track" }, pluginsButton { "Plugins" },
-        renderButton { "Render stems" }, rewindButton { "|<" }, playButton { "Play" };
-    juce::Viewport viewport;
-    TrackList trackList { *this };
-
-    // for the rows
-    void showAddPluginMenu (int track);
-    void showSlotMenu (int track, int slot);
-    void toggleEditor (int track, int slot);
+    juce::TextButton newButton { "New" }, openButton { "Open" }, saveButton { "Save" }, saveAsButton { "Save as" }, addTrackButton { "Add track" },
+        importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" };
+    juce::TextButton rewindButton { "|<" }, undoButton { "Undo" }, redoButton { "Redo" }, zoomOutButton { "-" }, zoomInButton { "+" }, zoomFitButton { "Fit" };
+    LampButton playButton { "Play" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" };
+    juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
+    juce::ComboBox signatureBox, gridBox;
+    ArrangeView arrange { session, editor };
+    juce::Rectangle<int> positionBox;                // the position read-out (bars.beats.ticks and mm:ss.ss)
 
 private:
+    // The audio callback's copy of the transport: the playhead, the loop and the end of the audio. The callback reads only these.
     struct Source : juce::AudioSource
     {
         explicit Source (MainComponent& m) : owner (m) {}
@@ -179,19 +159,24 @@ private:
         MainComponent& owner;
         std::atomic<juce::int64> position { 0 };
         std::atomic<bool> playing { false };
+        std::atomic<bool> loopOn { false };
+        std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 }, endOfAudio { 0 };
         juce::AudioBuffer<float> chunk { 2, kBlockSize };
     };
 
     void timerCallback() override;
-    void handleAsyncUpdate() override { rebuildNow(); }
+    void handleAsyncUpdate() override { refreshNow(); }
     void updateTitle();
+    void updateTransport();
     void showError (const juce::String& message);
     void chooseAndOpen();
-    void chooseAndAdd();
+    void chooseAndImport();
     void chooseFolder();
     void chooseAndRender();
     void showPluginsMenu();
-    void setDeviceRate();
+    void showSignature (int numerator, int denominator);
+    void applyBpm();
+    void syncPlayhead() { arrange.playhead = (double) position(); }
     juce::int64 endOfPlay() const { return session.length() + session.maxLatency(); }
 
     Options opts;
@@ -206,6 +191,7 @@ private:
     juce::int64 lastEditorHash = 0;
     int tick = 0;
     bool scanning = false;
-    juce::Rectangle<int> noteStrip, timeBox, bodyArea;
+    juce::StringArray signatures { "4/4", "3/4", "2/4", "5/4", "6/8", "7/8", "12/8" };
+    juce::Rectangle<int> noteStrip, bodyArea;
 };
 }

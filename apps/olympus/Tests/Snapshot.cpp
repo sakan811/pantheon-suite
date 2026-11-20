@@ -1,42 +1,46 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 The Pantheon authors
 
-// Renders the real window to a PNG over four synthetic stems, so the picture shows what the app is for.
+// Renders the real window to a PNG: four synthetic stems, cut into clips on a timeline with a tempo, three markers, a loop and a plugin, so
+// the picture shows what the app is for.
 //
 //   OlympusSnapshot <out.png> [plugins=<folder>]
 //
-//   plugins=FOLDER   use the suite's built plugins found in FOLDER (VST3) instead of stand-ins that carry the same names
+//   plugins=FOLDER   use the suite's built plugins found in FOLDER (VST3) on the chains instead of the test plugin
 
 #include "TestPlugin.h"
 #include "UI/MainComponent.h"
 
 namespace
 {
+constexpr double kRate = 48000.0;
+constexpr double kStemSeconds = 24.0;
+constexpr double kTempo = 96.0;   // a bar is 2.5 seconds
+
 // One stem of a song: `kind` 0 a vocal (a slow melody with vibrato), 1 a bass, 2 a drum loop, 3 chords.
 juce::File makeStem (const juce::File& folder, const juce::String& name, int kind)
 {
-    const double rate = 48000.0;
-    const int length = (int) (rate * 24.0);
+    const int length = (int) (kRate * kStemSeconds);
     juce::AudioBuffer<float> b (2, length);
     juce::Random random (kind + 7);
     const double notes[] = { 220.0, 247.0, 277.2, 330.0, 293.7, 247.0, 220.0, 196.0 };
     double phase = 0.0;
     for (int i = 0; i < length; ++i)
     {
-        const double t = i / rate;
-        const double beat = std::fmod (t * 2.0, 1.0); // 120 bpm
+        const double t = i / kRate;
+        const double beat = std::fmod (t * kTempo / 60.0, 1.0);
         float v = 0.0f;
         const float env = (float) std::exp (-3.0 * beat);
         if (kind == 0)
         {
             const double f = notes[(size_t) (t / 3.0) % 8] * (1.0 + 0.012 * std::sin (2.0 * juce::MathConstants<double>::pi * 5.5 * t));
-            phase += f / rate;
+            phase += f / kRate;
             const float gate = (float) (0.5 + 0.5 * std::sin (2.0 * juce::MathConstants<double>::pi * t / 3.0 - 1.2));
             v = gate * 0.35f * (float) (std::sin (2.0 * juce::MathConstants<double>::pi * phase) + 0.4 * std::sin (4.0 * juce::MathConstants<double>::pi * phase));
         }
         else if (kind == 1)
         {
-            phase += 55.0 * (((int) (t / 1.5)) % 2 == 0 ? 1.0 : 1.335) / rate;
+            phase += 55.0 * (((int) (t / 1.5)) % 2 == 0 ? 1.0 : 1.335) / kRate;
             v = 0.55f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * phase) * (0.6f + 0.4f * env);
         }
         else if (kind == 2)
@@ -48,7 +52,7 @@ juce::File makeStem (const juce::File& folder, const juce::String& name, int kin
         else
         {
             const double f = 130.8 * (1.0 + 0.5 * (((int) (t / 6.0)) % 2));
-            phase += f / rate;
+            phase += f / kRate;
             v = 0.16f * (float) (std::sin (2.0 * juce::MathConstants<double>::pi * phase) + std::sin (2.0 * juce::MathConstants<double>::pi * phase * 1.26) + std::sin (2.0 * juce::MathConstants<double>::pi * phase * 1.5));
         }
         b.setSample (0, i, v);
@@ -58,9 +62,18 @@ juce::File makeStem (const juce::File& folder, const juce::String& name, int kin
     file.deleteFile();
     juce::WavAudioFormat wav;
     std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
-    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (rate).withNumChannels (2).withBitsPerSample (24));
+    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (kRate).withNumChannels (2).withBitsPerSample (24));
     writer->writeFromAudioSampleBuffer (b, 0, length);
     return file;
+}
+
+// A clip of the stem: from `offsetSeconds` in the file, placed at `startSeconds` on the timeline, for `lengthSeconds`.
+void clip (olympus::Editor& editor, int track, const juce::File& file, double startSeconds, double offsetSeconds, double lengthSeconds)
+{
+    juce::String error;
+    const auto ref = editor.addClip (track, file, (juce::int64) (startSeconds * kRate), (juce::int64) (offsetSeconds * kRate), (juce::int64) (lengthSeconds * kRate), error);
+    if (! ref.valid())
+        std::printf ("clip on track %d: %s\n", track, error.toRawUTF8());
 }
 }
 
@@ -86,40 +99,61 @@ int main (int argc, char** argv)
     olympus::gui::MainComponent window (options);
     window.setSize (olympus::gui::MainComponent::kDesignWidth, olympus::gui::MainComponent::kDesignHeight);
 
+    juce::StringArray chainNames;
     if (pluginFolder.isNotEmpty())
     {
         olympus::ScanOptions scanOptions;
         scanOptions.includeSystem = false;
         window.session.catalog.scan (juce::FileSearchPath (pluginFolder), scanOptions);
+        chainNames = { "Nemesis Hush", "Hestia Space", "Hermes Level" };
     }
     else
     {
-        for (auto* n : { "Hermes Level", "Aegis Ceiling", "Hestia Space", "Nemesis Hush", "Dionysus Warmth", "Hera Bond", "Iris Prism", "Apollo Curve" })
-            test::addStandIn (window.session.catalog, n, juce::String (n) == "Aegis Ceiling" ? 96 : 0);
+        test::addTestPlugins (window.session.catalog);
+        chainNames = { "test gain" };
     }
 
-    juce::String error;
+    // four tracks, each a stem cut into clips on the timeline (seconds at the tempo: a bar is 2.5 s)
+    auto& editor = window.editor;
+    auto& session = window.session;
     const char* names[] = { "Vocal", "Bass", "Drums", "Chords" };
-    for (int i = 0; i < 4; ++i)
-        window.session.addTrack (makeStem (folder, names[i], i), names[i], error);
-    const std::vector<std::vector<const char*>> chains = { { "Nemesis Hush", "Hestia Space", "Dionysus Warmth", "Hermes Level", "Aegis Ceiling" }, { "Hera Bond", "Hestia Space", "Hermes Level" },
-                                                           { "Hestia Space", "Hermes Level" }, { "Iris Prism", "Hestia Space" } };
+    juce::File stems[4];
     for (int i = 0; i < 4; ++i)
     {
-        juce::StringArray chain;
-        for (auto* c : chains[(size_t) i]) chain.add (c);
-        if (! window.session.setChain (i, chain, error))
-            std::printf ("chain %d: %s\n", i, error.toRawUTF8());
+        stems[i] = makeStem (folder, names[i], i);
+        session.addEmptyTrack (names[i]);
     }
-    window.session.tracks[0]->gainDb = -1.5f;
-    window.session.tracks[1]->gainDb = -3.0f;
-    window.session.tracks[2]->gainDb = -6.0f;
-    window.session.tracks[3]->gainDb = -9.0f;
-    window.session.tracks[3]->mute = true;
-    window.session.name = "Demo song";
-    window.rebuildNow();
-    window.seek ((juce::int64) (9.5 * window.session.sampleRate));
+    juce::String error;
+    editor.setTempo (0.0, kTempo, error);
+    clip (editor, 0, stems[0], 0.0, 0.0, 8.0);
+    clip (editor, 0, stems[0], 10.0, 8.0, 8.0);
+    clip (editor, 0, stems[0], 20.0, 16.0, 6.0);
+    clip (editor, 1, stems[1], 0.0, 0.0, 12.0);
+    clip (editor, 1, stems[1], 14.0, 12.0, 10.0);
+    clip (editor, 2, stems[2], 2.0, 0.0, 6.0);
+    clip (editor, 2, stems[2], 10.0, 6.0, 6.0);
+    clip (editor, 2, stems[2], 18.0, 12.0, 6.0);
+    clip (editor, 3, stems[3], 6.0, 0.0, 14.0);
+    editor.setClipFades (3, 0, (juce::int64) (2.0 * kRate), (juce::int64) (2.0 * kRate), error);
+
+    const double gains[] = { -1.5, -3.0, -6.0, -9.0 };
+    for (int i = 0; i < 4; ++i) editor.setTrackGain (i, (float) gains[i], error);
+
+    for (int i = 0; i < (int) chainNames.size(); ++i)
+        session.addPlugin (0, chainNames[i], -1, error);
+
+    editor.addMarker ("Intro", 0);
+    editor.addMarker ("Verse", (juce::int64) (10.0 * kRate));
+    editor.addMarker ("Chorus", (juce::int64) (20.0 * kRate));
+    editor.setLoop ((juce::int64) (5.0 * kRate), (juce::int64) (20.0 * kRate), true);
+    session.name = "Demo song";
+    editor.clearUndo();
+    window.arrange.zoomToFit();
+    window.refreshNow();
+    window.seek ((juce::int64) (11.0 * kRate));
+    window.arrange.playhead = (double) window.position();
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+    window.arrange.refresh();
 
     const auto image = window.createComponentSnapshot (window.getLocalBounds(), true, 1.5f);
     juce::File out (argv[1]);
