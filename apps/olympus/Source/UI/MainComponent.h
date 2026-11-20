@@ -333,6 +333,8 @@ public:
     juce::Rectangle<float> masterMeterArea() const { return masterBarLeft.getUnion (masterBarRight); }
     // Checks only: the recorder, so a check can make a disk problem happen (Recorder::lostForTest, failedForTest).
     Recorder& recorderForChecks() { return recorder; }
+    // Checks only: the scan's state, so the empty-scan note can be checked while a scan is queued or running.
+    void setScanStateForChecks (bool queued, bool running) { scanQueued = queued; scanning = running; }
     juce::Rectangle<int> positionBox;                // the position read-out (bars.beats.ticks and mm:ss.ss)
     // the MONITOR strip: one button per plugin of the monitor chain, '+', the CORRECTION switch and the chain's latency
     juce::Rectangle<int> monitorStrip;
@@ -411,7 +413,8 @@ private:
     juce::int64 lastEditorHash = 0;
     int tick = 0;
     double lastAutosaveMs = 0.0;                    // juce::Time::getMillisecondCounterHiRes at the last autosave (or at start)
-    bool scanning = false;
+    bool scanning = false;                          // the scan runs (scanPlugins)
+    bool scanQueued = false;                        // the start's scan is queued and has not begun
     juce::StringArray signatures { "4/4", "3/4", "2/4", "5/4", "6/8", "7/8", "12/8" };
     juce::Rectangle<int> noteStrip, bodyArea;
     // a take in progress: the latency its clips are placed earlier by (fixed at REC), and the playhead it began at (the fallback when the

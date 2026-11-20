@@ -43,6 +43,7 @@ struct AdviceDevice
     bool monitorSkipped = false;   // the last start died loading the monitor chain: it is skipped until PLUGINS loads it
     bool projectSkipped = false;   // the last start died opening the last project: it was not opened again
     int monitorLatencySamples = -1; // the monitor chain's latency as the window last read it (never waits for the lock); -1: ask the session
+    bool scanning = false;          // a plugin scan is queued or running: the catalog is not complete yet, so no note says none was found
 };
 
 inline juce::String kiloHertz (double rate) { return juce::String (rate / 1000.0, 1) + " kHz"; }
@@ -67,7 +68,7 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
         anyAudible += s.audible (*t) ? 1 : 0;
     }
     // the scan found nothing at all (names() holds the scan's plugins, and the suite-only setting narrows them: then this note is not about the scan)
-    if (s.catalog.names().isEmpty() && ! s.catalog.suiteOnly())
+    if (s.catalog.names().isEmpty() && ! s.catalog.suiteOnly() && ! device.scanning)
         add (ui::Severity::warning, "No plugin found. PLUGINS > Look in a folder... adds a folder with VST3 plugins.");
     if (missingPlugins > 0)
         add (ui::Severity::warning, juce::String (missingPlugins) + " plugin(s) in this project are not installed here: they pass the audio through and keep their settings.");

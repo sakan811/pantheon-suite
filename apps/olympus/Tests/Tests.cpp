@@ -1928,6 +1928,49 @@ void settingsFileChecks()
     test::check (bad.loadFileAsString() == "this is not XML <<", "a second damaged file does not replace the first copy");
 }
 
+// [41] Takes and the MCP track name: a take the timeline cannot take does not stop the others (the first reason is reported, the files stay);
+// set_track with a blank name is refused before anything is applied (no setting changes, no undo step).
+void takeAndNameChecks()
+{
+    std::printf ("[41] A take that cannot be placed does not stop the others, and the first reason is reported; set_track with a blank name changes nothing and pushes no undo step\n");
+    tempFolder().getChildFile ("takes41").createDirectory();
+    const auto good = makeWav ("takes41/good.wav", 44100.0, 2, 44100, 0.5f, 440.0);
+    const auto missing = tempFolder().getChildFile ("takes41/missing.wav");   // never written: addClip cannot read it
+    juce::String err;
+    Session s;
+    s.addEmptyTrack ("A");
+    s.addEmptyTrack ("B");
+    Editor ed (s);
+    juce::String first;
+    test::check (! ed.addClip (0, missing, 0, 0, 44100, first).valid() && first.isNotEmpty(), "a missing file cannot be added as a clip, and the reason is given");
+
+    const std::vector<Recorder::Finished> takes { { 0, missing, 44100 }, { 1, good, 44100 } };
+    juce::String problem;
+    test::check (! finishRecording (takes, 0, 0, ed, problem) && s.tracks[1]->clips.size() == 1 && s.tracks[0]->clips.empty(),
+                 "the first take fails, and the second one still lands on its track as a clip");
+    test::check (problem == first, "the reason returned is the first take's, and the take's file is kept");
+    test::check (missing.getParentDirectory().getNumberOfChildFiles (juce::File::findFiles) == 1 && good.existsAsFile(), "the files stay on disk (the good take's file is there)");
+
+    // the first reason is kept when a later take fails for another reason too (a track that is not there)
+    juce::String again;
+    const std::vector<Recorder::Finished> more { { 0, missing, 44100 }, { 7, good, 44100 } };
+    test::check (! finishRecording (more, 0, 0, ed, again) && again == first, "a later failure does not replace the first reason");
+
+    // MCP set_track: a blank name is refused before the fader and pan are applied, and pushes no undo step
+    Session m;
+    m.addTrack (good, "M", err);
+    McpServer server (m);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+    const float gainBefore = m.tracks[0]->gainDb, panBefore = m.tracks[0]->pan;
+    const auto blank = call ("set_track", "{\"track\":0,\"gain_db\":-6,\"pan\":0.5,\"name\":\"   \"}");
+    test::check (failed (blank) && toolText (blank).isNotEmpty(), "set_track with a blank name is an error result with a reason");
+    test::check (m.tracks[0]->gainDb == gainBefore && m.tracks[0]->pan == panBefore && m.tracks[0]->name == "M",
+                 "and the fader, pan and name are unchanged");
+    test::check (failed (call ("undo", "{}")) && toolText (call ("undo", "{}")).contains ("Nothing to undo"), "and no undo step was pushed");
+    missing.getParentDirectory().deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -1972,6 +2015,7 @@ int main()
     latencyChecks();
     settingsFileChecks();
     mcpUndoChecks();
+    takeAndNameChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

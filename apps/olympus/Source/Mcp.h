@@ -354,6 +354,9 @@ private:
         }
         if (name == "set_track")
         {
+            // the name is checked before anything is applied: a call that fails changes nothing and pushes no undo step
+            const bool renaming = a.hasProperty ("name") && a["name"].toString().isNotEmpty();
+            if (renaming && a["name"].toString().trim().isEmpty()) { error = "The name is empty."; return {}; }
             // one gesture: the settings given are one undo step
             Gesture g (editor, "Track settings");
             if (a.hasProperty ("gain_db") && ! editor.setTrackGain (track, (float) (double) a["gain_db"], error)) return {};
