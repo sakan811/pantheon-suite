@@ -34,6 +34,40 @@ endif()
 # juce_add_gui_app / juce_add_console_app set on each executable; it is repeated here so the
 # core and the executables compile JUCE with the same definitions.
 # ---------------------------------------------------------------------------------------
+# JUCE 8 builds each module as an INTERFACE library: every target that links a module compiles the module's .cpp
+# files itself, so a static library in between would make each executable compile all of JUCE again. The function
+# below moves those source lists into OlympusCore (compiled once) and empties the module targets of them; the modules'
+# include directories and definitions still reach every executable through the PUBLIC link.
+function(olympus_move_juce_sources core)
+    set(todo ${ARGN})
+    set(seen "")
+    set(sources "")
+    while(todo)
+        list(POP_FRONT todo t)
+        if(NOT TARGET ${t})
+            continue()
+        endif()
+        get_target_property(real ${t} ALIASED_TARGET)
+        if(real)
+            set(t ${real})
+        endif()
+        if(t IN_LIST seen)
+            continue()
+        endif()
+        list(APPEND seen ${t})
+        get_target_property(links ${t} INTERFACE_LINK_LIBRARIES)
+        if(links)
+            list(APPEND todo ${links})
+        endif()
+        get_target_property(srcs ${t} INTERFACE_SOURCES)
+        if(srcs)
+            list(APPEND sources ${srcs})
+            set_property(TARGET ${t} PROPERTY INTERFACE_SOURCES "")
+        endif()
+    endwhile()
+    target_sources(${core} PRIVATE ${sources})
+endfunction()
+
 add_library(OlympusCore STATIC)
 target_sources(OlympusCore PRIVATE
     Source/UI/MainComponent.cpp
@@ -41,10 +75,13 @@ target_sources(OlympusCore PRIVATE
 target_include_directories(OlympusCore PUBLIC Source)
 target_compile_definitions(OlympusCore PUBLIC ${OLYMPUS_DEFINITIONS} JUCE_STANDALONE_APPLICATION=1)
 target_link_libraries(OlympusCore
-    PRIVATE
+    PUBLIC
         pantheon_ui
         ${OLYMPUS_LIBRARIES}
-        juce::juce_recommended_config_flags)
+        juce::juce_recommended_config_flags
+    PRIVATE
+        juce::juce_recommended_warning_flags) # the app compiled its window code with these; the core is that code now
+olympus_move_juce_sources(OlympusCore pantheon_ui ${OLYMPUS_LIBRARIES})
 
 # ---------------------------------------------------------------------------------------
 # The app (standalone, not a plugin)
