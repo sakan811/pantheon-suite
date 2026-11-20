@@ -112,6 +112,8 @@ int main (int argc, char** argv)
     options.scanPlugins = false;
     options.settingsFile = folder.getChildFile ("settings.xml");
     options.recordings = folder.getChildFile ("takes");
+    if (pluginFolder.isEmpty())
+        options.fillCatalog = [] (olympus::Catalog& catalog) { test::addTestPlugins (catalog); };
     olympus::gui::MainComponent window (options);
     window.setSize (olympus::gui::MainComponent::kDesignWidth, olympus::gui::MainComponent::kDesignHeight);
 
@@ -125,7 +127,6 @@ int main (int argc, char** argv)
     }
     else
     {
-        test::addTestPlugins (window.session.catalog);
         chainNames = { "test gain" };
     }
 
@@ -157,6 +158,9 @@ int main (int argc, char** argv)
 
     for (int i = 0; i < (int) chainNames.size(); ++i)
         session.addPlugin (0, chainNames[i], -1, error);
+    // the headphones' chain, a stand-in for a correction plugin: on the MONITOR strip, playback only (the test plugins only)
+    if (pluginFolder.isEmpty())
+        window.addMonitorPlugin ("Test Gain");
 
     editor.addMarker ("Intro", 0);
     editor.addMarker ("Verse", (juce::int64) (10.0 * kRate));

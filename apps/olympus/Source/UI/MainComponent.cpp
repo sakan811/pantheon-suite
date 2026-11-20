@@ -9,6 +9,8 @@ namespace
 {
 const char* const kAudioWildcard = "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.caf";
 constexpr int kMargin = 16, kHeaderHeight = 116, kRowC = 80; // kRowC: the top bar's third row (the device, the position)
+constexpr int kMonitorTop = kHeaderHeight + 2, kMonitorHeight = 28; // the MONITOR strip, under the header
+constexpr int kBodyTop = kMonitorTop + kMonitorHeight + 8;
 constexpr int kTicksPerBeat = 960;
 
 juce::String timeText (juce::int64 sample, double rate)
@@ -32,6 +34,22 @@ juce::String bpmText (double bpm)
 {
     if (std::abs (bpm - std::round (bpm)) < 0.05) return juce::String ((int) std::round (bpm));
     return juce::String (bpm, 1);
+}
+
+// The strip's read-out (the chain's latency) and the '+' button, from the strip's right end: the CORRECTION switch takes the last 176 px.
+juce::Rectangle<int> monitorLatencyArea (juce::Rectangle<int> strip) { return { strip.getRight() - 176 - 8 - 120, strip.getY(), 120, strip.getHeight() }; }
+int monitorPlusX (juce::Rectangle<int> strip) { return monitorLatencyArea (strip).getX() - 8 - 28; }
+
+// The maker of a plugin, from the catalog's own description (the labels names() gives are "Name" or, for two of one name, "Name (Maker)").
+juce::String makerOf (const Catalog& catalog, const juce::String& label)
+{
+    for (const auto& d : catalog.descriptions())
+    {
+        const auto maker = d.manufacturerName.isNotEmpty() ? d.manufacturerName : juce::String ("Other");
+        if (label == d.name || label == d.name + " (" + (d.manufacturerName.isNotEmpty() ? d.manufacturerName : d.pluginFormatName) + ")")
+            return maker;
+    }
+    return "Other";
 }
 
 juce::juce_wchar lowerCase (juce::juce_wchar c) { return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c; }
@@ -297,6 +315,23 @@ MainComponent::MainComponent (Options options) : opts (options)
         if (! cached || session.catalog.names().isEmpty())
             juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->scanPlugins (false); });
     }
+    // the checks fill the catalog here, before the monitor chain is read (the app's scan does it above, or after the first scan)
+    if (opts.fillCatalog)
+        opts.fillCatalog (session.catalog);
+    if (! session.catalog.names().isEmpty())
+        loadMonitorChain();
+
+    addAndMakeVisible (monitorAddButton);
+    addAndMakeVisible (monitorBypassButton);
+    monitorAddButton.setWantsKeyboardFocus (false);
+    monitorBypassButton.setWantsKeyboardFocus (false);
+    monitorAddButton.setTooltip ("Add a plugin to the monitor chain, after the others: the headphones hear it. Playback only; not in a render.");
+    monitorAddButton.onClick = [this] { showAddMonitorMenu(); };
+    monitorBypassButton.setClickingTogglesState (false);
+    monitorBypassButton.lamp = colours::good;
+    monitorBypassButton.setTooltip ("CORRECTION: the monitor chain is heard. BYPASS: the headphones hear the uncorrected mix. Not saved in the project.");
+    monitorBypassButton.onClick = [this] { setMonitorBypassed (! session.monitorBypass); };
+
     syncTransport();
     updateTransport();
     startTimerHz (30);
@@ -306,6 +341,7 @@ MainComponent::~MainComponent()
 {
     stopTimer();
     cancelPendingUpdate();
+    saveMonitorChain();   // the state of a monitor plugin whose window is still open is kept
     // a take still running keeps its files (Record.h: the takes are never deleted); the project is going away with the window
     if (recorder.isRecording())
         recorder.stop();
@@ -330,6 +366,7 @@ void MainComponent::scanPlugins (bool rescan)
     session.catalog.scan (settings.searchPath(), options);
     session.catalog.saveCache (Settings::pluginCacheFile (opts.settingsFile));
     scanning = false;
+    loadMonitorChain();   // the first scan fills the catalog the chain's plugins are made from
     // a project opened before the scan finished: give its missing plugins another try
     repaint();
 }
@@ -351,6 +388,7 @@ std::vector<ui::Note> MainComponent::notes() const
     advice.rate = device.running ? device.rate : 0.0;
     advice.inputs = device.inputs;
     advice.roundTripMs = roundTripMs();
+    advice.monitorProblem = monitorProblem;
     return adviceFor (session, advice);
 }
 
@@ -396,6 +434,7 @@ void MainComponent::updateTransport()
         bpmField.setReadOnly (! single);
     }
     repaint (positionBox);
+    refreshMonitorStrip();
     updateTitle();
 }
 
@@ -692,7 +731,7 @@ void MainComponent::updateRecording()
 void MainComponent::newProject()
 {
     stopRecording();
-    closeEditors();
+    closeTrackEditors();
     source.playing = false;
     session.newProject ("Untitled");
     editor.clearUndo();
@@ -706,7 +745,7 @@ void MainComponent::newProject()
 void MainComponent::openProject (const juce::File& file)
 {
     stopRecording();
-    closeEditors();
+    closeTrackEditors();
     source.playing = false;
     juce::String error;
     if (! session.load (file, error))
@@ -844,7 +883,7 @@ void MainComponent::removeTrack (int index)
         showError ("Stop the recording before you remove a track.");
         return;
     }
-    closeEditors();
+    closeTrackEditors();
     juce::String error;
     if (session.removeTrack (index, error))
     {
@@ -858,7 +897,7 @@ void MainComponent::removeTrack (int index)
 juce::String MainComponent::renderTo (const juce::File& folder, const std::function<bool (float)>& progress)
 {
     source.playing = false;
-    closeEditors();
+    closeTrackEditors();
     RenderOptions options;
     options.folder = folder;
     RenderResult result;
@@ -1035,12 +1074,12 @@ void MainComponent::showTrackMenu (int track)
             if (! session.setBypass (track, s, ! bypassed, error)) showError (error);
             requestRefresh();
         });
-        sub.addItem ("Move earlier", s > 0, false, [this, track, s] { closeEditors(); juce::String e; session.movePlugin (track, s, s - 1, e); requestRefresh(); });
-        sub.addItem ("Move later", s < count - 1, false, [this, track, s] { closeEditors(); juce::String e; session.movePlugin (track, s, s + 1, e); requestRefresh(); });
+        sub.addItem ("Move earlier", s > 0, false, [this, track, s] { closeTrackEditors(); juce::String e; session.movePlugin (track, s, s - 1, e); requestRefresh(); });
+        sub.addItem ("Move later", s < count - 1, false, [this, track, s] { closeTrackEditors(); juce::String e; session.movePlugin (track, s, s + 1, e); requestRefresh(); });
         sub.addSeparator();
         sub.addItem ("Remove", [this, track, s]
         {
-            closeEditors();
+            closeTrackEditors();
             juce::String error;
             if (session.removePlugin (track, s, error)) editor.clearUndo(); else showError (error);
             requestRefresh();
@@ -1052,10 +1091,19 @@ void MainComponent::showTrackMenu (int track)
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
+// A plugin's slot: a track's chain (track >= 0), or the monitor chain with track -1.
+Slot* MainComponent::slotOf (int track, int slot, juce::String& error)
+{
+    if (track >= 0) return session.slotAt (track, slot, error);
+    if (track == -1) return session.monitorSlotAt (slot, error);
+    error = "No track " + juce::String (track);
+    return nullptr;
+}
+
 void MainComponent::openEditor (int track, int slot)
 {
     juce::String error;
-    auto* s = session.slotAt (track, slot, error);
+    auto* s = slotOf (track, slot, error);
     if (s == nullptr || s->instance == nullptr)
     {
         showError (s == nullptr ? error : "That plugin is not installed here, so there is nothing to open.");
@@ -1064,12 +1112,219 @@ void MainComponent::openEditor (int track, int slot)
     if (auto it = windows.find (s); it != windows.end()) { it->second->toFront (true); return; }
     juce::AudioProcessorEditor* pluginEditor = s->instance->hasEditor() ? s->instance->createEditorAndMakeActive() : new juce::GenericAudioProcessorEditor (*s->instance);
     if (pluginEditor == nullptr) return;
-    windows[s] = makeEditorWindow (session.tracks[(size_t) track]->name + " - " + s->plugin, pluginEditor,
+    const auto owner = track < 0 ? juce::String ("Monitor") : session.tracks[(size_t) track]->name;
+    windows[s] = makeEditorWindow (owner + " - " + s->plugin, pluginEditor,
                                    [this, s, safe = juce::Component::SafePointer<MainComponent> (this)]
-                                   { juce::MessageManager::callAsync ([safe, s] { if (safe != nullptr) safe->windows.erase (s); }); });
+                                   {
+                                       juce::MessageManager::callAsync ([safe, s]
+                                       {
+                                           if (safe == nullptr) return;
+                                           safe->windows.erase (s);
+                                           safe->monitorEditorClosed (s);   // its state may have changed in the window: saved if it is a monitor plugin
+                                       });
+                                   });
 }
 
 void MainComponent::closeEditors() { windows.clear(); }
+
+// The editors of the tracks' plugins only: a monitor plugin's window stays open across NEW and OPEN, and when a track is removed or rendered.
+void MainComponent::closeTrackEditors()
+{
+    for (auto it = windows.begin(); it != windows.end();)
+    {
+        bool monitorSlot = false;
+        for (auto& m : session.monitor)
+            monitorSlot = monitorSlot || m.get() == it->first;
+        it = monitorSlot ? std::next (it) : windows.erase (it);
+    }
+}
+
+// ---- the monitor chain ---------------------------------------------------------------------------------------------------------------
+// Read once, after the catalog has its plugins. A file that is not a monitor chain (or is newer) is kept as it is: nothing is saved over it.
+void MainComponent::loadMonitorChain()
+{
+    if (monitorLoaded)
+        return;
+    juce::StringArray problems;
+    monitorLoaded = session.loadMonitor (Settings::monitorFile (opts.settingsFile), problems);
+    monitorProblem = monitorLoaded ? juce::String() : problems.joinIntoString (" ");
+    refreshMonitorStrip();
+}
+
+// Writes the chain beside settings.xml. Never before the chain was read: an unread file is not overwritten.
+void MainComponent::saveMonitorChain()
+{
+    if (! monitorLoaded)
+        return;
+    juce::String error;
+    if (! session.saveMonitor (Settings::monitorFile (opts.settingsFile), error))
+        showError (error);
+}
+
+void MainComponent::monitorEditorClosed (const Slot* slot)
+{
+    for (auto& m : session.monitor)
+        if (m.get() == slot)
+        {
+            saveMonitorChain();
+            return;
+        }
+}
+
+double MainComponent::monitorLatencyMs() const
+{
+    const double rate = device.running && device.rate > 0.0 ? device.rate : (session.sampleRate > 0.0 ? session.sampleRate : 48000.0);
+    return 1000.0 * (double) session.monitorLatency() / rate;
+}
+
+bool MainComponent::addMonitorPlugin (const juce::String& name)
+{
+    if (! monitorLoaded)
+    {
+        showError (monitorProblem.isNotEmpty() ? "The monitor chain could not be read, so it is not changed: " + monitorProblem
+                                               : juce::String ("The monitor chain is read after the plugin scan has finished."));
+        return false;
+    }
+    juce::String error;
+    if (! session.addMonitorPlugin (name, -1, error)) { showError (error); return false; }
+    saveMonitorChain();
+    refreshMonitorStrip();
+    return true;
+}
+
+void MainComponent::removeMonitorPlugin (int index)
+{
+    if (! monitorLoaded) return;
+    juce::String error;
+    auto* slot = session.monitorSlotAt (index, error);
+    if (slot == nullptr) { showError (error); return; }
+    if (auto it = windows.find (slot); it != windows.end()) windows.erase (it);   // its editor closes with it
+    if (! session.removeMonitorPlugin (index, error)) { showError (error); return; }
+    saveMonitorChain();
+    refreshMonitorStrip();
+}
+
+void MainComponent::moveMonitorPlugin (int index, int to)
+{
+    if (! monitorLoaded) return;
+    juce::String error;
+    if (! session.moveMonitorPlugin (index, to, error)) { showError (error); return; }
+    saveMonitorChain();
+    refreshMonitorStrip();
+}
+
+void MainComponent::setMonitorPluginBypass (int index, bool bypass)
+{
+    if (! monitorLoaded) return;
+    juce::String error;
+    if (! session.setMonitorPluginBypass (index, bypass, error)) { showError (error); return; }
+    saveMonitorChain();
+    refreshMonitorStrip();
+}
+
+void MainComponent::setMonitorBypassed (bool bypass)
+{
+    if (! monitorLoaded) return;
+    session.setMonitorBypass (bypass);
+    saveMonitorChain();
+    refreshMonitorStrip();
+}
+
+// The strip's buttons follow the chain: one per plugin. The buttons are rebuilt only when their number changes (a button is never deleted
+// by its own click); the names, the lamps and the CORRECTION switch are set each time.
+void MainComponent::refreshMonitorStrip()
+{
+    const int count = (int) session.monitor.size();
+    if (monitorButtons.size() != count)
+    {
+        monitorButtons.clear();
+        for (int i = 0; i < count; ++i)
+        {
+            auto* b = monitorButtons.add (new MonitorSlotButton());
+            b->setClickingTogglesState (false);
+            b->setWantsKeyboardFocus (false);
+            addAndMakeVisible (b);
+            b->onClick = [this, b] { if (const int at = monitorButtons.indexOf (b); at >= 0) openEditor (-1, at); };
+            b->onShiftClick = [this, b] { if (const int at = monitorButtons.indexOf (b); at >= 0) setMonitorPluginBypass (at, ! session.monitor[(size_t) at]->bypass); };
+            b->onMenu = [this, b] { if (const int at = monitorButtons.indexOf (b); at >= 0) showMonitorMenu (at); };
+        }
+        resized();
+    }
+    for (int i = 0; i < count; ++i)
+    {
+        auto* b = monitorButtons[i];
+        const auto& slot = *session.monitor[(size_t) i];
+        if (b->getButtonText() != slot.plugin) b->setButtonText (slot.plugin);
+        b->missing = slot.instance == nullptr;
+        // lit when it is installed and on; a bypassed or missing plugin is dark (a missing one reads in red)
+        b->setToggleState (slot.instance != nullptr && ! slot.bypass, juce::dontSendNotification);
+        const auto tip = slot.instance == nullptr ? juce::String ("Not installed on this computer: its name is in red. It passes the audio through and keeps its settings.")
+                                                 : juce::String ("Click: open its window. Shift-click: bypass. Right-click: the menu.");
+        b->setTooltip (tip);
+    }
+    const auto correction = juce::String (session.monitorBypass ? "Bypass" : "Correction on");
+    if (monitorBypassButton.getButtonText() != correction) monitorBypassButton.setButtonText (correction);
+    monitorBypassButton.setToggleState (! session.monitorBypass, juce::dontSendNotification);
+    repaint (monitorStrip);
+}
+
+// The menu of a monitor plugin: its window, its bypass, its place, and its removal (the chain is saved after each).
+void MainComponent::showMonitorMenu (int index)
+{
+    juce::String error;
+    auto* slot = session.monitorSlotAt (index, error);
+    if (slot == nullptr) return;
+    const bool missing = slot->instance == nullptr, bypassed = slot->bypass;
+    const int count = (int) session.monitor.size();
+    juce::PopupMenu menu;
+    menu.addItem ("Open", ! missing, false, [this, slot]
+    {
+        for (int i = 0; i < (int) session.monitor.size(); ++i)
+            if (session.monitor[(size_t) i].get() == slot) { openEditor (-1, i); return; }
+    });
+    menu.addItem (bypassed ? "Switch on" : "Bypass", [this, slot, bypassed]
+    {
+        for (int i = 0; i < (int) session.monitor.size(); ++i)
+            if (session.monitor[(size_t) i].get() == slot) { setMonitorPluginBypass (i, ! bypassed); return; }
+    });
+    menu.addSeparator();
+    menu.addItem ("Move left", index > 0, false, [this, index] { moveMonitorPlugin (index, index - 1); });
+    menu.addItem ("Move right", index < count - 1, false, [this, index] { moveMonitorPlugin (index, index + 1); });
+    menu.addSeparator();
+    menu.addItem ("Remove", [this, slot]
+    {
+        for (int i = 0; i < (int) session.monitor.size(); ++i)
+            if (session.monitor[(size_t) i].get() == slot) { removeMonitorPlugin (i); return; }
+    });
+    menu.showMenuAsync (juce::PopupMenu::Options());
+}
+
+// The plugins to add to the monitor chain: one list; over about 25 plugins, one sub-menu per maker.
+void MainComponent::showAddMonitorMenu()
+{
+    if (! monitorLoaded)
+    {
+        showError (monitorProblem.isNotEmpty() ? "The monitor chain could not be read, so it is not changed: " + monitorProblem
+                                               : juce::String ("The monitor chain is read after the plugin scan has finished."));
+        return;
+    }
+    const auto names = session.catalog.names();
+    juce::PopupMenu menu;
+    if (names.isEmpty())
+        menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
+    else if (names.size() <= 25)
+        for (const auto& n : names)
+            menu.addItem (n, [this, n] { addMonitorPlugin (n); });
+    else
+    {
+        std::map<juce::String, juce::PopupMenu> makers;
+        for (const auto& n : names)
+            makers[makerOf (session.catalog, n)].addItem (n, [this, n] { addMonitorPlugin (n); });
+        for (auto& [maker, sub] : makers)
+            menu.addSubMenu (maker, sub);
+    }
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&monitorAddButton));
+}
 
 // ---- timer, keys, layout -----------------------------------------------------------------------------------------------------
 void MainComponent::timerCallback()
@@ -1177,8 +1432,18 @@ void MainComponent::resized()
     positionBox = { w - kMargin - 184, kRowC, 184, hc };
 
     noteStrip = { kMargin, r.getHeight() - kMargin - ui::kNoteStripHeight, w - 2 * kMargin, ui::kNoteStripHeight };
-    bodyArea = { kMargin, kHeaderHeight + 12, w - 2 * kMargin, noteStrip.getY() - 10 - (kHeaderHeight + 12) };
+    bodyArea = { kMargin, kBodyTop, w - 2 * kMargin, noteStrip.getY() - 10 - kBodyTop };
     arrange.setBounds (bodyArea);
+
+    // the MONITOR strip: the label on the left, the chain's plugins, '+', the chain's latency and the CORRECTION switch on the right
+    monitorStrip = { kMargin, kMonitorTop, w - 2 * kMargin, kMonitorHeight };
+    monitorBypassButton.setBounds (monitorStrip.getRight() - 176, monitorStrip.getY(), 176, kMonitorHeight);
+    monitorAddButton.setBounds (monitorPlusX (monitorStrip), monitorStrip.getY(), 28, kMonitorHeight);
+    const int first = monitorStrip.getX() + 96, last = monitorPlusX (monitorStrip) - 8;
+    const int n = monitorButtons.size(), gap = 6;
+    const int each = n > 0 ? juce::jlimit (64, 160, (last - first - gap * (n - 1)) / n) : 0;
+    for (int i = 0; i < n; ++i)
+        monitorButtons[i]->setBounds (first + i * (each + gap), monitorStrip.getY(), each, kMonitorHeight);
 }
 
 void MainComponent::paint (juce::Graphics& g)
@@ -1208,6 +1473,13 @@ void MainComponent::paint (juce::Graphics& g)
                   + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String());
     }
     ui::hw::drawLabel (g, readout, { 930, kRowC, 140, 28 }, juce::Justification::centredRight, colour, 10.5f);
+    // the MONITOR strip: its label, a hint while the chain is empty, and the chain's latency beside the CORRECTION switch
+    ui::hw::drawLabel (g, "MONITOR", { monitorStrip.getX(), monitorStrip.getY(), 90, monitorStrip.getHeight() }, juce::Justification::centredLeft, colours::dim, 10.5f);
+    if (monitorButtons.isEmpty())
+        ui::hw::drawLabel (g, "no plugin: the headphones hear the mix as it is", { monitorStrip.getX() + 96, monitorStrip.getY(), 400, monitorStrip.getHeight() },
+                           juce::Justification::centredLeft, colours::dim, 10.0f);
+    ui::hw::drawLabel (g, "latency " + juce::String (monitorLatencyMs(), 1) + " ms", monitorLatencyArea (monitorStrip), juce::Justification::centredRight,
+                       colours::dim, 10.0f);
     ui::drawNoteStrip (g, noteStrip, notes());
 }
 }

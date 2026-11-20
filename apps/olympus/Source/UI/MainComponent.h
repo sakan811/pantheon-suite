@@ -49,6 +49,40 @@ public:
     void mouseUp (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) LampButton::mouseUp (e); }
 };
 
+// A plugin of the monitor chain on the MONITOR strip: click opens it, shift-click bypasses it, right-click (or ctrl-click) is its menu. A plugin
+// that is not installed is drawn with its name in red.
+class MonitorSlotButton : public SlotButton
+{
+public:
+    std::function<void()> onShiftClick;
+    bool missing = false;
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (e.mods.isShiftDown() && ! e.mods.isPopupMenu()) { shiftDown = true; return; }
+        SlotButton::mouseDown (e);
+    }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (shiftDown)
+        {
+            shiftDown = false;
+            if (contains (e.getPosition()) && onShiftClick) onShiftClick();
+            return;
+        }
+        SlotButton::mouseUp (e);
+    }
+    void paintButton (juce::Graphics& g, bool highlighted, bool down) override
+    {
+        ui::hw::drawPushButton (g, getLocalBounds().toFloat(), getToggleState(), lamp, down, highlighted, isEnabled());
+        g.setFont (ui::labelFont (10.0f));
+        g.setColour (missing ? colours::bad : (getToggleState() && lamp.getPerceivedBrightness() > 0.5f ? colours::lampInk : colours::text));
+        g.drawFittedText (getButtonText().toUpperCase(), getLocalBounds().reduced (8, 0).translated (0, down ? 1 : 0), juce::Justification::centred, 1);
+    }
+
+private:
+    bool shiftDown = false;
+};
+
 class PluginWindow : public juce::DocumentWindow
 {
 public:
@@ -71,6 +105,8 @@ public:
         bool scanPlugins = true;           // false when the caller fills the catalog
         juce::File settingsFile = Settings::defaultFile();
         juce::File recordings;             // where takes go when set (the checks); else the project's folder, or ~/Music
+        // the plugins the catalog holds, filled before the monitor chain is read (the checks; the app scans instead)
+        std::function<void (Catalog&)> fillCatalog;
     };
 
     // The audio device as the window last read it (on the message thread): what the summary, REC and the notes need.
@@ -149,9 +185,12 @@ public:
     // What the audio callback does for one block: the same code, so the checks can drive the loop and the end of the audio.
     void renderAudioBlock (juce::AudioBuffer<float>& buffer) { juce::AudioSourceChannelInfo info (&buffer, 0, buffer.getNumSamples()); source.getNextAudioBlock (info); }
     void scanPlugins (bool rescan = false);
+    // Opens the editor of a plugin: track `track`'s chain slot `slot`, or with track -1 a plugin of the monitor chain. One window per plugin.
     void openEditor (int track, int slot);
     int openEditors() const { return (int) windows.size(); }
     void closeEditors();
+    // Closes the editors of the tracks' plugins, not those of the monitor chain (which stay open across NEW and OPEN).
+    void closeTrackEditors();
     // Brings the arrangement, the transport and the title up to date now.
     void refreshNow();
     // The same, after the current event: for a change made from inside a control that the change may remove.
@@ -197,6 +236,19 @@ public:
     void showAddPluginMenu (int track);
     void showTrackMenu (int track);
 
+    // ---- the monitor chain (Session::monitor): playback only, saved in monitor.xml, not in the project and not an undo step ----------------
+    // Each change is saved at once. The chain is read once, after the catalog is filled (at start, or after the first scan).
+    bool addMonitorPlugin (const juce::String& name);           // at the end of the chain
+    void removeMonitorPlugin (int index);                       // closes its editor
+    void moveMonitorPlugin (int index, int to);
+    void setMonitorPluginBypass (int index, bool bypass);
+    void setMonitorBypassed (bool bypass);                      // CORRECTION / BYPASS: the whole chain
+    void showMonitorMenu (int index);
+    void showAddMonitorMenu();
+    void refreshMonitorStrip();                                 // the strip's buttons and read-outs, from the session
+    bool monitorChainLoaded() const { return monitorLoaded; }
+    double monitorLatencyMs() const;                           // the chain's latency in ms at the device's rate (0 when bypassed)
+
     bool keyPressed (const juce::KeyPress& key) override;
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -212,8 +264,13 @@ public:
     juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
     juce::ComboBox signatureBox, gridBox;
     juce::Label deviceLabel;                         // the device summary, under the buttons
-    ArrangeView arrange { session, editor };
     juce::Rectangle<int> positionBox;                // the position read-out (bars.beats.ticks and mm:ss.ss)
+    // the MONITOR strip: one button per plugin of the monitor chain, '+', the CORRECTION switch and the chain's latency
+    juce::Rectangle<int> monitorStrip;
+    juce::OwnedArray<MonitorSlotButton> monitorButtons;
+    juce::TextButton monitorAddButton { "+" };
+    LampButton monitorBypassButton { "Correction" };
+    ArrangeView arrange { session, editor };
 
 private:
     // The audio callback's copy of the transport: the playhead, the loop, the end of the audio and where the take began. The callback reads
@@ -252,8 +309,13 @@ private:
     void saveAudioState();
     void updateRecording();                         // the timer's part of a take: its strip, its time, a device that stopped
     void setTakeLatency();
+    void loadMonitorChain();                        // reads monitor.xml once the catalog is filled
+    void saveMonitorChain();                        // writes monitor.xml; nothing before the chain was read (never overwrites an unread file)
+    void monitorEditorClosed (const Slot* slot);    // a monitor plugin's window was closed: its state may have changed
+    Slot* slotOf (int track, int slot, juce::String& error);  // a track's chain slot, or with track -1 the monitor chain's
 
     Options opts;
+    bool monitorLoaded = false;                     // the chain is read: until then no save writes monitor.xml
     Source source { *this };
     Recorder recorder;
     std::unique_ptr<juce::FileChooser> chooser;
@@ -272,5 +334,6 @@ private:
     // callback never ran); the device stopped (set by the device thread, read by the timer)
     juce::int64 takeLatency = 0, takeFrom = 0;
     std::atomic<bool> deviceStopped { false };
+    juce::String monitorProblem;                    // why monitor.xml could not be read (shown on the foot), empty when it was
 };
 }
