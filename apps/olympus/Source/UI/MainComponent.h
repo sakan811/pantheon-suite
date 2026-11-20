@@ -212,7 +212,8 @@ public:
     // After a render, as the window shows it: a cancel is quiet, a failure is shown, a success is notified and its folder revealed.
     void finishRender (const juce::File& folder, const RenderResult& result, const juce::String& error);
     void togglePlay();
-    void rewind();                                   // to the loop's start when the loop is on, else to 0
+    void rewind();                                  // to the loop's start when the loop is on, else to 0
+    void jumpToMarker (bool forward);               // , and . : the marker before or after the playhead
     void seek (juce::int64 sample);
     juce::int64 position() const { return source.position.load(); }
     bool isPlaying() const { return source.playing.load(); }

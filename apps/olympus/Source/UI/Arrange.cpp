@@ -922,6 +922,11 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
     if (! hit.valid())
     {
         if (! e.mods.isPopupMenu()) selected = {};
+        else if (editor.hasClipboard())
+        {
+            const int track = trackAt (p.y, (int) s.tracks.size());
+            if (track >= 0) laneMenu (track, (juce::int64) juce::jmax (0.0, xToSample (p.x, pps)));
+        }
         repaint();
         return;
     }
@@ -1168,6 +1173,38 @@ void ArrangeView::duplicateSelected()
     edited();
 }
 
+void ArrangeView::copySelected()
+{
+    if (! selected.valid()) return;
+    juce::String error;
+    if (! editor.copyClip (selected, error)) report (error);
+}
+
+void ArrangeView::cutSelected()
+{
+    if (! selected.valid()) return;
+    juce::String error;
+    if (editor.cutClip (selected, error)) selected = {};
+    else report (error);
+    edited();
+}
+
+void ArrangeView::pasteAtPlayhead()
+{
+    if (! editor.hasClipboard()) { report ("The clipboard is empty: copy or cut a clip first."); return; }
+    pasteAt (selected.valid() ? selected.track : editor.clipboardTrack(), (juce::int64) playhead);
+}
+
+void ArrangeView::pasteAt (int track, juce::int64 at)
+{
+    if (recordingFrom >= 0.0) { report ("Stop the recording before you paste."); return; }
+    juce::String error;
+    const auto made = editor.pasteClip (track, at, error);
+    if (! made.valid()) { report (error); return; }
+    selected = made;
+    edited();
+}
+
 void ArrangeView::addMarkerAtPlayhead()
 {
     const auto s = snapshot();
@@ -1184,15 +1221,29 @@ void ArrangeView::clipMenu (ClipRef ref)
     juce::PopupMenu menu;
     menu.addItem (1, "Split at playhead");
     menu.addItem (2, "Duplicate");
-    menu.addItem (3, c.mute ? "Unmute" : "Mute");
-    menu.addItem (4, "Gain...");
-    menu.addItem (5, "Rename...");
+    menu.addItem (3, "Copy");
+    menu.addItem (4, "Cut");
+    menu.addItem (5, c.mute ? "Unmute" : "Mute");
+    menu.addItem (6, "Gain...");
+    menu.addItem (7, "Rename...");
     menu.addSeparator();
-    menu.addItem (6, "Delete");
+    menu.addItem (8, "Delete");
     juce::Component::SafePointer<ArrangeView> safe (this);
     menu.showMenuAsync ({}, [safe, ref] (int result)
     {
         if (safe != nullptr && result > 0) safe->clipAction (ref, result);
+    });
+}
+
+// The empty lane's menu: Paste here, at the clicked track and sample (only when the clipboard holds a clip).
+void ArrangeView::laneMenu (int track, juce::int64 at)
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, "Paste here");
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    menu.showMenuAsync ({}, [safe, track, at] (int result)
+    {
+        if (safe != nullptr && result > 0) safe->pasteAt (track, at);
     });
 }
 
@@ -1218,9 +1269,16 @@ void ArrangeView::clipAction (ClipRef ref, int action)
             else report (error);
             break;
         case 3:
+            if (! editor.copyClip (ref, error)) report (error);
+            return;
+        case 4:
+            if (editor.cutClip (ref, error)) selected = {};
+            else report (error);
+            break;
+        case 5:
             if (! editor.setClipMute (ref.track, ref.clip, ! c.mute, error)) report (error);
             break;
-        case 4:
+        case 6:
             askText ("Clip gain", "Gain in dB, from -100 to +24", juce::String (c.gainDb, 1), [this, ref] (const juce::String& text)
             {
                 if (! text.containsAnyOf ("0123456789")) { report ("Type a number of dB."); return; }
@@ -1229,7 +1287,7 @@ void ArrangeView::clipAction (ClipRef ref, int action)
                 edited();
             });
             return;
-        case 5:
+        case 7:
             askText ("Rename clip", "The new name", c.name, [this, ref] (const juce::String& text)
             {
                 juce::String e;
@@ -1237,7 +1295,7 @@ void ArrangeView::clipAction (ClipRef ref, int action)
                 edited();
             });
             return;
-        case 6:
+        case 8:
             if (editor.deleteClip (ref.track, ref.clip, error)) selected = {};
             else report (error);
             break;

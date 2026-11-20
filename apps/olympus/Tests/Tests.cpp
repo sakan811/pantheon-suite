@@ -1971,6 +1971,61 @@ void takeAndNameChecks()
     missing.getParentDirectory().deleteRecursively();
 }
 
+// [42] The clipboard (the Editor): a copy pastes an identical clip on the chosen track, at the place asked; a paste and a cut are each one
+// undo step; a refusal changes nothing and says why; the clipboard survives an undo and a change of rate refuses a paste.
+void clipboardChecks()
+{
+    std::printf ("[42] Clipboard: a copy pastes an identical clip on the chosen track (one undo step); a cut is one step; refusals change nothing; the clipboard survives undo; a paste at another rate is refused\n");
+    tempFolder().getChildFile ("clip42").createDirectory();
+    const auto wav = makeWav ("clip42/a.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    s.addTrack (wav, "A", err);
+    s.addEmptyTrack ("B");
+    s.tracks[0]->clips[0].start = 100;
+    s.tracks[0]->clips[0].offset = 300;
+    s.tracks[0]->clips[0].length = 600;
+    s.tracks[0]->clips[0].gainDb = -3.0f;
+    s.tracks[0]->clips[0].fadeIn = 50;
+    s.tracks[0]->clips[0].fadeOut = 60;
+    s.tracks[0]->clips[0].mute = true;
+    const auto src = s.tracks[0]->clips[0];
+    Editor ed (s);
+
+    test::check (! ed.hasClipboard() && ! ed.pasteClip (1, 0, err).valid() && err.isNotEmpty(), "a paste with an empty clipboard is refused, with the reason");
+    test::check (! ed.copyClip ({ 7, 0 }, err) && ! ed.copyClip ({ 0, 9 }, err) && ! ed.hasClipboard(), "a copy of a clip or a track that is not there is refused");
+    test::check (ed.copyClip ({ 0, 0 }, err) && ed.hasClipboard() && ed.clipboardTrack() == 0, "a copy fills the clipboard, and records the track it came from");
+    test::check (s.tracks[0]->clips.size() == 1 && s.tracks[0]->clips[0].start == 100 && ! ed.canUndo(), "and a copy changes nothing in the session and makes no undo step");
+
+    const auto pasted = ed.pasteClip (1, 5000, err);
+    const auto& dst = s.tracks[1]->clips;
+    test::check (pasted.track == 1 && pasted.clip == 0 && dst.size() == 1, "a paste puts the clip on the chosen track and returns it");
+    const auto& c = dst[0];
+    test::check (c.audio.get() == src.audio.get() && c.start == 5000 && c.offset == 300 && c.length == 600, "the copy shares the audio, and keeps the place in the file and the length");
+    test::check (c.gainDb == -3.0f && c.fadeIn == 50 && c.fadeOut == 60 && c.mute && c.name == src.name && c.file == src.file, "and its gain, fades, mute, name and file");
+    test::check (sameSamples (mixOf (s, 0, 100, 600), mixOf (s, 1, 5000, 600), 0, 600), "the pasted clip plays exactly what the original plays");
+    test::check (ed.undoLabel() == "Paste clip" && ed.undo() && s.tracks[1]->clips.empty(), "the paste is one undo step, and undo removes it");
+    test::check (ed.hasClipboard() && ed.redo() && s.tracks[1]->clips.size() == 1, "the clipboard survives the undo, and redo brings the clip back");
+
+    // a cut: copy and delete as one step; undo brings the clip back where it was; a paste then puts it elsewhere
+    test::check (ed.cutClip ({ 0, 0 }, err) && s.tracks[0]->clips.empty() && ed.undoLabel() == "Cut clip", "a cut removes the clip, as one undo step labelled so");
+    test::check (ed.undo() && s.tracks[0]->clips.size() == 1 && s.tracks[0]->clips[0].start == 100, "undo brings the cut clip back where it was");
+    test::check (ed.cutClip ({ 0, 0 }, err) && ed.clipboardTrack() == 0 && ed.pasteClip (1, 0, err).valid() && s.tracks[1]->clips.size() == 2,
+                 "a cut, then a paste on the other track, puts the clip there");
+    test::check (s.tracks[1]->clips.back().start == 0 && s.tracks[1]->clips.back().audio.get() == src.audio.get(), "the restored clip is at the new place with the same audio");
+
+    // refusals change nothing: a track that is not there, a place before 0, and the undo label
+    const auto label = ed.undoLabel();
+    const auto before = s.tracks[1]->clips.size();
+    test::check (! ed.pasteClip (9, 0, err).valid() && ! ed.pasteClip (1, -5, err).valid() && err.isNotEmpty(), "a track that is not there and a place before 0 are refused, with the reason");
+    test::check (s.tracks[1]->clips.size() == before && ed.undoLabel() == label, "and the refused pastes change nothing and make no undo step");
+
+    // a change of rate: the copy is at the old rate, so a paste is refused until the clip is copied again
+    test::check (s.adoptRate (96000.0, err) && ! ed.pasteClip (1, 0, err).valid() && err.containsIgnoreCase ("rate"), "a paste after the session changed its rate is refused, with the reason");
+    ed.clearClipboard();
+    test::check (! ed.hasClipboard() && ed.clipboardTrack() == -1 && ! ed.pasteClip (1, 0, err).valid(), "clearing the clipboard empties it");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -2016,6 +2071,7 @@ int main()
     settingsFileChecks();
     mcpUndoChecks();
     takeAndNameChecks();
+    clipboardChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
