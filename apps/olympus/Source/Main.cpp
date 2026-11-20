@@ -53,7 +53,8 @@ public:
     void systemRequestedQuit() override
     {
         if (window == nullptr) { quit(); return; }
-        window->content->askToDiscard ("Quit and lose them?", [] { quit(); });
+        // refused (and nothing quits) while a render runs or a dialog is open: askToDiscard checks it first
+        window->content->askToDiscard ("Quit and lose them?", [content = window->content] { content->dropAutosave(); quit(); });
     }
     void anotherInstanceStarted (const juce::String& commandLine) override
     {

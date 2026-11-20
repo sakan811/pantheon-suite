@@ -200,9 +200,11 @@ MainComponent::MainComponent (Options options) : opts (options)
     };
     chooseSaveFile = [this] (const juce::String& title, const juce::File& start, std::function<void (const juce::File&)> done)
     {
+        if (dialogOpen) return;   // one dialog at a time: a second chooser would destroy the one that is open
+        dialogOpen = true;
         chooser = std::make_unique<juce::FileChooser> (title, start, "*.olympus");
         chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
-                              [done] (const juce::FileChooser& fc) { done (fc.getResult()); });
+                              [this, done] (const juce::FileChooser& fc) { dialogOpen = false; done (fc.getResult()); });
     };
     chooseRenderOptions = [] (RenderOptions& choice) { return askRenderDialog (choice); };
     askRecover = [] (const juce::String& message)
@@ -428,18 +430,27 @@ std::vector<ui::Note> MainComponent::notes() const
     advice.monitorProblem = monitorProblem;
     advice.monitorSkipped = monitorSkipped && ! monitorLoaded;
     advice.projectSkipped = projectSkipped;
+    monitorLatencyMs();   // refreshes the cache with a try-lock (never waits: notes() runs in paint)
+    advice.monitorLatencySamples = monitorLatencyCacheSamples;
     return adviceFor (session, advice);
 }
 
 void MainComponent::askToDiscard (const juce::String& action, std::function<void()> proceed)
 {
+    // NEW, OPEN and Quit wait while a render runs or another dialog is open (the message thread stays free, and no second chooser replaces one)
+    if (refuseWhileBusy()) return;
     // a take that runs is placed first: its clips are what would be lost, and the question then sees them as changes
     if (recorder.isRecording())
         stopRecording();
     if (! session.dirty || session.tracks.empty()) { proceed(); return; }
-    const auto answer = askUnsaved ? askUnsaved ("The project has changes that are not saved. " + action) : Unsaved::discard;
+    auto answer = Unsaved::discard;
+    {
+        const DialogBusy busy (dialogOpen);
+        answer = askUnsaved ? askUnsaved ("The project has changes that are not saved. " + action) : Unsaved::discard;
+    }
     if (answer == Unsaved::cancel) return;
-    if (answer == Unsaved::discard) { deleteAutosaves(); proceed(); return; }
+    // the discarded work's autosave is deleted by the action itself, once that action has gone through (NEW, OPEN, Quit)
+    if (answer == Unsaved::discard) { proceed(); return; }
     // Save: a project with a file is written here; one without gets the Save As chooser, and goes on only once its file is written
     if (session.projectFile != juce::File())
     {
@@ -447,7 +458,25 @@ void MainComponent::askToDiscard (const juce::String& action, std::function<void
             proceed();
         return;
     }
-    saveProjectAs ([proceed = std::move (proceed)] (bool saved) { if (saved) proceed(); });
+    // the chooser that asked is still inside its callback: the action (it may open another chooser) runs on the next message
+    saveProjectAs ([this, proceed = std::move (proceed)] (bool saved)
+    {
+        if (! saved) return;
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this), proceed]
+        {
+            if (safe != nullptr) proceed();
+        });
+    });
+}
+
+bool MainComponent::refuseWhileBusy()
+{
+    if (session.renderRunning())
+    {
+        showError ("A render is running: wait for it or cancel it first.");
+        return true;
+    }
+    return dialogOpen;   // a dialog is open: its answer is the one that counts
 }
 
 // Puts the session's transport on the controls and the audio callback's copy of the loop and the end. The timer calls it; so does every
@@ -725,6 +754,7 @@ bool MainComponent::startRecording()
     }
     takeFrom = position();
     setTakeLatency();
+    session.dirty = true;   // a take's WAV is on disk from its first block: the project is dirty now, so a quit asks and the autosave runs
     {
         const juce::ScopedLock sl (session.lock);
         arrange.recordingTracks.clear();
@@ -762,7 +792,8 @@ void MainComponent::stopRecording (const juce::String& problem)
     juce::String error;
     if (! finishRecording (takes, start, (int) takeLatency, editor, error) && error.isEmpty())
         error = "A take could not be placed on its track.";
-    session.dirty = true;
+    for (const auto& take : takes)
+        if (take.frames > 0) { session.dirty = true; break; }   // a take that placed nothing changes nothing
 
     ClipRef first;
     {
@@ -870,11 +901,15 @@ void MainComponent::saveProjectAs (std::function<void (bool)> done)
 
 bool MainComponent::saveTo (const juce::File& file)
 {
+    const juce::File before = session.projectFile;   // the file this session was saved to until now (none when untitled)
     juce::String error;
     if (! session.save (file, error)) { showError (error); return false; }
     settings.lastProject = file.getFullPathName();
     settings.save (opts.settingsFile);
     deleteAutosaves();   // the project is on disk: its autosave is no longer news
+    // Save As: the old project's autosave holds this session's work too, so it goes; an untitled session's autosave goes with its first save
+    if (before != juce::File() && before != file) autosaveFileFor (before).deleteFile();
+    if (before == juce::File()) untitledAutosaveFile().deleteFile();
     updateTitle();
     return true;
 }
@@ -1051,18 +1086,39 @@ void MainComponent::filesDropped (const juce::StringArray& files, int, int)
 // ---- file choosers -----------------------------------------------------------------------------------------------------------
 void MainComponent::chooseAndOpen()
 {
+    if (dialogOpen) return;
+    dialogOpen = true;
     chooser = std::make_unique<juce::FileChooser> ("Open a project", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.olympus");
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [this] (const juce::FileChooser& fc) { if (fc.getResult() != juce::File()) openProject (fc.getResult()); });
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              dialogOpen = false;
+                              const auto file = fc.getResult();
+                              if (file == juce::File()) return;
+                              juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this), file]
+                              {
+                                  if (safe == nullptr) return;
+                                  const auto discarded = safe->autosaveFile();   // the session the answer discarded (still open until now)
+                                  safe->openProject (file);
+                                  // a failed open keeps it: only an open that happened discards the work
+                                  if (safe->session.projectFile == file)
+                                      discarded.deleteFile();
+                              });
+                          });
 }
 
 void MainComponent::chooseAndImport()
 {
     const auto at = position();
+    if (dialogOpen) return;
+    dialogOpen = true;
+    if (dialogOpen) return;
+    dialogOpen = true;
     chooser = std::make_unique<juce::FileChooser> ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), kAudioWildcard);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
                           [this, at] (const juce::FileChooser& fc)
                           {
+                              dialogOpen = false;
                               juce::StringArray files;
                               for (auto& f : fc.getResults()) files.add (f.getFullPathName());
                               if (! files.isEmpty()) importFiles (files, -1, at);
@@ -1071,10 +1127,13 @@ void MainComponent::chooseAndImport()
 
 void MainComponent::chooseFolder()
 {
+    if (dialogOpen) return;
+    dialogOpen = true;
     chooser = std::make_unique<juce::FileChooser> ("The folder with the built plugins (.vst3), or the repository's plugins folder", juce::File::getSpecialLocation (juce::File::userHomeDirectory));
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                           [this] (const juce::FileChooser& fc)
                           {
+                              dialogOpen = false;
                               if (fc.getResult() == juce::File()) return;
                               settings.pluginFolders.addIfNotAlreadyThere (fc.getResult().getFullPathName());
                               settings.save (opts.settingsFile);
@@ -1110,16 +1169,25 @@ void MainComponent::chooseAndRender()
     RenderOptions choice;
     choice.bits = settings.renderBits;
     choice.writeStems = settings.renderStems;
-    if (chooseRenderOptions && ! chooseRenderOptions (choice))
+    if (dialogOpen) return;
+    bool chosen = true;
+    {
+        const DialogBusy busy (dialogOpen);
+        chosen = ! chooseRenderOptions || chooseRenderOptions (choice);
+    }
+    if (! chosen)
         return;
     settings.renderBits = choice.bits;
     settings.renderStems = choice.writeStems;
     settings.save (opts.settingsFile);
     const auto start = session.projectFile != juce::File() ? session.projectFile.getParentDirectory().getChildFile (session.name + " stems") : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    if (dialogOpen) return;
+    dialogOpen = true;
     chooser = std::make_unique<juce::FileChooser> ("Render the stems into this folder", start);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                           [this, choice] (const juce::FileChooser& fc)
                           {
+                              dialogOpen = false;
                               const auto folder = fc.getResult();
                               if (folder == juce::File()) return;
                               // the message thread stops the transport and closes the tracks' plugin windows before the worker starts:
@@ -1359,7 +1427,17 @@ void MainComponent::monitorEditorClosed (const Slot* slot)
 double MainComponent::monitorLatencyMs() const
 {
     const double rate = device.running && device.rate > 0.0 ? device.rate : (session.sampleRate > 0.0 ? session.sampleRate : 48000.0);
-    return 1000.0 * (double) session.monitorLatency() / rate;
+    // Paint and the timer read this: they never wait for Session::lock (a render holds it for its whole run). The lock is tried, and the
+    // last value is kept while it is busy or a render runs (Session::monitorLatency takes it blocking, so it is not called here).
+    const juce::ScopedTryLock sl (session.lock);
+    if (sl.isLocked() && ! session.renderRunning())
+    {
+        int sum = 0;
+        if (! session.monitorBypass)
+            for (auto& s : session.monitor) sum += s->latency();
+        monitorLatencyCacheSamples = sum;
+    }
+    return 1000.0 * (double) monitorLatencyCacheSamples / rate;
 }
 
 bool MainComponent::addMonitorPlugin (const juce::String& name)
@@ -1514,7 +1592,7 @@ void MainComponent::showAddMonitorMenu()
 // ---- autosave and recovery ----------------------------------------------------------------------------------------------------------
 juce::File MainComponent::autosaveFileFor (const juce::File& project) const
 {
-    return project.getSiblingFile (project.getFileNameWithoutExtension() + ".autosave.olympus");
+    return project.getSiblingFile (project.getFileName() + ".autosave");   // "mix.olympus.autosave": never a project (saveTo adds .olympus, the chooser filters *.olympus)
 }
 
 juce::File MainComponent::untitledAutosaveFile() const
@@ -1536,17 +1614,19 @@ bool MainComponent::autosaveNow()
     juce::String error;
     if (! session.saveCopy (autosaveFile(), error))
     {
-        showError (error);
+        // one message per failure streak, not one every interval
+        if (! autosaveFailing) showError ("Autosave failed: " + error);
+        autosaveFailing = true;
         return false;
     }
+    autosaveFailing = false;
     return true;
 }
 
+// Deletes the autosave of the session as it is now (its project's, or the untitled one). Another project's autosave is never touched.
 void MainComponent::deleteAutosaves()
 {
-    if (session.projectFile != juce::File())
-        autosaveFileFor (session.projectFile).deleteFile();
-    untitledAutosaveFile().deleteFile();
+    autosaveFile().deleteFile();
 }
 
 bool MainComponent::offerRecovery()
@@ -1627,18 +1707,22 @@ void MainComponent::timerCallback()
         lastAutosaveMs = juce::Time::getMillisecondCounterHiRes();
         autosaveNow();
     }
-    // A plugin edited in its own window changes the project: notice it by what the plugins would save.
-    if (! windows.empty() && ++tick % 15 == 0)
+    // A plugin edited in its own window changes the project: notice it by what the plugins would save. Read every 15 ticks while a window is
+    // open, and once more when the last one closes (so an edit made just before the close is not lost). The plugins are read under the
+    // lock, which is only tried: processBlock may run beside it, and a busy lock is looked at again on the next tick.
+    const bool closing = windows.empty();
+    if (closing ? lastEditorHash == 0 : (++tick % 15 != 0))
+        return;
+    juce::int64 hash = 0;
     {
-        juce::int64 hash = 0;
+        const juce::ScopedTryLock sl (session.lock);
+        if (! sl.isLocked()) return;
         for (auto& t : session.tracks)
             for (auto& s : t->chain)
                 hash = hash * 31 + session.stateOf (*s).toBase64Encoding().hashCode64();
-        if (lastEditorHash != 0 && hash != lastEditorHash) session.dirty = true;
-        lastEditorHash = hash;
     }
-    else if (windows.empty())
-        lastEditorHash = 0;
+    if (lastEditorHash != 0 && hash != lastEditorHash) session.dirty = true;
+    lastEditorHash = closing ? 0 : hash;
 }
 
 // The keys. The window owns the transport and the clip keys; the arrangement takes only its selection and nudges (arrows, Escape).
