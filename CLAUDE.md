@@ -32,7 +32,7 @@ the changed file (see the sections below). The plugins' READMEs keep the plain `
 
 ## Skills
 
-The procedures that are long and rarely needed live in [.claude/skills/](.claude/skills) (committed; the rest of `.claude/` is ignored). **Use them without being asked:** when a task matches one, invoke it with the
+The procedures that are long and rarely needed live in [.claude/skills/](.claude/skills) (committed alongside [.claude/agents/](.claude/agents); the rest of `.claude/` is ignored, and `.agents/` mirrors them for Antigravity). **Use them without being asked:** when a task matches one, invoke it with the
 Skill tool before you start, and follow its steps instead of improvising them. Do not wait for the user to type the name.
 
 - `new-plugin`: a request to create, add or scaffold a plugin.
@@ -65,7 +65,7 @@ code-checker ┘   (edits)   (the diff)      (completeness)     (only on request
 
 ### Every task runs through a pipeline of Haiku agents (standing rule from the user, 2026-11-20)
 
-**Always, for every task** (a feature, a fix, a review, a doc change, a build-speed change; none is too small to skip it): the main session plans and writes the briefs, and the work itself is done by a pipeline of **Haiku** agents (`model: haiku`). Where the named agents above are not in the checkout (`.claude/` is ignored, a cloud clone does not have them), use a general-purpose agent with `model: haiku` and the brief below. The size of the task changes how many stages run, never whether the pipeline is used: a one-line fix is one `fixer` and the orchestrator's own check.
+**Always, for every task** (a feature, a fix, a review, a doc change, a build-speed change; none is too small to skip it): the main session plans and writes the briefs, and the work itself is done by a pipeline of **Haiku** agents (`model: haiku`). Where the named agents above are not available, use a general-purpose agent with `model: haiku` and the brief below. The size of the task changes how many stages run, never whether the pipeline is used: a one-line fix is one `fixer` and the orchestrator's own check.
 
 ```
 orchestrator: plan, split, write briefs ─► builder (one at a time) ─► reviewers (read-only, in parallel) ─► fixer (≤ 2 rounds) ─► orchestrator: re-run the checks, look at the pictures, decide, commit
