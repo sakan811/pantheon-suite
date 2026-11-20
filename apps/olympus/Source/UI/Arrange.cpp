@@ -343,7 +343,17 @@ juce::Button* ArrangeView::inputButton (int track)
 ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
 {
     ArrangeSnapshot s;
-    const juce::ScopedLock sl (session.lock);
+    // The message thread never waits for the lock: a render holds it for its whole run. While it is busy the last model is returned (the
+    // tracks do not change under a render: the window is modal over it).
+    // The audio thread holds it for a moment each block, so a miss is retried; only a render (renderRunning) makes this give up.
+    const juce::ScopedTryLock sl (session.lock);
+    while (! sl.isLocked())
+    {
+        if (session.renderRunning())
+            return lastSnapshot != nullptr ? *lastSnapshot : s;
+        juce::Thread::sleep (1);
+        sl.retryLock();
+    }
     s.rate = session.sampleRate > 0.0 ? session.sampleRate : kFallbackRate;
     s.tempo = session.tempo;
     s.grid = session.grid;
@@ -371,6 +381,7 @@ ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
         s.length = juce::jmax (s.length, t->length());
         s.tracks.push_back (std::move (v));
     }
+    lastSnapshot = std::make_shared<const ArrangeSnapshot> (s);
     return s;
 }
 

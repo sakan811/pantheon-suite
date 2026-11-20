@@ -21,6 +21,9 @@ struct Settings
     juce::String audioDeviceState;
     // A round-trip latency the user types in, added to the device's own when a take is placed (Record.h). Saved as an attribute.
     int extraLatencySamples = 0;
+    // The last render's choice (the dialog before the folder chooser remembers it): bit depth 16, 24 or 32, and whether the stems are written.
+    int renderBits = 32;
+    bool renderStems = true;
 
     // OLYMPUS_SETTINGS names another file (the tests use it, so they never touch the real one).
     static juce::File defaultFile()
@@ -62,6 +65,10 @@ struct Settings
             s.lastProject = xml->getStringAttribute ("lastProject");
             s.scanSuiteOnly = xml->getBoolAttribute ("scanSuiteOnly", false);
             s.extraLatencySamples = juce::jlimit (0, 1000000, xml->getIntAttribute ("extraLatency", 0));
+            // an older file has none of these: the defaults (32-bit float, stems on); an unknown depth is 32 too
+            const int bits = xml->getIntAttribute ("renderBits", 32);
+            s.renderBits = (bits == 16 || bits == 24 || bits == 32) ? bits : 32;
+            s.renderStems = xml->getBoolAttribute ("renderStems", true);
             if (auto* device = xml->getChildByName ("AudioDevice"); device != nullptr && device->getFirstChildElement() != nullptr)
                 s.audioDeviceState = device->getFirstChildElement()->toString();
         }
@@ -82,6 +89,8 @@ struct Settings
         xml.setAttribute ("lastProject", lastProject);
         xml.setAttribute ("scanSuiteOnly", scanSuiteOnly ? 1 : 0);
         xml.setAttribute ("extraLatency", extraLatencySamples);
+        xml.setAttribute ("renderBits", renderBits);
+        xml.setAttribute ("renderStems", renderStems ? 1 : 0);
         for (auto& f : pluginFolders)
             xml.createNewChildElement ("PluginFolder")->setAttribute ("path", f);
         if (auto device = juce::parseXML (audioDeviceState); device != nullptr)

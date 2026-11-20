@@ -163,8 +163,18 @@ public:
     void newProject();
     void openProject (const juce::File& file);
     bool saveProject();
-    void saveProjectAs();
+    // `done` (optional) gets whether the file was written; it runs after the chooser, which is asynchronous.
+    void saveProjectAs (std::function<void (bool)> done = {});
     bool saveTo (const juce::File& file);
+    // Autosave (every kAutosaveInterval seconds while the project has changes): the project is written beside the project file as
+    // `<name>.autosave.olympus`, or as `autosave-untitled.olympus` beside settings.xml, and the session's name, file and dirty flag stay.
+    // Returns false when nothing was written (no changes, or a render is running). A test calls it directly.
+    static constexpr double kAutosaveInterval = 120.0;   // seconds
+    bool autosaveNow();
+    juce::File autosaveFile() const;
+    // At start, after the last project: unsaved work of the last session (an autosave newer than its project, or an untitled one) is offered;
+    // "Open it" loads it as the session with changes, its project file kept, and "Ignore" deletes it. Returns true when an autosave was found.
+    bool offerRecovery();
     // One new track per file, its clip at sample 0 (the checks' way in; the buttons use importFiles at the playhead).
     void addTracks (const juce::StringArray& files);
     // Audio files as clips: with `track` -1 each file is a new track named after it, else the files go on that track one after another.
@@ -180,7 +190,11 @@ public:
     // Writes the stems and the mix. Returns the reason when it fails, an empty string when it worked.
     // Called on the message thread (the checks) it closes the tracks' plugin windows first; the progress window's worker passes
     // editorsClosed = true, after chooseAndRender closed them on the message thread.
-    juce::String renderTo (const juce::File& folder, const std::function<bool (float)>& progress = {}, bool editorsClosed = false);
+    // `options` says what is written (its folder is `folder`); `result` gets what was written, and its `stopped` says a cancel (no message).
+    juce::String renderTo (const juce::File& folder, const std::function<bool (float)>& progress = {}, bool editorsClosed = false,
+                           RenderOptions options = {}, RenderResult* result = nullptr);
+    // After a render, as the window shows it: a cancel is quiet, a failure is shown, a success is notified and its folder revealed.
+    void finishRender (const juce::File& folder, const RenderResult& result, const juce::String& error);
     void togglePlay();
     void rewind();                                   // to the loop's start when the loop is on, else to 0
     void seek (juce::int64 sample);
@@ -227,10 +241,20 @@ public:
     DeviceState device;
     double deviceRate = 0.0;            // the device's rate while it runs, else 0
 
-    // Runs `proceed` now if nothing would be lost, else after the user agrees.
+    // Runs `proceed` now if nothing would be lost, else after the user has chosen: Save (a project without a file gets the Save As chooser,
+    // and `proceed` runs only once the file is written), Don't save, or Cancel (`proceed` does not run). A take that runs is placed first.
     void askToDiscard (const juce::String& action, std::function<void()> proceed);
-    // How a question is put: message, the button that goes ahead, what to do then. Replaceable, so the checks need no dialog.
-    std::function<void (const juce::String&, const juce::String&, std::function<void()>)> ask;
+    // The questions, replaceable so the checks answer them without a dialog (the defaults show the real ones).
+    enum class Unsaved { cancel, save, discard };
+    std::function<Unsaved (const juce::String&)> askUnsaved;
+    std::function<void (const juce::String& title, const juce::File& start, std::function<void (const juce::File&)> done)> chooseSaveFile;
+    // Before the render's folder chooser: the bit depth and the mix-only choice in `options` (false when cancelled). Remembered in settings.
+    std::function<bool (RenderOptions&)> chooseRenderOptions;
+    // "Olympus found unsaved work from the last session. Open it?": true to open it.
+    std::function<bool (const juce::String&)> askRecover;
+    // A message that is not a problem (the render's result): a box by default.
+    std::function<void (const juce::String&)> notify;
+    std::function<void (const juce::File&)> reveal;   // the render's folder, shown in the file manager (replaceable: the checks show nothing)
     std::function<void (const juce::String&)> reportError;
     // What holds a plugin's editor on screen (a PluginWindow by default); replaceable, so the checks open no native window.
     std::function<std::unique_ptr<juce::Component> (const juce::String&, juce::AudioProcessorEditor*, std::function<void()>)> makeEditorWindow;
@@ -310,6 +334,13 @@ private:
     void chooseAndImport();
     void chooseFolder();
     void chooseAndRender();
+    // The render dialog's default: bit depth and mix-only, as AlertWindow (modal). Returns false when cancelled.
+    static bool askRenderDialog (RenderOptions& options);
+    // Autosave and recovery (the file names are in autosaveFile and offerRecovery).
+    juce::File autosaveFileFor (const juce::File& project) const;
+    juce::File untitledAutosaveFile() const;
+    void deleteAutosaves();                         // after a save, NEW, or a quit / open that drops the changes
+    void recoverFrom (const juce::File& autosave, const juce::File& project);
     void showPluginsMenu();
     void showSignature (int numerator, int denominator);
     void applyBpm();
@@ -341,6 +372,7 @@ private:
     juce::String shownTitle;
     juce::int64 lastEditorHash = 0;
     int tick = 0;
+    double lastAutosaveMs = 0.0;                    // juce::Time::getMillisecondCounterHiRes at the last autosave (or at start)
     bool scanning = false;
     juce::StringArray signatures { "4/4", "3/4", "2/4", "5/4", "6/8", "7/8", "12/8" };
     juce::Rectangle<int> noteStrip, bodyArea;
