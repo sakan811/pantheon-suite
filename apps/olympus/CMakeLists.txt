@@ -39,7 +39,8 @@ juce_add_gui_app(Olympus
 
 target_sources(Olympus PRIVATE
     Source/Main.cpp
-    Source/UI/MainComponent.cpp)
+    Source/UI/MainComponent.cpp
+    Source/UI/Arrange.cpp)
 target_include_directories(Olympus PRIVATE Source)
 target_compile_definitions(Olympus PRIVATE
     ${OLYMPUS_DEFINITIONS}
@@ -89,7 +90,7 @@ set_target_properties(OlympusTests PROPERTIES EXCLUDE_FROM_ALL TRUE OSX_ARCHITEC
 #   cmake --build build --target OlympusUiCheck
 # ---------------------------------------------------------------------------------------
 juce_add_console_app(OlympusUiCheck PRODUCT_NAME "OlympusUiCheck")
-target_sources(OlympusUiCheck PRIVATE Tests/UiCheck.cpp Source/UI/MainComponent.cpp)
+target_sources(OlympusUiCheck PRIVATE Tests/UiCheck.cpp Source/UI/MainComponent.cpp Source/UI/Arrange.cpp)
 target_include_directories(OlympusUiCheck PRIVATE Source Tests)
 target_compile_definitions(OlympusUiCheck PRIVATE ${OLYMPUS_DEFINITIONS})
 target_link_libraries(OlympusUiCheck
@@ -105,7 +106,7 @@ set_target_properties(OlympusUiCheck PROPERTIES EXCLUDE_FROM_ALL TRUE OSX_ARCHIT
 #   cmake --build build --target OlympusSnapshot
 # ---------------------------------------------------------------------------------------
 juce_add_console_app(OlympusSnapshot PRODUCT_NAME "OlympusSnapshot")
-target_sources(OlympusSnapshot PRIVATE Tests/Snapshot.cpp Source/UI/MainComponent.cpp)
+target_sources(OlympusSnapshot PRIVATE Tests/Snapshot.cpp Source/UI/MainComponent.cpp Source/UI/Arrange.cpp)
 target_include_directories(OlympusSnapshot PRIVATE Source Tests)
 target_compile_definitions(OlympusSnapshot PRIVATE ${OLYMPUS_DEFINITIONS})
 target_link_libraries(OlympusSnapshot
