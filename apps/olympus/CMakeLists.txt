@@ -100,7 +100,9 @@ juce_add_gui_app(Olympus
     BUNDLE_ID org.pantheon.olympus
     PRODUCT_NAME "Olympus"
     DOCUMENT_EXTENSIONS olympus
-    DESCRIPTION "Session host for the Pantheon plugin suite")
+    DESCRIPTION "Session host for the Pantheon plugin suite"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Olympus records from your audio interface into tracks.")
 
 target_sources(Olympus PRIVATE Source/Main.cpp)
 target_compile_definitions(Olympus PRIVATE

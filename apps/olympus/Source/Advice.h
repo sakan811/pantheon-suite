@@ -17,23 +17,39 @@ inline const char* guideText()
            "It is for arranging audio on a timeline: IMPORT AUDIO, or drop files on the window, puts each file on a track at the playhead; drag clips "
            "to move them, edges to trim them, S splits at the playhead. Set the tempo, the grid, markers and a loop. Each track has a chain of "
            "plugins (FX), a fader and a pan. RENDER STEMS writes one WAV per track and the mix.\n\n"
-           "It is not for MIDI or instruments, and it does not time-stretch: audio keeps its own speed, and a tempo change moves the grid, not the audio.\n\n"
-           "Keys: Space plays and stops, Return rewinds, L loops, M adds a marker, Delete removes the selected clip, Cmd+D duplicates it, "
+           "It records from your audio interface: AUDIO chooses the input and the output device. Arm a track (R) and choose its input (IN); REC "
+           "(or the R key) records every armed track into a take, one file per track, kept on disk. When you stop, each take is placed on its track, "
+           "earlier by the device's round trip, so it lines up with what you heard.\n\n"
+           "It is not for software input monitoring: hear yourself through your interface's direct monitoring or a zero-latency mix. It does not "
+           "punch in, loop-record or comp takes, and it is not for MIDI or instruments. It does not time-stretch: audio keeps its own speed, and a "
+           "tempo change moves the grid, not the audio.\n\n"
+           "Keys: Space plays and stops, Return rewinds, L loops, M adds a marker, R records, Delete removes the selected clip, Cmd+D duplicates it, "
            "Cmd+Z and Shift+Cmd+Z undo and redo, Cmd+S saves.\n\n"
            "An agent can edit the project through the MCP server (OlympusMcp, see the README); open the saved project here.";
 }
 
-// `deviceRate`: the rate of the audio device, 0 when there is none (tests, snapshots).
-inline std::vector<ui::Note> adviceFor (const Session& s, double deviceRate = 0.0)
+// What the audio device is, for the notes: whether it runs, its rate, its input channels and the round trip of its latency in ms.
+struct AdviceDevice
+{
+    bool running = false;
+    double rate = 0.0;
+    int inputs = 0;
+    double roundTripMs = 0.0;
+};
+
+inline juce::String kiloHertz (double rate) { return juce::String (rate / 1000.0, 1) + " kHz"; }
+
+inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& device = {})
 {
     std::vector<ui::Note> notes;
     const auto add = [&notes] (ui::Severity sev, const juce::String& text) { notes.push_back ({ sev, text.toStdString() }); };
 
-    int missingPlugins = 0, anyAudible = 0, clips = 0;
+    int missingPlugins = 0, anyAudible = 0, clips = 0, armed = 0;
     for (auto& t : s.tracks)
     {
         bool missingAudio = false;
         clips += (int) t->clips.size();
+        armed += t->armed ? 1 : 0;
         for (auto& clip : t->clips)
             missingAudio = missingAudio || clip.audio == nullptr;
         if (missingAudio)
@@ -48,9 +64,16 @@ inline std::vector<ui::Note> adviceFor (const Session& s, double deviceRate = 0.
         add (ui::Severity::warning, juce::String (missingPlugins) + " plugin(s) in this project are not installed here: they pass the audio through and keep their settings.");
     if (! s.tracks.empty() && anyAudible == 0)
         add (ui::Severity::warning, "Every track is muted, or others are soloed: nothing would be played or rendered.");
-    if (deviceRate > 0.0 && s.sampleRate > 0.0 && std::abs (deviceRate - s.sampleRate) > 1.0)
-        add (ui::Severity::warning, "The audio device runs at " + juce::String (juce::roundToInt (deviceRate)) + " Hz, the session at "
+    if (device.rate > 0.0 && s.sampleRate > 0.0 && std::abs (device.rate - s.sampleRate) > 1.0)
+        add (ui::Severity::warning, "The audio device runs at " + juce::String (juce::roundToInt (device.rate)) + " Hz, the session at "
                                         + juce::String (juce::roundToInt (s.sampleRate)) + " Hz: playback is at the wrong pitch. Stems are not affected.");
+    // recording: a take is kept at the device's rate, and resampled to the session's when it is placed (Session::loadPooled)
+    if (armed > 0 && (! device.running || device.inputs == 0))
+        add (ui::Severity::warning, "A track is armed, but no audio input is running: choose the input device in AUDIO.");
+    if (armed > 0 && device.rate > 0.0 && s.sampleRate > 0.0 && std::abs (device.rate - s.sampleRate) > 1.0)
+        add (ui::Severity::info, "Takes are recorded at " + kiloHertz (device.rate) + " and resampled to the session's " + kiloHertz (s.sampleRate) + " when placed.");
+    if (device.running && device.roundTripMs > 30.0)
+        add (ui::Severity::warning, "The audio round trip is " + juce::String (juce::roundToInt (device.roundTripMs)) + " ms: lower the buffer size in AUDIO.");
     for (auto& t : s.tracks)
         if (t->latency() > 0)
         {

@@ -55,6 +55,15 @@ public:
     std::function<void (const juce::String&)> reportError;                     // an edit the Editor refused, with its reason
     // Audio files dropped on the lanes: the track under the drop, or -1 when it is below the last track, and the sample it lands on.
     std::function<void (const juce::StringArray& files, int track, juce::int64 at)> onFilesDropped;
+    // The IN button of a track: the window shows the device's inputs and sets the track's input (Session::setTrackInput).
+    std::function<void (int track)> onInputMenu;
+    // The input a track records, the peak it reads from that input (linear; reading resets it), and whether the meters show it: the
+    // window sets these (the view knows no device). An armed track's meter shows its input when showInputLevels is on.
+    std::function<float (int track)> inputLevel;
+    bool showInputLevels = false;
+    // While a recording runs: where it began and where it is now (samples; -1 when none), and the armed tracks it records on.
+    double recordingFrom = -1.0, recordingTo = -1.0;
+    std::vector<int> recordingTracks;
 
     // ---- the view -------------------------------------------------------------------------------------------------------------
     // Takes the model as it is now: the meters are read here (the peak since the last read), the headers follow, and the playhead
@@ -69,6 +78,13 @@ public:
     void deleteSelected();
     void duplicateSelected();
     void addMarkerAtPlayhead();
+
+    // The label of a track's input: "IN 1" for a mono input, "IN 1+2" for a pair (inputs are numbered from 1 here).
+    static juce::String inputText (int left, int right);
+
+    // The header's ARM and IN buttons (the checks press them; nullptr when there is no such track).
+    juce::Button* armButton (int track);
+    juce::Button* inputButton (int track);
 
     // ---- geometry (view coordinates, for the checks and the window) -------------------------------------------------------------
     ClipRef clipAt (juce::Point<int> point) const;       // the clip under the point, invalid when none

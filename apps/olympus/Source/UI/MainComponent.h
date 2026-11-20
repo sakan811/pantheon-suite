@@ -6,6 +6,7 @@
 #include "Advice.h"
 #include "Arrange.h"
 #include "../Edit.h"
+#include "../Record.h"
 #include "Session.h"
 #include "Settings.h"
 
@@ -20,6 +21,7 @@
 namespace olympus::gui
 {
 class MainComponent;
+class AudioDialog;
 
 // A push switch whose lamp has the colour it is given (the kit's look-and-feel lights every switch in one colour): amber for the transport
 // switches, red for a mute, green for a solo, red for a plugin that is not installed.
@@ -57,7 +59,8 @@ public:
 
 // The whole window: the project buttons and the transport along the top, the arrangement (ArrangeView) in the body, and the notes at the
 // foot. It owns the session, the editor that changes it, and the audio device.
-class MainComponent : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer, private juce::AsyncUpdater
+class MainComponent : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer, private juce::AsyncUpdater,
+                      private juce::ChangeListener
 {
 public:
     static constexpr int kDesignWidth = 1280, kDesignHeight = ui::editorHeightFor (kDesignWidth);
@@ -67,6 +70,45 @@ public:
         bool audioDevice = true;           // false for the checks and the snapshots
         bool scanPlugins = true;           // false when the caller fills the catalog
         juce::File settingsFile = Settings::defaultFile();
+        juce::File recordings;             // where takes go when set (the checks); else the project's folder, or ~/Music
+    };
+
+    // The audio device as the window last read it (on the message thread): what the summary, REC and the notes need.
+    struct DeviceState
+    {
+        bool running = false;                      // the device runs and calls back
+        juce::String inputName, outputName;
+        double rate = 0.0;
+        int bufferSize = 0;
+        int inputs = 0, outputs = 0;               // the active channels
+        int inputLatency = 0, outputLatency = 0;   // samples
+        juce::BigInteger activeInputs;             // which of the device's inputs are active
+    };
+
+    // One entry of the IN menu: a device input alone (right -1) or a pair of neighbouring inputs.
+    struct InputChoice
+    {
+        juce::String label;
+        int left = 0, right = -1;
+    };
+
+    // The audio path of one device block, called by the device (audioDeviceIOCallbackWithContext) and by the checks, which pass buffers of
+    // their own. The inputs go to the recorder first (its meters always, its takes while one runs); the transport then fills the outputs.
+    class DeviceCallback : public juce::AudioIODeviceCallback
+    {
+    public:
+        explicit DeviceCallback (MainComponent& m) : owner (m) {}
+        void deviceBlock (const float* const* in, int numIn, float* const* out, int numOut, int n);
+        void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const* outputChannelData,
+                                               int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext&) override
+        {
+            deviceBlock (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples);
+        }
+        void audioDeviceAboutToStart (juce::AudioIODevice* device) override;
+        void audioDeviceStopped() override;
+
+    private:
+        MainComponent& owner;
     };
 
     MainComponent();
@@ -115,6 +157,31 @@ public:
     // The same, after the current event: for a change made from inside a control that the change may remove.
     void requestRefresh() { triggerAsyncUpdate(); }
 
+    // ---- recording (Record.h) ------------------------------------------------------------------------------------------------------
+    // REC (or R): starts the takes of the armed tracks from the playhead, with playback; again stops them and places the takes.
+    bool isRecording() const { return recorder.isRecording(); }
+    bool startRecording();
+    void toggleRecord();
+    // Ends the takes: the clips go on their tracks as one undo step. `problem` is shown after (a device that stopped, say).
+    void stopRecording (const juce::String& problem = {});
+    // Where the takes of this project go: "<project> Recordings" beside the project file, else a folder in ~/Music (Options::recordings wins).
+    juce::File recordingFolder() const;
+
+    // ---- the audio device ----------------------------------------------------------------------------------------------------------
+    // The IN menu's entries for a device: each active input alone, then each pair of neighbouring active inputs.
+    static std::vector<InputChoice> inputChoices (const DeviceState& state);
+    // The top bar's text: "IN: <device> / OUT: <device> / 48.0 kHz / 256 smp", or "no audio device".
+    juce::String deviceSummary() const;
+    // The device's round trip (input and output latency) in ms, 0 when there is no device.
+    double roundTripMs() const;
+    void showInputMenu (int track);
+    void showAudioSettings();
+    // Checks and the snapshot: the device the window shows, without a device. Prepares the recorder as a real device start would.
+    void setDeviceForTest (const DeviceState& state);
+    DeviceCallback io { *this };        // the device's callback (the checks call its deviceBlock)
+    DeviceState device;
+    double deviceRate = 0.0;            // the device's rate while it runs, else 0
+
     // Runs `proceed` now if nothing would be lost, else after the user agrees.
     void askToDiscard (const juce::String& action, std::function<void()> proceed);
     // How a question is put: message, the button that goes ahead, what to do then. Replaceable, so the checks need no dialog.
@@ -124,8 +191,7 @@ public:
     std::function<std::unique_ptr<juce::Component> (const juce::String&, juce::AudioProcessorEditor*, std::function<void()>)> makeEditorWindow;
     juce::String windowTitle() const;
     std::function<void()> onTitleChanged;
-    std::vector<ui::Note> notes() const { return adviceFor (session, deviceRate); }
-    double deviceRate = 0.0;
+    std::vector<ui::Note> notes() const;
 
     // The menus of a track: its plugins (open, bypass, move, remove) and the plugins to add.
     void showAddPluginMenu (int track);
@@ -140,31 +206,34 @@ public:
     // ---- the controls (public so the checks can find and press them) ---------------------------------------------------------------
     ui::GuideButton guideButton { guideTitle(), guideText() };
     juce::TextButton newButton { "New" }, openButton { "Open" }, saveButton { "Save" }, saveAsButton { "Save as" }, addTrackButton { "Add track" },
-        importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" };
+        importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, audioButton { "Audio" };
     juce::TextButton rewindButton { "|<" }, undoButton { "Undo" }, redoButton { "Redo" }, zoomOutButton { "-" }, zoomInButton { "+" }, zoomFitButton { "Fit" };
-    LampButton playButton { "Play" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" };
+    LampButton playButton { "Play" }, recordButton { "Rec" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" };
     juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
     juce::ComboBox signatureBox, gridBox;
+    juce::Label deviceLabel;                         // the device summary, under the buttons
     ArrangeView arrange { session, editor };
     juce::Rectangle<int> positionBox;                // the position read-out (bars.beats.ticks and mm:ss.ss)
 
 private:
-    // The audio callback's copy of the transport: the playhead, the loop and the end of the audio. The callback reads only these.
-    struct Source : juce::AudioSource
+    // The audio callback's copy of the transport: the playhead, the loop, the end of the audio and where the take began. The callback reads
+    // only these.
+    struct Source
     {
         explicit Source (MainComponent& m) : owner (m) {}
-        void prepareToPlay (int, double rate) override { owner.deviceRate = rate; }
-        void releaseResources() override {}
-        void getNextAudioBlock (const juce::AudioSourceChannelInfo& info) override;
+        void getNextAudioBlock (const juce::AudioSourceChannelInfo& info);
         MainComponent& owner;
         std::atomic<juce::int64> position { 0 };
         std::atomic<bool> playing { false };
         std::atomic<bool> loopOn { false };
         std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 }, endOfAudio { 0 };
+        // The playhead at the first device block the recorder ran in (set by DeviceCallback::deviceBlock); -1 before it. Cleared at REC.
+        std::atomic<juce::int64> recordStart { -1 };
         juce::AudioBuffer<float> chunk { 2, kBlockSize };
     };
 
     void timerCallback() override;
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void handleAsyncUpdate() override { refreshNow(); }
     void updateTitle();
     void updateTransport();
@@ -178,14 +247,20 @@ private:
     void applyBpm();
     void syncPlayhead() { arrange.playhead = (double) position(); }
     juce::int64 endOfPlay() const { return session.length() + session.maxLatency(); }
+    void readDevice();                              // the device as it is now, into `device`
+    void deviceChanged();                           // a change of the device: read it, save its state, end a take that cannot go on
+    void saveAudioState();
+    void updateRecording();                         // the timer's part of a take: its strip, its time, a device that stopped
+    void setTakeLatency();
 
     Options opts;
     Source source { *this };
+    Recorder recorder;
     std::unique_ptr<juce::FileChooser> chooser;
     juce::AudioDeviceManager deviceManager;
-    juce::AudioSourcePlayer player;
     juce::TooltipWindow tooltips { this, 600 };
     HardwareLookAndFeel look;
+    std::unique_ptr<AudioDialog> audioDialog;
     std::map<const Slot*, std::unique_ptr<juce::Component>> windows;
     juce::String shownTitle;
     juce::int64 lastEditorHash = 0;
@@ -193,5 +268,9 @@ private:
     bool scanning = false;
     juce::StringArray signatures { "4/4", "3/4", "2/4", "5/4", "6/8", "7/8", "12/8" };
     juce::Rectangle<int> noteStrip, bodyArea;
+    // a take in progress: the latency its clips are placed earlier by (fixed at REC), and the playhead it began at (the fallback when the
+    // callback never ran); the device stopped (set by the device thread, read by the timer)
+    juce::int64 takeLatency = 0, takeFrom = 0;
+    std::atomic<bool> deviceStopped { false };
 };
 }

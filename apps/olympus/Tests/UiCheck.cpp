@@ -47,12 +47,20 @@ juce::File makeWav (const juce::String& name, int length = 24000)
     return file;
 }
 
+// Each window's takes go to a folder of their own, so the files a check finds are the ones it made.
+juce::File takesFolder()
+{
+    static int windows = 0;
+    return tempFolder().getChildFile ("takes-" + juce::String (++windows));
+}
+
 std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true)
 {
     MainComponent::Options options;
     options.audioDevice = false;
     options.scanPlugins = false;
     options.settingsFile = tempFolder().getChildFile ("settings.xml");
+    options.recordings = takesFolder();
     auto w = std::make_unique<MainComponent> (options);
     w->setSize (MainComponent::kDesignWidth, MainComponent::kDesignHeight);
     if (withPlugins) test::addTestPlugins (w->session.catalog);
@@ -70,6 +78,53 @@ std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true)
         if (gAnswer) onOk();
     };
     return w;
+}
+
+// A running device the checks describe: four inputs (the tests record on the first and the second pair), the given rate and latencies.
+MainComponent::DeviceState fakeDevice (double rate = 48000.0, int inLatency = 100, int outLatency = 50)
+{
+    MainComponent::DeviceState d;
+    d.running = true;
+    d.inputName = "Interface";
+    d.outputName = "Headphones";
+    d.rate = rate;
+    d.bufferSize = 256;
+    d.inputs = 4;
+    d.outputs = 2;
+    d.inputLatency = inLatency;
+    d.outputLatency = outLatency;
+    d.activeInputs.setRange (0, 4, true);
+    return d;
+}
+
+// What the device does for `frames` frames, in odd block sizes: input 0 carries a 440 Hz sine at 0.5, inputs 2 and 3 the same tone at 0.25.
+// `fed` counts the frames the device has run (the sine's phase). Returns the peak of the outputs.
+float feedDevice (MainComponent& w, juce::int64& fed, double rate, int frames)
+{
+    constexpr int kSizes[] = { 100, 512, 37, 1100, 256, 999, 3, 2048, 777 };
+    float peak = 0.0f;
+    for (int block = 0; frames > 0; ++block)
+    {
+        const int n = juce::jmin (frames, kSizes[block % 9]);
+        std::vector<std::vector<float>> in (4, std::vector<float> ((size_t) n, 0.0f));
+        std::vector<std::vector<float>> out (2, std::vector<float> ((size_t) n, 0.0f));
+        for (int i = 0; i < n; ++i)
+        {
+            const double phase = 2.0 * juce::MathConstants<double>::pi * 440.0 * (double) (fed + i) / rate;
+            in[0][(size_t) i] = 0.5f * (float) std::sin (phase);
+            in[2][(size_t) i] = 0.25f * (float) std::sin (phase);
+            in[3][(size_t) i] = in[2][(size_t) i];
+        }
+        const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+        float* outPtr[2] = { out[0].data(), out[1].data() };
+        w.io.deviceBlock (inPtr, 4, outPtr, 2, n);
+        for (auto& channel : out)
+            for (float v : channel)
+                peak = juce::jmax (peak, std::abs (v));
+        fed += n;
+        frames -= n;
+    }
+    return peak;
 }
 
 // A click, and the message loop for the moment the button takes to act on it (JUCE answers triggerClick asynchronously).
@@ -95,7 +150,7 @@ void layoutCheck (MainComponent& w, const char* label)
     std::vector<juce::Component*> controls { &w.newButton, &w.openButton, &w.saveButton, &w.saveAsButton, &w.addTrackButton, &w.importButton,
                                              &w.pluginsButton, &w.renderButton, &w.guideButton, &w.rewindButton, &w.playButton, &w.loopButton,
                                              &w.metronomeButton, &w.bpmField, &w.signatureBox, &w.snapButton, &w.gridBox, &w.undoButton, &w.redoButton,
-                                             &w.zoomOutButton, &w.zoomInButton, &w.zoomFitButton };
+                                             &w.zoomOutButton, &w.zoomInButton, &w.zoomFitButton, &w.audioButton, &w.recordButton, &w.deviceLabel };
     bool ok = inside (w.arrange, w) && w.arrange.getBounds().getWidth() > 0;
     for (size_t i = 0; i < controls.size(); ++i)
     {
@@ -545,6 +600,164 @@ int main()
             }
             test::check (ok, "painting to an image does not crash, at the smallest, a normal and the largest zoom");
         }
+    }
+
+    std::printf ("[11] Devices and the notes\n");
+    {
+        auto w = makeWindow();
+        test::check (w->deviceSummary() == "no audio device", "with no device the top bar says so");
+        w->setDeviceForTest (fakeDevice());
+        test::check (w->deviceSummary() == "IN: Interface / OUT: Headphones / 48.0 kHz / 256 smp", "the top bar: " + w->deviceSummary());
+        test::check (std::abs (w->roundTripMs() - 150.0 * 1000.0 / 48000.0) < 1e-9, "the round trip: input and output latency, in ms");
+        test::check (w->deviceLabel.getText() == w->deviceSummary(), "the device label shows the summary");
+
+        // the IN menu's entries: each active input, then each neighbouring pair of active inputs
+        const auto all = MainComponent::inputChoices (fakeDevice());
+        bool ok = all.size() == 7 && all[0].label == "In 1" && all[0].right == -1 && all[1].label == "In 1+2" && all[1].left == 0 && all[1].right == 1;
+        ok = ok && all[2].label == "In 2" && all[3].label == "In 2+3" && all[5].label == "In 3+4" && all[5].left == 2 && all[5].right == 3 && all[6].label == "In 4";
+        test::check (ok, "the IN menu: each input alone, then each pair of neighbours");
+        auto gap = fakeDevice();
+        gap.activeInputs.clearBit (1);
+        test::check (MainComponent::inputChoices (gap).size() == 4 && MainComponent::inputChoices (MainComponent::DeviceState {}).empty(),
+                     "an inactive input is not offered, and with no device the menu is empty");
+
+        // the notes that fire for an armed track and the device
+        juce::String error;
+        w->addTracks ({ makeWav ("notes.wav").getFullPathName() });
+        w->session.setTrackArm (0, true, error);
+        w->setDeviceForTest (MainComponent::DeviceState {});
+        w->refreshNow();
+        test::check (noteMentions (*w, "no audio input is running", ui::Severity::warning), "an armed track with no device input is said");
+        w->setDeviceForTest (fakeDevice (44100.0, 0, 0));
+        test::check (noteMentions (*w, "Takes are recorded at 44.1 kHz", ui::Severity::info), "a take at another rate than the session's is said");
+        w->setDeviceForTest (fakeDevice (48000.0, 1000, 1000));
+        test::check (noteMentions (*w, "round trip is 42 ms", ui::Severity::warning), "a round trip above 30 ms says to lower the buffer size");
+        w->setDeviceForTest (fakeDevice());
+        test::check (! noteMentions (*w, "round trip", ui::Severity::warning) && ! noteMentions (*w, "no audio input", ui::Severity::warning),
+                     "with a device and the same rate, neither note fires");
+
+        // the device's settings come back from the settings file as they were saved
+        const juce::String state = "<DEVICESETUP deviceType=\"Test\" audioInputDeviceName=\"Interface\" audioOutputDeviceName=\"Headphones\" audioDeviceRate=\"48000\" audioDeviceBufferSize=\"256\"/>";
+        olympus::Settings saved;
+        saved.audioDeviceState = state;
+        const auto file = tempFolder().getChildFile ("device-settings.xml");
+        saved.save (file);
+        const auto back = olympus::Settings::load (file);
+        const auto parsed = juce::parseXML (back.audioDeviceState);
+        test::check (parsed != nullptr && parsed->hasTagName ("DEVICESETUP") && parsed->getStringAttribute ("audioInputDeviceName") == "Interface"
+                         && parsed->getIntAttribute ("audioDeviceBufferSize") == 256, "the device's settings round-trip through the settings file");
+    }
+
+    std::printf ("[12] Recording\n");
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("playback.wav").getFullPathName() });   // a clip on track 0, 24000 frames at 48 kHz
+        w->addEmptyTrack();
+        juce::String error;
+
+        // refused: with no device, and with no track armed
+        gErrors.clear();
+        test::check (! w->startRecording() && ! w->isRecording() && gErrors.size() == 1 && gErrors.back().contains ("No audio device"),
+                     "REC without a running device is refused, and says so");
+        w->setDeviceForTest (fakeDevice());
+        gErrors.clear();
+        test::check (! w->startRecording() && ! w->isRecording() && gErrors.size() == 1 && gErrors.back().contains ("No track is armed"),
+                     "REC with no track armed is refused, and says so");
+        auto noInputs = fakeDevice();
+        noInputs.inputs = 0;
+        noInputs.activeInputs.clear();
+        w->setDeviceForTest (noInputs);
+        press (*w->arrange.armButton (0));
+        gErrors.clear();
+        test::check (! w->startRecording() && gErrors.size() == 1 && gErrors.back().contains ("no input channels"), "REC with a device that has no inputs is refused");
+        w->setDeviceForTest (fakeDevice());
+
+        // ARM: the header's R button on track 0, the session on track 1; each track its own input, shown on its header
+        test::check (w->session.tracks[0]->armed && w->arrange.armButton (0)->getToggleState(), "the R button arms the track");
+        test::check (w->session.setTrackArm (1, true, error) && w->session.tracks[1]->armed, "a track is armed through the session too");
+        test::check (w->session.setTrackInput (0, 0, -1, error) && w->session.setTrackInput (1, 2, 3, error), "two tracks on different inputs");
+        w->refreshNow();
+        test::check (w->arrange.inputButton (0)->getButtonText() == "IN 1" && w->arrange.inputButton (1)->getButtonText() == "IN 3+4",
+                     "each header shows its input: IN 1 and IN 3+4");
+        test::check (w->arrange.armButton (1)->getToggleState(), "and the lamp of an armed track is lit");
+
+        // REC with the R key, from the playhead at 4800: the playback clip is heard while the takes run
+        w->seek (4800);
+        w->keyPressed (juce::KeyPress ('r'));
+        test::check (w->isRecording() && w->isPlaying() && w->recordButton.getToggleState(), "the R key starts the takes; the transport plays and REC is lit");
+        juce::int64 fed = 0;
+        const float heard = feedDevice (*w, fed, 48000.0, 30000);
+        test::check (heard > 0.1f, "the playback clip is heard while recording: peak " + juce::String (heard));
+        test::check (w->isRecording() && w->position() == 4800 + 30000, "the take keeps running past the end of the audio");
+
+        // while the take runs, the loop does not wrap: the playhead goes on past the loop's end
+        w->editor.setLoop (5000, 6000, true);
+        w->syncTransport();
+        feedDevice (*w, fed, 48000.0, 1000);
+        test::check (w->position() == 4800 + 31000, "no loop wrap while recording: " + juce::String ((int) w->position()));
+        w->editor.setLoop (0, 0, false);
+        w->syncTransport();
+
+        // the playhead cannot be moved during a take
+        gErrors.clear();
+        w->seek (0);
+        test::check (w->position() == 4800 + 31000 && ! gErrors.empty(), "the playhead does not move during a take, and says so");
+
+        // STOP (the Space key): the takes go on their tracks, minus the device's round trip (100 + 50 samples)
+        w->keyPressed (juce::KeyPress (juce::KeyPress::spaceKey));
+        test::check (! w->isRecording() && ! w->isPlaying(), "STOP ends the takes and the playback");
+        const auto& t0 = w->session.tracks[0]->clips;
+        const auto& t1 = w->session.tracks[1]->clips;
+        const juce::int64 placed = 4800 - 150;
+        test::check (t0.size() == 2 && t1.size() == 1, "each armed track has its take as a clip");
+        test::check (t0[1].start == placed && t1[0].start == placed, "the takes start at the record start less the round trip: " + juce::String ((int) placed));
+        test::check (t0[1].length == 31000 && t1[0].length == 31000, "a take is as long as it recorded");
+        test::check (w->arrange.selected.track == 0 && w->arrange.selected.clip == 1, "the first new clip is selected");
+        test::check (w->session.dirty && w->editor.undoLabel() == "Record", "the session is dirty, and the takes are one step called Record");
+        test::check (w->arrange.recordingFrom < 0.0 && w->arrange.recordingTracks.empty(), "the recording strip is gone");
+
+        // the takes are the device's sine: track 0 took input 0 (0.5), track 1 inputs 2 and 3 (0.25)
+        test::check (t0[1].audio != nullptr && std::abs (t0[1].audio->getSample (0, 1000) - 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * 1000.0 / 48000.0)) < 1e-4f,
+                     "the take on IN 1 is the sine of IN 1");
+        test::check (t1[0].audio != nullptr && std::abs (t1[0].audio->getSample (1, 1000) - 0.25f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * 1000.0 / 48000.0)) < 1e-4f,
+                     "the take on IN 3+4 is the sine of IN 3 and 4");
+        test::check (w->recordingFolder().getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 2, "two take files on disk, in the recordings folder");
+
+        // one undo step takes both out, and redo brings them back
+        test::check (w->editor.undo() && w->session.tracks[0]->clips.size() == 1 && w->session.tracks[1]->clips.empty(), "one undo takes both takes out");
+        test::check (w->editor.redo() && w->session.tracks[0]->clips.size() == 2 && w->session.tracks[1]->clips.size() == 1, "and redo brings them back");
+
+        // a take that is stopped by the device is kept: the device stops, the timer ends the take with what it has
+        const int before = (int) w->session.tracks[0]->clips.size();
+        w->seek (0);
+        w->toggleRecord();
+        juce::int64 more = 0;
+        feedDevice (*w, more, 48000.0, 2000);
+        w->io.audioDeviceStopped();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        test::check (! w->isRecording() && (int) w->session.tracks[0]->clips.size() == before + 1
+                         && w->session.tracks[0]->clips.back().length == 2000 && ! gErrors.empty() && gErrors.back().contains ("stopped while recording"),
+                     "a device that stops ends the take, which is kept, and the window says so");
+
+        // a change of the device during a take ends it as well
+        w->toggleRecord();
+        feedDevice (*w, more, 48000.0, 512);
+        w->io.audioDeviceAboutToStart (nullptr);
+        test::check (! w->isRecording(), "a device change ends the take before the new device runs");
+    }
+
+    std::printf ("[13] Recording in an empty session\n");
+    {
+        auto w = makeWindow();
+        juce::String error;
+        w->session.addEmptyTrack ("Mic");
+        w->session.setTrackArm (0, true, error);
+        w->setDeviceForTest (fakeDevice (44100.0, 0, 0));
+        w->toggleRecord();
+        juce::int64 fed = 0;
+        feedDevice (*w, fed, 44100.0, 4410);
+        w->toggleRecord();
+        test::check (w->session.sampleRate == 44100.0 && w->session.tracks[0]->clips.size() == 1, "the first take sets the session's rate: " + juce::String (w->session.sampleRate));
     }
 
     std::printf ("[10] Session: empty tracks\n");

@@ -88,6 +88,8 @@ struct ArrangeSnapshot
         juce::String name;
         float gainDb = 0.0f, pan = 0.0f;
         bool mute = false, solo = false;
+        bool armed = false;
+        int inputLeft = 0, inputRight = -1;
         float peakL = 0.0f, peakR = 0.0f; // only when taken with peaks: the maximum since the last read
         std::vector<Clip> clips;
     };
@@ -144,7 +146,7 @@ struct ArrangeWaves
     }
 };
 
-// ---- one track's header: name, M, S, FX, X, pan, fader and meter ------------------------------------------------------------------
+// ---- one track's header: name, M, S, FX, X, pan, R, IN, fader and meter -------------------------------------------------------------
 class ArrangeTrackHeader : public juce::Component
 {
 public:
@@ -168,7 +170,7 @@ public:
         muteButton.setClickingTogglesState (true);
         muteButton.lamp = colours::bad;
         // a header switch never takes the keyboard: Space and the other transport keys reach the window
-        for (auto* b : { &muteButton, &soloButton, &fxButton, &removeButton }) b->setWantsKeyboardFocus (false);
+        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &fxButton, &removeButton, &armButton, &inputButton }) b->setWantsKeyboardFocus (false);
         faderSlider.setWantsKeyboardFocus (false);
         panKnob.setWantsKeyboardFocus (false);
         muteButton.setTooltip ("Mute the track");
@@ -193,7 +195,18 @@ public:
         removeButton.lamp = colours::bad;
         removeButton.setTooltip ("Remove the track");
         removeButton.onClick = [this] { if (view.onRemoveTrack) view.onRemoveTrack (index); };
-        for (auto* b : { &muteButton, &soloButton, &fxButton, &removeButton }) addAndMakeVisible (*b);
+        armButton.setClickingTogglesState (true);
+        armButton.lamp = colours::bad;
+        armButton.setTooltip ("Arm the track to record it (REC). Its input is beside it; the meter shows that input while the transport is stopped.");
+        armButton.onClick = [this]
+        {
+            juce::String error;
+            if (! view.session.setTrackArm (index, armButton.getToggleState(), error)) view.report (error);
+            view.edited();
+        };
+        inputButton.setTooltip ("The device input this track records. Click to choose it.");
+        inputButton.onClick = [this] { if (view.onInputMenu) view.onInputMenu (index); };
+        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &fxButton, &removeButton, &armButton, &inputButton }) addAndMakeVisible (*b);
 
         panKnob.setup ("Pan", -1.0, 1.0, 0.0, 0.0, [] (double v) { return panText (v); }, [] (const juce::String& t) { return panFromText (t); },
                        "Balance: drag, or click the number and type L30, C or R30.");
@@ -229,7 +242,7 @@ public:
         faderSlider.setLookAndFeel (nullptr);
     }
 
-    void setState (const juce::String& title, float gainDb, float panValue, bool isMuted, bool isSoloed)
+    void setState (const juce::String& title, float gainDb, float panValue, bool isMuted, bool isSoloed, bool isArmed, const juce::String& input)
     {
         if (! editingName && nameLabel.getText() != title)
             nameLabel.setText (title, juce::dontSendNotification);
@@ -237,6 +250,8 @@ public:
         panKnob.setValue (panValue);
         muteButton.setToggleState (isMuted, juce::dontSendNotification);
         soloButton.setToggleState (isSoloed, juce::dontSendNotification);
+        armButton.setToggleState (isArmed, juce::dontSendNotification);
+        if (inputButton.getButtonText() != input) inputButton.setButtonText (input);
     }
 
     // The meter: the level falls back by a few dB between reads, the held mark more slowly.
@@ -257,7 +272,9 @@ public:
         muteButton.setBounds (8, 30, 26, 22);
         soloButton.setBounds (38, 30, 26, 22);
         panKnob.setBounds (66, 27, 100, 32);
-        faderSlider.setBounds (8, 64, w - 16, 18);
+        armButton.setBounds (8, 62, 26, 22);
+        inputButton.setBounds (38, 62, 58, 22);
+        faderSlider.setBounds (102, 66, w - 110, 16);
     }
 
     void paint (juce::Graphics& g) override
@@ -278,6 +295,8 @@ public:
 
     ArrangeView& view;
     int index;
+    ArrangeLamp armButton { "R" };
+    juce::TextButton inputButton { "IN" };
 
 private:
     bool editingName = false;
@@ -305,6 +324,22 @@ ArrangeView::~ArrangeView()
     headers.clear();
 }
 
+juce::String ArrangeView::inputText (int left, int right)
+{
+    if (right < 0) return "IN " + juce::String (left + 1);
+    return "IN " + juce::String (left + 1) + "+" + juce::String (right + 1);
+}
+
+juce::Button* ArrangeView::armButton (int track)
+{
+    return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->armButton : nullptr;
+}
+
+juce::Button* ArrangeView::inputButton (int track)
+{
+    return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->inputButton : nullptr;
+}
+
 ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
 {
     ArrangeSnapshot s;
@@ -324,6 +359,9 @@ ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
         v.pan = t->pan;
         v.mute = t->mute;
         v.solo = t->solo;
+        v.armed = t->armed;
+        v.inputLeft = t->inputLeft;
+        v.inputRight = t->inputRight;
         v.clips = t->clips;
         if (takePeaks)
         {
@@ -432,8 +470,15 @@ void ArrangeView::syncHeaders (bool readMeters)
         auto& h = *headers[(size_t) i];
         const auto& t = s.tracks[(size_t) i];
         h.index = i;
-        h.setState (t.name, t.gainDb, t.pan, t.mute, t.solo);
-        if (readMeters) h.addPeaks (t.peakL, t.peakR);
+        h.setState (t.name, t.gainDb, t.pan, t.mute, t.solo, t.armed, inputText (t.inputLeft, t.inputRight));
+        if (! readMeters) continue;
+        if (t.armed && showInputLevels && inputLevel)
+        {
+            const float peak = inputLevel (i);
+            h.addPeaks (peak, peak);
+        }
+        else
+            h.addPeaks (t.peakL, t.peakR);
     }
 
     // a selection the model no longer has is dropped
@@ -685,6 +730,21 @@ void ArrangeView::paint (juce::Graphics& g)
             const auto rect = clipRect (i, clips[(size_t) c].start, clips[(size_t) c].length, pps);
             if (rect.getRight() < kHeaderWidth || rect.getX() > width) continue;
             paintClip (g, s, pps, i, clips[(size_t) c], selected.track == i && selected.clip == c);
+        }
+    }
+
+    // a take in progress: a red strip across each armed lane, from where the recording began to the playhead
+    if (recordingFrom >= 0.0)
+    {
+        const int x0 = sampleToX (recordingFrom, pps), x1 = sampleToX (juce::jmax (recordingFrom, recordingTo), pps);
+        for (int track : recordingTracks)
+        {
+            if (track < 0 || track >= count) continue;
+            const int y = trackTop (track);
+            g.setColour (colours::bad.withAlpha (0.22f));
+            g.fillRect (x0, y + 1, juce::jmax (0, x1 - x0), kLaneHeight - 2);
+            g.setColour (colours::bad);
+            g.fillRect (x0, y + 1, 2, kLaneHeight - 2);
         }
     }
 

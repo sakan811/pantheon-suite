@@ -7,6 +7,9 @@
 //   OlympusSnapshot <out.png> [plugins=<folder>]
 //
 //   plugins=FOLDER   use the suite's built plugins found in FOLDER (VST3) on the chains instead of the test plugin
+//
+// A second picture, next to <out.png> as screenshot-record.png: the same session while a take runs on two armed tracks (IN 1 and IN 3+4),
+// with a device the picture describes (there is no audio device in a headless run; the takes are written to a folder of the snapshot's own).
 
 #include "TestPlugin.h"
 #include "UI/MainComponent.h"
@@ -77,6 +80,18 @@ void clip (olympus::Editor& editor, int track, const juce::File& file, double st
 }
 }
 
+// The window to a PNG file. Returns false when it cannot be written.
+bool writePicture (olympus::gui::MainComponent& window, const juce::File& out)
+{
+    const auto image = window.createComponentSnapshot (window.getLocalBounds(), true, 1.5f);
+    out.deleteFile();
+    juce::FileOutputStream stream (out);
+    juce::PNGImageFormat png;
+    const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
+    std::printf ("%s %s\n", ok ? "wrote" : "FAILED to write", out.getFullPathName().toRawUTF8());
+    return ok;
+}
+
 int main (int argc, char** argv)
 {
     if (argc < 2)
@@ -96,6 +111,7 @@ int main (int argc, char** argv)
     options.audioDevice = false;
     options.scanPlugins = false;
     options.settingsFile = folder.getChildFile ("settings.xml");
+    options.recordings = folder.getChildFile ("takes");
     olympus::gui::MainComponent window (options);
     window.setSize (olympus::gui::MainComponent::kDesignWidth, olympus::gui::MainComponent::kDesignHeight);
 
@@ -155,13 +171,51 @@ int main (int argc, char** argv)
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
     window.arrange.refresh();
 
-    const auto image = window.createComponentSnapshot (window.getLocalBounds(), true, 1.5f);
-    juce::File out (argv[1]);
-    out.deleteFile();
-    juce::FileOutputStream stream (out);
-    juce::PNGImageFormat png;
-    const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
-    std::printf ("%s %s\n", ok ? "wrote" : "FAILED to write", out.getFullPathName().toRawUTF8());
+    bool ok = writePicture (window, juce::File (argv[1]));
+
+    // the second picture: two armed tracks, IN 1 and IN 3+4, while a take runs from bar 4 (8 seconds); the armed lanes show the take in red
+    olympus::gui::MainComponent::DeviceState device;
+    device.running = true;
+    device.inputName = "Interface";
+    device.outputName = "Headphones";
+    device.rate = kRate;
+    device.bufferSize = 128;
+    device.inputs = 4;
+    device.outputs = 2;
+    device.inputLatency = 96;
+    device.outputLatency = 48;
+    device.activeInputs.setRange (0, 4, true);
+    window.setDeviceForTest (device);
+    session.setTrackArm (0, true, error);
+    session.setTrackArm (2, true, error);
+    session.setTrackInput (0, 0, -1, error);
+    session.setTrackInput (2, 2, 3, error);
+    window.seek ((juce::int64) (8.0 * kRate));
+    window.toggleRecord();
+    {
+        // 3.5 seconds of the device: a 440 Hz tone on the inputs, in 128-frame blocks
+        const int total = (int) (3.5 * kRate);
+        std::vector<std::vector<float>> in (4, std::vector<float> (128, 0.0f));
+        std::vector<std::vector<float>> out (2, std::vector<float> (128, 0.0f));
+        for (int done = 0; done < total; done += 128)
+        {
+            for (int i = 0; i < 128; ++i)
+            {
+                const float v = 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (done + i) / kRate);
+                in[0][(size_t) i] = v;
+                in[2][(size_t) i] = 0.6f * v;
+                in[3][(size_t) i] = 0.6f * v;
+            }
+            const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+            float* outPtr[2] = { out[0].data(), out[1].data() };
+            window.io.deviceBlock (inPtr, 4, outPtr, 2, 128);
+        }
+    }
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+    window.arrange.refresh();
+    ok = writePicture (window, juce::File (argv[1]).getSiblingFile ("screenshot-record.png")) && ok;
+    window.toggleRecord();   // the take ends: its takes go to the snapshot's folder, which is removed below
+
     folder.deleteRecursively();
     return ok ? 0 : 1;
 }
