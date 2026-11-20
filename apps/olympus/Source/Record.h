@@ -173,9 +173,17 @@ public:
     // caller places a take's start by that same decision (DeviceCallback::deviceBlock).
     bool push (const float* const* inputs, int numInputs, int numSamples)
     {
-        bool first = false;
         if (! prepared.load() || inputs == nullptr || numSamples <= 0)
-            return first;
+            return false;
+        struct BusyScope
+        {
+            std::atomic<bool>& flag;
+            explicit BusyScope (std::atomic<bool>& f) : flag (f) { flag.store (true); }
+            ~BusyScope() { flag.store (false); }
+        };
+        const BusyScope busyScope (busy);
+        const bool rec = recording.load();
+        const bool first = rec;
         for (int offset = 0; offset < numSamples; offset += blockMax)
         {
             const int n = juce::jmin (blockMax, numSamples - offset);
@@ -188,11 +196,8 @@ public:
                 if (p > meters[(size_t) input].load())
                     meters[(size_t) input].store (p);
             }
-            busy.store (true);
-            if (recording.load())
+            if (rec)
             {
-                if (offset == 0)
-                    first = true;
                 for (auto& lane : lanes)
                 {
                     const float* channels[2];
@@ -208,7 +213,6 @@ public:
                 }
                 framesPushed.fetch_add (n);
             }
-            busy.store (false);
         }
         return first;
     }
