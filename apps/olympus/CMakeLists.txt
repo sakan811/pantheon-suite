@@ -114,6 +114,12 @@ target_link_libraries(Olympus
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+if(APPLE)
+    add_custom_command(TARGET Olympus POST_BUILD
+        COMMAND /usr/bin/codesign --force --deep --sign - --identifier org.pantheon.olympus "$<TARGET_BUNDLE_DIR:Olympus>"
+        COMMENT "Ad-hoc signing Olympus.app with bound Info.plist (org.pantheon.olympus)"
+        VERBATIM)
+endif()
 
 # ---------------------------------------------------------------------------------------
 # The MCP server: the same session without a window, speaking MCP on stdin and stdout (what an agent starts).
