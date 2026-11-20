@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -332,8 +333,11 @@ private:
         {
             const int from = session.findTrack (trackArg, error);
             if (from < 0) return {};
+            const auto* arr = a["to_tracks"].getArray();
+            if (arr == nullptr) { error = "Give 'to_tracks' (an array of track numbers or names)."; return {}; }
+            if (arr->isEmpty()) { error = "Give at least one target track in 'to_tracks'."; return {}; }
             std::vector<int> to;
-            for (auto& t : *a["to_tracks"].getArray())
+            for (auto& t : *arr)
             {
                 const int i = session.findTrack (t, error);
                 if (i < 0) return {};
@@ -487,21 +491,40 @@ private:
         }
         if (name == "add_plugin")
         {
-            if (! session.addPlugin (track, a["plugin"].toString(), a.hasProperty ("position") ? (int) a["position"] : -1, error)) return {};
+            if (! a["plugin"].isString() || a["plugin"].toString().trim().isEmpty())
+            { error = "Give 'plugin' (plugin name)."; return {}; }
+            int pos = -1;
+            if (a.hasProperty ("position"))
+            {
+                pos = indexArg (a, "position", error);
+                if (pos < 0) return {};
+            }
+            if (! session.addPlugin (track, a["plugin"].toString(), pos, error)) return {};
             editor.clearUndo(); // plugins are not undone (see Edit.h)
             return session.describe();
         }
         if (name == "set_chain")
         {
+            const auto* arr = a["plugins"].getArray();
+            if (arr == nullptr) { error = "Give 'plugins' (an array of plugin names, or [] to clear the chain)."; return {}; }
             juce::StringArray plugins;
-            if (auto* arr = a["plugins"].getArray())
-                for (auto& p : *arr) plugins.add (p.toString());
+            for (const auto& p : *arr)
+            {
+                if (! p.isString()) { error = "Each entry in 'plugins' must be a plugin name (string)."; return {}; }
+                plugins.add (p.toString());
+            }
             if (! session.setChain (track, plugins, error)) return {};
             editor.clearUndo(); // plugins are not undone (see Edit.h)
             return session.describe();
         }
         if (name == "move_plugin")
-            return session.movePlugin (track, (int) a["from"], (int) a["to"], error) ? session.describe() : juce::var();
+        {
+            const int from = indexArg (a, "from", error);
+            if (from < 0) return {};
+            const int to = indexArg (a, "to", error);
+            if (to < 0) return {};
+            return session.movePlugin (track, from, to, error) ? session.describe() : juce::var();
+        }
 
         const int slot = findSlot (track, a["slot"], error);
         if (slot < 0) return {};
@@ -512,7 +535,10 @@ private:
             return session.describe();
         }
         if (name == "bypass_plugin")
+        {
+            if (! a.hasProperty ("bypass") || ! a["bypass"].isBool()) { error = "Give 'bypass' (true or false)."; return {}; }
             return session.setBypass (track, slot, (bool) a["bypass"], error) ? session.describe() : juce::var();
+        }
 
         auto* instance = session.tracks[(size_t) track]->chain[(size_t) slot]->instance.get();
         if (instance == nullptr) { error = "That plugin is not installed on this machine, so it has no settings to read or change."; return {}; }
@@ -529,11 +555,15 @@ private:
         }
         if (name == "load_preset")
         {
-            const auto wanted = a["preset"].toString();
+            juce::String wanted;
+            if (! nameOrIndexArg (a["preset"], wanted, error, "Give 'preset' (name or number from list_presets)."))
+                return {};
             int found = -1;
             for (int i = 0; i < instance->getNumPrograms() && found < 0; ++i)
                 if (instance->getProgramName (i).equalsIgnoreCase (wanted)) found = i;
-            if (found < 0 && wanted.containsOnly ("0123456789") && wanted.isNotEmpty()) found = wanted.getIntValue();
+            if (found < 0)
+                if (const auto idx = parseNonNegativeInt (wanted))
+                    found = *idx;
             if (! juce::isPositiveAndBelow (found, instance->getNumPrograms())) { error = "No preset '" + wanted + "' (see list_presets)."; return {}; }
             session.dirty = true;
             instance->setCurrentProgram (found);
@@ -543,15 +573,83 @@ private:
         return {};
     }
 
+    static bool nameOrIndexArg (const juce::var& v, juce::String& out, juce::String& error, const char* prompt)
+    {
+        if (v.isString())
+        {
+            out = v.toString().trim();
+            if (out.isNotEmpty())
+                return true;
+            error = prompt;
+            return false;
+        }
+        if (v.isInt() || v.isInt64())
+        {
+            const juce::int64 n = (juce::int64) v;
+            if (n < 0 || n > (juce::int64) std::numeric_limits<int>::max())
+            {
+                error = prompt;
+                return false;
+            }
+            out = juce::String ((int) n);
+            return true;
+        }
+        if (v.isDouble())
+        {
+            const double d = (double) v;
+            if (! std::isfinite (d) || std::trunc (d) != d || d < 0.0 || d > (double) std::numeric_limits<int>::max())
+            {
+                error = prompt;
+                return false;
+            }
+            out = juce::String ((int) d);
+            return true;
+        }
+        error = prompt;
+        return false;
+    }
+
+    static std::optional<int> parseNonNegativeInt (const juce::String& s)
+    {
+        if (s.isEmpty() || ! s.containsOnly ("0123456789")) return {};
+        juce::int64 parsed = 0;
+        for (int k = 0; k < s.length(); ++k)
+        {
+            const int d = (int) (s[k] - '0');
+            if (parsed > (std::numeric_limits<int>::max() - d) / 10) return {};
+            parsed = parsed * 10 + d;
+        }
+        return (int) parsed;
+    }
+
     // A number from 0 given as `key`, or -1 with the reason (missing, not a number, or negative).
     static int indexArg (const juce::var& a, const char* key, juce::String& error)
     {
         if (! a.hasProperty (key)) { error = juce::String ("Give '") + key + "' (a number, from 0)."; return -1; }
         const auto& v = a[key];
-        if (! (v.isInt() || v.isInt64() || v.isDouble())) { error = juce::String ("'") + key + "' must be a number, from 0."; return -1; }
-        const int i = (int) v;
-        if (i < 0) { error = juce::String ("'") + key + "' must be 0 or more (numbered from 0)."; return -1; }
-        return i;
+        if (v.isInt())
+        {
+            const int i = (int) v;
+            if (i < 0) { error = juce::String ("'") + key + "' must be 0 or more (numbered from 0)."; return -1; }
+            return i;
+        }
+        if (v.isInt64())
+        {
+            const juce::int64 n = (juce::int64) v;
+            if (n < 0) { error = juce::String ("'") + key + "' must be 0 or more (numbered from 0)."; return -1; }
+            if (n > (juce::int64) std::numeric_limits<int>::max()) { error = juce::String ("'") + key + "' is too large."; return -1; }
+            return (int) n;
+        }
+        if (v.isDouble())
+        {
+            const double d = (double) v;
+            if (! std::isfinite (d) || std::trunc (d) != d) { error = juce::String ("'") + key + "' must be a whole number, from 0."; return -1; }
+            if (d < 0.0) { error = juce::String ("'") + key + "' must be 0 or more (numbered from 0)."; return -1; }
+            if (d > (double) std::numeric_limits<int>::max()) { error = juce::String ("'") + key + "' is too large."; return -1; }
+            return (int) d;
+        }
+        error = juce::String ("'") + key + "' must be a number, from 0.";
+        return -1;
     }
 
     // A time given as the number `name` ("start_seconds" or "start_beats"), as samples at the session's rate. Nothing when it is not a
@@ -582,14 +680,64 @@ private:
     int findSlot (int track, const juce::var& which, juce::String& error) const
     {
         auto& chain = session.tracks[(size_t) track]->chain;
-        if (which.isString() && ! which.toString().containsOnly ("0123456789"))
+        int i = -1;
+        if (which.isString())
         {
-            for (int i = 0; i < (int) chain.size(); ++i)
-                if (chain[(size_t) i]->plugin.startsWithIgnoreCase (which.toString().trim())) return i;
-            error = "No plugin '" + which.toString() + "' on that track";
+            const auto s = which.toString().trim();
+            if (s.isEmpty())
+            {
+                error = "Give 'slot' (a plugin number from 0, or a plugin name).";
+                return -1;
+            }
+            if (! s.containsOnly ("0123456789"))
+            {
+                for (int slot = 0; slot < (int) chain.size(); ++slot)
+                    if (chain[(size_t) slot]->plugin.startsWithIgnoreCase (s)) return slot;
+                error = "No plugin '" + which.toString() + "' on that track";
+                return -1;
+            }
+            if (const auto parsed = parseNonNegativeInt (s))
+                i = *parsed;
+            else
+            {
+                error = "No plugin " + s + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
+                return -1;
+            }
+        }
+        else if (which.isInt())
+        {
+            i = (int) which;
+        }
+        else if (which.isInt64())
+        {
+            const juce::int64 n = (juce::int64) which;
+            if (n < 0 || n > (juce::int64) std::numeric_limits<int>::max())
+            {
+                error = "No plugin " + which.toString() + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
+                return -1;
+            }
+            i = (int) n;
+        }
+        else if (which.isDouble())
+        {
+            const double d = (double) which;
+            if (! std::isfinite (d) || std::trunc (d) != d)
+            {
+                error = "'slot' must be a whole number (from 0) or a plugin name.";
+                return -1;
+            }
+            if (d < 0.0 || d > (double) std::numeric_limits<int>::max())
+            {
+                error = "No plugin " + which.toString() + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
+                return -1;
+            }
+            i = (int) d;
+        }
+        else
+        {
+            error = "Give 'slot' (a plugin number from 0, or a plugin name).";
             return -1;
         }
-        const int i = which.isString() ? which.toString().getIntValue() : (int) which;
         if (juce::isPositiveAndBelow (i, (int) chain.size())) return i;
         error = "No plugin " + juce::String (i) + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
         return -1;
@@ -615,20 +763,26 @@ private:
 
     juce::var setParameter (juce::AudioPluginInstance& instance, const juce::var& a, juce::String& error)
     {
-        const auto which = a["parameter"].toString().trim();
+        juce::String which;
+        if (! nameOrIndexArg (a["parameter"], which, error, "Give 'parameter' (id, name or number from list_parameters)."))
+            return {};
         juce::AudioProcessorParameter* found = nullptr;
-        int i = 0;
         for (auto* p : instance.getParameters())
-        {
             if (idOf (*p).equalsIgnoreCase (which) || p->getName (64).equalsIgnoreCase (which)) { found = p; break; }
-            ++i;
-        }
-        if (found == nullptr && which.containsOnly ("0123456789") && which.isNotEmpty())
-            found = juce::isPositiveAndBelow (which.getIntValue(), instance.getParameters().size()) ? instance.getParameters()[which.getIntValue()] : nullptr;
+        if (found == nullptr)
+            if (const auto idx = parseNonNegativeInt (which))
+                found = juce::isPositiveAndBelow (*idx, instance.getParameters().size()) ? instance.getParameters()[*idx] : nullptr;
         if (found == nullptr) { error = "No setting '" + which + "' (see list_parameters)."; return {}; }
         float value;
-        if (a.hasProperty ("value")) value = (float) (double) a["value"];
-        else if (a["text"].toString().isNotEmpty()) value = found->getValueForText (a["text"].toString());
+        if (a.hasProperty ("value"))
+        {
+            const auto& vv = a["value"];
+            if (! (vv.isInt() || vv.isInt64() || vv.isDouble()) || ! std::isfinite ((double) vv))
+            { error = "'value' must be a number (0..1)."; return {}; }
+            value = (float) (double) vv;
+        }
+        else if (a["text"].isString() && a["text"].toString().isNotEmpty())
+            value = found->getValueForText (a["text"].toString());
         else { error = "Give 'value' (0..1) or 'text'."; return {}; }
         found->beginChangeGesture();
         found->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, value));
