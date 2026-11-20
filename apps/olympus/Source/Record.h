@@ -87,6 +87,7 @@ public:
     // of active inputs below it; an input that is not active maps to -1 (silence, and REC refuses it).
     void prepare (double rate, int maxBlock, const juce::BigInteger& activeInputs = allInputs())
     {
+        const juce::SpinLock::ScopedLockType sl (prepareLock);
         if (recording.load())
             return;
         blockMax = juce::jmax (1, maxBlock);
@@ -173,7 +174,8 @@ public:
     // caller places a take's start by that same decision (DeviceCallback::deviceBlock).
     bool push (const float* const* inputs, int numInputs, int numSamples)
     {
-        if (! prepared.load() || inputs == nullptr || numSamples <= 0)
+        const juce::SpinLock::ScopedTryLockType sl (prepareLock);
+        if (! sl.isLocked() || ! prepared.load() || inputs == nullptr || numSamples <= 0)
             return false;
         struct BusyScope
         {
@@ -311,6 +313,7 @@ private:
     }
 
     juce::TimeSliceThread thread;        // declared first: the lanes (and their writers) go before it
+    juce::SpinLock prepareLock;          // guards prepare() against push() when audioDeviceAboutToStart marshals via callAsync
     std::vector<Lane> lanes;
     std::vector<float> silence;          // zeros, blockMax long
     int blockMax = 512;

@@ -9,6 +9,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <functional>
@@ -64,7 +65,7 @@ struct Slot
     Slot& operator= (const Slot&) = delete;
     ~Slot() { if (instance != nullptr && watch != nullptr) instance->removeListener (watch); }
 
-    int latency() const { return instance != nullptr && ! bypass ? instance->getLatencySamples() : 0; }
+    int latency() const { return instance != nullptr && ! bypass ? juce::jmax (0, instance->getLatencySamples()) : 0; }
 };
 
 // A named place on the timeline. The session keeps them sorted by start.
@@ -109,7 +110,7 @@ struct Track
     {
         int sum = 0;
         for (auto& s : chain) sum += s->latency();
-        return sum;
+        return juce::jmax (0, sum);
     }
     // The end of the last clip (0 with none).
     juce::int64 length() const
@@ -202,6 +203,7 @@ public:
     {
         formats.registerBasicFormats();
         monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
+        midiScratch.ensureSize (256);
     }
     ~Session()
     {
@@ -692,10 +694,10 @@ public:
                 else monitorScratch.clear (ch, 0, count);
             }
             juce::AudioBuffer<float> view (monitorScratch.getArrayOfWritePointers(), viewChannels, count);
-            juce::MidiBuffer midi;
+            midiScratch.clear();
             for (auto& s : monitor)
                 if (s->instance != nullptr && ! s->bypass)
-                    s->instance->processBlock (view, midi);
+                    s->instance->processBlock (view, midiScratch);
             for (int ch = 0; ch < copied; ++ch)
                 out.copyFrom (ch, start, monitorScratch, ch, 0, count);
         }
@@ -787,11 +789,15 @@ public:
     }
 
     // Whether the track is heard: not muted, and (when anything is soloed) soloed.
+    static bool audible (const Track& t, bool anySolo)
+    {
+        return ! t.mute && (! anySolo || t.solo);
+    }
     bool audible (const Track& t) const
     {
         bool anySolo = false;
         for (auto& o : tracks) anySolo = anySolo || o->solo;
-        return ! t.mute && (! anySolo || t.solo);
+        return audible (t, anySolo);
     }
 
     // The gains of a balance pan: the far side is attenuated, the near side is untouched (so the centre is unity and a track is never
@@ -810,28 +816,62 @@ public:
     {
         dest.clear (0, n);
         const int channels = juce::jmin (2, dest.getNumChannels());
+        if (channels <= 0 || n <= 0)
+            return;
         for (const auto& c : t.clips)
         {
             if (c.mute || c.audio == nullptr || c.length <= 0)
                 continue;
             const juce::int64 from = juce::jmax (start, c.start), to = juce::jmin (start + n, c.end());
+            if (from >= to)
+                continue;
             const auto& src = *c.audio;
+            const int srcChannels = src.getNumChannels();
+            const juce::int64 srcSamples = (juce::int64) src.getNumSamples();
+            if (srcChannels <= 0 || srcSamples <= 0)
+                continue;
+            const juce::int64 sFrom = juce::jmax (from, c.start - c.offset);
+            const juce::int64 sTo = juce::jmin (to, c.start - c.offset + srcSamples);
+            if (sFrom >= sTo)
+                continue;
             const float gain = juce::Decibels::decibelsToGain (c.gainDb, -100.0f);
-            for (juce::int64 s = from; s < to; ++s)
+            const juce::int64 flatStart = c.fadeIn > 0 ? juce::jlimit (sFrom, sTo, c.start + c.fadeIn) : sFrom;
+            const juce::int64 flatEnd = c.fadeOut > 0 ? juce::jlimit (flatStart, sTo, c.end() - c.fadeOut + 1) : sTo;
+
+            auto addFadeSample = [&] (juce::int64 s)
             {
                 const juce::int64 local = s - c.start;
-                const juce::int64 index = c.offset + local;
-                if (index < 0 || index >= src.getNumSamples())
-                    continue;
+                const int index = (int) (c.offset + local);
                 float env = gain;
                 if (local < c.fadeIn)
                     env *= (float) local / (float) c.fadeIn;
                 const juce::int64 remaining = c.length - local;
                 if (remaining < c.fadeOut)
                     env *= (float) remaining / (float) c.fadeOut;
+                const int destIdx = (int) (s - start);
                 for (int ch = 0; ch < channels; ++ch)
-                    dest.addSample (ch, (int) (s - start), src.getSample (juce::jmin (ch, src.getNumChannels() - 1), (int) index) * env);
+                    dest.getWritePointer (ch)[destIdx] += src.getReadPointer (juce::jmin (ch, srcChannels - 1))[index] * env;
+            };
+
+            for (juce::int64 s = sFrom; s < flatStart; ++s)
+                addFadeSample (s);
+
+            if (flatEnd > flatStart)
+            {
+                const int count = (int) (flatEnd - flatStart);
+                const int destStart = (int) (flatStart - start);
+                const int srcStart = (int) (c.offset + (flatStart - c.start));
+                for (int ch = 0; ch < channels; ++ch)
+                {
+                    const int srcCh = juce::jmin (ch, srcChannels - 1);
+                    juce::FloatVectorOperations::addWithMultiply (dest.getWritePointer (ch, destStart),
+                                                                  src.getReadPointer (srcCh, srcStart),
+                                                                  gain, count);
+                }
             }
+
+            for (juce::int64 s = flatEnd; s < sTo; ++s)
+                addFadeSample (s);
         }
     }
 
@@ -905,6 +945,13 @@ public:
         prepareLocked (nonRealtime);
     }
 
+    // Clears the real-time latency compensation delay rings of every track (for example after a seek so stale audio is not heard).
+    void clearDelayRings()
+    {
+        const juce::ScopedLock sl (lock);
+        clearDelayRingsLocked();
+    }
+
     // `out` is overwritten with [start, start + n) of the session (two channels, cut into kBlockSize pieces so every plugin and track
     // scratch stays within kBlockSize; n <= 0 does nothing). No loop here: the caller splits blocks at the loop's end. Audio thread.
     void processBlock (juce::AudioBuffer<float>& out, juce::int64 start)
@@ -916,6 +963,9 @@ public:
         const juce::ScopedTryLock sl (lock);
         if (! sl.isLocked())
             return;
+        bool anySolo = false;
+        for (const auto& t : tracks)
+            if (t->solo) { anySolo = true; break; }
         const int channels = juce::jmin (2, out.getNumChannels());
         for (int done = 0; done < n; done += kBlockSize)
         {
@@ -924,7 +974,7 @@ public:
             publishHead (blockStart, true);
             for (auto& t : tracks)
             {
-                if (! audible (*t) || t->clips.empty())
+                if (! audible (*t, anySolo) || t->clips.empty())
                 {
                     // skipped: its delay must not come back with stale audio when it plays again
                     if (t->delayDirty)
@@ -970,21 +1020,29 @@ public:
         if (! options.folder.createDirectory().wasOk()) { error = "Cannot make the folder " + options.folder.getFullPathName(); return false; }
         const OfflineScope offlineScope (*this); // plugins in render mode for this function; back to real time on every way out
 
-        struct Out { Track* track; std::unique_ptr<juce::AudioFormatWriter> writer; juce::File file; int latency; juce::int64 written = 0; float peak = 0.0f; };
+        struct Out { Track* track; std::unique_ptr<juce::AudioFormatWriter> writer; juce::File file; int latency; float left = 1.0f, right = 1.0f; juce::int64 written = 0; float peak = 0.0f; };
         std::vector<Out> outs;
+        const auto mixFile = options.folder.getChildFile ("mix.wav");
+        std::unique_ptr<juce::AudioFormatWriter> mixWriter;
         // an error after files were made: this run's stems go, as a cancel's do, so no partial folder is left (the caller reports the error)
-        auto discardRun = [&outs, &options]
+        auto discardRun = [&outs, &options, &mixWriter, &mixFile]
         {
             for (auto& o : outs) { o.writer.reset(); if (options.writeStems) o.file.deleteFile(); }
+            mixWriter.reset();
+            if (options.writeMix) mixFile.deleteFile();
         };
+        bool anySolo = false;
+        for (const auto& t : tracks)
+            if (t->solo) { anySolo = true; break; }
         int index = 0;
         for (auto& t : tracks)
         {
             ++index;
-            if (! audible (*t)) continue;
+            if (! audible (*t, anySolo)) continue;
             Out o;
             o.track = t.get();
             o.latency = t->latency();
+            trackGains (*o.track, o.left, o.right);
             o.file = options.folder.getChildFile (juce::String (index).paddedLeft ('0', 2) + "-" + juce::File::createLegalFileName (t->name) + ".wav");
             if (options.writeStems)
             {
@@ -995,12 +1053,29 @@ public:
         }
         if (outs.empty()) { error = "No track is audible (all muted, or others soloed)."; return false; }
 
-        juce::AudioBuffer<float> mix (2, options.writeMix ? (int) stemLength : 0);
-        mix.clear();
+        if (options.writeMix)
+        {
+            mixWriter = makeWriter (mixFile, options.bits, error);
+            if (mixWriter == nullptr)
+            {
+                if (error.isEmpty()) error = "Writing mix.wav failed.";
+                mixFile.deleteFile();
+                discardRun();
+                return false;
+            }
+        }
+
         int totalLatency = 0;
         for (auto& o : outs) totalLatency = juce::jmax (totalLatency, o.latency);
+        const int mixRingSize = totalLatency + kBlockSize;
+        juce::AudioBuffer<float> mixRing (2, options.writeMix ? mixRingSize : 0);
+        mixRing.clear();
+        const float masterGain = juce::Decibels::decibelsToGain (masterDb, -100.0f);
+        float mixPeak = 0.0f;
+        juce::int64 mixFlushed = 0;
+
         const juce::int64 end = stemLength + totalLatency;
-        juce::AudioBuffer<float> block (2, kBlockSize);
+        juce::AudioBuffer<float> block (2, options.writeStems ? kBlockSize : 0);
 
         for (juce::int64 start = 0; start < end; start += kBlockSize)
         {
@@ -1014,26 +1089,57 @@ public:
                 const juce::int64 last = juce::jmin ((juce::int64) n, stemLength + o.latency - start);
                 if (last <= first) continue;
                 const int count = (int) (last - first);
-                float left = 0.0f, right = 0.0f;
-                trackGains (*o.track, left, right);
-                block.setSize (2, count, false, false, true);
-                for (int ch = 0; ch < 2; ++ch)
+                if (options.writeStems)
                 {
-                    block.copyFrom (ch, 0, o.track->scratch, ch, (int) first, count);
-                    block.applyGain (ch, 0, count, ch == 0 ? left : right);
-                    o.peak = juce::jmax (o.peak, block.getMagnitude (ch, 0, count));
-                }
-                if (o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count))
-                {
-                    error = "Writing " + o.file.getFileName() + " failed.";
-                    discardRun();
-                    return false;
+                    block.setSize (2, count, false, false, true);
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        block.copyFrom (ch, 0, o.track->scratch, ch, (int) first, count);
+                        block.applyGain (ch, 0, count, ch == 0 ? o.left : o.right);
+                        o.peak = juce::jmax (o.peak, block.getMagnitude (ch, 0, count));
+                    }
+                    if (o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count))
+                    {
+                        error = "Writing " + o.file.getFileName() + " failed.";
+                        discardRun();
+                        return false;
+                    }
                 }
                 if (options.writeMix)
                 {
-                    const int dest = (int) (start + first - o.latency);
+                    const juce::int64 dest = start + first - o.latency;
+                    const int r0 = (int) (dest % mixRingSize);
+                    const int s1 = juce::jmin (count, mixRingSize - r0);
+                    const int s2 = count - s1;
                     for (int ch = 0; ch < 2; ++ch)
-                        mix.addFrom (ch, dest, block, ch, 0, count);
+                    {
+                        const float g = ch == 0 ? o.left : o.right;
+                        mixRing.addFrom (ch, r0, o.track->scratch, ch, (int) first, s1, g);
+                        if (s2 > 0)
+                            mixRing.addFrom (ch, 0, o.track->scratch, ch, (int) first + s1, s2, g);
+                    }
+                }
+            }
+            if (options.writeMix)
+            {
+                const juce::int64 readyEnd = juce::jmin (stemLength, start + n - totalLatency);
+                while (mixFlushed < readyEnd)
+                {
+                    const int r0 = (int) (mixFlushed % mixRingSize);
+                    const int chunk = (int) juce::jmin (readyEnd - mixFlushed, (juce::int64) (mixRingSize - r0));
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        mixRing.applyGain (ch, r0, chunk, masterGain);
+                        mixPeak = juce::jmax (mixPeak, mixRing.getMagnitude (ch, r0, chunk));
+                    }
+                    if (! mixWriter->writeFromAudioSampleBuffer (mixRing, r0, chunk))
+                    {
+                        error = "Writing mix.wav failed.";
+                        discardRun();
+                        return false;
+                    }
+                    mixRing.clear (r0, chunk);
+                    mixFlushed += chunk;
                 }
             }
             if (progress && ! progress ((float) ((double) (start + n) / (double) end)))
@@ -1041,6 +1147,11 @@ public:
                 // a cancelled render leaves no stem of its run behind: the files it wrote are closed and deleted, and the caller says nothing
                 if (options.writeStems)
                     for (auto& o : outs) { o.writer.reset(); o.file.deleteFile(); }
+                if (options.writeMix)
+                {
+                    mixWriter.reset();
+                    mixFile.deleteFile();
+                }
                 result.stopped = true;
                 error = "Stopped.";
                 return false;
@@ -1054,21 +1165,9 @@ public:
         }
         if (options.writeMix)
         {
-            mix.applyGain (juce::Decibels::decibelsToGain (masterDb, -100.0f));
-            const auto file = options.folder.getChildFile ("mix.wav");
-            auto writer = makeWriter (file, options.bits, error);
-            if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (mix, 0, mix.getNumSamples()))
-            {
-                if (error.isEmpty()) error = "Writing mix.wav failed.";
-                writer.reset();
-                file.deleteFile();
-                discardRun();
-                return false;
-            }
-            writer.reset();
-            result.mixFile = file.getFullPathName();
-            result.mixPeakDb = (double) juce::Decibels::gainToDecibels (mix.getMagnitude (0, mix.getNumSamples()) > mix.getMagnitude (1, 0, mix.getNumSamples())
-                                                                           ? mix.getMagnitude (0, mix.getNumSamples()) : mix.getMagnitude (1, 0, mix.getNumSamples()), -200.0f);
+            mixWriter.reset();
+            result.mixFile = mixFile.getFullPathName();
+            result.mixPeakDb = (double) juce::Decibels::gainToDecibels (mixPeak, -200.0f);
         }
         result.seconds = (double) stemLength / sampleRate;
         return true;
@@ -1609,6 +1708,7 @@ public:
 private:
     juce::AudioFormatManager formats;
     juce::AudioBuffer<float> monitorScratch; // the monitor chain's view of a block (kMaxMonitorChannels x kBlockSize), sized here, never in the callback
+    juce::MidiBuffer midiScratch;
 
     // The audio pool: a file's buffer, shared by the clips that play it. Held weakly, so a buffer goes when its last clip does.
     // Message thread only; the audio thread never reads it.
@@ -1828,6 +1928,16 @@ private:
         t.scratch.setSize (2, kBlockSize, false, true, false);
     }
 
+    void clearDelayRingsLocked()
+    {
+        for (auto& t : tracks)
+        {
+            t->delayRing.clear();
+            t->delayPos = 0;
+            t->delayDirty = false;
+        }
+    }
+
     void prepareLocked (bool nonRealtime)
     {
         const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
@@ -1841,6 +1951,7 @@ private:
                 }
         monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
         updateLatenciesLocked();
+        clearDelayRingsLocked();
     }
 
     // How long each track is delayed in real time so the tracks stay aligned with each other (the one with the most latency is not).
@@ -1925,24 +2036,72 @@ private:
     {
         mixClips (t, start, n, t.scratch);
         juce::AudioBuffer<float> view (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
-        juce::MidiBuffer midi;
+        midiScratch.clear();
         for (auto& s : t.chain)
             if (s->instance != nullptr && ! s->bypass)
-                s->instance->processBlock (view, midi);
-        if (t.delaySamples > 0 && t.delayRing.getNumSamples() == t.delaySamples && ! rendering())
+                s->instance->processBlock (view, midiScratch);
+        if (t.delaySamples > 0 && t.delayRing.getNumSamples() == t.delaySamples && ! rendering() && n > 0)
         {
             const int d = t.delaySamples;
             t.delayDirty = true;
-            for (int i = 0; i < n; ++i)
+            if (n <= kBlockSize)
             {
-                for (int ch = 0; ch < 2; ++ch)
+                std::array<float, kBlockSize> tmp;
+                const int pos = t.delayPos;
+                if (n <= d)
                 {
-                    auto* ring = t.delayRing.getWritePointer (ch);
-                    const float in = view.getSample (ch, i);
-                    view.setSample (ch, i, ring[t.delayPos]);
-                    ring[t.delayPos] = in;
+                    const int first = juce::jmin (n, d - pos);
+                    const int second = n - first;
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        auto* data = view.getWritePointer (ch);
+                        auto* ring = t.delayRing.getWritePointer (ch);
+                        juce::FloatVectorOperations::copy (tmp.data(), data, n);
+                        juce::FloatVectorOperations::copy (data, ring + pos, first);
+                        if (second > 0)
+                            juce::FloatVectorOperations::copy (data + first, ring, second);
+                        juce::FloatVectorOperations::copy (ring + pos, tmp.data(), first);
+                        if (second > 0)
+                            juce::FloatVectorOperations::copy (ring, tmp.data() + first, second);
+                    }
+                    const int next = pos + n;
+                    t.delayPos = next >= d ? next - d : next;
                 }
-                t.delayPos = (t.delayPos + 1) % d;
+                else
+                {
+                    const int firstOut = d - pos;
+                    const int newPos = (pos + n) % d;
+                    const int firstRing = d - newPos;
+                    const int tailStart = n - d;
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        auto* data = view.getWritePointer (ch);
+                        auto* ring = t.delayRing.getWritePointer (ch);
+                        juce::FloatVectorOperations::copy (tmp.data(), data, n);
+                        juce::FloatVectorOperations::copy (data, ring + pos, firstOut);
+                        if (pos > 0)
+                            juce::FloatVectorOperations::copy (data + firstOut, ring, pos);
+                        juce::FloatVectorOperations::copy (data + d, tmp.data(), tailStart);
+                        juce::FloatVectorOperations::copy (ring + newPos, tmp.data() + tailStart, firstRing);
+                        if (newPos > 0)
+                            juce::FloatVectorOperations::copy (ring, tmp.data() + tailStart + firstRing, newPos);
+                    }
+                    t.delayPos = newPos;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        auto* ring = t.delayRing.getWritePointer (ch);
+                        const float in = view.getSample (ch, i);
+                        view.setSample (ch, i, ring[t.delayPos]);
+                        ring[t.delayPos] = in;
+                    }
+                    t.delayPos = (t.delayPos + 1) % d;
+                }
             }
         }
     }

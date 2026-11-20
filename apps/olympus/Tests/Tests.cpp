@@ -3143,6 +3143,56 @@ void mcpAnalyzeAudioChecks()
     tempFolder().getChildFile ("mcp-analyze").deleteRecursively();
 }
 
+void delayRingAndRelativePathChecks()
+{
+    std::printf ("[53] Track::delayRing cleared on prepareLocked() and clearDelayRings(), and MCP relative paths\n");
+    const auto dir = tempFolder().getChildFile ("delay-clear");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("delay-clear/tone.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+
+    Session s;
+    test::addTestPlugins (s.catalog);
+    juce::String err;
+    test::check (s.addTrack (wav, "Dry", err) && s.addTrack (wav, "Latent", err), "added Dry and Latent tracks");
+    test::check (s.setChain (1, { "Test Delay" }, err), "added Test Delay to Latent track");
+    s.prepare (false);
+    test::check (s.tracks[0]->delaySamples > 0, "Dry track has non-zero latency compensation delay");
+
+    juce::AudioBuffer<float> block (2, 32);
+    s.processBlock (block, 0);
+    test::check (s.tracks[0]->delayDirty && s.tracks[0]->delayPos > 0
+                     && s.tracks[0]->delayRing.getMagnitude (0, 0, s.tracks[0]->delaySamples) > 0.0f,
+                 "processBlock populates Dry delayRing and advances delayPos");
+
+    s.clearDelayRings();
+    test::check (! s.tracks[0]->delayDirty && s.tracks[0]->delayPos == 0
+                     && s.tracks[0]->delayRing.getMagnitude (0, 0, s.tracks[0]->delaySamples) == 0.0f
+                     && s.tracks[0]->delayRing.getMagnitude (1, 0, s.tracks[0]->delaySamples) == 0.0f,
+                 "clearDelayRings() zeroes delayRing and resets delayPos and delayDirty");
+
+    s.processBlock (block, 32);
+    test::check (s.tracks[0]->delayDirty && s.tracks[0]->delayPos > 0
+                     && s.tracks[0]->delayRing.getMagnitude (0, 0, s.tracks[0]->delaySamples) > 0.0f,
+                 "second processBlock repopulates Dry delayRing");
+
+    s.prepare (false);
+    test::check (! s.tracks[0]->delayDirty && s.tracks[0]->delayPos == 0
+                     && s.tracks[0]->delayRing.getMagnitude (0, 0, s.tracks[0]->delaySamples) == 0.0f
+                     && s.tracks[0]->delayRing.getMagnitude (1, 0, s.tracks[0]->delaySamples) == 0.0f,
+                 "prepare() / prepareLocked() zeroes delayRing and resets delayPos and delayDirty");
+
+    // Relative path handling in McpServer (must not hit juce::File relative path assertion)
+    Session mcpSession;
+    McpServer server (mcpSession);
+    const auto relWav = wav.getRelativePathFrom (juce::File::getCurrentWorkingDirectory()).replace ("\\", "\\\\");
+    const auto rAdd = toolCall (server, "add_track", "{\"file\":\"" + relWav + "\",\"name\":\"Rel\"}");
+    test::check (! (bool) rAdd["isError"] && mcpSession.tracks.size() == 1 && ! mcpSession.tracks[0]->clips.empty(),
+                 "McpServer add_track resolves relative file path safely");
+
+    dir.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -3199,6 +3249,7 @@ int main()
     catalogSafetyAndScanChecks();
     analyzeChecks();
     mcpAnalyzeAudioChecks();
+    delayRingAndRelativePathChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
