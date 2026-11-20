@@ -13,6 +13,7 @@
 #include "TestPlugin.h"
 
 #include <chrono>
+#include <limits>
 #include <sstream>
 #include <thread>
 
@@ -2026,6 +2027,907 @@ void clipboardChecks()
     test::check (! ed.hasClipboard() && ed.clipboardTrack() == -1 && ! ed.pasteClip (1, 0, err).valid(), "clearing the clipboard empties it");
 }
 
+namespace
+{
+struct SpyState
+{
+    std::atomic<int> inProcess { 0 };
+    std::atomic<int> inState { 0 };
+    std::atomic<int> raceDetected { 0 };
+    std::atomic<int> processCalls { 0 };
+    std::atomic<int> stateCalls { 0 };
+    std::atomic<bool> blockInProcess { false };
+    std::atomic<bool> enteredProcess { false };
+};
+
+class SpyPlugin : public test::GainPlugin
+{
+public:
+    SpyPlugin (const juce::String& pluginName, std::shared_ptr<SpyState> s)
+        : test::GainPlugin (pluginName, 0), state (std::move (s)) {}
+
+    void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer& m) override
+    {
+        state->inProcess.fetch_add (1);
+        if (state->inState.load() != 0)
+            state->raceDetected.fetch_add (1);
+        state->processCalls.fetch_add (1);
+        if (state->blockInProcess.load())
+        {
+            state->enteredProcess.store (true);
+            for (int ms = 0; ms < 2000 && state->blockInProcess.load(); ++ms)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        }
+        test::GainPlugin::processBlock (b, m);
+        state->inProcess.fetch_sub (1);
+    }
+    using test::GainPlugin::processBlock;
+
+    void getStateInformation (juce::MemoryBlock& m) override
+    {
+        state->inState.fetch_add (1);
+        if (state->inProcess.load() != 0)
+            state->raceDetected.fetch_add (1);
+        state->stateCalls.fetch_add (1);
+        std::this_thread::yield();
+        test::GainPlugin::getStateInformation (m);
+        state->inState.fetch_sub (1);
+    }
+
+private:
+    std::shared_ptr<SpyState> state;
+};
+
+juce::File writeRawWav (const juce::String& name, juce::uint32 sampleRate, juce::uint32 claimedDataBytes, juce::int64 actualPayloadBytes = -1)
+{
+    auto file = tempFolder().getChildFile (name);
+    file.deleteFile();
+    juce::FileOutputStream out (file);
+    out.write ("RIFF", 4);
+    out.writeInt ((int) (36 + claimedDataBytes));
+    out.write ("WAVE", 4);
+    out.write ("fmt ", 4);
+    out.writeInt (16);
+    out.writeShort (1); // PCM
+    out.writeShort (2); // channels
+    out.writeInt ((int) sampleRate);
+    out.writeInt ((int) (sampleRate * 4));
+    out.writeShort (4); // block align
+    out.writeShort (16); // bits per sample
+    out.write ("data", 4);
+    out.writeInt ((int) claimedDataBytes);
+    const juce::int64 toWrite = actualPayloadBytes < 0 ? (juce::int64) claimedDataBytes : actualPayloadBytes;
+    for (juce::int64 i = 0; i < toWrite; ++i)
+        out.writeByte (0);
+    out.flush();
+    return file;
+}
+
+juce::File writeTruncatedAiff (const juce::String& name, juce::uint32 claimedSamples)
+{
+    auto file = tempFolder().getChildFile (name);
+    file.deleteFile();
+    juce::FileOutputStream out (file);
+    const juce::uint32 claimedAudioBytes = claimedSamples * 4;
+    out.write ("FORM", 4);
+    out.writeIntBigEndian ((int) (46 + claimedAudioBytes));
+    out.write ("AIFF", 4);
+    out.write ("COMM", 4);
+    out.writeIntBigEndian (18);
+    out.writeShortBigEndian (2); // channels
+    out.writeIntBigEndian ((int) claimedSamples);
+    out.writeShortBigEndian (16); // bits per sample
+    // 80-bit IEEE 754 extended for 48000 Hz: 0x400E, 0xBB80000000000000
+    const unsigned char sr48k[10] = { 0x40, 0x0e, 0xbb, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    out.write (sr48k, 10);
+    out.write ("SSND", 4);
+    out.writeIntBigEndian ((int) (claimedAudioBytes + 8));
+    out.writeIntBigEndian (0); // offset
+    out.writeIntBigEndian (0); // blockSize
+    out.flush();
+    return file;
+}
+} // namespace
+
+// [43] R2.2: MCP copy_chain null-checks to_tracks and rejects non-array or empty to_tracks before touching state or undo.
+void mcpCopyChainChecks()
+{
+    std::printf ("[43] MCP copy_chain: missing, non-array, empty or invalid to_tracks fails without touching state or undo\n");
+    tempFolder().getChildFile ("mcp-copy").createDirectory();
+    const auto wav = makeWav ("mcp-copy/a.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    s.addTrack (wav, "A", err);
+    s.addTrack (wav, "B", err);
+    s.setChain (0, { "test gain" }, err);
+    setGain (s, 0, 0, -6.0);
+    s.setChain (1, { "test delay" }, err);
+
+    McpServer server (s);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+    test::check (! failed (call ("set_master", "{\"master_db\":-1}")), "seed undo history with a master edit");
+
+    for (const auto* badCopy : { "{\"from_track\":0}",
+                                 "{\"from_track\":0,\"to_tracks\":null}",
+                                 "{\"from_track\":0,\"to_tracks\":\"1\"}",
+                                 "{\"from_track\":0,\"to_tracks\":1}",
+                                 "{\"from_track\":0,\"to_tracks\":true}",
+                                 "{\"from_track\":0,\"to_tracks\":{}}",
+                                 "{\"from_track\":0,\"to_tracks\":[]}",
+                                 "{\"from_track\":0,\"to_tracks\":[1,\"\"]}",
+                                 "{\"from_track\":0,\"to_tracks\":[1,null]}",
+                                 "{\"from_track\":0,\"to_tracks\":[1,99]}" })
+    {
+        const auto r = call ("copy_chain", badCopy);
+        test::check (failed (r) && toolText (r).isNotEmpty(), juce::String ("copy_chain refused: ") + badCopy);
+        test::check (s.tracks[1]->chain.size() == 1 && s.tracks[1]->chain[0]->plugin == "Test Delay", "copy_chain error left target chain untouched");
+    }
+    test::check (! failed (call ("undo", "{}")) && std::abs (s.masterDb) < 1e-4f, "failed copy_chain did not clear undo");
+
+    test::check (! failed (call ("copy_chain", "{\"from_track\":0,\"to_tracks\":[1]}")) && s.tracks[1]->chain.size() == 1
+                     && s.tracks[1]->chain[0]->plugin == "Test Gain" && std::abs (gainOf (s, 1, 0) + 6.0) < 0.01,
+                 "valid copy_chain copies chain and state");
+    tempFolder().getChildFile ("mcp-copy").deleteRecursively();
+}
+
+// [44] R2.7: Session::copyChain holds Session::lock while snapshotting chain/state, releases lock across makeSlot, and deduplicates targets.
+void copyChainLockChecks()
+{
+    std::printf ("[44] Session::copyChain: lock protects getStateInformation vs processBlock without blocking audio during makeSlot\n");
+    tempFolder().getChildFile ("copy-lock").createDirectory();
+    const auto wav = makeWav ("copy-lock/a.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+
+    // Part A: deterministic barrier proving copyChain waits for Session::lock before calling getStateInformation
+    {
+        auto spy = std::make_shared<SpyState>();
+        Session s;
+        s.catalog.addInternal (test::GainPlugin::description ("Spy Plugin"), [spy] (double, int)
+                               { return std::make_unique<SpyPlugin> ("Spy Plugin", spy); });
+        juce::String err;
+        s.addTrack (wav, "T0", err);
+        s.addTrack (wav, "T1", err);
+        test::check (s.setChain (0, { "Spy Plugin" }, err), "spy plugin loaded on track 0");
+
+        spy->blockInProcess.store (true);
+        std::thread audioThread ([&]
+        {
+            juce::AudioBuffer<float> buf (2, kBlockSize);
+            s.processBlock (buf, 0);
+        });
+        for (int ms = 0; ms < 2000 && ! spy->enteredProcess.load(); ++ms)
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        test::check (spy->enteredProcess.load(), "audio thread entered processBlock");
+
+        bool copyOk = false;
+        juce::String copyErr;
+        std::thread copyThread ([&] { copyOk = s.copyChain (0, { 1 }, copyErr); });
+        std::this_thread::sleep_for (std::chrono::milliseconds (15));
+        test::check (spy->stateCalls.load() == 0, "copyChain waits for Session::lock before reading getStateInformation");
+
+        spy->blockInProcess.store (false);
+        audioThread.join();
+        copyThread.join();
+        test::check (copyOk && spy->raceDetected.load() == 0 && spy->stateCalls.load() == 1 && s.tracks[1]->chain.size() == 1,
+                     "after lock release copyChain completes with zero raceDetected");
+    }
+
+    // Part B: slow makeSlot does not hold Session::lock, plus concurrent stress with duplicate targets
+    {
+        auto spy = std::make_shared<SpyState>();
+        auto slowMade = std::make_shared<std::atomic<bool>> (false);
+        auto audioRanDuringMakeSlot = std::make_shared<std::atomic<bool>> (false);
+        Session s;
+        s.catalog.addInternal (test::GainPlugin::description ("Spy Plugin"), [spy] (double, int)
+                               { return std::make_unique<SpyPlugin> ("Spy Plugin", spy); });
+        s.catalog.addInternal (test::GainPlugin::description ("Slow Spy"), [spy, slowMade, audioRanDuringMakeSlot] (double, int)
+                               {
+                                   if (slowMade->exchange (true))
+                                   {
+                                       const int startCalls = spy->processCalls.load();
+                                       for (int ms = 0; ms < 500; ++ms)
+                                       {
+                                           if (spy->processCalls.load() > startCalls)
+                                           {
+                                               audioRanDuringMakeSlot->store (true);
+                                               break;
+                                           }
+                                           std::this_thread::sleep_for (std::chrono::milliseconds (1));
+                                       }
+                                   }
+                                   return std::make_unique<SpyPlugin> ("Slow Spy", spy);
+                               });
+        juce::String err;
+        s.addTrack (wav, "T0", err);
+        s.addTrack (wav, "T1", err);
+        s.addTrack (wav, "T2", err);
+        test::check (s.setChain (0, { "Slow Spy" }, err), "slow spy loaded on track 0");
+
+        std::atomic<bool> stopAudio { false };
+        std::thread audioThread ([&]
+        {
+            juce::AudioBuffer<float> buf (2, kBlockSize);
+            while (! stopAudio.load())
+            {
+                s.processBlock (buf, 0);
+                std::this_thread::sleep_for (std::chrono::microseconds (200));
+            }
+        });
+        for (int ms = 0; ms < 500 && spy->processCalls.load() == 0; ++ms)
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+        test::check (s.copyChain (0, { 1 }, err), "copyChain with Slow Spy succeeds");
+        test::check (audioRanDuringMakeSlot->load(), "processBlock continues running while makeSlot runs outside Session::lock");
+
+        test::check (s.setChain (0, { "Spy Plugin" }, err), "switch track 0 to Spy Plugin for stress loop");
+        for (int round = 0; round < 20; ++round)
+            test::check (s.copyChain (0, { 1, 1, 2 }, err), "concurrent copyChain with duplicate targets succeeds");
+
+        stopAudio.store (true);
+        audioThread.join();
+        test::check (spy->raceDetected.load() == 0 && s.tracks[1]->chain.size() == 1 && s.tracks[2]->chain.size() == 1,
+                     "concurrent processBlock + copyChain finishes with raceDetected == 0 and deduplicated target chains");
+    }
+    tempFolder().getChildFile ("copy-lock").deleteRecursively();
+}
+
+// [45] R2.8: Session::processBlock ignores n <= 0 and chunks n > kBlockSize identically to kBlockSize slices.
+void processBlockChunkChecks()
+{
+    std::printf ("[45] Session::processBlock: n <= 0 is a no-op and n > kBlockSize matches kBlockSize chunking bitwise\n");
+    tempFolder().getChildFile ("pb-chunk").createDirectory();
+    const auto imp = makeWav ("pb-chunk/imp.wav", 48000.0, 2, 4800, 0.5f, 0.0, 300);
+
+    auto setupSession = [&] (Session& s)
+    {
+        juce::String err;
+        test::addTestPlugins (s.catalog);
+        s.addTrack (imp, "Dry", err);
+        s.addTrack (imp, "Wet", err);
+        s.addTrack (imp, "Muted", err);
+        s.setChain (1, { "test gain", "test delay" }, err);
+        setGain (s, 1, 0, -3.0);
+        s.setChain (2, { "test delay" }, err);
+        // Prime Track 2's delayDirty while unmuted, then mute it
+        juce::AudioBuffer<float> prime (2, 16);
+        s.processBlock (prime, 0);
+        s.tracks[0]->peakL = 0.0f; s.tracks[0]->peakR = 0.0f;
+        s.tracks[1]->peakL = 0.0f; s.tracks[1]->peakR = 0.0f;
+        s.tracks[2]->peakL = 0.0f; s.tracks[2]->peakR = 0.0f;
+        s.masterPeakL = 0.0f; s.masterPeakR = 0.0f;
+        s.tracks[2]->mute = true;
+        s.metronomeOn = true;
+        s.masterDb = -3.0f;
+        s.loopStart = 0;
+        s.loopEnd = 96000;
+        s.loopOn = true;
+        s.prepare (false);
+    };
+
+    // n <= 0 check
+    {
+        Session s;
+        setupSession (s);
+        s.head.set (1234, false);
+        juce::AudioBuffer<float> empty (2, 0);
+        s.processBlock (empty, 0);
+        test::check (s.head.getPosition()->getTimeInSamples().orFallback (-1) == 1234
+                         && s.tracks[0]->peakL.load() == 0.0f && s.masterPeakL.load() == 0.0f,
+                     "processBlock with n == 0 leaves head and peaks untouched");
+    }
+
+    // n > kBlockSize bitwise equivalence check
+    Session sBig, sChunked;
+    setupSession (sBig);
+    setupSession (sChunked);
+
+    juce::AudioBuffer<float> big1 (2, 1300), big2 (2, 700);
+    sBig.processBlock (big1, 0);
+    sBig.processBlock (big2, 1300);
+
+    juce::AudioBuffer<float> chk1 (2, 1300), chk2 (2, 700);
+    const auto runChunked = [&] (juce::AudioBuffer<float>& dest, juce::int64 start)
+    {
+        const int total = dest.getNumSamples();
+        for (int off = 0; off < total; off += kBlockSize)
+        {
+            const int cnt = juce::jmin (kBlockSize, total - off);
+            juce::AudioBuffer<float> slice (2, cnt);
+            sChunked.processBlock (slice, start + off);
+            for (int ch = 0; ch < 2; ++ch)
+                dest.copyFrom (ch, off, slice, ch, 0, cnt);
+        }
+    };
+    runChunked (chk1, 0);
+    runChunked (chk2, 1300);
+
+    test::check (sameAudio (big1, chk1) && sameAudio (big2, chk2), "oversized processBlock matches kBlockSize slices bitwise");
+    test::check (sBig.tracks[0]->peakL.load() == sChunked.tracks[0]->peakL.load()
+                     && sBig.tracks[1]->peakL.load() == sChunked.tracks[1]->peakL.load()
+                     && sBig.masterPeakL.load() == sChunked.masterPeakL.load()
+                     && sBig.masterPeakR.load() == sChunked.masterPeakR.load(),
+                 "track and master peaks match chunked runs");
+    test::check (sBig.head.getPosition()->getTimeInSamples().orFallback (-1) == sChunked.head.getPosition()->getTimeInSamples().orFallback (-1)
+                     && close (sBig.head.getPosition()->getPpqPosition().orFallback (-1.0), sChunked.head.getPosition()->getPpqPosition().orFallback (-2.0)),
+                 "final playhead position and ppq match chunked runs");
+    test::check (! sBig.tracks[2]->delayDirty && sBig.tracks[2]->delayPos == 0, "muted track cleared delayDirty on oversized block");
+    tempFolder().getChildFile ("pb-chunk").deleteRecursively();
+}
+
+// [46] R3.12: Recorder::push latches recording and holds busy across the entire multi-chunk call.
+void recorderChunkAtomicityChecks()
+{
+    std::printf ("[46] Recorder::push: busy and latched recording keep frames a multiple of block and align sample 0 to first true\n");
+    const auto dir = tempFolder().getChildFile ("rec-atom");
+    dir.deleteRecursively();
+    dir.createDirectory();
+
+    for (int cycle = 0; cycle < 10; ++cycle)
+    {
+        Recorder rec;
+        rec.prepare (48000.0, 64); // 256 = 4 * blockMax
+        Session s;
+        s.addEmptyTrack ("T");
+        s.tracks[0]->armed = true;
+
+        std::atomic<bool> stopWorker { false };
+        std::atomic<int> blocksPushed { 0 };
+        std::atomic<int> firstTrueBlock { -1 };
+
+        std::thread audioThread ([&]
+        {
+            std::vector<float> l (256), r (256);
+            int idx = 0;
+            while (! stopWorker.load())
+            {
+                const float tag = (float) (idx + 1);
+                std::fill (l.begin(), l.end(), tag);
+                std::fill (r.begin(), r.end(), tag);
+                const float* ptrs[2] = { l.data(), r.data() };
+                if (rec.push (ptrs, 2, 256))
+                {
+                    int expected = -1;
+                    firstTrueBlock.compare_exchange_strong (expected, idx);
+                }
+                ++idx;
+                blocksPushed.fetch_add (1);
+                std::this_thread::sleep_for (std::chrono::microseconds (150));
+            }
+        });
+
+        while (blocksPushed.load() < 5)
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+        juce::String err;
+        test::check (beginRecording (rec, s, dir, 48000.0, err), "beginRecording succeeds on cycle " + juce::String (cycle));
+        const int atStart = blocksPushed.load();
+        while (blocksPushed.load() < atStart + 10)
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+        const auto done = rec.stop();
+        stopWorker.store (true);
+        audioThread.join();
+
+        const int firstIdx = firstTrueBlock.load();
+        test::check (firstIdx >= 0, "push returned true for the first recorded block");
+        test::check (done.size() == 1 && done[0].frames == rec.framesRecorded(), "finished lane frames match framesRecorded()");
+        test::check (done[0].frames > 0 && done[0].frames % 256 == 0,
+                     test::fmt ("recorded frames (%lld) is a positive multiple of 256 (no mid-block tearing)", (long long) done[0].frames));
+
+        const auto wav = readWav (done[0].file);
+        test::check (wav.getNumSamples() == (int) done[0].frames, "WAV sample count matches finished frames");
+        bool aligned = true;
+        const int numBlocks = wav.getNumSamples() / 256;
+        for (int k = 0; k < numBlocks && aligned; ++k)
+        {
+            const float expectedVal = (float) (firstIdx + k + 1);
+            for (int i = 0; i < 256; ++i)
+            {
+                if (std::abs (wav.getSample (0, k * 256 + i) - expectedVal) > 1e-5f)
+                {
+                    aligned = false;
+                    break;
+                }
+            }
+        }
+        test::check (aligned, "WAV sample 0 aligns identically with firstTrueBlock and every 256-sample chunk is intact");
+    }
+    dir.deleteRecursively();
+}
+
+// [47] R3.13: MCP set_chain rejects missing, non-array, or non-string plugins while preserving explicit [].
+void mcpSetChainChecks()
+{
+    std::printf ("[47] MCP set_chain: missing, non-array or non-string plugins fails without wiping chain or undo; [] clears\n");
+    tempFolder().getChildFile ("mcp-setchain").createDirectory();
+    const auto wav = makeWav ("mcp-setchain/a.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    s.addTrack (wav, "A", err);
+    s.setChain (0, { "test gain" }, err);
+
+    McpServer server (s);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+    test::check (! failed (call ("set_master", "{\"master_db\":-1}")), "seed undo history");
+
+    for (const auto* badChain : { "{\"track\":0}",
+                                  "{\"track\":0,\"plugins\":null}",
+                                  "{\"track\":0,\"plugins\":\"Test Gain\"}",
+                                  "{\"track\":0,\"plugins\":123}",
+                                  "{\"track\":0,\"plugins\":true}",
+                                  "{\"track\":0,\"plugins\":{}}",
+                                  "{\"track\":0,\"plugins\":[123]}",
+                                  "{\"track\":0,\"plugins\":[null]}",
+                                  "{\"track\":0,\"plugins\":[false]}",
+                                  "{\"track\":0,\"plugins\":[\"Test Gain\",{}]}" })
+    {
+        const auto r = call ("set_chain", badChain);
+        test::check (failed (r) && toolText (r).isNotEmpty(), juce::String ("set_chain refused: ") + badChain);
+        test::check (s.tracks[0]->chain.size() == 1 && s.tracks[0]->chain[0]->plugin == "Test Gain", "set_chain error left track chain intact");
+    }
+    test::check (! failed (call ("undo", "{}")) && std::abs (s.masterDb) < 1e-4f, "failed set_chain did not clear undo");
+
+    test::check (! failed (call ("set_chain", "{\"track\":0,\"plugins\":[]}")) && s.tracks[0]->chain.empty(),
+                 "set_chain with explicit [] clears the chain");
+    tempFolder().getChildFile ("mcp-setchain").deleteRecursively();
+}
+
+// [48] R3.14: findTrack, findSlot, indexArg, move_plugin and related MCP parsers reject blank/missing/non-numeric/overflow args.
+void mcpIndexValidationChecks()
+{
+    std::printf ("[48] MCP validation: findTrack, findSlot, move_plugin, indexArg and sibling parsers reject coercible args\n");
+    tempFolder().getChildFile ("mcp-idx").createDirectory();
+    const auto wav = makeWav ("mcp-idx/a.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    s.addTrack (wav, "A", err);
+    s.addTrack (wav, "B", err);
+    s.addEmptyTrack (""); // ensure whitespace-only "   " never matches an empty-named track
+
+    McpServer server (s);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+
+    // Direct Session::findTrack checks
+    test::check (s.findTrack (0, err) == 0 && s.findTrack ("0", err) == 0 && s.findTrack (" 1 ", err) == 1
+                     && s.findTrack ("b", err) == 1 && s.findTrack (1.0, err) == 1,
+                 "findTrack accepts valid int, digit string, name and integral double");
+    for (const auto& bad : { juce::var(), juce::var (false), juce::var (true), juce::var (""), juce::var ("   "),
+                             juce::var (0.5), juce::var (-0.5), juce::var (std::numeric_limits<double>::quiet_NaN()),
+                             juce::var (std::numeric_limits<double>::infinity()),
+                             juce::var ((juce::int64) 4294967296LL), juce::var ("4294967296"),
+                             juce::var ("99999999999999999999"), juce::var ("-1"),
+                             juce::var (juce::Array<juce::var>()), juce::var (new juce::DynamicObject()) })
+        test::check (s.findTrack (bad, err) < 0 && err.isNotEmpty(), "findTrack rejects invalid/coercible var");
+
+    // remove_track, move_clip to_track, delete_clip indexArg
+    for (const char* badTrack : { "", "   ", "4294967296" })
+        test::check (failed (call ("remove_track", "{\"track\":\"" + juce::String (badTrack) + "\"}")) && s.tracks.size() == 3,
+                     "remove_track rejects blank/overflow string");
+    for (const char* badJson : { "{\"track\":null}", "{\"track\":false}", "{\"track\":true}", "{\"track\":0.5}",
+                                 "{\"track\":{}}", "{\"track\":[]}", "{\"track\":4294967296}" })
+        test::check (failed (call ("remove_track", badJson)) && s.tracks.size() == 3, juce::String ("remove_track rejects ") + badJson);
+    test::check (failed (call ("move_clip", "{\"track\":1,\"clip\":0,\"to_track\":null,\"start_seconds\":0}")) && s.tracks[1]->clips.size() == 1,
+                 "move_clip rejects null to_track");
+    test::check (failed (call ("delete_clip", "{\"track\":0,\"clip\":0.5}")) && failed (call ("delete_clip", "{\"track\":0,\"clip\":4294967296}"))
+                     && s.tracks[0]->clips.size() == 1,
+                 "indexArg rejects float and int64 overflow");
+
+    // set_track empty name no-op preserved
+    test::check (! failed (call ("set_track", "{\"track\":0,\"name\":\"\"}")) && s.tracks[0]->name == "A",
+                 "set_track empty name remains a valid no-op");
+
+    // move_plugin, findSlot, add_plugin position, bypass_plugin, set_parameter, load_preset
+    test::check (! failed (call ("set_chain", "{\"track\":0,\"plugins\":[\"Test Gain\",\"Test Delay\"]}")), "set two plugins for slot checks");
+    for (const char* badMove : { "{\"track\":0,\"from\":1}",
+                                 "{\"track\":0,\"from\":0,\"to\":null}",
+                                 "{\"track\":0,\"from\":0,\"to\":false}",
+                                 "{\"track\":0,\"from\":0,\"to\":\"\"}",
+                                 "{\"track\":0,\"from\":0,\"to\":\"1\"}",
+                                 "{\"track\":0,\"from\":0,\"to\":0.5}",
+                                 "{\"track\":0,\"from\":0,\"to\":4294967296}",
+                                 "{\"track\":0,\"from\":-1,\"to\":1}" })
+    {
+        test::check (failed (call ("move_plugin", badMove)) && s.tracks[0]->chain[0]->plugin == "Test Gain",
+                     juce::String ("move_plugin rejects ") + badMove);
+    }
+    test::check (! failed (call ("move_plugin", "{\"track\":0,\"from\":0,\"to\":1}")) && s.tracks[0]->chain[0]->plugin == "Test Delay",
+                 "valid move_plugin reorders chain");
+
+    for (const char* badSlot : { "{\"track\":0}",
+                                 "{\"track\":0,\"slot\":null}",
+                                 "{\"track\":0,\"slot\":false}",
+                                 "{\"track\":0,\"slot\":true}",
+                                 "{\"track\":0,\"slot\":\"\"}",
+                                 "{\"track\":0,\"slot\":\"   \"}",
+                                 "{\"track\":0,\"slot\":0.5}",
+                                 "{\"track\":0,\"slot\":4294967296}",
+                                 "{\"track\":0,\"slot\":\"4294967296\"}",
+                                 "{\"track\":0,\"slot\":{}}" })
+    {
+        test::check (failed (call ("remove_plugin", badSlot)) && s.tracks[0]->chain.size() == 2,
+                     juce::String ("remove_plugin rejects ") + badSlot);
+        test::check (failed (call ("list_parameters", badSlot)), juce::String ("list_parameters rejects ") + badSlot);
+        test::check (failed (call ("list_presets", badSlot)), juce::String ("list_presets rejects ") + badSlot);
+    }
+    test::check (failed (call ("bypass_plugin", "{\"track\":0,\"slot\":\"   \",\"bypass\":true}")) && ! s.tracks[0]->chain[0]->bypass,
+                 "bypass_plugin rejects blank slot");
+    test::check (failed (call ("bypass_plugin", "{\"track\":0,\"slot\":0,\"bypass\":null}")) && ! s.tracks[0]->chain[0]->bypass,
+                 "bypass_plugin rejects non-bool bypass");
+    test::check (failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\",\"position\":null}"))
+                     && failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\",\"position\":0.5}"))
+                     && failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\",\"position\":false}"))
+                     && failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\",\"position\":-1}"))
+                     && failed (call ("add_plugin", "{\"track\":0,\"plugin\":true}"))
+                     && s.tracks[0]->chain.size() == 2,
+                 "add_plugin rejects bad position and non-string plugin");
+    test::check (failed (call ("set_parameter", "{\"track\":0,\"slot\":1,\"parameter\":false,\"value\":0.1}"))
+                     && failed (call ("set_parameter", "{\"track\":0,\"slot\":1,\"parameter\":-1.0,\"value\":0.1}"))
+                     && failed (call ("set_parameter", "{\"track\":0,\"slot\":1,\"parameter\":\"4294967296\",\"value\":0.1}"))
+                     && failed (call ("set_parameter", "{\"track\":0,\"slot\":1,\"parameter\":0,\"value\":null}"))
+                     && failed (call ("set_parameter", "{\"track\":0,\"slot\":1,\"parameter\":0,\"text\":false}"))
+                     && std::abs (gainOf (s, 0, 1)) < 0.01,
+                 "set_parameter rejects boolean/negative-double/overflow parameter and non-numeric value/non-string text");
+    test::check (failed (call ("load_preset", "{\"track\":0,\"slot\":1,\"preset\":false}"))
+                     && failed (call ("load_preset", "{\"track\":0,\"slot\":1,\"preset\":true}"))
+                     && failed (call ("load_preset", "{\"track\":0,\"slot\":1,\"preset\":-1.0}"))
+                     && failed (call ("load_preset", "{\"track\":0,\"slot\":1,\"preset\":\"4294967296\"}"))
+                     && std::abs (gainOf (s, 0, 1)) < 0.01,
+                 "load_preset rejects boolean, negative double and overflow preset");
+    test::check (! failed (call ("load_preset", "{\"track\":0,\"slot\":1,\"preset\":1.0}"))
+                     && std::abs (gainOf (s, 0, 1) - 6.0) < 0.01,
+                 "load_preset accepts non-negative integral double 1.0");
+    test::check (! failed (call ("set_parameter", "{\"track\":0,\"slot\":1,\"parameter\":0.0,\"value\":0.5}"))
+                     && std::abs (gainOf (s, 0, 1)) < 0.01,
+                 "set_parameter accepts non-negative integral double 0.0");
+    tempFolder().getChildFile ("mcp-idx").deleteRecursively();
+}
+
+// [49] R3.15: readClip path resolution, NaN/Inf/fade/loopOn guards in load(), and readAudio invalid sampleRate/length checks.
+void projectValidationChecks()
+{
+    std::printf ("[49] Project validation: readClip paths, NaN/Inf/fade/loopOn on load, and readAudio sampleRate/length checks\n");
+    const auto dir = tempFolder().getChildFile ("proj-val");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("proj-val/rel.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    const auto otherWav = makeWav ("proj-val/other.wav", 48000.0, 2, 4800, 0.5f, 220.0);
+    juce::String err;
+
+    // A: readClip path resolution
+    {
+        const auto p = dir.getChildFile ("paths.olympus");
+        p.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"48000\">"
+                           "<Track name=\"T1\">"
+                           "<Clip name=\"c1\" file=\"missing.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"1000\"/>"
+                           "<Clip name=\"c2\" file=\"missing2.wav\" path=\"sub/rel.wav\" start=\"0\" offset=\"0\" length=\"1000\"/>"
+                           "<Clip name=\"c3\" file=\"\" path=\"\" start=\"0\" offset=\"0\" length=\"1000\"/>"
+                           "<Clip name=\"c4\" file=\"rel.wav\" path=\"/no/such/file.wav\" start=\"0\" offset=\"0\" length=\"1000\"/>"
+                           "<Clip name=\"c5\" file=\"missing.wav\" path=\"" + otherWav.getFullPathName().replace ("\"", "&quot;") + "\" start=\"0\" offset=\"0\" length=\"1000\"/>"
+                           "</Track></OlympusProject>");
+        Session s;
+        test::check (s.load (p, err) && s.tracks.size() == 1 && s.tracks[0]->clips.size() == 5, "paths project loads");
+        const auto& clips = s.tracks[0]->clips;
+        test::check (clips[0].file == dir.getChildFile ("missing.wav"), "empty path attribute preserves relative file");
+        test::check (clips[1].file == dir.getChildFile ("missing2.wav"), "non-absolute path attribute preserves relative file");
+        test::check (clips[2].file == juce::File(), "both file and path empty gives empty juce::File()");
+        test::check (clips[3].file == wav && clips[3].audio != nullptr, "existing relative file wins over missing path");
+        test::check (clips[4].file == otherWav && clips[4].audio != nullptr, "existing absolute path used when relative is missing");
+        test::check (s.save (dir.getChildFile ("paths-resaved.olympus"), err), "resave succeeds");
+    }
+
+    // B + C + D: NaN/Inf, fades, extreme rate, loopOn
+    {
+        const auto p = dir.getChildFile ("nan.olympus");
+        p.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"nan\" masterDb=\"nan\" loopStart=\"1000\" loopEnd=\"1000\" loopOn=\"1\">"
+                           "<Tempo beat=\"nan\" bpm=\"140\"/>"
+                           "<Tempo beat=\"4\" bpm=\"nan\"/>"
+                           "<Track name=\"T1\" gainDb=\"nan\" pan=\"inf\">"
+                           "<Clip name=\"c1\" file=\"rel.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"4800\" gainDb=\"nan\" fadeIn=\"10000\" fadeOut=\"10000\"/>"
+                           "<Clip name=\"c2\" file=\"rel.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"4800\" gainDb=\"0\" fadeIn=\"3000\" fadeOut=\"3000\"/>"
+                           "<Clip name=\"c3\" file=\"gone.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"1000\" fadeIn=\"800\" fadeOut=\"800\"/>"
+                           "</Track></OlympusProject>");
+        Session s;
+        test::check (s.load (p, err) && s.tracks.size() == 1 && s.tracks[0]->clips.size() == 3, "NaN project loads cleanly");
+        test::check (std::isfinite (s.sampleRate) && std::abs (s.sampleRate - 48000.0) < 0.5, "NaN sampleRate recovers from valid clip rate");
+        test::check (std::isfinite (s.masterDb) && s.masterDb == 0.0f, "NaN masterDb falls back to 0.0f");
+        test::check (std::isfinite (s.tracks[0]->gainDb) && s.tracks[0]->gainDb == 0.0f
+                         && std::isfinite (s.tracks[0]->pan) && s.tracks[0]->pan == 0.0f,
+                     "NaN/Inf track gainDb and pan fall back to 0.0f");
+        test::check (s.tempo.points.size() == 1 && s.tempo.points[0].beat == 0.0 && s.tempo.points[0].bpm == 120.0,
+                     "NaN Tempo entries are dropped and default 120 bpm remains");
+        const auto& clips = s.tracks[0]->clips;
+        test::check (std::isfinite (clips[0].gainDb) && clips[0].gainDb == 0.0f
+                         && clips[0].fadeIn == 4800 && clips[0].fadeOut == 0,
+                     "NaN clip gainDb falls back to 0 and oversized fadeIn/fadeOut clamp to length");
+        test::check (clips[1].fadeIn == 3000 && clips[1].fadeOut == 1800, "fadeIn + fadeOut clamped to <= length");
+        test::check (clips[2].length == 1000 && clips[2].fadeIn == 800 && clips[2].fadeOut == 200, "missing clip fadeIn + fadeOut clamped to length");
+        test::check (! s.loopOn, "loopOn disabled when loopEnd <= loopStart");
+
+        // Extreme rate + valid loopOn + loopStart > loopEnd
+        const auto p2 = dir.getChildFile ("extreme.olympus");
+        p2.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"1e20\" masterDb=\"18\" loopStart=\"2000\" loopEnd=\"1000\" loopOn=\"1\">"
+                            "<Track name=\"T\"><Clip name=\"m\" file=\"gone.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"1000\"/></Track>"
+                            "</OlympusProject>");
+        Session s2;
+        test::check (s2.load (p2, err) && s2.tracks[0]->clips[0].length == 1000 && ! s2.loopOn
+                         && std::abs (s2.masterDb - 12.0f) < 1e-4f && s2.warnings.joinIntoString ("\n").contains ("+12 dB"),
+                     "extreme rate missing clip safe, loopEnd < loopStart clears loopOn, masterDb > 12 warns");
+
+        const auto p3 = dir.getChildFile ("goodloop.olympus");
+        p3.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"48000\" loopStart=\"1000\" loopEnd=\"2000\" loopOn=\"1\"/>");
+        Session s3;
+        test::check (s3.load (p3, err) && s3.loopOn, "valid loopStart < loopEnd keeps loopOn");
+    }
+
+    // E: readAudio validation (0 sample rate, 0 length, truncated-payload WAV/AIFF, and tiny valid WAV)
+    {
+        const auto zeroRate = writeRawWav ("proj-val/zero-rate.wav", 0, 16);
+        const auto zeroLen = writeRawWav ("proj-val/zero-len.wav", 48000, 0);
+        const auto spoof50M = writeRawWav ("proj-val/spoof-50m.wav", 48000, 200000000, 0);
+        const auto spoof100 = writeRawWav ("proj-val/spoof-100.wav", 48000, 100, 0);
+        const auto partialTrunc = writeRawWav ("proj-val/partial-trunc.wav", 48000, 4000, 100);
+        const auto truncAiff = writeTruncatedAiff ("proj-val/trunc.aif", 50000000);
+        const auto tinyValid = writeRawWav ("proj-val/tiny-valid.wav", 48000, 4, 4);
+        Session s;
+        test::check (! s.addTrack (zeroRate, "ZR", err) && err.isNotEmpty(), "readAudio rejects 0 sample rate WAV: " + err);
+        test::check (! s.addTrack (zeroLen, "ZL", err) && err.isNotEmpty(), "readAudio rejects 0-sample WAV: " + err);
+        test::check (! s.addTrack (spoof50M, "S50M", err) && err.isNotEmpty(), "readAudio rejects 44-byte WAV claiming 200MB payload: " + err);
+        test::check (! s.addTrack (spoof100, "S100", err) && err.isNotEmpty(), "readAudio rejects 44-byte WAV claiming 100B payload: " + err);
+        test::check (! s.addTrack (partialTrunc, "PT", err) && err.isNotEmpty(), "readAudio rejects partially truncated WAV: " + err);
+        test::check (! s.addTrack (truncAiff, "AIFF", err) && err.isNotEmpty(), "readAudio rejects truncated AIFF: " + err);
+        test::check (s.addTrack (tinyValid, "Tiny", err) && s.tracks.size() == 1 && s.tracks[0]->clips[0].length == 1,
+                     "readAudio still loads a tiny valid 1-sample WAV");
+    }
+
+    // F: missing clip BEFORE a valid clip when sampleRate="nan" or omitted, and missing-only project with omitted sampleRate
+    {
+        const auto pNan = dir.getChildFile ("missing-first-nan.olympus");
+        pNan.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"nan\">"
+                              "<Track name=\"T1\">"
+                              "<Clip name=\"m\" file=\"does_not_exist.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"48000\" fadeIn=\"500\" fadeOut=\"500\"/>"
+                              "<Clip name=\"ok\" file=\"rel.wav\" path=\"\" start=\"48000\" offset=\"0\" length=\"4800\"/>"
+                              "</Track></OlympusProject>");
+        Session sNan;
+        test::check (sNan.load (pNan, err) && std::abs (sNan.sampleRate - 48000.0) < 0.5
+                         && sNan.tracks.size() == 1 && sNan.tracks[0]->clips.size() == 2
+                         && sNan.tracks[0]->clips[0].audio == nullptr
+                         && sNan.tracks[0]->clips[0].length == 48000
+                         && sNan.tracks[0]->clips[0].fadeIn == 500 && sNan.tracks[0]->clips[0].fadeOut == 500,
+                     "missing clip before valid clip with sampleRate=nan keeps saved length and fades");
+
+        const auto pOmit = dir.getChildFile ("missing-first-omit.olympus");
+        pOmit.replaceWithText ("<OlympusProject version=\"2\">"
+                               "<Track name=\"T1\">"
+                               "<Clip name=\"m\" file=\"does_not_exist.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"48000\" fadeIn=\"500\" fadeOut=\"500\"/>"
+                               "<Clip name=\"ok\" file=\"rel.wav\" path=\"\" start=\"48000\" offset=\"0\" length=\"4800\"/>"
+                               "</Track></OlympusProject>");
+        Session sOmit;
+        test::check (sOmit.load (pOmit, err) && std::abs (sOmit.sampleRate - 48000.0) < 0.5
+                         && sOmit.tracks[0]->clips[0].length == 48000
+                         && sOmit.tracks[0]->clips[0].fadeIn == 500 && sOmit.tracks[0]->clips[0].fadeOut == 500,
+                     "missing clip before valid clip with omitted sampleRate keeps saved length and fades");
+
+        const auto pOnly = dir.getChildFile ("missing-only-omit.olympus");
+        pOnly.replaceWithText ("<OlympusProject version=\"2\">"
+                               "<Track name=\"T1\">"
+                               "<Clip name=\"m1\" file=\"missing1.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"48000\" fadeIn=\"500\" fadeOut=\"500\"/>"
+                               "<Clip name=\"m2\" file=\"missing2.wav\" path=\"\" start=\"48000\" offset=\"0\" length=\"2000000000\" fadeIn=\"400000000\" fadeOut=\"400000000\"/>"
+                               "</Track></OlympusProject>");
+        Session sOnly;
+        const juce::int64 cap48k = (juce::int64) (48000.0 * 3600.0 * 2.0);
+        test::check (sOnly.load (pOnly, err) && sOnly.tracks.size() == 1 && sOnly.tracks[0]->clips.size() == 2
+                         && sOnly.tracks[0]->clips[0].length == 48000
+                         && sOnly.tracks[0]->clips[0].fadeIn == 500 && sOnly.tracks[0]->clips[0].fadeOut == 500
+                         && sOnly.tracks[0]->clips[1].length == cap48k
+                         && sOnly.tracks[0]->clips[1].fadeIn == cap48k && sOnly.tracks[0]->clips[1].fadeOut == 0,
+                     "missing-only project with omitted sampleRate preserves 48000 and caps oversized clip at 2h");
+    }
+    dir.deleteRecursively();
+}
+
+// [50] R1.1, R1.3, R1.4: suite-only candidate filtering, folder walk depth/TCC/hidden/bundle guards, pre-load VST3/AU deduplication, and incremental cache persistence.
+static void catalogSafetyAndScanChecks()
+{
+    std::printf ("[50] Catalog safety and scan checks (R1.1, R1.3, R1.4)\n");
+    const auto dir = tempFolder().getChildFile ("catalog-r1");
+    dir.deleteRecursively();
+    dir.createDirectory();
+
+    // 1. Settings::scanSuiteOnly defaults to false
+    Settings defaultSettings;
+    test::check (! defaultSettings.scanSuiteOnly, "Settings::scanSuiteOnly defaults to false");
+
+    // 2. VST3 candidate filtering with onlySuite = true and setSuiteOnly(true)
+    const auto vstDir = dir.getChildFile ("vst-root");
+    const auto hermesBundle = vstDir.getChildFile ("Hermes Level.vst3");
+    const auto thirdPartyBundle = vstDir.getChildFile ("ThirdParty Synth.vst3");
+    hermesBundle.createDirectory();
+    thirdPartyBundle.createDirectory();
+
+    Catalog cat;
+    const juce::FileSearchPath extra (vstDir.getFullPathName());
+    const auto allCandidates = cat.candidatesForFormat ("VST3", extra, false, false);
+    test::check (allCandidates.size() == 2
+                     && allCandidates.contains (hermesBundle.getFullPathName())
+                     && allCandidates.contains (thirdPartyBundle.getFullPathName()),
+                 "candidatesForFormat with onlySuite=false returns both suite and third-party VST3 bundles");
+
+    const auto suiteCandidates = cat.candidatesForFormat ("VST3", extra, false, true);
+    test::check (suiteCandidates.size() == 1 && suiteCandidates[0] == hermesBundle.getFullPathName(),
+                 "candidatesForFormat with onlySuite=true keeps Hermes Level.vst3 and skips ThirdParty Synth.vst3 before loading");
+
+    cat.setSuiteOnly (true);
+    const auto modeSuiteCandidates = cat.candidatesForFormat ("VST3", extra, false, false);
+    test::check (modeSuiteCandidates.size() == 1 && modeSuiteCandidates[0] == hermesBundle.getFullPathName(),
+                 "Catalog::setSuiteOnly(true) also filters VST3 candidates by plugin name before loading");
+    cat.setSuiteOnly (false);
+
+    // 3. findBundlesIn depth limit (kMaxBundleDepth == 5), forbidden roots, and skipped subdirectories
+    test::check (Catalog::kMaxBundleDepth == 5, "Catalog::kMaxBundleDepth is 5");
+    const auto walkRoot = dir.getChildFile ("walk");
+    walkRoot.createDirectory();
+
+    // Depth 5 from walkRoot: d1/d2/d3/d4/d5/Depth5.vst3 (depth 0=walkRoot, 1=d1, 2=d2, 3=d3, 4=d4, 5=d5 -> found inside d5!)
+    const auto d5Dir = walkRoot.getChildFile ("d1/d2/d3/d4/d5");
+    d5Dir.createDirectory();
+    const auto depth5Bundle = d5Dir.getChildFile ("Depth5.vst3");
+    depth5Bundle.createDirectory();
+
+    // Depth 6 from walkRoot: d1/d2/d3/d4/d5/d6/Depth6.vst3 (should NOT be reached)
+    const auto d6Dir = d5Dir.getChildFile ("d6");
+    d6Dir.createDirectory();
+    const auto depth6Bundle = d6Dir.getChildFile ("Depth6.vst3");
+    depth6Bundle.createDirectory();
+
+    // Skipped subdirectories inside walkRoot, each holding a .vst3 bundle that must NOT be found
+    const char* const skippedDirs[] = {
+        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies",
+        "Application Support", "Caches", "Mobile Documents", "Containers",
+        ".git", ".Trash", "_deps", "CMakeFiles", "node_modules",
+        "SomeApp.app", "Other.component", "Foo.framework"
+    };
+    for (const char* sub : skippedDirs)
+        walkRoot.getChildFile (sub).getChildFile ("HiddenInside.vst3").createDirectory();
+
+    const auto foundBundles = Catalog::findBundlesIn (walkRoot);
+    test::check (foundBundles.size() == 1 && foundBundles[0] == depth5Bundle,
+                 "findBundlesIn finds bundle at depth 5 and skips depth 6, TCC subdirs, hidden dirs, build dirs, and non-VST3 bundles");
+
+    // Forbidden roots at depth 0 return empty immediately
+    const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+    for (const auto& forbidden : { juce::File(),
+                                   juce::File ("/"),
+                                   juce::File ("/Volumes"),
+                                   juce::File ("/Users"),
+                                   juce::File ("/System"),
+                                   juce::File ("/Library"),
+                                   juce::File ("/Applications"),
+                                   home,
+                                   home.getChildFile ("Library"),
+                                   home.getChildFile ("Applications"),
+                                   juce::File::getSpecialLocation (juce::File::userDesktopDirectory),
+                                   juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                                   home.getChildFile ("Downloads"),
+                                   juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                                   juce::File::getSpecialLocation (juce::File::userPicturesDirectory),
+                                   juce::File::getSpecialLocation (juce::File::userMoviesDirectory),
+                                   walkRoot.getChildFile ("Desktop"),
+                                   walkRoot.getChildFile ("Documents"),
+                                   walkRoot.getChildFile ("Downloads"),
+                                   walkRoot.getChildFile ("Music"),
+                                   walkRoot.getChildFile ("Pictures"),
+                                   walkRoot.getChildFile ("Movies") })
+    {
+        test::check (Catalog::isForbiddenPluginRoot (forbidden) && Catalog::findBundlesIn (forbidden).isEmpty(),
+                     "findBundlesIn refuses forbidden root: " + (forbidden == juce::File() ? juce::String ("<empty>") : forbidden.getFullPathName()));
+    }
+
+    // 4. Pre-load VST3/AU deduplication
+    {
+        struct FakeAuFormat : juce::AudioPluginFormat
+        {
+            juce::String getName() const override { return "AudioUnit"; }
+            void findAllTypesForFile (juce::OwnedArray<juce::PluginDescription>&, const juce::String&) override {}
+            bool fileMightContainThisPluginType (const juce::String&) override { return true; }
+            juce::String getNameOfPluginFromIdentifier (const juce::String& id) override { return id.fromFirstOccurrenceOf (":", false, false); }
+            bool pluginNeedsRescanning (const juce::PluginDescription&) override { return false; }
+            bool doesPluginStillExist (const juce::PluginDescription&) override { return true; }
+            bool canScanForPlugins() const override { return true; }
+            bool isTrivialToScan() const override { return true; }
+            juce::StringArray searchPathsForPlugins (const juce::FileSearchPath&, bool, bool) override
+            {
+                return { "AudioUnit:Hermes Level", "AudioUnit:Unique AU" };
+            }
+            juce::FileSearchPath getDefaultLocationsToSearch() override { return {}; }
+            void createPluginInstance (const juce::PluginDescription&, double, int, PluginCreationCallback) override {}
+            bool requiresUnblockedMessageThreadDuringCreation (const juce::PluginDescription&) const override { return false; }
+        } fakeAu;
+
+        test::check (Catalog::candidatePluginName (fakeAu, "AudioUnit:Hermes Level") == "Hermes Level",
+                     "candidatePluginName extracts AU plugin name via format.getNameOfPluginFromIdentifier");
+        test::check (Catalog::candidatePluginName (fakeAu, "AudioUnit:Acme: Hermes Level") == "Hermes Level",
+                     "candidatePluginName strips Manufacturer: prefix from AU plugin name");
+
+        juce::KnownPluginList preloaded;
+        preloaded.addType (described ("Hermes Level", "Pantheon", "VST3", hermesBundle.getFullPathName()));
+        const auto cacheWithVst3 = dir.getChildFile ("with-vst3.xml");
+        test::check (preloaded.createXml()->writeTo (cacheWithVst3), "wrote cache with VST3 plugin");
+
+        Catalog dedupCat;
+        test::check (dedupCat.loadCache (cacheWithVst3) && dedupCat.names().contains ("Hermes Level"),
+                     "loaded VST3 Hermes Level into Catalog");
+#if JUCE_PLUGINHOST_AU && JUCE_MAC
+        // Also seed any system AU into VST3 list or test with a real system AU if present, or verify via candidatesForFormat:
+        const auto allAus = Catalog().candidatesForFormat ("AudioUnit", {}, true, false);
+        if (! allAus.isEmpty())
+        {
+            juce::AudioUnitPluginFormat realAuFmt;
+            const auto firstAuId = allAus[0];
+            const auto firstAuName = Catalog::candidatePluginName (realAuFmt, firstAuId);
+            if (firstAuName.isNotEmpty())
+            {
+                juce::KnownPluginList withMatchingVst3;
+                withMatchingVst3.addType (described (firstAuName, "Pantheon", "VST3", "/x/" + firstAuName + ".vst3"));
+                const auto matchXml = dir.getChildFile ("match-au.xml");
+                withMatchingVst3.createXml()->writeTo (matchXml);
+                Catalog auDedupCat;
+                auDedupCat.loadCache (matchXml);
+                const auto filteredAus = auDedupCat.candidatesForFormat ("AudioUnit", {}, true, false);
+                test::check (! filteredAus.contains (firstAuId),
+                             "pre-load VST3/AU deduplication skips AudioUnit candidate when a VST3 of the same name is already in list");
+            }
+        }
+#endif
+    }
+
+    // 5. Incremental plugins.xml persistence even when 0 plugins are found
+    {
+        const auto emptyDir = dir.getChildFile ("empty-plugins");
+        emptyDir.createDirectory();
+        const auto cacheFile = dir.getChildFile ("incremental/plugins.xml");
+        test::check (! cacheFile.existsAsFile(), "cacheFile does not exist before scan");
+
+        Catalog emptyScanCat;
+        ScanOptions opts;
+        opts.includeSystem = false;
+        opts.suiteOnly = true;
+        opts.cacheFile = cacheFile;
+        opts.deadMansPedal = dir.getChildFile ("incremental/scan.pedal");
+        emptyScanCat.scan (juce::FileSearchPath (emptyDir.getFullPathName()), opts);
+
+        test::check (cacheFile.existsAsFile(), "Catalog::scan writes options.cacheFile even when 0 plugins are found");
+        Catalog reloaded;
+        test::check (reloaded.loadCache (cacheFile) && reloaded.names().isEmpty(),
+                     "loadCache returns true on a valid 0-plugin <KNOWNPLUGINS> plugins.xml");
+
+        // 6. Scanning with options.suiteOnly = true preserves cached third-party plugins in Catalog (when suiteOnlyMode is false)
+        juce::KnownPluginList withThirdParty;
+        withThirdParty.addType (described ("ThirdParty Synth", "Acme", "VST3", thirdPartyBundle.getFullPathName()));
+        const auto tpCacheFile = dir.getChildFile ("preserve-tp/plugins.xml");
+        tpCacheFile.getParentDirectory().createDirectory();
+        test::check (withThirdParty.createXml()->writeTo (tpCacheFile), "wrote cache containing third-party plugin");
+
+        Catalog preserveCat;
+        test::check (preserveCat.loadCache (tpCacheFile) && preserveCat.names().contains ("ThirdParty Synth"),
+                     "loaded cached third-party plugin into Catalog");
+        ScanOptions suiteScanOpts;
+        suiteScanOpts.includeSystem = false;
+        suiteScanOpts.suiteOnly = true;
+        suiteScanOpts.cacheFile = tpCacheFile;
+        suiteScanOpts.deadMansPedal = dir.getChildFile ("preserve-tp/scan.pedal");
+        preserveCat.scan (juce::FileSearchPath (emptyDir.getFullPathName()), suiteScanOpts);
+        test::check (! preserveCat.suiteOnly() && preserveCat.names().contains ("ThirdParty Synth"),
+                     "Catalog::scan with options.suiteOnly=true preserves cached third-party plugin when suiteOnlyMode is false");
+    }
+
+    dir.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -2072,6 +2974,14 @@ int main()
     mcpUndoChecks();
     takeAndNameChecks();
     clipboardChecks();
+    mcpCopyChainChecks();
+    copyChainLockChecks();
+    processBlockChunkChecks();
+    recorderChunkAtomicityChecks();
+    mcpSetChainChecks();
+    mcpIndexValidationChecks();
+    projectValidationChecks();
+    catalogSafetyAndScanChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
