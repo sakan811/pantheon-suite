@@ -27,10 +27,10 @@ cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Re
 Source/DSP/        no GUI dependencies; covered by Tests/Tests.cpp
   Compressor.h       Channels, BandParams, reductionDb() (the gain computer), Level (the detector), GainFollower (attack / release on the gain)
   LinearSplit.h      the linear-phase split: kernels from the crossovers, FFT overlap-save, the top band as the complement
-  Target.h           TARGET: the shifts of THRESH from a curve and the bands' typical levels; plain C++
   Learn.h            BandProfile: what LEARN makes of a band's level over time (THRESH, RATIO, ATTACK, RELEASE); LoudnessMatch: the OUTPUT that LEARN ALL sets; plain C++
   Engine.h           the whole signal path, the tick, oversampling, makeup and gain match, solo and delta, meters, latency
 Source/Advice.h      the notes of the strip under the bands and the GUIDE text; plain C++, no JUCE
+Source/Target.h      TARGET: the shifts of THRESH from a curve and the bands' typical levels; plain C++
 Source/Parameters.h  parameter layout, readParams(), layoutOf(), addSplit() / removeSplit()                 <- the single source of truth for parameters
 Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/BandView.h` is the display (spectrogram, band edges, PEAK / JUMPS)
 ../../shared/dsp/    SpectrumIssues.h (`pdsp::SpectrumGrid`, `pdsp::IssueFinder`: plain C++, tested by AtlasTests [9]), SpectrumAnalyzer.h, AnalyzerTap.h

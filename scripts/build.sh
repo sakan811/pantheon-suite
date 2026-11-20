@@ -14,10 +14,10 @@
 #            anything else              taken as a CMake target name, built (and run if it is a console tool)
 #
 # What makes it quick: one `cmake --build` for all the targets asked for (so the cores are shared between them, not used
-# one target after another); every core; configure only when there is no build folder (CMake re-configures by itself when a
+# one target after another); every core; configure only when the build folder has no CMakeCache.txt (CMake re-configures by itself when a
 # CMakeLists changes); Ninja for a new build folder, and ccache for every compile, when they are installed (`brew install ninja ccache`).
 # Each target compiles its own copy of JUCE, which is most of a cold build: ccache turns the second and later ones into cache hits.
-# A build folder made by this script does not install into the system plugin folders (the *_INSTALL_AFTER_BUILD options stay off). A folder that
+# A build folder made by this script does not install into the system plugin folders (except Themis' on macOS: `THEMIS_INSTALL_AFTER_BUILD` defaults to ON there and the script does not change it; the other *_INSTALL_AFTER_BUILD options stay off). A folder that
 # was configured with one of them ON keeps it (the script never changes a cache): building its vst3 or au target then copies the plugin into
 # ~/Library/Audio/Plug-Ins, replacing the copy there. Harmonia and Hephaestus install on every build, whatever the option.
 set -euo pipefail

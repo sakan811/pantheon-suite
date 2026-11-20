@@ -126,7 +126,7 @@ layer only holds the parameters, the host glue and the editor.
 ### Tests, screenshots and layout
 
 ```sh
-scripts/build_tests.sh      # offline DSP accuracy tests (no JUCE) + builds build-tools/{tune_wav,pitch_track,stress_corrector}
+scripts/build_tests.sh      # offline DSP accuracy tests (no JUCE): builds build-tools/{tune_wav,dsp_test,pitch_track,stress_corrector} and runs dsp_test
 cmake --build build --target HarmoniaDevTool
 build/HarmoniaDevTool_artefacts/Release/HarmoniaDevTool selftest              # headless processor self-test
 build/HarmoniaDevTool_artefacts/Release/HarmoniaDevTool snapshot docs/screenshot.png   # renders the editor to PNG

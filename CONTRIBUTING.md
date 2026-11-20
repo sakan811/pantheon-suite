@@ -2,7 +2,7 @@
 
 This repository is maintained by one person, who writes and merges all the code. **Suggestions are welcome; code
 contributions are not accepted.** That keeps it reviewable by a single maintainer and keeps the principles in
-[CLAUDE.md](CLAUDE.md) and in each plugin's CLAUDE.md intact (for Themis: it only measures and never processes the audio,
+[CLAUDE.md](CLAUDE.md) and in each plugin's CLAUDE.md intact (for Themis: it only measures; its one exception is listening, where AUDITION and COMPARE change the output only while engaged and are not saved;
 advice is computed from measurements and never invented; everywhere: one place for every fact and threshold).
 
 ## How to suggest something
