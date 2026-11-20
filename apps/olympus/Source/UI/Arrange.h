@@ -138,6 +138,14 @@ private:
     double scrollSamples = 0.0;                         // the timeline's left edge, in samples
     int scrollY = 0;                                    // the lanes' top, in pixels
     double lastPlayhead = 0.0;
+    bool hasRefreshed = false;
+    std::shared_ptr<const ArrangeSnapshot> lastRefreshSnapshot;
+    double lastRefreshScrollSamples = 0.0;
+    int lastRefreshScrollY = 0;
+    double lastRefreshZoom = kDefaultZoom;
+    ClipRef lastRefreshSelected;
+    double lastRefreshRecFrom = -1.0, lastRefreshRecTo = -1.0;
+    std::vector<int> lastRefreshRecTracks;
 
     // The model of the last snapshot taken with the lock. While a render holds the session's lock, snapshot returns this instead of waiting.
     mutable std::shared_ptr<const ArrangeSnapshot> lastSnapshot;
@@ -154,7 +162,9 @@ private:
 
     void seekTo (juce::int64 sample);
     void layoutHeaders();
+    void layoutHeaders (const ArrangeSnapshot& s);
     void syncHeaders (bool readMeters);
+    void syncHeaders (const ArrangeSnapshot& s, bool readMeters);
     void changed();   // repaint and tell the window (during a drag)
     void edited();    // as changed, after the headers took the model
     void report (const juce::String& error) { if (reportError && error.isNotEmpty()) reportError (error); }

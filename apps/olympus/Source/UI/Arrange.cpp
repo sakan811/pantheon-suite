@@ -58,14 +58,15 @@ double chooseStepBeats (const TempoMap& tempo, double pxPerBeat)
 {
     const double bpb = tempo.beatsPerBar();
     double best = -1.0, largest = 0.0;
-    std::vector<double> candidates;
-    for (int k = 0; k <= 12; ++k) candidates.push_back (0.125 * std::pow (2.0, k));
-    for (int k = 0; k <= 8; ++k) candidates.push_back (bpb * std::pow (2.0, k));
-    for (double c : candidates)
+    auto consider = [&] (double c)
     {
         largest = std::max (largest, c);
         if (c * pxPerBeat >= kMinGap && (best < 0.0 || c < best)) best = c;
-    }
+    };
+    double c = 0.125;
+    for (int k = 0; k <= 12; ++k, c *= 2.0) consider (c);
+    c = bpb;
+    for (int k = 0; k <= 8; ++k, c *= 2.0) consider (c);
     return best > 0.0 ? best : largest;
 }
 
@@ -108,6 +109,42 @@ struct ArrangeSnapshot
     std::vector<TrackView> tracks;
     juce::int64 length = 0;
 };
+
+static bool sameArrangeVisual (const ArrangeSnapshot& a, const ArrangeSnapshot& b)
+{
+    if (! juce::exactlyEqual (a.rate, b.rate) || a.grid != b.grid || a.loopOn != b.loopOn || a.loopStart != b.loopStart || a.loopEnd != b.loopEnd)
+        return false;
+    if (a.tempo.numerator != b.tempo.numerator || a.tempo.denominator != b.tempo.denominator
+        || a.tempo.points.size() != b.tempo.points.size())
+        return false;
+    for (size_t i = 0; i < a.tempo.points.size(); ++i)
+        if (! juce::exactlyEqual (a.tempo.points[i].beat, b.tempo.points[i].beat) || ! juce::exactlyEqual (a.tempo.points[i].bpm, b.tempo.points[i].bpm))
+            return false;
+    if (a.markers.size() != b.markers.size())
+        return false;
+    for (size_t i = 0; i < a.markers.size(); ++i)
+        if (a.markers[i].start != b.markers[i].start || a.markers[i].name != b.markers[i].name)
+            return false;
+    if (a.tracks.size() != b.tracks.size())
+        return false;
+    for (size_t i = 0; i < a.tracks.size(); ++i)
+    {
+        const auto& ta = a.tracks[i];
+        const auto& tb = b.tracks[i];
+        if (ta.mute != tb.mute || ta.clips.size() != tb.clips.size())
+            return false;
+        for (size_t c = 0; c < ta.clips.size(); ++c)
+        {
+            const auto& ca = ta.clips[c];
+            const auto& cb = tb.clips[c];
+            if (ca.start != cb.start || ca.offset != cb.offset || ca.length != cb.length
+                || ! juce::exactlyEqual (ca.gainDb, cb.gainDb) || ca.fadeIn != cb.fadeIn || ca.fadeOut != cb.fadeOut
+                || ca.mute != cb.mute || ca.name != cb.name || ca.audio.get() != cb.audio.get())
+                return false;
+        }
+    }
+    return true;
+}
 
 // The peaks of an audio file: per block of 256 frames, the lowest and the highest sample of either channel. Built once per file.
 struct ArrangeWaves
@@ -237,6 +274,7 @@ public:
         {
             juce::String error;
             if (! view.editor.setTrackGain (index, (float) faderSlider.getValue(), error)) view.report (error);
+            lastTooltipGain = (float) faderSlider.getValue();
             faderSlider.setTooltip (trackFaderTooltip (faderSlider.getValue()));
             view.changed();
         };
@@ -254,8 +292,15 @@ public:
             nameLabel.setText (title, juce::dontSendNotification);
         if (! faderSlider.isMouseButtonDown())
         {
-            faderSlider.setValue (gainDb, juce::dontSendNotification);
-            faderSlider.setTooltip (trackFaderTooltip (gainDb));
+            if (std::abs (faderSlider.getValue() - (double) gainDb) > 1e-4)
+                faderSlider.setValue (gainDb, juce::dontSendNotification);
+            if (! juce::exactlyEqual (lastTooltipGain, gainDb))
+            {
+                lastTooltipGain = gainDb;
+                const auto tip = trackFaderTooltip (gainDb);
+                if (faderSlider.getTooltip() != tip)
+                    faderSlider.setTooltip (tip);
+            }
         }
         panKnob.setValue (panValue);
         muteButton.setToggleState (isMuted, juce::dontSendNotification);
@@ -267,8 +312,10 @@ public:
     // The meter: the level falls back by a few dB between reads, the held mark more slowly (MeterBallistics, shared with the master).
     void addPeaks (float peakL, float peakR)
     {
+        const float prevLevel = meter.level, prevHold = meter.hold;
         meter.add ((float) dbOf (std::max (peakL, peakR)));
-        repaint();
+        if (std::abs (meter.level - prevLevel) > 1e-4f || std::abs (meter.hold - prevHold) > 1e-4f)
+            repaint();
     }
 
     void resized() override
@@ -306,6 +353,7 @@ public:
 
 private:
     bool editingName = false;
+    float lastTooltipGain = std::numeric_limits<float>::quiet_NaN();
     MeterBallistics meter;
     juce::Label nameLabel;
     ArrangeLamp muteButton { "M" }, soloButton { "S" }, fxButton { "FX" }, removeButton { "X" };
@@ -482,7 +530,11 @@ void ArrangeView::seekTo (juce::int64 sample)
 
 void ArrangeView::layoutHeaders()
 {
-    const auto s = snapshot();
+    layoutHeaders (snapshot());
+}
+
+void ArrangeView::layoutHeaders (const ArrangeSnapshot& s)
+{
     const int count = (int) s.tracks.size();
     scrollY = juce::jlimit (0, maxScrollY (count), scrollY);
     headerPort.setBounds (0, laneTop(), kHeaderWidth, juce::jmax (0, getHeight() - laneTop()));
@@ -492,7 +544,11 @@ void ArrangeView::layoutHeaders()
 
 void ArrangeView::syncHeaders (bool readMeters)
 {
-    const auto s = snapshot (readMeters);
+    syncHeaders (snapshot (readMeters), readMeters);
+}
+
+void ArrangeView::syncHeaders (const ArrangeSnapshot& s, bool readMeters)
+{
     const int n = (int) s.tracks.size();
     while ((int) headers.size() > n)
     {
@@ -526,7 +582,7 @@ void ArrangeView::syncHeaders (bool readMeters)
         const bool ok = selected.track < n && selected.clip < (int) s.tracks[(size_t) selected.track].clips.size();
         if (! ok) selected = {};
     }
-    layoutHeaders();
+    layoutHeaders (s);
 }
 
 void ArrangeView::changed()
@@ -543,14 +599,52 @@ void ArrangeView::edited()
 
 void ArrangeView::refresh()
 {
-    syncHeaders (true);
-    const auto s = snapshot();
+    const auto s = snapshot (true);
+    syncHeaders (s, true);
     const double pps = pxPerSample (s.rate);
     const double span = juce::jmax (0.0, (double) (getWidth() - kHeaderWidth) / pps);
-    if (followPlayhead && playhead != lastPlayhead && (playhead < scrollSamples || playhead > scrollSamples + span))
+    if (followPlayhead && ! juce::exactlyEqual (playhead, lastPlayhead) && (playhead < scrollSamples || playhead > scrollSamples + span))
         scrollSamples = juce::jmax (0.0, playhead - span * 0.125);
+
+    const bool fullVisualChanged = ! hasRefreshed
+        || lastRefreshSnapshot == nullptr
+        || ! sameArrangeVisual (s, *lastRefreshSnapshot)
+        || ! juce::exactlyEqual (scrollSamples, lastRefreshScrollSamples)
+        || scrollY != lastRefreshScrollY
+        || ! juce::exactlyEqual (zoom, lastRefreshZoom)
+        || selected.track != lastRefreshSelected.track
+        || selected.clip != lastRefreshSelected.clip
+        || ! juce::exactlyEqual (recordingFrom, lastRefreshRecFrom)
+        || ! juce::exactlyEqual (recordingTo, lastRefreshRecTo)
+        || recordingTracks != lastRefreshRecTracks;
+
+    if (fullVisualChanged)
+    {
+        repaint();
+    }
+    else if (! juce::exactlyEqual (playhead, lastPlayhead))
+    {
+        const int oldPx = sampleToX (lastPlayhead, pps);
+        const int newPx = sampleToX (playhead, pps);
+        if (oldPx != newPx)
+        {
+            const int x0 = juce::jmax (kHeaderWidth - 5, juce::jmin (oldPx, newPx) - 5);
+            const int x1 = juce::jmin (getWidth(), juce::jmax (oldPx, newPx) + 6);
+            if (x1 > x0)
+                repaint (x0, 0, x1 - x0, getHeight());
+        }
+    }
+
+    hasRefreshed = true;
     lastPlayhead = playhead;
-    repaint();
+    lastRefreshSnapshot = lastSnapshot != nullptr ? lastSnapshot : std::make_shared<const ArrangeSnapshot> (s);
+    lastRefreshScrollSamples = scrollSamples;
+    lastRefreshScrollY = scrollY;
+    lastRefreshZoom = zoom;
+    lastRefreshSelected = selected;
+    lastRefreshRecFrom = recordingFrom;
+    lastRefreshRecTo = recordingTo;
+    lastRefreshRecTracks = recordingTracks;
 }
 
 void ArrangeView::zoomToFit()
@@ -580,6 +674,8 @@ void ArrangeView::scrollTo (juce::int64 sample)
 void ArrangeView::drawWave (juce::Graphics& g, const Clip& clip, juce::Rectangle<int> area, double pps, juce::Colour colour)
 {
     if (clip.audio == nullptr || clip.audio->getNumSamples() == 0 || clip.length <= 0) return;
+    const auto visible = area.getIntersection (g.getClipBounds());
+    if (visible.isEmpty()) return;
     const auto& buffer = *clip.audio;
     const auto& peaks = waves->of (clip.audio);
     const auto frames = (juce::int64) buffer.getNumSamples();
@@ -588,7 +684,7 @@ void ArrangeView::drawWave (juce::Graphics& g, const Clip& clip, juce::Rectangle
     const int blockSize = ArrangeWaves::kBlock;
 
     g.setColour (colour);
-    for (int x = area.getX(); x < area.getRight(); ++x)
+    for (int x = visible.getX(); x < visible.getRight(); ++x)
     {
         // the column's samples, relative to the clip's start and to its place in the file
         const double t0 = xToSample (x, pps) - (double) clip.start;
