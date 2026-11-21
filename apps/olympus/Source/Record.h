@@ -49,7 +49,7 @@ private:
 class Recorder
 {
 public:
-    static constexpr int kMaxInputs = 32; // the meters cover the first kMaxInputs device inputs
+    static constexpr int kMaxInputs = 64; // the meters cover the first kMaxInputs device inputs
 
     // A take: the track it goes to, the device inputs it records (inRight -1 = mono: inLeft on both channels) and the name of its file.
     struct Take
