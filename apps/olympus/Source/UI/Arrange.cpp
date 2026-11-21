@@ -302,7 +302,8 @@ public:
                     faderSlider.setTooltip (tip);
             }
         }
-        panKnob.setValue (panValue);
+        if (panGesture == nullptr && std::abs (panKnob.getValue() - (double) panValue) > 1e-4)
+            panKnob.setValue (panValue);
         muteButton.setToggleState (isMuted, juce::dontSendNotification);
         soloButton.setToggleState (isSoloed, juce::dontSendNotification);
         armButton.setToggleState (isArmed, juce::dontSendNotification);
@@ -416,9 +417,8 @@ bool ArrangeView::isInteracting() const
     return false;
 }
 
-ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
+std::shared_ptr<const ArrangeSnapshot> ArrangeView::snapshotPtr (bool takePeaks) const
 {
-    ArrangeSnapshot s;
     // The message thread never waits for the lock: a render holds it for its whole run. While it is busy the last model is returned (the
     // tracks do not change under a render: the window is modal over it).
     // The audio thread holds it for a moment each block, so a miss is retried; only a render (renderRunning) makes this give up.
@@ -426,17 +426,25 @@ ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
     while (! sl.isLocked())
     {
         if (session.renderRunning())
-            return lastSnapshot != nullptr ? *lastSnapshot : s;
+        {
+            if (lastSnapshot == nullptr)
+                return std::make_shared<const ArrangeSnapshot>();
+            auto copy = std::make_shared<ArrangeSnapshot> (*lastSnapshot);
+            for (auto& t : copy->tracks)
+                t.peakL = t.peakR = 0.0f;
+            return copy;
+        }
         juce::Thread::sleep (1);
         sl.retryLock();
     }
-    s.rate = session.sampleRate > 0.0 ? session.sampleRate : kFallbackRate;
-    s.tempo = session.tempo;
-    s.grid = session.grid;
-    s.markers = session.markers;
-    s.loopOn = session.loopOn;
-    s.loopStart = session.loopStart;
-    s.loopEnd = session.loopEnd;
+    auto s = std::make_shared<ArrangeSnapshot>();
+    s->rate = session.sampleRate > 0.0 ? session.sampleRate : kFallbackRate;
+    s->tempo = session.tempo;
+    s->grid = session.grid;
+    s->markers = session.markers;
+    s->loopOn = session.loopOn;
+    s->loopStart = session.loopStart;
+    s->loopEnd = session.loopEnd;
     for (auto& t : session.tracks)
     {
         ArrangeSnapshot::TrackView v;
@@ -454,11 +462,16 @@ ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
             v.peakL = t->peakL.exchange (0.0f);
             v.peakR = t->peakR.exchange (0.0f);
         }
-        s.length = juce::jmax (s.length, t->length());
-        s.tracks.push_back (std::move (v));
+        s->length = juce::jmax (s->length, t->length());
+        s->tracks.push_back (std::move (v));
     }
-    lastSnapshot = std::make_shared<const ArrangeSnapshot> (s);
+    lastSnapshot = s;
     return s;
+}
+
+ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const
+{
+    return *snapshotPtr (takePeaks);
 }
 
 double ArrangeView::pxPerSample (double rate) const
@@ -488,7 +501,7 @@ int ArrangeView::trackTop (int index) const
 
 int ArrangeView::trackAt (int y, int trackCount) const
 {
-    if (y < laneTop()) return -1;
+    if (y < laneTop() || y >= getHeight() - kScrollStripHeight) return -1;
     const int i = (y - laneTop() + scrollY) / kLaneHeight;
     return i < trackCount ? i : -1;
 }
@@ -517,7 +530,73 @@ int ArrangeView::markerAt (const ArrangeSnapshot& s, juce::Point<int> p, double 
 
 int ArrangeView::maxScrollY (int trackCount) const
 {
-    return juce::jmax (0, trackCount * kLaneHeight - (getHeight() - laneTop()));
+    return juce::jmax (0, trackCount * kLaneHeight - (getHeight() - laneTop() - kScrollStripHeight));
+}
+
+juce::Rectangle<int> ArrangeView::scrollStripBounds() const
+{
+    const int h = getHeight();
+    if (h <= laneTop() + kScrollStripHeight || getWidth() <= kHeaderWidth)
+        return {};
+    return { kHeaderWidth, h - kScrollStripHeight, getWidth() - kHeaderWidth, kScrollStripHeight };
+}
+
+void ArrangeView::scrollThumbMetrics (const ArrangeSnapshot& s, double pps, float& thumbX, float& thumbW, double& totalSamples) const
+{
+    const auto strip = scrollStripBounds();
+    const float sw = (float) juce::jmax (1, strip.getWidth());
+    const double visibleSpan = (double) juce::jmax (1, strip.getWidth()) / pps;
+    const double visibleEnd = scrollSamples + visibleSpan;
+    totalSamples = juce::jmax ((double) s.length, visibleEnd, 1.0);
+    const double fracLen = juce::jlimit (0.0, 1.0, visibleSpan / totalSamples);
+    thumbW = juce::jlimit (1.0f, sw, juce::jmax (20.0f, (float) (fracLen * sw)));
+    const double maxScroll = juce::jmax (0.0, totalSamples - visibleSpan);
+    const double scrollRatio = maxScroll > 0.0 ? juce::jlimit (0.0, 1.0, scrollSamples / maxScroll) : 0.0;
+    thumbX = (float) strip.getX() + (float) scrollRatio * (sw - thumbW);
+}
+
+bool ArrangeView::hitFadeIn (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const
+{
+    if (! ref.valid() || ! juce::isPositiveAndBelow (ref.track, (int) s.tracks.size())) return false;
+    const auto& clips = s.tracks[(size_t) ref.track].clips;
+    if (! juce::isPositiveAndBelow (ref.clip, (int) clips.size())) return false;
+    const auto& c = clips[(size_t) ref.clip];
+    const auto r = clipRect (ref.track, c.start, c.length, pps);
+    if (r.getWidth() < 28 || p.y < r.getY() || p.y - r.getY() >= kFadeZone) return false;
+    if (c.fadeIn > 0)
+    {
+        const int fadeInX = sampleToX ((double) (c.start + c.fadeIn), pps);
+        return std::abs (p.x - fadeInX) <= kFadeGrab;
+    }
+    return p.x > r.getX() + kEdgeGrab && p.x <= r.getX() + kEdgeGrab + kFadeGrab;
+}
+
+bool ArrangeView::hitFadeOut (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const
+{
+    if (! ref.valid() || ! juce::isPositiveAndBelow (ref.track, (int) s.tracks.size())) return false;
+    const auto& clips = s.tracks[(size_t) ref.track].clips;
+    if (! juce::isPositiveAndBelow (ref.clip, (int) clips.size())) return false;
+    const auto& c = clips[(size_t) ref.clip];
+    const auto r = clipRect (ref.track, c.start, c.length, pps);
+    if (r.getWidth() < 28 || p.y < r.getY() || p.y - r.getY() >= kFadeZone) return false;
+    if (c.fadeOut > 0)
+    {
+        const int fadeOutX = sampleToX ((double) (c.end() - c.fadeOut), pps);
+        return std::abs (p.x - fadeOutX) <= kFadeGrab;
+    }
+    return p.x >= r.getRight() - kEdgeGrab - kFadeGrab && p.x < r.getRight() - kEdgeGrab;
+}
+
+bool ArrangeView::hitFadeIn (ClipRef ref, juce::Point<int> point) const
+{
+    const auto s = snapshot();
+    return hitFadeIn (s, ref, point, pxPerSample (s.rate));
+}
+
+bool ArrangeView::hitFadeOut (ClipRef ref, juce::Point<int> point) const
+{
+    const auto s = snapshot();
+    return hitFadeOut (s, ref, point, pxPerSample (s.rate));
 }
 
 void ArrangeView::seekTo (juce::int64 sample)
@@ -537,7 +616,7 @@ void ArrangeView::layoutHeaders (const ArrangeSnapshot& s)
 {
     const int count = (int) s.tracks.size();
     scrollY = juce::jlimit (0, maxScrollY (count), scrollY);
-    headerPort.setBounds (0, laneTop(), kHeaderWidth, juce::jmax (0, getHeight() - laneTop()));
+    headerPort.setBounds (0, laneTop(), kHeaderWidth, juce::jmax (0, getHeight() - laneTop() - kScrollStripHeight));
     for (int i = 0; i < (int) headers.size(); ++i)
         headers[(size_t) i]->setBounds (0, trackTop (i) - laneTop(), kHeaderWidth, kLaneHeight);
 }
@@ -599,7 +678,8 @@ void ArrangeView::edited()
 
 void ArrangeView::refresh()
 {
-    const auto s = snapshot (true);
+    const auto sp = snapshotPtr (true);
+    const auto& s = *sp;
     syncHeaders (s, true);
     const double pps = pxPerSample (s.rate);
     const double span = juce::jmax (0.0, (double) (getWidth() - kHeaderWidth) / pps);
@@ -637,7 +717,7 @@ void ArrangeView::refresh()
 
     hasRefreshed = true;
     lastPlayhead = playhead;
-    lastRefreshSnapshot = lastSnapshot != nullptr ? lastSnapshot : std::make_shared<const ArrangeSnapshot> (s);
+    lastRefreshSnapshot = sp;
     lastRefreshScrollSamples = scrollSamples;
     lastRefreshScrollY = scrollY;
     lastRefreshZoom = zoom;
@@ -664,6 +744,23 @@ void ArrangeView::zoomToFit()
     repaint();
 }
 
+void ArrangeView::zoomBy (double factor)
+{
+    const auto s = snapshot();
+    const double oldPps = pxPerSample (s.rate);
+    const int timelineWidth = juce::jmax (1, getWidth() - kHeaderWidth);
+    const double leftSample = scrollSamples;
+    const double rightSample = leftSample + (double) timelineWidth / oldPps;
+    const bool playheadVisible = playhead >= leftSample && playhead <= rightSample;
+    const double anchorSample = playheadVisible ? playhead : (leftSample + rightSample) * 0.5;
+    const double anchorPxFromLeft = (anchorSample - leftSample) * oldPps;
+
+    zoom = juce::jlimit (kMinZoom, kMaxZoom, zoom * factor);
+    const double newPps = pxPerSample (s.rate);
+    scrollSamples = juce::jmax (0.0, anchorSample - anchorPxFromLeft / newPps);
+    repaint();
+}
+
 void ArrangeView::scrollTo (juce::int64 sample)
 {
     scrollSamples = (double) juce::jmax ((juce::int64) 0, sample);
@@ -683,7 +780,8 @@ void ArrangeView::drawWave (juce::Graphics& g, const Clip& clip, juce::Rectangle
     const float mid = (float) area.getCentreY(), half = juce::jmax (1.0f, (float) area.getHeight() * 0.5f - 3.0f);
     const int blockSize = ArrangeWaves::kBlock;
 
-    g.setColour (colour);
+    juce::RectangleList<float> rects;
+    rects.ensureStorageAllocated (visible.getWidth());
     for (int x = visible.getX(); x < visible.getRight(); ++x)
     {
         // the column's samples, relative to the clip's start and to its place in the file
@@ -708,13 +806,26 @@ void ArrangeView::drawWave (juce::Graphics& g, const Clip& clip, juce::Rectangle
         else
         {
             const auto b0 = (size_t) (f0 / blockSize), b1 = (size_t) ((f1 - 1) / blockSize);
-            for (auto k = b0; k <= b1; ++k) { lo = std::min (lo, peaks.lo[k]); hi = std::max (hi, peaks.hi[k]); }
+            const size_t numBlocks = b1 - b0 + 1;
+            const size_t stride = numBlocks > 4 ? numBlocks / 4 : 1;
+            for (size_t k = b0; k <= b1; k += stride)
+            {
+                lo = std::min (lo, peaks.lo[k]);
+                hi = std::max (hi, peaks.hi[k]);
+            }
+            if (stride > 1)
+            {
+                lo = std::min (lo, peaks.lo[b1]);
+                hi = std::max (hi, peaks.hi[b1]);
+            }
         }
         if (hi < lo) continue;
         const float y1 = mid - juce::jlimit (-1.0f, 1.0f, hi) * half;
         const float y2 = mid - juce::jlimit (-1.0f, 1.0f, lo) * half;
-        g.fillRect ((float) x, y1, 1.0f, juce::jmax (1.0f, y2 - y1));
+        rects.addWithoutMerging (juce::Rectangle<float> ((float) x, y1, 1.0f, juce::jmax (1.0f, y2 - y1)));
     }
+    g.setColour (colour);
+    g.fillRectList (rects);
 }
 
 void ArrangeView::paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const Clip& clip, bool selectedNow)
@@ -788,9 +899,26 @@ void ArrangeView::paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double
     }
 
     // fade handles, at the top
-    g.setColour (colours::amber);
-    if (clip.fadeIn > 0) g.fillRect (fadeInX - 3.0f, r.getY(), 6.0f, 6.0f);
-    if (clip.fadeOut > 0) g.fillRect (fadeOutX - 3.0f, r.getY(), 6.0f, 6.0f);
+    if (clip.fadeIn > 0)
+    {
+        g.setColour (colours::amber);
+        g.fillRect (fadeInX - 3.0f, r.getY(), 6.0f, 6.0f);
+    }
+    else if (r.getWidth() >= 28.0f)
+    {
+        g.setColour (colours::amber.withAlpha (0.45f));
+        g.fillRect (r.getX() + (float) kEdgeGrab, r.getY(), 6.0f, 6.0f);
+    }
+    if (clip.fadeOut > 0)
+    {
+        g.setColour (colours::amber);
+        g.fillRect (fadeOutX - 3.0f, r.getY(), 6.0f, 6.0f);
+    }
+    else if (r.getWidth() >= 28.0f)
+    {
+        g.setColour (colours::amber.withAlpha (0.45f));
+        g.fillRect (r.getRight() - (float) kEdgeGrab - 6.0f, r.getY(), 6.0f, 6.0f);
+    }
 
     g.setColour (selectedNow ? colours::amber : colours::panelEdge);
     g.drawRoundedRectangle (r.reduced (0.5f), 3.0f, selectedNow ? 2.0f : 1.0f);
@@ -800,7 +928,8 @@ void ArrangeView::paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double
 void ArrangeView::paint (juce::Graphics& g)
 {
     g.fillAll (colours::background);
-    const auto s = snapshot();
+    const auto sp = snapshotPtr();
+    const auto& s = *sp;
     const double pps = pxPerSample (s.rate);
     const int width = getWidth(), height = getHeight(), top = laneTop();
     const auto timeline = juce::Rectangle<int> (kHeaderWidth, 0, juce::jmax (0, width - kHeaderWidth), height);
@@ -832,6 +961,39 @@ void ArrangeView::paint (juce::Graphics& g)
         ui::hw::drawGlass (g, lane, 3.0f, colours::accent);
     }
 
+    // empty state prompt when there are no tracks
+    if (count == 0)
+    {
+        const auto body = juce::Rectangle<int> (kHeaderWidth, top, juce::jmax (0, width - kHeaderWidth), juce::jmax (0, height - top - kScrollStripHeight)).reduced (24, 12);
+        g.setFont (ui::font (13.0f));
+        g.setColour (colours::dim);
+        g.drawFittedText (juce::String::fromUTF8 ("Drop audio files or a .olympus project here \xe2\x80\x94 or click + Track / Import Audio"),
+                          body, juce::Justification::centred, 2);
+    }
+
+    // file-drag drop highlight
+    if (draggingFiles)
+    {
+        if (dragHoverTrack >= 0 && dragHoverTrack < count)
+        {
+            const int y = trackTop (dragHoverTrack);
+            const auto lane = juce::Rectangle<float> ((float) kHeaderWidth, (float) (y + 1), (float) (width - kHeaderWidth), (float) (kLaneHeight - 2)).reduced (2.0f, 0.0f);
+            g.setColour (colours::amber.withAlpha (0.12f));
+            g.fillRoundedRectangle (lane, 3.0f);
+            g.setColour (colours::amber.withAlpha (0.8f));
+            g.drawRoundedRectangle (lane.reduced (0.5f), 3.0f, 1.5f);
+        }
+        else
+        {
+            const auto dropArea = juce::Rectangle<float> ((float) kHeaderWidth, (float) top, (float) juce::jmax (0, width - kHeaderWidth),
+                                                          (float) juce::jmax (0, height - top - kScrollStripHeight)).reduced (4.0f);
+            g.setColour (colours::amber.withAlpha (0.08f));
+            g.fillRoundedRectangle (dropArea, 4.0f);
+            g.setColour (colours::amber.withAlpha (0.7f));
+            g.drawRoundedRectangle (dropArea.reduced (0.5f), 4.0f, 1.5f);
+        }
+    }
+
     // the loop, shaded across the lanes
     if (s.loopEnd > s.loopStart)
     {
@@ -859,6 +1021,8 @@ void ArrangeView::paint (juce::Graphics& g)
     // clips
     for (int i = 0; i < count; ++i)
     {
+        const int y = trackTop (i);
+        if (y + kLaneHeight < top || y > height) continue;
         const auto& clips = s.tracks[(size_t) i].clips;
         for (int c = 0; c < (int) clips.size(); ++c)
         {
@@ -961,6 +1125,21 @@ void ArrangeView::paint (juce::Graphics& g)
     g.setColour (colours::amber);
     if (px >= kHeaderWidth - 1 && px <= width)
         g.fillRect (px - 4, 0, 9, 6);
+
+    // slim horizontal overview/scrollbar strip at the bottom of the lane area
+    const auto strip = scrollStripBounds();
+    if (! strip.isEmpty())
+    {
+        float thumbX = 0.0f, thumbW = 0.0f;
+        double totalSamples = 1.0;
+        scrollThumbMetrics (s, pps, thumbX, thumbW, totalSamples);
+        g.setColour (colours::panel.darker (0.35f));
+        g.fillRect (strip);
+        g.setColour (juce::Colours::black.withAlpha (0.5f));
+        g.fillRect (strip.getX(), strip.getY(), strip.getWidth(), 1);
+        g.setColour (colours::amber.withAlpha (mode == Mode::scrollX ? 0.75f : 0.45f));
+        g.fillRoundedRectangle (thumbX, (float) strip.getY() + 1.5f, thumbW, (float) strip.getHeight() - 3.0f, 2.5f);
+    }
 }
 
 // ---- layout ------------------------------------------------------------------------------------------------------------------------
@@ -971,7 +1150,7 @@ void ArrangeView::resized()
 
 ClipRef ArrangeView::clipAt (juce::Point<int> p) const
 {
-    if (p.x < kHeaderWidth) return {};
+    if (p.x < kHeaderWidth || scrollStripBounds().contains (p)) return {};
     const auto s = snapshot();
     const double pps = pxPerSample (s.rate);
     const int track = trackAt (p.y, (int) s.tracks.size());
@@ -994,10 +1173,62 @@ juce::Rectangle<int> ArrangeView::clipBounds (ClipRef ref) const
 }
 
 // ---- mouse -------------------------------------------------------------------------------------------------------------------------
+void ArrangeView::mouseMove (const juce::MouseEvent& e)
+{
+    hoverPos = e.getPosition();
+}
+
+void ArrangeView::mouseExit (const juce::MouseEvent&)
+{
+    hoverPos = { -1, -1 };
+}
+
+juce::MouseCursor ArrangeView::getMouseCursor()
+{
+    if (mode == Mode::trimStart || mode == Mode::trimEnd || mode == Mode::fadeIn || mode == Mode::fadeOut)
+        return juce::MouseCursor::LeftRightResizeCursor;
+    if (mode == Mode::marker)
+        return juce::MouseCursor::PointingHandCursor;
+    if (hoverPos.x < kHeaderWidth || hoverPos.y < 0 || scrollStripBounds().contains (hoverPos))
+        return juce::MouseCursor::NormalCursor;
+
+    const auto s = snapshot();
+    const double pps = pxPerSample (s.rate);
+    if (hoverPos.y >= kRulerHeight + kLoopHeight && hoverPos.y < laneTop())
+    {
+        if (markerAt (s, hoverPos, pps) >= 0)
+            return juce::MouseCursor::PointingHandCursor;
+        return juce::MouseCursor::NormalCursor;
+    }
+    if (hoverPos.y < laneTop())
+        return juce::MouseCursor::NormalCursor;
+
+    const int track = trackAt (hoverPos.y, (int) s.tracks.size());
+    if (track < 0)
+        return juce::MouseCursor::NormalCursor;
+    const auto& clips = s.tracks[(size_t) track].clips;
+    for (int c = (int) clips.size() - 1; c >= 0; --c)
+    {
+        const auto r = clipRect (track, clips[(size_t) c].start, clips[(size_t) c].length, pps);
+        if (! r.contains (hoverPos)) continue;
+        const ClipRef hit { track, c };
+        const auto& clip = clips[(size_t) c];
+        const bool edgeStart = hoverPos.x - r.getX() <= kEdgeGrab;
+        const bool edgeEnd = r.getRight() - hoverPos.x <= kEdgeGrab;
+        const bool fadeInHit = (clip.fadeIn > 0 || ! edgeStart) && hitFadeIn (s, hit, hoverPos, pps);
+        const bool fadeOutHit = (clip.fadeOut > 0 || ! edgeEnd) && hitFadeOut (s, hit, hoverPos, pps);
+        if (fadeInHit || fadeOutHit || edgeStart || edgeEnd)
+            return juce::MouseCursor::LeftRightResizeCursor;
+        break;
+    }
+    return juce::MouseCursor::NormalCursor;
+}
+
 void ArrangeView::mouseDown (const juce::MouseEvent& e)
 {
     grabKeyboardFocus();
     const auto p = e.getPosition();
+    hoverPos = p;
     const auto s = snapshot();
     const double pps = pxPerSample (s.rate);
     pressX = p.x;
@@ -1012,6 +1243,27 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
             editor.setLoop (s.loopStart, s.loopEnd, ! s.loopOn);
             edited();
         }
+        return;
+    }
+
+    const auto strip = scrollStripBounds();
+    if (strip.contains (p))
+    {
+        if (e.mods.isPopupMenu()) return;
+        mode = Mode::scrollX;
+        float thumbX = 0.0f, thumbW = 0.0f;
+        scrollThumbMetrics (s, pps, thumbX, thumbW, dragTotalSamples);
+        const double visibleSpan = (double) juce::jmax (1, strip.getWidth()) / pps;
+        const double maxScroll = juce::jmax (0.0, dragTotalSamples - visibleSpan);
+        if ((float) p.x < thumbX || (float) p.x > thumbX + thumbW)
+        {
+            const float sw = (float) juce::jmax (1, strip.getWidth());
+            const float avail = juce::jmax (1.0f, sw - thumbW);
+            const float targetThumbX = juce::jlimit (0.0f, avail, (float) (p.x - strip.getX()) - thumbW * 0.5f);
+            scrollSamples = ((double) targetThumbX / (double) avail) * maxScroll;
+        }
+        dragScrollStart = scrollSamples;
+        repaint();
         return;
     }
 
@@ -1052,7 +1304,15 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
     const auto hit = clipAt (p);
     if (! hit.valid())
     {
-        if (! e.mods.isPopupMenu()) selected = {};
+        if (! e.mods.isPopupMenu())
+        {
+            if (e.mods.isAltDown())
+            {
+                seekTo (editor.snap ((juce::int64) juce::jmax (0.0, xToSample (p.x, pps))));
+                return;
+            }
+            selected = {};
+        }
         else if (editor.hasClipboard())
         {
             const int track = trackAt (p.y, (int) s.tracks.size());
@@ -1073,13 +1333,14 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
     origFadeIn = c.fadeIn;
     origFadeOut = c.fadeOut;
 
-    const int fadeInX = sampleToX ((double) (c.start + c.fadeIn), pps);
-    const int fadeOutX = sampleToX ((double) (c.end() - c.fadeOut), pps);
-    const bool top = p.y - r.getY() < kFadeZone;
-    if (top && c.fadeIn > 0 && std::abs (p.x - fadeInX) <= kFadeGrab) mode = Mode::fadeIn;
-    else if (top && c.fadeOut > 0 && std::abs (p.x - fadeOutX) <= kFadeGrab) mode = Mode::fadeOut;
-    else if (p.x - r.getX() <= kEdgeGrab) mode = Mode::trimStart;
-    else if (r.getRight() - p.x <= kEdgeGrab) mode = Mode::trimEnd;
+    const bool edgeStart = p.x - r.getX() <= kEdgeGrab;
+    const bool edgeEnd = r.getRight() - p.x <= kEdgeGrab;
+    if (c.fadeIn > 0 && hitFadeIn (s, hit, p, pps)) mode = Mode::fadeIn;
+    else if (c.fadeOut > 0 && hitFadeOut (s, hit, p, pps)) mode = Mode::fadeOut;
+    else if (edgeStart) mode = Mode::trimStart;
+    else if (edgeEnd) mode = Mode::trimEnd;
+    else if (hitFadeIn (s, hit, p, pps)) mode = Mode::fadeIn;
+    else if (hitFadeOut (s, hit, p, pps)) mode = Mode::fadeOut;
     else mode = Mode::move;
 
     switch (mode)
@@ -1096,6 +1357,7 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
 {
     if (mode == Mode::none) return;
     const auto p = e.getPosition();
+    hoverPos = p;
     const auto s = snapshot();
     const double pps = pxPerSample (s.rate);
     const double deltaSamples = (double) (p.x - pressX) / pps;
@@ -1106,6 +1368,21 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
         case Mode::ruler:
             seekTo ((juce::int64) xToSample (p.x, pps));
             return;
+
+        case Mode::scrollX:
+        {
+            const auto strip = scrollStripBounds();
+            if (strip.isEmpty()) return;
+            const double visibleSpan = (double) juce::jmax (1, strip.getWidth()) / pps;
+            const double maxScroll = juce::jmax (0.0, dragTotalSamples - visibleSpan);
+            const float sw = (float) juce::jmax (1, strip.getWidth());
+            const float thumbW = juce::jlimit (1.0f, sw, juce::jmax (20.0f, (float) (visibleSpan / juce::jmax (1.0, dragTotalSamples) * sw)));
+            const float avail = juce::jmax (1.0f, sw - thumbW);
+            const double delta = ((double) (p.x - pressX) / (double) avail) * maxScroll;
+            scrollSamples = juce::jlimit (0.0, maxScroll, dragScrollStart + delta);
+            repaint();
+            return;
+        }
 
         case Mode::loop:
         {
@@ -1144,14 +1421,24 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
         }
 
         case Mode::trimStart:
-            if (! editor.trimStart (dragClip.track, dragClip.clip, editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + std::llround (deltaSamples))), error))
+        {
+            const auto targetStart = editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + std::llround (deltaSamples)));
+            if (! editor.trimStart (dragClip.track, dragClip.clip, targetStart, error))
                 report (error);
+            else if (origFadeIn > 0 || origFadeOut > 0)
+                editor.setClipFades (dragClip.track, dragClip.clip, origFadeIn, origFadeOut, error);
             break;
+        }
 
         case Mode::trimEnd:
-            if (! editor.trimEnd (dragClip.track, dragClip.clip, editor.snap ((juce::int64) juce::jmax (0.0, (double) origEnd + std::llround (deltaSamples))), error))
+        {
+            const auto targetEnd = editor.snap ((juce::int64) juce::jmax (0.0, (double) origEnd + std::llround (deltaSamples)));
+            if (! editor.trimEnd (dragClip.track, dragClip.clip, targetEnd, error))
                 report (error);
+            else if (origFadeIn > 0 || origFadeOut > 0)
+                editor.setClipFades (dragClip.track, dragClip.clip, origFadeIn, origFadeOut, error);
             break;
+        }
 
         case Mode::fadeIn:
             if (! editor.setClipFades (dragClip.track, dragClip.clip, origFadeIn + std::llround (deltaSamples), origFadeOut, error))
@@ -1171,10 +1458,11 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
 
 void ArrangeView::mouseUp (const juce::MouseEvent&)
 {
-    const bool wasEdit = mode != Mode::none && mode != Mode::ruler;
+    const bool wasEdit = mode != Mode::none && mode != Mode::ruler && mode != Mode::scrollX;
     mode = Mode::none;
     endGesture();
     if (wasEdit) edited();
+    else repaint();
 }
 
 void ArrangeView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -1183,16 +1471,18 @@ void ArrangeView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWh
     const int timelineWidth = juce::jmax (1, getWidth() - kHeaderWidth);
     if (e.mods.isCommandDown() || e.mods.isCtrlDown())
     {
+        const double x = (double) juce::jmax (kHeaderWidth, e.x);
         const double pps = pxPerSample (s.rate);
-        const double anchorSample = xToSample (e.x, pps);
+        const double anchorSample = xToSample (x, pps);
         zoom = juce::jlimit (kMinZoom, kMaxZoom, zoom * std::pow (2.0, wheel.deltaY * 4.0));
         const double newPps = pxPerSample (s.rate);
-        scrollSamples = juce::jmax (0.0, anchorSample - (e.x - kHeaderWidth) / newPps);
+        scrollSamples = juce::jmax (0.0, anchorSample - (x - kHeaderWidth) / newPps);
     }
-    else if (std::abs (wheel.deltaX) > std::abs (wheel.deltaY) || e.mods.isShiftDown())
+    else if (e.mods.isShiftDown() || std::abs (wheel.deltaX) > std::abs (wheel.deltaY))
     {
         const double pps = pxPerSample (s.rate);
-        const double delta = std::abs (wheel.deltaX) > 0.0 ? wheel.deltaX : wheel.deltaY;
+        const bool useX = ! e.mods.isShiftDown() && std::abs (wheel.deltaX) > std::abs (wheel.deltaY);
+        const double delta = useX ? wheel.deltaX : (std::abs (wheel.deltaY) > 0.0f ? wheel.deltaY : wheel.deltaX);
         scrollSamples = juce::jmax (0.0, scrollSamples - delta * 0.25 * timelineWidth / pps);
     }
     else
@@ -1367,6 +1657,10 @@ void ArrangeView::clipMenu (ClipRef ref)
     menu.addItem (6, "Gain...");
     menu.addItem (7, "Rename...");
     menu.addSeparator();
+    menu.addItem (9, "Fade in (0.5 s)");
+    menu.addItem (10, "Fade out (0.5 s)");
+    menu.addItem (11, "Clear fades");
+    menu.addSeparator();
     menu.addItem (8, "Delete");
     juce::Component::SafePointer<ArrangeView> safe (this);
     menu.showMenuAsync ({}, [safe, ref] (int result)
@@ -1467,6 +1761,15 @@ void ArrangeView::clipAction (ClipRef ref, int action)
             if (editor.deleteClip (ref.track, ref.clip, error)) selected = {};
             else report (error);
             break;
+        case 9:
+            if (! editor.setClipFades (ref.track, ref.clip, (juce::int64) std::llround (0.5 * s.rate), c.fadeOut, error)) report (error);
+            break;
+        case 10:
+            if (! editor.setClipFades (ref.track, ref.clip, c.fadeIn, (juce::int64) std::llround (0.5 * s.rate), error)) report (error);
+            break;
+        case 11:
+            if (! editor.setClipFades (ref.track, ref.clip, 0, 0, error)) report (error);
+            break;
         default:
             return;
     }
@@ -1558,13 +1861,55 @@ void ArrangeView::finishOpenDialogForTest (bool accept, const juce::String& text
 // ---- files ---------------------------------------------------------------------------------------------------------------------------
 bool ArrangeView::isInterestedInFileDrag (const juce::StringArray& files)
 {
+    if (files.size() == 1 && juce::File (files[0]).hasFileExtension ("olympus"))
+        return (bool) onProjectDropped;
     for (auto& f : files)
         if (isAudioFile (juce::File (f))) return true;
     return false;
 }
 
+void ArrangeView::updateDropHover (const juce::StringArray& files, int x, int y)
+{
+    const bool isProject = files.size() == 1 && juce::File (files[0]).hasFileExtension ("olympus");
+    const int newTrack = (isProject || y < laneTop() || x < kHeaderWidth) ? -1 : trackAt (y, (int) snapshot().tracks.size());
+    if (! draggingFiles || dragHoverTrack != newTrack)
+    {
+        draggingFiles = true;
+        dragHoverTrack = newTrack;
+        repaint();
+    }
+}
+
+void ArrangeView::fileDragEnter (const juce::StringArray& files, int x, int y)
+{
+    updateDropHover (files, x, y);
+}
+
+void ArrangeView::fileDragMove (const juce::StringArray& files, int x, int y)
+{
+    updateDropHover (files, x, y);
+}
+
+void ArrangeView::fileDragExit (const juce::StringArray&)
+{
+    if (draggingFiles || dragHoverTrack != -1)
+    {
+        draggingFiles = false;
+        dragHoverTrack = -1;
+        repaint();
+    }
+}
+
 void ArrangeView::filesDropped (const juce::StringArray& files, int x, int y)
 {
+    draggingFiles = false;
+    dragHoverTrack = -1;
+    repaint();
+    if (files.size() == 1 && juce::File (files[0]).hasFileExtension ("olympus"))
+    {
+        if (onProjectDropped) onProjectDropped (juce::File (files[0]));
+        return;
+    }
     if (y < laneTop() || ! onFilesDropped) return;
     const auto s = snapshot();
     const double pps = pxPerSample (s.rate);

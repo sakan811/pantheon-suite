@@ -140,9 +140,18 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
 // of its first block, so the position is read here, before the block plays.
 void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int numIn, float* const* out, int numOut, int n)
 {
+    if (owner.deviceStarting.load())
+    {
+        if (out != nullptr && numOut > 0)
+            for (int ch = 0; ch < numOut; ++ch)
+                if (out[ch] != nullptr)
+                    juce::FloatVectorOperations::clear (out[ch], n);
+        return;
+    }
     // the take's first sample is the playhead of the first block the recorder wrote: push says which block that was, so the start and the
     // write are one decision. The position is read before this block plays.
-    if (owner.recorder.push (in, numIn, n) && owner.source.recordStart.load() < 0)
+    if (! owner.recordStarting.load()
+        && owner.recorder.push (in, numIn, n) && owner.source.recordStart.load() < 0)
         owner.source.recordStart = owner.source.position.load();
     if (out == nullptr || numOut <= 0)
     {
@@ -180,13 +189,23 @@ void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice
     const double rate = hasDevice ? started->getCurrentSampleRate() : 0.0;
     const int bufSize = hasDevice ? started->getCurrentBufferSizeSamples() : 0;
     const juce::BigInteger activeIn = hasDevice ? started->getActiveInputChannels() : juce::BigInteger();
+    const std::uint64_t seq = ++owner.deviceStartSeq;
 
-    auto apply = [safe = juce::Component::SafePointer<MainComponent> (&owner), hasDevice, rate, bufSize, activeIn, refresh = ! onMessageThread]
+    auto apply = [safe = juce::Component::SafePointer<MainComponent> (&owner), seq, hasDevice, rate, bufSize, activeIn, refresh = ! onMessageThread]
     {
         if (safe == nullptr)
             return;
+        struct ResetStarting
+        {
+            juce::Component::SafePointer<MainComponent> s;
+            std::uint64_t seq;
+            ~ResetStarting() { if (s != nullptr && seq == s->deviceStartSeq.load()) s->deviceStarting = false; }
+        } reset { safe, seq };
+        if (seq != safe->deviceStartSeq.load())
+            return;
         if (safe->recorder.isRecording())
             safe->stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
+        safe->readDevice();
         if (! hasDevice)
             return;
         safe->deviceRate = rate;
@@ -201,12 +220,15 @@ void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice
         apply();
         return;
     }
+    owner.deviceStarting = true;
     juce::MessageManager::callAsync (std::move (apply));
 }
 
 // Device thread. Only a flag: the timer ends a take that the device stopped under (on the message thread).
 void MainComponent::DeviceCallback::audioDeviceStopped()
 {
+    ++owner.deviceStartSeq;
+    owner.deviceStarting = false;
     owner.deviceStopped = true;
 }
 
@@ -264,7 +286,11 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); repaint (noteStrip); };
     arrange.onTrackMenu = [this] (int track) { showTrackMenu (track); };
     arrange.onRemoveTrack = [this] (int track) { removeTrack (track); };
-    arrange.onFilesDropped = [this] (const juce::StringArray& files, int track, juce::int64 at) { importFiles (files, track, at); };
+    arrange.onFilesDropped = [this] (const juce::StringArray& files, int track, juce::int64 at)
+    {
+        if (! refuseWhileBusy()) importFiles (files, track, at);
+    };
+    arrange.onProjectDropped = [this] (const juce::File& file) { openProjectRequested (file); };
     arrange.reportError = [this] (const juce::String& message) { showError (message); };
     arrange.onInputMenu = [this] (int track) { showInputMenu (track); };
     // an armed track's meter shows its input: the larger of its one or two device inputs, since the last read
@@ -423,7 +449,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     // the checks fill the catalog here, before the monitor chain is read (the app's scan does it above, or after the first scan)
     if (opts.fillCatalog)
         opts.fillCatalog (session.catalog);
-    if (! session.catalog.names().isEmpty())
+    if (! scanQueued)
         loadMonitorChain();
     adoptDeviceRate(); // a session without a rate takes the device's; one with a project at another rate is converted
 
@@ -456,6 +482,8 @@ MainComponent::~MainComponent()
         deviceManager.removeChangeListener (this);
         deviceManager.removeAudioCallback (&io);
     }
+    if (searchWindow != nullptr)
+        searchWindow->exitModalState (0);
     audioDialog.reset();
     closeEditors();
     setLookAndFeel (nullptr);
@@ -523,7 +551,7 @@ void MainComponent::askToDiscard (const juce::String& action, std::function<void
     // a take that runs is placed first: its clips are what would be lost, and the question then sees them as changes
     if (recorder.isRecording())
         stopRecording();
-    if (! session.dirty || session.tracks.empty()) { proceed(); return; }
+    if (! session.dirty) { proceed(); return; }
     auto answer = Unsaved::discard;
     {
         const DialogBusy busy (dialogOpen);
@@ -540,10 +568,10 @@ void MainComponent::askToDiscard (const juce::String& action, std::function<void
         return;
     }
     // the chooser that asked is still inside its callback: the action (it may open another chooser) runs on the next message
-    saveProjectAs ([this, proceed = std::move (proceed)] (bool saved)
+    saveProjectAs ([safe = juce::Component::SafePointer<MainComponent> (this), proceed = std::move (proceed)] (bool saved)
     {
-        if (! saved) return;
-        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this), proceed]
+        if (safe == nullptr || ! saved) return;
+        juce::MessageManager::callAsync ([safe, proceed]
         {
             if (safe != nullptr) proceed();
         });
@@ -789,11 +817,13 @@ void MainComponent::showInputMenu (int track)
     else if (choices.empty())
         menu.addItem ("The device has no active input", false, false, nullptr);
     for (const auto& c : choices)
-        menu.addItem (c.label, true, c.left == current.inputLeft && c.right == current.inputRight, [this, track, c]
+        menu.addItem (c.label, true, c.left == current.inputLeft && c.right == current.inputRight,
+                      [safe = juce::Component::SafePointer<MainComponent> (this), track, c]
         {
+            if (safe == nullptr) return;
             juce::String error;
-            if (! session.setTrackInput (track, c.left, c.right, error)) showError (error);
-            requestRefresh();
+            if (! safe->session.setTrackInput (track, c.left, c.right, error)) safe->showError (error);
+            safe->requestRefresh();
         });
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&arrange));
 }
@@ -837,19 +867,20 @@ bool MainComponent::startRecording()
         showError (error);
         return false;
     }
-    const bool wasPlaying = source.playing.load();
     takeFrom = position();
     setTakeLatency();
     syncTransport();
     session.prepare (false);
     source.recordStart = -1;   // set by the first device block the recorder runs in
-    source.playing = true;
+    recordStarting = true;
     if (! beginRecording (recorder, session, recordingFolder(), device.rate, error))
     {
-        source.playing = wasPlaying;
+        recordStarting = false;
         showError (error);
         return false;
     }
+    source.playing = true;
+    recordStarting = false;
     session.dirty = true;   // a take's WAV is on disk from its first block: the project is dirty now, so a quit asks and the autosave runs
     {
         const juce::ScopedLock sl (session.lock);
@@ -961,7 +992,7 @@ void MainComponent::updateRecording()
     const juce::int64 heard = source.recordStart.load();
     arrange.recordingFrom = (double) (heard >= 0 ? heard : takeFrom);
     arrange.recordingTo = (double) position();
-    repaint();
+    repaint ({ positionBox.getX() - 148, kRowC, 140, 28 });
 }
 
 // The master section, on the timer. The session's peaks are read here and only here (exchange resets them). They are read before the device's
@@ -1044,6 +1075,11 @@ void MainComponent::newProject()
 
 bool MainComponent::openProject (const juce::File& file)
 {
+    if (! file.existsAsFile())
+    {
+        showError (file.getFileName() + " could not be found.");
+        return false;
+    }
     projectSkipped = false;   // the user opened one: the note about the last start's project is no longer news
     stopRecording();
     closeTrackEditors();
@@ -1093,9 +1129,10 @@ bool MainComponent::saveProject()
 void MainComponent::saveProjectAs (std::function<void (bool)> done)
 {
     const auto start = session.projectFile == juce::File() ? juce::File::getSpecialLocation (juce::File::userDocumentsDirectory) : session.projectFile;
-    chooseSaveFile ("Save the project", start, [this, done] (const juce::File& file)
+    chooseSaveFile ("Save the project", start, [safe = juce::Component::SafePointer<MainComponent> (this), done] (const juce::File& file)
     {
-        const bool saved = file != juce::File() && saveTo (file.withFileExtension ("olympus"));
+        if (safe == nullptr) return;
+        const bool saved = file != juce::File() && safe->saveTo (file.withFileExtension ("olympus"));
         if (done) done (saved);
     });
 }
@@ -1200,8 +1237,7 @@ void MainComponent::toggleMetronome()
 
 void MainComponent::zoomBy (double factor)
 {
-    arrange.zoom = juce::jlimit (0.05, 4000.0, arrange.zoom * factor);
-    arrange.repaint();
+    arrange.zoomBy (factor);
 }
 
 void MainComponent::removeTrack (int index)
@@ -1244,7 +1280,11 @@ void MainComponent::togglePlay()
 {
     if (recorder.isRecording()) { stopRecording(); return; }
     if (source.playing.load()) { source.playing = false; return; }
-    if (session.tracks.empty()) return;
+    if (session.tracks.empty() || (session.length() <= 0 && ! session.loopOn && ! session.metronomeOn))
+    {
+        if (notify) notify ("No tracks or audio yet: drop audio files on the window or click Import audio.");
+        return;
+    }
     syncTransport();
     // at the end of the audio (and not looping), playing starts again from the beginning
     if (! session.loopOn && position() >= endOfPlay()) seek (0);
@@ -1290,6 +1330,7 @@ void MainComponent::seek (juce::int64 sample)
     }
     session.clearDelayRings();
     source.position = juce::jmax ((juce::int64) 0, sample);
+    syncPlayhead();
 }
 
 void MainComponent::syncTransport()
@@ -1303,9 +1344,10 @@ void MainComponent::syncTransport()
 
 void MainComponent::filesDropped (const juce::StringArray& files, int, int)
 {
+    if (refuseWhileBusy()) return;
     // dropped outside the arrangement: a project opens, audio goes on new tracks at the playhead
     if (files.size() == 1 && juce::File (files[0]).hasFileExtension ("olympus"))
-        askToDiscard ("Open it and lose them?", [this, f = files[0]] { openProject (juce::File (f)); });
+        openProjectRequested (juce::File (files[0]));
     else
         importFiles (files, -1, position());
 }
@@ -1577,47 +1619,145 @@ void MainComponent::finishRender (const juce::File& folder, const RenderResult& 
 // ---- plugins and tracks ------------------------------------------------------------------------------------------------------
 void MainComponent::showPluginsMenu()
 {
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
     juce::PopupMenu menu;
     menu.addSectionHeader ("Found: " + juce::String (session.catalog.names().size()) + " plugins");
     for (auto& n : session.catalog.names()) menu.addItem (n, false, false, nullptr);
     menu.addSeparator();
-    menu.addItem ("Suite plugins only", true, settings.scanSuiteOnly, [this]
+    menu.addItem ("Suite plugins only", true, settings.scanSuiteOnly, [safe]
     {
-        settings.scanSuiteOnly = ! settings.scanSuiteOnly;
-        session.catalog.setSuiteOnly (settings.scanSuiteOnly);
-        settings.save (opts.settingsFile);
-        requestRefresh();
+        if (safe == nullptr) return;
+        safe->settings.scanSuiteOnly = ! safe->settings.scanSuiteOnly;
+        safe->session.catalog.setSuiteOnly (safe->settings.scanSuiteOnly);
+        safe->settings.save (safe->opts.settingsFile);
+        safe->requestRefresh();
     });
-    menu.addItem ("Look in a folder...", [this] { chooseFolder(); });
-    menu.addItem ("Rescan plugins", [this] { scanPlugins (true); requestRefresh(); });
+    menu.addItem ("Look in a folder...", [safe] { if (safe != nullptr) safe->chooseFolder(); });
+    menu.addItem ("Rescan plugins", [safe] { if (safe != nullptr) { safe->scanPlugins (true); safe->requestRefresh(); } });
     if (! session.catalog.blacklisted().isEmpty())
-        menu.addItem ("Forget blacklisted plugins", [this] { session.catalog.clearBlacklist(); scanPlugins (true); requestRefresh(); });
+        menu.addItem ("Forget blacklisted plugins", [safe] { if (safe != nullptr) { safe->session.catalog.clearBlacklist(); safe->scanPlugins (true); safe->requestRefresh(); } });
     if (monitorChainSkipped())
-        menu.addItem ("Load saved monitor chain", [this] { loadSkippedMonitorChain(); requestRefresh(); });
+        menu.addItem ("Load saved monitor chain", [safe] { if (safe != nullptr) { safe->loadSkippedMonitorChain(); safe->requestRefresh(); } });
     if (! settings.pluginFolders.isEmpty())
     {
         menu.addSeparator();
         menu.addSectionHeader ("Folders");
         for (auto& f : settings.pluginFolders)
-            menu.addItem ("Forget " + juce::File (f).getFileName(), [this, f] { settings.pluginFolders.removeString (f); settings.save (opts.settingsFile); scanPlugins(); });
+            menu.addItem ("Forget " + juce::File (f).getFileName(), [safe, f]
+            {
+                if (safe == nullptr) return;
+                safe->settings.pluginFolders.removeString (f);
+                safe->settings.save (safe->opts.settingsFile);
+                safe->scanPlugins();
+            });
     }
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&pluginsButton));
 }
 
-void MainComponent::showAddPluginMenu (int track)
+void MainComponent::populatePluginMenu (juce::PopupMenu& menu, std::function<void (const juce::String&)> onPick)
 {
-    juce::PopupMenu menu;
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
     const auto names = session.catalog.names();
     if (names.isEmpty())
+    {
         menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
-    for (auto& n : names)
-        menu.addItem (n, [this, track, n]
+        return;
+    }
+    menu.addItem ("Search plugins...", [safe, onPick]
+    {
+        if (safe != nullptr) safe->showPluginSearch (onPick);
+    });
+    menu.addSeparator();
+    if (names.size() <= 25)
+    {
+        for (const auto& n : names)
+            menu.addItem (n, [safe, onPick, n] { if (safe != nullptr && onPick) onPick (n); });
+    }
+    else
+    {
+        std::map<juce::String, juce::PopupMenu> makers;
+        for (const auto& n : names)
+            makers[makerOf (session.catalog, n)].addItem (n, [safe, onPick, n] { if (safe != nullptr && onPick) onPick (n); });
+        for (auto& [maker, sub] : makers)
+            menu.addSubMenu (maker, sub);
+    }
+}
+
+void MainComponent::showPluginSearch (std::function<void (const juce::String&)> onPick)
+{
+    if (dialogOpen) return;
+    dialogOpen = true;
+    auto* box = new juce::AlertWindow ("Search plugins", "Filter by plugin name or maker:", juce::MessageBoxIconType::NoIcon);
+    searchWindow = box;
+    box->addTextEditor ("query", {}, {});
+    box->addButton ("Find", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    const auto safeBox = juce::Component::SafePointer<juce::AlertWindow> (box);
+    box->enterModalState (true, juce::ModalCallbackFunction::create ([safe, safeBox, onPick] (int result)
+    {
+        if (safe == nullptr) return;
+        safe->searchWindow = nullptr;
+        if (result != 1 || safeBox == nullptr) { safe->dialogOpen = false; return; }
+        const auto query = safeBox->getTextEditorContents ("query").trim();
+        if (query.isEmpty()) { safe->dialogOpen = false; return; }
+
+        juce::StringArray matches;
+        for (const auto& n : safe->session.catalog.names())
         {
-            juce::String error;
-            if (! session.addPlugin (track, n, -1, error)) showError (error);
-            editor.clearUndo();
-            requestRefresh();
+            const auto maker = makerOf (safe->session.catalog, n);
+            if (n.containsIgnoreCase (query) || maker.containsIgnoreCase (query))
+                matches.add (n);
+        }
+        if (matches.isEmpty())
+        {
+            safe->dialogOpen = false;
+            safe->showError ("No plugin matching \"" + query + "\".");
+            return;
+        }
+        for (const auto& n : matches)
+        {
+            if (n.equalsIgnoreCase (query))
+            {
+                safe->dialogOpen = false;
+                if (onPick) onPick (n);
+                return;
+            }
+        }
+        if (matches.size() == 1)
+        {
+            safe->dialogOpen = false;
+            if (onPick) onPick (matches[0]);
+            return;
+        }
+        juce::PopupMenu sub;
+        for (const auto& n : matches)
+        {
+            const auto maker = makerOf (safe->session.catalog, n);
+            const auto label = maker != "Other" ? (n + "  [" + maker + "]") : n;
+            sub.addItem (label, [safe, onPick, n] { if (safe != nullptr && onPick) onPick (n); });
+        }
+        sub.showMenuAsync (juce::PopupMenu::Options(), [safe] (int)
+        {
+            if (safe != nullptr) safe->dialogOpen = false;
         });
+    }), true);
+}
+
+void MainComponent::showAddPluginMenu (int track)
+{
+    if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return;
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    juce::PopupMenu menu;
+    populatePluginMenu (menu, [safe, track] (const juce::String& n)
+    {
+        if (safe == nullptr) return;
+        if (! juce::isPositiveAndBelow (track, (int) safe->session.tracks.size())) return;
+        juce::String error;
+        if (! safe->session.addPlugin (track, n, -1, error)) safe->showError (error);
+        safe->editor.clearUndo();
+        safe->requestRefresh();
+    });
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
@@ -1625,6 +1765,7 @@ void MainComponent::showAddPluginMenu (int track)
 void MainComponent::showTrackMenu (int track)
 {
     if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return;
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
     const auto& chain = session.tracks[(size_t) track]->chain;
     const int count = (int) chain.size();
 
@@ -1636,27 +1777,43 @@ void MainComponent::showTrackMenu (int track)
         const bool missing = chain[(size_t) s]->instance == nullptr;
         const bool bypassed = chain[(size_t) s]->bypass;
         juce::PopupMenu sub;
-        sub.addItem ("Open", ! missing, false, [this, track, s] { openEditor (track, s); });
-        sub.addItem (bypassed ? "Switch on" : "Bypass", [this, track, s, bypassed]
+        sub.addItem ("Open", ! missing, false, [safe, track, s] { if (safe != nullptr) safe->openEditor (track, s); });
+        sub.addItem (bypassed ? "Switch on" : "Bypass", [safe, track, s, bypassed]
         {
+            if (safe == nullptr) return;
             juce::String error;
-            if (! session.setBypass (track, s, ! bypassed, error)) showError (error);
-            requestRefresh();
+            if (! safe->session.setBypass (track, s, ! bypassed, error)) safe->showError (error);
+            safe->requestRefresh();
         });
-        sub.addItem ("Move earlier", s > 0, false, [this, track, s] { closeTrackEditors(); juce::String e; session.movePlugin (track, s, s - 1, e); requestRefresh(); });
-        sub.addItem ("Move later", s < count - 1, false, [this, track, s] { closeTrackEditors(); juce::String e; session.movePlugin (track, s, s + 1, e); requestRefresh(); });
-        sub.addSeparator();
-        sub.addItem ("Remove", [this, track, s]
+        sub.addItem ("Move earlier", s > 0, false, [safe, track, s]
         {
-            closeTrackEditors();
+            if (safe == nullptr) return;
+            safe->closeTrackEditors();
+            juce::String e;
+            safe->session.movePlugin (track, s, s - 1, e);
+            safe->requestRefresh();
+        });
+        sub.addItem ("Move later", s < count - 1, false, [safe, track, s]
+        {
+            if (safe == nullptr) return;
+            safe->closeTrackEditors();
+            juce::String e;
+            safe->session.movePlugin (track, s, s + 1, e);
+            safe->requestRefresh();
+        });
+        sub.addSeparator();
+        sub.addItem ("Remove", [safe, track, s]
+        {
+            if (safe == nullptr) return;
+            safe->closeTrackEditors();
             juce::String error;
-            if (session.removePlugin (track, s, error)) editor.clearUndo(); else showError (error);
-            requestRefresh();
+            if (safe->session.removePlugin (track, s, error)) safe->editor.clearUndo(); else safe->showError (error);
+            safe->requestRefresh();
         });
         menu.addSubMenu (chain[(size_t) s]->plugin + (missing ? "  (not installed)" : bypassed ? "  (bypassed)" : ""), sub);
     }
     menu.addSeparator();
-    menu.addItem ("Add plugin...", [this, track] { showAddPluginMenu (track); });
+    menu.addItem ("Add plugin...", [safe, track] { if (safe != nullptr) safe->showAddPluginMenu (track); });
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
@@ -1721,6 +1878,7 @@ void MainComponent::loadMonitorChain()
     if (monitorLoaded || monitorSkipped)
         return;
     const auto pedal = Settings::monitorPedalFile (opts.settingsFile);
+    pedal.getParentDirectory().createDirectory();
     pedal.replaceWithText ("loading the monitor chain\n");
     juce::StringArray problems;
     monitorLoaded = session.loadMonitor (Settings::monitorFile (opts.settingsFile), problems);
@@ -1746,6 +1904,7 @@ void MainComponent::openLastProjectAtStart()
     if (! last.existsAsFile() || projectSkipped)
         return;
     const auto pedal = Settings::projectPedalFile (opts.settingsFile);
+    pedal.getParentDirectory().createDirectory();
     pedal.replaceWithText ("opening the last project\n");
     openProject (last);
     pedal.deleteFile();
@@ -1898,32 +2057,36 @@ void MainComponent::showMonitorMenu (int index)
     juce::String error;
     auto* slot = session.monitorSlotAt (index, error);
     if (slot == nullptr) return;
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
     const bool missing = slot->instance == nullptr, bypassed = slot->bypass;
     const int count = (int) session.monitor.size();
     juce::PopupMenu menu;
-    menu.addItem ("Open", ! missing, false, [this, slot]
+    menu.addItem ("Open", ! missing, false, [safe, slot]
     {
-        for (int i = 0; i < (int) session.monitor.size(); ++i)
-            if (session.monitor[(size_t) i].get() == slot) { openEditor (-1, i); return; }
+        if (safe == nullptr) return;
+        for (int i = 0; i < (int) safe->session.monitor.size(); ++i)
+            if (safe->session.monitor[(size_t) i].get() == slot) { safe->openEditor (-1, i); return; }
     });
-    menu.addItem (bypassed ? "Switch on" : "Bypass", [this, slot, bypassed]
+    menu.addItem (bypassed ? "Switch on" : "Bypass", [safe, slot, bypassed]
     {
-        for (int i = 0; i < (int) session.monitor.size(); ++i)
-            if (session.monitor[(size_t) i].get() == slot) { setMonitorPluginBypass (i, ! bypassed); return; }
+        if (safe == nullptr) return;
+        for (int i = 0; i < (int) safe->session.monitor.size(); ++i)
+            if (safe->session.monitor[(size_t) i].get() == slot) { safe->setMonitorPluginBypass (i, ! bypassed); return; }
     });
     menu.addSeparator();
-    menu.addItem ("Move left", index > 0, false, [this, index] { moveMonitorPlugin (index, index - 1); });
-    menu.addItem ("Move right", index < count - 1, false, [this, index] { moveMonitorPlugin (index, index + 1); });
+    menu.addItem ("Move left", index > 0, false, [safe, index] { if (safe != nullptr) safe->moveMonitorPlugin (index, index - 1); });
+    menu.addItem ("Move right", index < count - 1, false, [safe, index] { if (safe != nullptr) safe->moveMonitorPlugin (index, index + 1); });
     menu.addSeparator();
-    menu.addItem ("Remove", [this, slot]
+    menu.addItem ("Remove", [safe, slot]
     {
-        for (int i = 0; i < (int) session.monitor.size(); ++i)
-            if (session.monitor[(size_t) i].get() == slot) { removeMonitorPlugin (i); return; }
+        if (safe == nullptr) return;
+        for (int i = 0; i < (int) safe->session.monitor.size(); ++i)
+            if (safe->session.monitor[(size_t) i].get() == slot) { safe->removeMonitorPlugin (i); return; }
     });
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
-// The plugins to add to the monitor chain: one list; over about 25 plugins, one sub-menu per maker.
+// The plugins to add to the monitor chain: searchable, and over 25 plugins grouped into one sub-menu per maker.
 void MainComponent::showAddMonitorMenu()
 {
     if (! monitorLoaded)
@@ -1932,21 +2095,12 @@ void MainComponent::showAddMonitorMenu()
                                                : juce::String ("The monitor chain is read after the plugin scan has finished."));
         return;
     }
-    const auto names = session.catalog.names();
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
     juce::PopupMenu menu;
-    if (names.isEmpty())
-        menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
-    else if (names.size() <= 25)
-        for (const auto& n : names)
-            menu.addItem (n, [this, n] { addMonitorPlugin (n); });
-    else
+    populatePluginMenu (menu, [safe] (const juce::String& n)
     {
-        std::map<juce::String, juce::PopupMenu> makers;
-        for (const auto& n : names)
-            makers[makerOf (session.catalog, n)].addItem (n, [this, n] { addMonitorPlugin (n); });
-        for (auto& [maker, sub] : makers)
-            menu.addSubMenu (maker, sub);
-    }
+        if (safe != nullptr) safe->addMonitorPlugin (n);
+    });
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&monitorAddButton));
 }
 
@@ -2026,6 +2180,10 @@ void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& p
     stopRecording();
     closeTrackEditors();
     source.playing = false;
+    const auto pedal = Settings::projectPedalFile (opts.settingsFile);
+    pedal.getParentDirectory().createDirectory();
+    pedal.replaceWithText ("recovering the last project\n");
+    struct PedalGuard { juce::File f; ~PedalGuard() { f.deleteFile(); } } pedalGuard { pedal };
     juce::String error;
     if (! session.load (autosave, error))
     {
@@ -2037,6 +2195,7 @@ void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& p
     session.projectFile = project;
     session.dirty = true;
     editor.clearUndo();
+    clearMasterClip();
     adoptDeviceRate();
     arrange.selected = {};
     seek (0);
@@ -2045,6 +2204,39 @@ void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& p
     arrange.repaint();
     if (session.warnings.size() > 0)
         showError ("Recovered with notes:\n\n" + session.warnings.joinIntoString ("\n"));
+}
+
+bool MainComponent::hasOpenTrackEditor() const
+{
+    for (const auto& [slot, win] : windows)
+    {
+        bool isMonitor = false;
+        for (const auto& m : session.monitor)
+            if (m.get() == slot) { isMonitor = true; break; }
+        if (! isMonitor)
+            return true;
+    }
+    return false;
+}
+
+juce::int64 MainComponent::trackPluginStateHash() const
+{
+    juce::uint64 h = 14695981039346656037ULL;
+    for (const auto& t : session.tracks)
+        for (const auto& s : t->chain)
+        {
+            const auto mb = session.stateOf (*s);
+            const auto* data = static_cast<const juce::uint8*> (mb.getData());
+            const size_t n = mb.getSize();
+            h ^= (juce::uint64) n;
+            h *= 1099511628211ULL;
+            for (size_t i = 0; i < n; ++i)
+            {
+                h ^= data[i];
+                h *= 1099511628211ULL;
+            }
+        }
+    return h == 0 ? 1 : (juce::int64) h;
 }
 
 bool MainComponent::checkExternalProjectChange()
@@ -2062,20 +2254,16 @@ bool MainComponent::checkExternalProjectChange()
     }
     if (mtime == loadedProjectMtime)
         return false;
-    if (! windows.empty())
+    if (hasOpenTrackEditor())
     {
         const juce::ScopedTryLock sl (session.lock);
         if (! sl.isLocked())
             return false;
-        juce::int64 hash = 0;
-        for (auto& t : session.tracks)
-            for (auto& s : t->chain)
-                hash = hash * 31 + session.stateOf (*s).toBase64Encoding().hashCode64();
+        const auto hash = trackPluginStateHash();
         if (lastEditorHash != 0 && hash != lastEditorHash)
             session.dirty = true;
         lastEditorHash = hash;
     }
-    loadedProjectMtime = mtime;
     if (session.dirty)
     {
         bool reload = false;
@@ -2084,12 +2272,16 @@ bool MainComponent::checkExternalProjectChange()
             reload = askReload && askReload ("The project file was changed on disk (for example by the MCP server). Reload it and lose the unsaved changes in this window?");
         }
         if (! reload)
+        {
+            loadedProjectMtime = mtime;
             return false;
+        }
     }
     const auto file = session.projectFile;
     const auto discarded = autosaveFile();
     if (! openProject (file))
         return false;
+    loadedProjectMtime = mtime;
     discarded.deleteFile();
     return true;
 }
@@ -2114,28 +2306,25 @@ void MainComponent::timerCallback()
         repaint (noteStrip);
     }
     arrange.refresh();
-    updateTransport();
     if (rendering)
         return;
+    updateTransport();
     // the autosave: every kAutosaveInterval seconds, the project is written beside its file if it has changes (autosaveNow)
     if (juce::Time::getMillisecondCounterHiRes() - lastAutosaveMs >= kAutosaveInterval * 1000.0)
     {
         lastAutosaveMs = juce::Time::getMillisecondCounterHiRes();
         autosaveNow();
     }
-    // A plugin edited in its own window changes the project: notice it by what the plugins would save. Read every 15 ticks while a window is
-    // open, and once more when the last one closes (so an edit made just before the close is not lost). The plugins are read under the
-    // lock, which is only tried: processBlock may run beside it, and a busy lock is looked at again on the next tick.
-    const bool closing = windows.empty();
+    // A plugin edited in its own window changes the project: notice it by what the plugins would save. Read every 15 ticks while a track
+    // plugin window is open, and once more when the last one closes (so an edit made just before the close is not lost). The plugins are read
+    // under the lock, which is only tried: processBlock may run beside it, and a busy lock is looked at again on the next tick.
+    const bool closing = ! hasOpenTrackEditor();
     if (! (closing ? lastEditorHash == 0 : (++tick % 15 != 0)))
     {
         const juce::ScopedTryLock sl (session.lock);
         if (sl.isLocked())
         {
-            juce::int64 hash = 0;
-            for (auto& t : session.tracks)
-                for (auto& s : t->chain)
-                    hash = hash * 31 + session.stateOf (*s).toBase64Encoding().hashCode64();
+            const auto hash = trackPluginStateHash();
             if (lastEditorHash != 0 && hash != lastEditorHash) session.dirty = true;
             lastEditorHash = closing ? 0 : hash;
         }
@@ -2148,7 +2337,7 @@ void MainComponent::timerCallback()
 }
 
 // The keys. The window owns the transport and the clip keys; the arrangement takes only its selection and nudges (arrows, Escape).
-// Keys typed into the tempo field never get here (the field takes them).
+// Keys typed into a text editor never get here (or are ignored by the window).
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
     const auto code = key.getKeyCode();
@@ -2156,9 +2345,9 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     const auto mods = key.getModifiers();
     const bool cmd = mods.isCommandDown(), shift = mods.isShiftDown();
     const auto is = [text, code] (juce::juce_wchar c) { return text == c || lowerCase ((juce::juce_wchar) code) == c; };
-    // the tempo field keeps its own keys (its letters, its caret, Home and End, its copy and paste): the jumps and the clipboard keys
-    // stay out of it
-    const bool typing = bpmField.hasKeyboardFocus (true);
+    // a text editor (the tempo field, track rename, knob entry) keeps its own keys
+    const bool typing = bpmField.hasKeyboardFocus (true)
+                        || dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr;
 
     if (cmd)
     {
@@ -2166,8 +2355,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (is ('s')) { if (shift) saveProjectAs(); else saveProject(); return true; }
         if (is ('o')) { openButton.triggerClick(); return true; }
         if (is ('n')) { newButton.triggerClick(); return true; }
-        if (is ('d')) { arrange.duplicateSelected(); return true; }
         if (typing) return false;
+        if (is ('d')) { arrange.duplicateSelected(); return true; }
         if (is ('c')) { arrange.copySelected(); return true; }
         if (is ('x')) { arrange.cutSelected(); return true; }
         if (is ('v')) { syncPlayhead(); arrange.pasteAtPlayhead(); return true; }
@@ -2263,46 +2452,65 @@ void MainComponent::resized()
 void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (colours::background);
-    ui::hw::drawHeaderPlate (g, juce::Rectangle<float> (0.0f, 0.0f, (float) getWidth(), (float) kHeaderHeight - 6.0f));
-    ui::hw::drawNameplate (g, { kMargin, 8, 250, 66 }, "Olympus", "Basic DAW", "Pantheon plugins", ! session.tracks.empty(), 24.0f);
+    const auto clip = g.getClipBounds();
+    if (clip.intersects (juce::Rectangle<int> (0, 0, getWidth(), kHeaderHeight)))
+        ui::hw::drawHeaderPlate (g, juce::Rectangle<float> (0.0f, 0.0f, (float) getWidth(), (float) kHeaderHeight - 6.0f));
+    if (clip.intersects (juce::Rectangle<int> (kMargin, 8, 250, 66)))
+        ui::hw::drawNameplate (g, { kMargin, 8, 250, 66 }, "Olympus", "Basic DAW", "Pantheon plugins", ! session.tracks.empty(), 24.0f);
 
     // the position read-out, on glass
-    ui::hw::drawGlass (g, positionBox.toFloat(), 3.0f, colours::amber);
-    g.setColour (colours::amber);
-    g.setFont (ui::lcdFont (14.0f));
-    g.drawText (positionText (session, position()), positionBox.reduced (8, 0), juce::Justification::centredRight);
-    ui::hw::drawGlassOverlay (g, positionBox.toFloat(), 3.0f, false);
+    if (clip.intersects (positionBox))
+    {
+        ui::hw::drawGlass (g, positionBox.toFloat(), 3.0f, colours::amber);
+        g.setColour (colours::amber);
+        g.setFont (ui::lcdFont (14.0f));
+        g.drawText (positionText (session, position()), positionBox.reduced (8, 0), juce::Justification::centredRight);
+        ui::hw::drawGlassOverlay (g, positionBox.toFloat(), 3.0f, false);
+    }
 
     // beside the position: the time of the take in progress in red, else the track count and the sample rate
-    juce::String readout;
-    juce::Colour colour = colours::dim;
-    if (recorder.isRecording())
+    const juce::Rectangle<int> readoutArea { positionBox.getX() - 148, kRowC, 140, 28 };
+    if (clip.intersects (readoutArea))
     {
-        readout = "REC  " + timeText ((juce::int64) recorder.framesRecorded(), device.rate);
-        colour = colours::bad;
+        juce::String readout;
+        juce::Colour colour = colours::dim;
+        if (recorder.isRecording())
+        {
+            readout = "REC  " + timeText ((juce::int64) recorder.framesRecorded(), device.rate);
+            colour = colours::bad;
+        }
+        else
+        {
+            readout = juce::String ((int) session.tracks.size()) + (session.tracks.size() == 1 ? " track" : " tracks")
+                      + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String());
+        }
+        ui::hw::drawLabel (g, readout, readoutArea, juce::Justification::centredRight, colour, 10.5f);
     }
-    else
-    {
-        readout = juce::String ((int) session.tracks.size()) + (session.tracks.size() == 1 ? " track" : " tracks")
-                  + (session.sampleRate > 0.0 ? "  " + juce::String (session.sampleRate / 1000.0, 1) + " kHz" : juce::String());
-    }
-    ui::hw::drawLabel (g, readout, { positionBox.getX() - 148, kRowC, 140, 28 }, juce::Justification::centredRight, colour, 10.5f);
     // the MONITOR strip: its label, a hint while the chain is empty, and the chain's latency beside the CORRECTION switch
-    ui::hw::drawLabel (g, "MONITOR", { monitorStrip.getX(), monitorStrip.getY(), 90, monitorStrip.getHeight() }, juce::Justification::centredLeft, colours::dim, 10.5f);
-    if (monitorButtons.isEmpty())
-        ui::hw::drawLabel (g, "no plugin: the headphones hear the mix as it is", { monitorStrip.getX() + 96, monitorStrip.getY(), 400, monitorStrip.getHeight() },
-                           juce::Justification::centredLeft, colours::dim, 10.0f);
-    ui::hw::drawLabel (g, "latency " + juce::String (monitorLatencyMs(), 1) + " ms", monitorLatencyArea (monitorStrip), juce::Justification::centredRight,
-                       colours::dim, 10.0f);
-    // the master section: its label, and the stereo meter's bars (the track meter's ballistics and colours, on the kit's dark slot)
-    ui::hw::drawLabel (g, "MASTER", { kMargin, kRowC, 50, 28 }, juce::Justification::centredLeft, colours::dim, 10.5f);
-    for (const auto* bar : { &masterBarLeft, &masterBarRight })
+    if (clip.intersects (monitorStrip))
     {
-        g.setColour (juce::Colours::black.withAlpha (0.85f));
-        g.fillRoundedRectangle (bar->expanded (0.0f, 1.0f), 2.0f);
+        ui::hw::drawLabel (g, "MONITOR", { monitorStrip.getX(), monitorStrip.getY(), 90, monitorStrip.getHeight() }, juce::Justification::centredLeft, colours::dim, 10.5f);
+        if (monitorButtons.isEmpty())
+            ui::hw::drawLabel (g, "no plugin: the headphones hear the mix as it is", { monitorStrip.getX() + 96, monitorStrip.getY(), 400, monitorStrip.getHeight() },
+                               juce::Justification::centredLeft, colours::dim, 10.0f);
+        ui::hw::drawLabel (g, "latency " + juce::String (monitorLatencyMs(), 1) + " ms", monitorLatencyArea (monitorStrip), juce::Justification::centredRight,
+                           colours::dim, 10.0f);
     }
-    paintLevelBar (g, masterBarLeft, masterLeft);
-    paintLevelBar (g, masterBarRight, masterRight);
-    ui::drawNoteStrip (g, noteStrip, notes());
+    // the master section: its label, and the stereo meter's bars (the track meter's ballistics and colours, on the kit's dark slot)
+    const juce::Rectangle<int> masterLabelArea { kMargin, kRowC, 50, 28 };
+    if (clip.intersects (masterLabelArea))
+        ui::hw::drawLabel (g, "MASTER", masterLabelArea, juce::Justification::centredLeft, colours::dim, 10.5f);
+    if (clip.intersects (masterBarLeft.getUnion (masterBarRight).expanded (2.0f, 2.0f).toNearestInt()))
+    {
+        for (const auto* bar : { &masterBarLeft, &masterBarRight })
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.85f));
+            g.fillRoundedRectangle (bar->expanded (0.0f, 1.0f), 2.0f);
+        }
+        paintLevelBar (g, masterBarLeft, masterLeft);
+        paintLevelBar (g, masterBarRight, masterRight);
+    }
+    if (clip.intersects (noteStrip))
+        ui::drawNoteStrip (g, noteStrip, notes());
 }
 }
