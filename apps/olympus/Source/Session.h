@@ -245,6 +245,7 @@ public:
         track->name = trackName.isNotEmpty() ? trackName : "Track " + juce::String ((int) tracks.size() + 1);
         makeTrackLocked (*track);
         tracks.push_back (std::move (track));
+        updateLatenciesLocked();
         dirty = true;
         return (int) tracks.size() - 1;
     }
@@ -448,12 +449,23 @@ public:
     // Puts a new plugin (its own defaults) in the chain at `position` (-1 = the end).
     bool addPlugin (int track, const juce::String& query, int position, juce::String& error)
     {
-        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        double snapRate = 0.0;
+        {
+            const juce::ScopedLock sl (lock);
+            if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+            snapRate = sampleRate;
+        }
         const auto exact = catalog.resolve (query, error);
         if (exact.isEmpty()) return false;
-        auto slot = makeSlot (exact, nullptr, error);
+        auto slot = makeSlot (exact, nullptr, error, snapRate);
         if (slot == nullptr) return false;
         const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size()))
+        {
+            if (slot->instance != nullptr) slot->instance->setPlayHead (nullptr);
+            error = "No track " + juce::String (track);
+            return false;
+        }
         auto& chain = tracks[(size_t) track]->chain;
         position = position < 0 || position > (int) chain.size() ? (int) chain.size() : position;
         chain.insert (chain.begin() + position, std::move (slot));
@@ -498,17 +510,33 @@ public:
     // Replaces the chain with new plugins (their defaults), in this order. All names are checked first: a wrong one changes nothing.
     bool setChain (int track, const juce::StringArray& plugins, juce::String& error)
     {
-        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        double snapRate = 0.0;
+        {
+            const juce::ScopedLock sl (lock);
+            if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+            snapRate = sampleRate;
+        }
         std::vector<std::unique_ptr<Slot>> fresh;
+        auto releaseFresh = [&fresh]
+        {
+            for (auto& s : fresh)
+                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        };
         for (const auto& p : plugins)
         {
             const auto exact = catalog.resolve (p, error);
-            if (exact.isEmpty()) return false;
-            auto slot = makeSlot (exact, nullptr, error);
-            if (slot == nullptr) return false;
+            if (exact.isEmpty()) { releaseFresh(); return false; }
+            auto slot = makeSlot (exact, nullptr, error, snapRate);
+            if (slot == nullptr) { releaseFresh(); return false; }
             fresh.push_back (std::move (slot));
         }
         const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size()))
+        {
+            releaseFresh();
+            error = "No track " + juce::String (track);
+            return false;
+        }
         auto& chain = tracks[(size_t) track]->chain;
         for (auto& s : chain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
@@ -652,7 +680,6 @@ public:
     // Bypasses the whole monitor chain. It does not dirty the project: the chain is not part of it.
     void setMonitorBypass (bool bypass)
     {
-        const juce::ScopedLock sl (lock);
         monitorBypass = bypass;
     }
 
@@ -990,14 +1017,24 @@ public:
                 trackGains (*t, left, right);
                 for (int ch = 0; ch < channels; ++ch)
                     out.addFrom (ch, done, t->scratch, ch, 0, count, ch == 0 ? left : right);
-                t->peakL = juce::jmax (t->peakL.load(), t->scratch.getMagnitude (0, 0, count) * left);
-                t->peakR = juce::jmax (t->peakR.load(), t->scratch.getMagnitude (1, 0, count) * right);
+                const float pL = t->scratch.getMagnitude (0, 0, count) * left;
+                const float pR = t->scratch.getMagnitude (1, 0, count) * right;
+                if (std::isfinite (pL)) t->peakL = juce::jmax (t->peakL.load(), pL);
+                if (std::isfinite (pR)) t->peakR = juce::jmax (t->peakR.load(), pR);
             }
         }
         addMetronome (out, start);
         out.applyGain (juce::Decibels::decibelsToGain (masterDb, -100.0f));
-        if (channels > 0) masterPeakL = juce::jmax (masterPeakL.load(), out.getMagnitude (0, 0, n));
-        if (channels > 1) masterPeakR = juce::jmax (masterPeakR.load(), out.getMagnitude (1, 0, n));
+        if (channels > 0)
+        {
+            const float mL = out.getMagnitude (0, 0, n);
+            if (std::isfinite (mL)) masterPeakL = juce::jmax (masterPeakL.load(), mL);
+        }
+        if (channels > 1)
+        {
+            const float mR = out.getMagnitude (1, 0, n);
+            if (std::isfinite (mR)) masterPeakR = juce::jmax (masterPeakR.load(), mR);
+        }
     }
 
     // ---- rendering ------------------------------------------------------------------------------------------------------
@@ -1076,10 +1113,17 @@ public:
 
         const juce::int64 end = stemLength + totalLatency;
         juce::AudioBuffer<float> block (2, options.writeStems ? kBlockSize : 0);
+        struct HeadStop
+        {
+            Session& session;
+            juce::int64 pos = 0;
+            ~HeadStop() { session.publishHead (pos, false); }
+        } headStop { *this, 0 };
 
         for (juce::int64 start = 0; start < end; start += kBlockSize)
         {
             const int n = (int) juce::jmin ((juce::int64) kBlockSize, end - start);
+            headStop.pos = start;
             publishHead (start, true);
             for (auto& o : outs)
             {
@@ -1096,7 +1140,13 @@ public:
                     {
                         block.copyFrom (ch, 0, o.track->scratch, ch, (int) first, count);
                         block.applyGain (ch, 0, count, ch == 0 ? o.left : o.right);
-                        o.peak = juce::jmax (o.peak, block.getMagnitude (ch, 0, count));
+                        auto* dst = block.getWritePointer (ch);
+                        for (int i = 0; i < count; ++i)
+                            if (! std::isfinite (dst[i]))
+                                dst[i] = 0.0f;
+                        const float mag = block.getMagnitude (ch, 0, count);
+                        if (std::isfinite (mag))
+                            o.peak = juce::jmax (o.peak, mag);
                     }
                     if (o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count))
                     {
@@ -1130,7 +1180,13 @@ public:
                     for (int ch = 0; ch < 2; ++ch)
                     {
                         mixRing.applyGain (ch, r0, chunk, masterGain);
-                        mixPeak = juce::jmax (mixPeak, mixRing.getMagnitude (ch, r0, chunk));
+                        auto* dst = mixRing.getWritePointer (ch, r0);
+                        for (int i = 0; i < chunk; ++i)
+                            if (! std::isfinite (dst[i]))
+                                dst[i] = 0.0f;
+                        const float mag = mixRing.getMagnitude (ch, r0, chunk);
+                        if (std::isfinite (mag))
+                            mixPeak = juce::jmax (mixPeak, mag);
                     }
                     if (! mixWriter->writeFromAudioSampleBuffer (mixRing, r0, chunk))
                     {
@@ -1240,21 +1296,25 @@ public:
 
     bool save (const juce::File& file, juce::String& error)
     {
-        const auto previousName = name;
-        name = file.getFileNameWithoutExtension(); // the project is named after its file
+        const auto nextName = file.getFileNameWithoutExtension(); // the project is named after its file
         std::unique_ptr<juce::XmlElement> xml;
         {
             // every plugin's state is read here: not while processBlock runs beside it
             const juce::ScopedLock sl (lock);
+            const auto previousName = name;
+            name = nextName;
             xml = toXml (file);
+            name = previousName;
         }
+        file.getParentDirectory().createDirectory();
         juce::TemporaryFile temp (file);
         if (! xml->writeTo (temp.getFile()) || ! temp.overwriteTargetFileWithTemporary())
         {
-            name = previousName;
             error = "Cannot write " + file.getFullPathName();
             return false;
         }
+        const juce::ScopedLock sl (lock);
+        name = nextName;
         projectFile = file;
         dirty = false;
         return true;
@@ -1293,6 +1353,8 @@ public:
         double rate = xml->getDoubleAttribute ("sampleRate", 0.0);
         if (! std::isfinite (rate) || rate < 0.0)
             rate = 0.0;
+        static constexpr juce::int64 kMaxSafeSample = std::numeric_limits<juce::int64>::max() / 4;
+        std::vector<double> slotPreparedRates;
         std::vector<std::unique_ptr<Track>> loaded;
         for (auto* e : xml->getChildWithTagNameIterator ("Track"))
         {
@@ -1319,6 +1381,7 @@ public:
                 juce::MemoryBlock state;
                 state.fromBase64Encoding (c->getStringAttribute ("state"));
                 juce::String problem2;
+                const double slotRate = rate > 0.0 ? rate : (sampleRate > 0.0 ? sampleRate : 48000.0);
                 auto slot = makeSlot (c->getStringAttribute ("plugin"), &state, problem2, rate);
                 if (slot == nullptr)
                 {
@@ -1326,6 +1389,10 @@ public:
                     slot = std::make_unique<Slot>();
                     slot->plugin = c->getStringAttribute ("plugin");
                     slot->savedState = state;
+                }
+                else
+                {
+                    slotPreparedRates.push_back (slotRate);
                 }
                 slot->bypass = c->getBoolAttribute ("bypass");
                 t->chain.push_back (std::move (slot));
@@ -1365,7 +1432,8 @@ public:
 
         std::vector<Marker> markerList;
         for (auto* m : xml->getChildWithTagNameIterator ("Marker"))
-            markerList.push_back ({ m->getStringAttribute ("name"), juce::jmax ((juce::int64) 0, m->getStringAttribute ("sample", "0").getLargeIntValue()) });
+            markerList.push_back ({ m->getStringAttribute ("name"),
+                                    juce::jlimit ((juce::int64) 0, kMaxSafeSample, m->getStringAttribute ("sample", "0").getLargeIntValue()) });
         std::stable_sort (markerList.begin(), markerList.end(), [] (const Marker& a, const Marker& b) { return a.start < b.start; });
 
         const juce::ScopedLock sl (lock);
@@ -1392,8 +1460,8 @@ public:
                 problems.add ("The master gain was above +12 dB and is set to +12 dB.");
             masterDb = (float) juce::jlimit (-100.0, 12.0, savedMasterDb);
         }
-        loopStart = juce::jmax ((juce::int64) 0, xml->getStringAttribute ("loopStart", "0").getLargeIntValue());
-        loopEnd = juce::jmax ((juce::int64) 0, xml->getStringAttribute ("loopEnd", "0").getLargeIntValue());
+        loopStart = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml->getStringAttribute ("loopStart", "0").getLargeIntValue());
+        loopEnd = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml->getStringAttribute ("loopEnd", "0").getLargeIntValue());
         loopOn = xml->getBoolAttribute ("loopOn") && loopEnd > loopStart;
         metronomeOn = xml->getBoolAttribute ("metronome");
         snapOn = xml->getBoolAttribute ("snap", true);
@@ -1401,7 +1469,17 @@ public:
         projectFile = file;
         name = xml->getStringAttribute ("name", file.getFileNameWithoutExtension());
         warnings = problems;
-        prepareLocked (false);
+        const double finalRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+        const bool needsPrepare = std::any_of (slotPreparedRates.begin(), slotPreparedRates.end(),
+                                               [finalRate] (double r) { return std::abs (r - finalRate) > 0.5; });
+        if (needsPrepare)
+            prepareLocked (false);
+        else
+        {
+            monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
+            updateLatenciesLocked();
+            clearDelayRingsLocked();
+        }
         dirty = false;
         return true;
     }
@@ -1805,8 +1883,13 @@ private:
     static juce::AudioBuffer<float> resampled (const juce::AudioBuffer<float>& raw, double fromRate, double toRate)
     {
         const int len = raw.getNumSamples();
+        if (len <= 0 || ! (fromRate > 0.0) || ! (toRate > 0.0) || ! std::isfinite (fromRate) || ! std::isfinite (toRate))
+            return {};
         const double ratio = fromRate / toRate;
-        const int outLen = (int) std::ceil ((double) len / ratio);
+        const double wanted = std::ceil ((double) len / ratio);
+        if (! std::isfinite (wanted) || wanted > (double) (std::numeric_limits<int>::max() - 16))
+            return {};
+        const int outLen = (int) wanted;
         juce::AudioBuffer<float> out (2, outLen);
         for (int ch = 0; ch < 2; ++ch)
         {
@@ -1834,9 +1917,10 @@ private:
         else
             c.file = relFile;
 
+        static constexpr juce::int64 kMaxSafeSample = std::numeric_limits<juce::int64>::max() / 4;
         c.name = legacy ? c.file.getFileNameWithoutExtension() : e.getStringAttribute ("name", c.file.getFileNameWithoutExtension());
-        c.start = juce::jmax ((juce::int64) 0, e.getStringAttribute ("start", "0").getLargeIntValue());
-        c.offset = juce::jmax ((juce::int64) 0, e.getStringAttribute ("offset", "0").getLargeIntValue());
+        c.start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, e.getStringAttribute ("start", "0").getLargeIntValue());
+        c.offset = juce::jlimit ((juce::int64) 0, kMaxSafeSample, e.getStringAttribute ("offset", "0").getLargeIntValue());
         const juce::int64 savedLength = e.getStringAttribute ("length", "-1").getLargeIntValue();
         const double rawGainDb = e.getDoubleAttribute ("gainDb", 0.0);
         c.gainDb = std::isfinite (rawGainDb) ? (float) juce::jlimit (-100.0, 24.0, rawGainDb) : 0.0f;
@@ -2009,16 +2093,16 @@ private:
         const juce::int64 click = (juce::int64) std::llround (0.015 * sr);
         if (click <= 0)
             return;
-        const int beatsInBar = juce::jmax (1, (int) std::lround (tempo.beatsPerBar()));
         const double beatsFrom = tempo.samplesToBeats ((double) (start - click));
         const double beatsTo = tempo.samplesToBeats ((double) (start + n));
         for (juce::int64 k = juce::jmax ((juce::int64) 0, (juce::int64) std::floor (beatsFrom)); (double) k <= beatsTo; ++k)
         {
-            const juce::int64 onset = (juce::int64) std::llround (tempo.beatsToSamples ((double) k));
+            const double beatSample = tempo.beatsToSamples ((double) k);
+            const juce::int64 onset = (juce::int64) std::llround (beatSample);
             const juce::int64 from = juce::jmax (start, onset), to = juce::jmin (start + n, onset + click);
             if (to <= from)
                 continue;
-            const bool bar = k % beatsInBar == 0;
+            const bool bar = tempo.barBeatAt (beatSample).beat == 1;
             const double frequency = bar ? 1500.0 : 1000.0;
             const float amplitude = bar ? 0.35f : 0.25f;
             for (juce::int64 s = from; s < to; ++s)
