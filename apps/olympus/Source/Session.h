@@ -37,6 +37,8 @@ inline constexpr int kProjectVersion = 2;
 inline constexpr int kMonitorVersion = 1; // monitor.xml, separate from the project's version
 inline constexpr int kBlockSize = 512;
 inline constexpr int kMaxMonitorChannels = 8; // the most channels the monitor chain is handed (a device's outputs past this are not run)
+inline constexpr juce::int64 kMaxSafeSample = std::numeric_limits<juce::int64>::max() / 4; // the largest timeline position: a rate change scales it without overflowing
+inline constexpr double kMinValidRate = 8000.0, kMaxValidRate = 768000.0; // a saved sample rate outside these is not a rate Olympus can use
 
 // Hears a plugin say its latency has changed (a linear-phase switch, say). A plugin may say so on any thread, so it only sets a flag: the
 // window's timer reads it on the message thread and the session follows (Session::takeLatencyChange). One is owned by each Session.
@@ -462,7 +464,7 @@ public:
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (track, (int) tracks.size()))
         {
-            if (slot->instance != nullptr) slot->instance->setPlayHead (nullptr);
+            if (slot->instance != nullptr) { slot->instance->releaseResources(); slot->instance->setPlayHead (nullptr); }
             error = "No track " + juce::String (track);
             return false;
         }
@@ -520,7 +522,7 @@ public:
         auto releaseFresh = [&fresh]
         {
             for (auto& s : fresh)
-                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+                if (s->instance != nullptr) { s->instance->releaseResources(); s->instance->setPlayHead (nullptr); }
         };
         for (const auto& p : plugins)
         {
@@ -574,7 +576,7 @@ public:
         auto releaseBuilt = [] (std::vector<std::unique_ptr<Slot>>& slots)
         {
             for (auto& s : slots)
-                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+                if (s->instance != nullptr) { s->instance->releaseResources(); s->instance->setPlayHead (nullptr); }
         };
         for (int t : targets)
         {
@@ -937,7 +939,14 @@ public:
             else it = pool.erase (it);
         }
 
-        const auto scale = [k] (juce::int64 v) { return (juce::int64) std::llround ((double) v * k); };
+        // bounded: a saved position at the limit times a large k (8 kHz to 48 kHz) would not fit in int64, so it lands on the limit
+        const auto scale = [k] (juce::int64 v)
+        {
+            const double scaled = (double) v * k;
+            if (! (scaled > 0.0)) return (juce::int64) 0;
+            if (scaled >= (double) kMaxSafeSample) return kMaxSafeSample;
+            return (juce::int64) std::llround (scaled);
+        };
         for (auto& t : tracks)
             for (auto& c : t->clips)
             {
@@ -951,7 +960,7 @@ public:
                     c.length = juce::jmax ((juce::int64) 1, juce::jmin (c.length, n - c.offset));
                 }
                 c.fadeIn = juce::jmin (scale (c.fadeIn), c.length);
-                c.fadeOut = juce::jmin (scale (c.fadeOut), c.length);
+                c.fadeOut = juce::jmin (scale (c.fadeOut), c.length - c.fadeIn); // the two fades never overlap (Edit.h keeps the same rule)
             }
         for (auto& m : markers)
             m.start = scale (m.start);
@@ -1350,10 +1359,15 @@ public:
 
         juce::StringArray problems;
         pool.clear(); // the rate of the project may differ from the one the pool was read at
-        double rate = xml->getDoubleAttribute ("sampleRate", 0.0);
-        if (! std::isfinite (rate) || rate < 0.0)
-            rate = 0.0;
-        static constexpr juce::int64 kMaxSafeSample = std::numeric_limits<juce::int64>::max() / 4;
+        const auto savedRateText = xml->getStringAttribute ("sampleRate");
+        const double savedRate = xml->getDoubleAttribute ("sampleRate", 0.0);
+        // a saved 0 is the rate the app itself does not know yet and stays unknown in silence, and so does no attribute at all; anything
+        // else that is not a rate in the band (a NaN, a negative, one no device runs at, or text that is not a number and reads as 0.0)
+        // becomes unknown too, and is said with the text as it was saved. An unknown rate is set by the device or by a file.
+        const bool rateIsUsable = std::isfinite (savedRate) && savedRate >= kMinValidRate && savedRate <= kMaxValidRate;
+        double rate = rateIsUsable ? savedRate : 0.0;
+        if (rate == 0.0 && savedRateText.isNotEmpty() && savedRateText != "0")
+            problems.add ("The saved sample rate '" + savedRateText + "' is not a rate Olympus can use, so it is unknown until the device sets one.");
         std::vector<double> slotPreparedRates;
         std::vector<std::unique_ptr<Track>> loaded;
         for (auto* e : xml->getChildWithTagNameIterator ("Track"))
@@ -1362,7 +1376,10 @@ public:
             t->name = e->getStringAttribute ("name");
             const double trackGain = e->getDoubleAttribute ("gainDb", 0.0);
             const double trackPan = e->getDoubleAttribute ("pan", 0.0);
-            t->gainDb = std::isfinite (trackGain) ? (float) juce::jlimit (-100.0, 24.0, trackGain) : 0.0f;
+            // the same range as the fader and Editor::setTrackGain (-100 is silence, +12 the top)
+            if (std::isfinite (trackGain) && trackGain > 12.0)
+                problems.add ("Track '" + t->name + "': the gain was above +12 dB and is set to +12 dB.");
+            t->gainDb = std::isfinite (trackGain) ? (float) juce::jlimit (-100.0, 12.0, trackGain) : 0.0f;
             t->pan = std::isfinite (trackPan) ? (float) juce::jlimit (-1.0, 1.0, trackPan) : 0.0f;
             t->mute = e->getBoolAttribute ("mute");
             t->solo = e->getBoolAttribute ("solo");
@@ -1660,6 +1677,7 @@ public:
                 c->setProperty ("index", j++);
                 c->setProperty ("plugin", s->plugin);
                 c->setProperty ("installed", s->instance != nullptr);
+                if (s->instance == nullptr) c->setProperty ("reason", slotProblem (*s));
                 c->setProperty ("bypass", s->bypass);
                 chain.add (juce::var (c));
             }
@@ -1677,11 +1695,20 @@ public:
             entry->setProperty ("bypass", s->bypass);
             entry->setProperty ("latency_samples", s->latency());
             entry->setProperty ("installed", s->instance != nullptr);
+            if (s->instance == nullptr) entry->setProperty ("reason", slotProblem (*s));
             monitorList.add (juce::var (entry));
         }
         root->setProperty ("monitor", monitorList);
         root->setProperty ("monitor_bypass", monitorBypass.load());
         return juce::var (root);
+    }
+
+    // Why a slot holds no instance, for anything that describes it: a plugin the catalog here does have was refused by the stereo check
+    // with the settings it saved; one the catalog does not have is not installed. catalog.has is the very lookup create() used, so the
+    // two can never disagree about what is installed.
+    juce::String slotProblem (const Slot& s) const
+    {
+        return catalog.has (s.plugin) ? "cannot run in stereo with its saved settings" : "not installed on this machine";
     }
 
     // Makes a slot for a plugin. With `state`, the plugin is given those settings. Null, with the reason, if the plugin cannot be made.
@@ -1694,16 +1721,18 @@ public:
             return nullptr;
         }
         const double useRate = rate > 0.0 ? rate : (sampleRate > 0.0 ? sampleRate : 48000.0);
+        // the state goes on before the plugin is set up: a state that changes its buses must be there when the stereo check runs
+        if (state != nullptr && state->getSize() > 0)
+            instance->setStateInformation (state->getData(), (int) state->getSize());
         const juce::String supports = layoutWords (*instance); // before configure: a refused layout leaves the buses empty
         if (! configure (*instance, useRate, false))
         {
+            instance->releaseResources(); // configure set it up and this drops it: as everywhere else, a prepared instance goes released, not straight destroyed
             error = pluginName + " cannot run on a stereo track (it supports " + supports + ")";
             return nullptr;
         }
         auto slot = std::make_unique<Slot>();
         slot->plugin = pluginName;
-        if (state != nullptr && state->getSize() > 0)
-            instance->setStateInformation (state->getData(), (int) state->getSize());
         instance->setPlayHead (&head);
         slot->instance = std::move (instance);
         slot->watch = &latencyWatch;
@@ -1917,7 +1946,6 @@ private:
         else
             c.file = relFile;
 
-        static constexpr juce::int64 kMaxSafeSample = std::numeric_limits<juce::int64>::max() / 4;
         c.name = legacy ? c.file.getFileNameWithoutExtension() : e.getStringAttribute ("name", c.file.getFileNameWithoutExtension());
         c.start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, e.getStringAttribute ("start", "0").getLargeIntValue());
         c.offset = juce::jlimit ((juce::int64) 0, kMaxSafeSample, e.getStringAttribute ("offset", "0").getLargeIntValue());
@@ -1972,8 +2000,9 @@ private:
                 }
     }
 
-    // Stereo main buses, every other bus (a sidechain, an extra output) disabled, then the rate and the block. Returns false when the plugin does
-    // not run stereo as set up here (see runsStereo): its layout is then left as it is and it must not be used on a track or in the monitor.
+    // Stereo main buses, every other bus (a sidechain, an extra output) disabled, then the rate and the block, then the verdict. Returns false
+    // when the plugin does not run stereo as set up here (see runsStereo): it is set up all the same, so a slot that is kept (a project's
+    // unusable slot, a plugin that changed its own buses later) is never handed a buffer after its resources were released.
     bool configure (juce::AudioPluginInstance& p, double rate, bool nonRealtime)
     {
         auto layout = p.getBusesLayout();
@@ -1982,11 +2011,9 @@ private:
         for (int i = 0; i < layout.outputBuses.size(); ++i)
             layout.outputBuses.getReference (i) = i == 0 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled();
         p.setBusesLayout (layout); // a refusal is caught by runsStereo, which looks at the layout the plugin ended with
-        if (! runsStereo (p))
-            return false;
         p.setNonRealtime (nonRealtime);
         p.prepareToPlay (rate, kBlockSize);
-        return true;
+        return runsStereo (p);
     }
 
     // Whether the plugin, as it now is, takes two channels in and out on its main buses, with no other bus enabled. A plugin with no input bus

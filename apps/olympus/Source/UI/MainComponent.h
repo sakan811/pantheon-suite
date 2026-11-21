@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 
 #include <pantheon/ui/Advice.h>
 #include <pantheon/ui/Aspect.h>
@@ -373,6 +374,9 @@ public:
     juce::Rectangle<float> masterMeterArea() const { return masterBarLeft.getUnion (masterBarRight); }
     // Checks only: the recorder, so a check can make a disk problem happen (Recorder::lostForTest, failedForTest).
     Recorder& recorderForChecks() { return recorder; }
+    // Checks only: pretend the take's files are still opening (Recorder::start does the folder and the headers on the message thread), so a
+    // check can feed the callback the blocks that arrive then and see what it makes of them.
+    void setFilesOpeningForChecks (bool opening) { recordStarting = opening; }
     // Checks only: the scan's state, so the empty-scan note can be checked while a scan is queued or running.
     void setScanStateForChecks (bool queued, bool running) { scanQueued = queued; scanning = running; }
     juce::Rectangle<int> positionBox;                // the position read-out (bars.beats.ticks and mm:ss.ss)
@@ -384,8 +388,8 @@ public:
     ArrangeView arrange { session, editor };
 
 private:
-    // The audio callback's copy of the transport: the playhead, the loop, the end of the audio and where the take began. The callback reads
-    // only these.
+    // The audio callback's copy of the transport: the playhead, the loop and the end of the audio. The callback reads and writes only these.
+    // (Where a take began is the recorder's, Recorder::push decides it with the write itself.)
     struct Source
     {
         explicit Source (MainComponent& m) : owner (m) {}
@@ -395,8 +399,6 @@ private:
         std::atomic<bool> playing { false };
         std::atomic<bool> loopOn { false };
         std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 }, endOfAudio { 0 };
-        // The playhead at the first device block the recorder ran in (set by DeviceCallback::deviceBlock); -1 before it. Cleared at REC.
-        std::atomic<juce::int64> recordStart { -1 };
         juce::AudioBuffer<float> chunk { 2, kBlockSize };
     };
 
@@ -432,9 +434,22 @@ private:
     void readDevice();                              // the device as it is now, into `device`
     void adoptDeviceRate();                         // the session takes the device's rate (converting a project opened at another one); message thread
     void deviceChanged();                           // a change of the device: read it, save its state, end a take that cannot go on
+    // What audioDeviceAboutToStart described, kept as a value so the message thread can apply it whenever it is safe to wait for the
+    // session's lock (see DeviceCallback::audioDeviceAboutToStart and applyDeviceStart).
+    struct DeviceStart
+    {
+        std::uint64_t seq = 0;
+        bool hasDevice = false, refresh = false;
+        double rate = 0.0;
+        int bufSize = 0;
+        juce::BigInteger activeInputs;
+    };
+    // Message thread: end a take that cannot go on, prepare the recorder and the scratch, adopt the rate. Deferred while a render holds the
+    // session's lock (its own wait would freeze the progress window), and retried by the timer once the render is over.
+    void applyDeviceStart (const DeviceStart&);
     void saveAudioState();
     void updateRecording();                         // the timer's part of a take: its strip, its time, a device that stopped
-    void finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, const juce::String& problem);
+    void finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, juce::int64 headSkipped, const juce::String& problem);
     void setTakeLatency();
     void loadMonitorChain();                        // reads monitor.xml once the catalog is filled
     void saveMonitorChain();                        // writes monitor.xml; nothing before the chain was read (never overwrites an unread file)
@@ -480,6 +495,9 @@ private:
     std::atomic<bool> deviceStarting { false };
     std::atomic<bool> recordStarting { false };
     std::atomic<std::uint64_t> deviceStartSeq { 0 };
+    // A device start that found a render holding the session's lock: kept for the timer, which applies it once the render lets go. Message
+    // thread only, and `deviceStarting` stays set while it waits (the callback holds the output silent until the new device is prepared).
+    std::optional<DeviceStart> pendingDeviceStart;
     juce::String monitorProblem;                    // why monitor.xml could not be read (shown on the foot), empty when it was
     // the master section's state: the meter's two bars, the held peak and its time, the latched CLIP, and the fader's one undo step while dragged
     MeterBallistics masterLeft, masterRight;

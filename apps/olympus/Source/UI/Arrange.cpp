@@ -514,6 +514,12 @@ juce::Rectangle<int> ArrangeView::clipRect (int track, juce::int64 start, juce::
     return { x0, top + kClipPad, juce::jmax (2, x1 - x0), kLaneHeight - 2 * kClipPad };
 }
 
+int ArrangeView::markerAtForTest (juce::Point<int> p) const
+{
+    const auto s = snapshot();
+    return markerAt (s, p, pxPerSample (s.rate));
+}
+
 int ArrangeView::markerAt (const ArrangeSnapshot& s, juce::Point<int> p, double pps) const
 {
     const auto font = ui::labelFont (9.5f);
@@ -522,7 +528,7 @@ int ArrangeView::markerAt (const ArrangeSnapshot& s, juce::Point<int> p, double 
         const int x = sampleToX ((double) s.markers[(size_t) i].start, pps);
         juce::GlyphArrangement glyphs;
         glyphs.addLineOfText (font, s.markers[(size_t) i].name, 0.0f, 0.0f);
-        const float width = glyphs.getBoundingBox (0, -1, true).getWidth() + 14.0f;
+        const float width = juce::jmin (glyphs.getBoundingBox (0, -1, true).getWidth() + 14.0f, 165.0f); // the name is drawn in 160 px from x+5: the hit area is not wider than what is seen
         if (p.x >= x - 4 && (float) p.x <= (float) x + width) return i;
     }
     return -1;
@@ -546,8 +552,7 @@ void ArrangeView::scrollThumbMetrics (const ArrangeSnapshot& s, double pps, floa
     const auto strip = scrollStripBounds();
     const float sw = (float) juce::jmax (1, strip.getWidth());
     const double visibleSpan = (double) juce::jmax (1, strip.getWidth()) / pps;
-    const double visibleEnd = scrollSamples + visibleSpan;
-    totalSamples = juce::jmax ((double) s.length, visibleEnd, 1.0);
+    totalSamples = juce::jmax ((double) s.length, visibleSpan, 1.0); // the content only: overscroll must not stretch the strip's own total
     const double fracLen = juce::jlimit (0.0, 1.0, visibleSpan / totalSamples);
     thumbW = juce::jlimit (1.0f, sw, juce::jmax (20.0f, (float) (fracLen * sw)));
     const double maxScroll = juce::jmax (0.0, totalSamples - visibleSpan);
@@ -601,6 +606,8 @@ bool ArrangeView::hitFadeOut (ClipRef ref, juce::Point<int> point) const
 
 void ArrangeView::seekTo (juce::int64 sample)
 {
+    if (recordingFrom >= 0.0)
+        return; // a take is one continuous recording: the transport refuses a seek, so the view does not ask (a ruler drag would stack one error box per event)
     const auto at = juce::jmax ((juce::int64) 0, sample);
     playhead = (double) at;
     if (onSeek) onSeek (at);
@@ -684,7 +691,11 @@ void ArrangeView::refresh()
     const double pps = pxPerSample (s.rate);
     const double span = juce::jmax (0.0, (double) (getWidth() - kHeaderWidth) / pps);
     if (followPlayhead && ! juce::exactlyEqual (playhead, lastPlayhead) && (playhead < scrollSamples || playhead > scrollSamples + span))
-        scrollSamples = juce::jmax (0.0, playhead - span * 0.125);
+    {
+        const double target = juce::jmax (0.0, playhead - span * 0.125);
+        // a take runs past the end of the audio, so following it may scroll past the content; otherwise the view stays on the content
+        scrollSamples = recordingFrom >= 0.0 ? target : juce::jlimit (0.0, juce::jmax (0.0, (double) s.length - span), target);
+    }
 
     const bool fullVisualChanged = ! hasRefreshed
         || lastRefreshSnapshot == nullptr
@@ -757,13 +768,16 @@ void ArrangeView::zoomBy (double factor)
 
     zoom = juce::jlimit (kMinZoom, kMaxZoom, zoom * factor);
     const double newPps = pxPerSample (s.rate);
-    scrollSamples = juce::jmax (0.0, anchorSample - anchorPxFromLeft / newPps);
+    scrollSamples = juce::jlimit (0.0, juce::jmax (0.0, (double) s.length - (double) timelineWidth / newPps),
+                                  juce::jmax (0.0, anchorSample - anchorPxFromLeft / newPps));
     repaint();
 }
 
 void ArrangeView::scrollTo (juce::int64 sample)
 {
-    scrollSamples = (double) juce::jmax ((juce::int64) 0, sample);
+    const auto s = snapshot();
+    const double span = (double) juce::jmax (1, getWidth() - kHeaderWidth) / pxPerSample (s.rate);
+    scrollSamples = juce::jlimit (0.0, juce::jmax (0.0, (double) s.length - span), (double) juce::jmax ((juce::int64) 0, sample));
     repaint();
 }
 
@@ -1227,6 +1241,8 @@ juce::MouseCursor ArrangeView::getMouseCursor()
 void ArrangeView::mouseDown (const juce::MouseEvent& e)
 {
     grabKeyboardFocus();
+    endGesture(); // a second press (another pointer, or a release a modal loop swallowed) closes the first drag's step instead of nesting inside it
+    dragSourceIndex = e.source.getIndex();
     const auto p = e.getPosition();
     hoverPos = p;
     const auto s = snapshot();
@@ -1355,6 +1371,7 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
 
 void ArrangeView::mouseDrag (const juce::MouseEvent& e)
 {
+    if (e.source.getIndex() != dragSourceIndex) return; // only the pointer that began the drag moves it
     if (mode == Mode::none) return;
     const auto p = e.getPosition();
     hoverPos = p;
@@ -1456,8 +1473,10 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
     changed();
 }
 
-void ArrangeView::mouseUp (const juce::MouseEvent&)
+void ArrangeView::mouseUp (const juce::MouseEvent& e)
 {
+    if (e.source.getIndex() != dragSourceIndex) return; // another pointer's release does not end this drag
+    dragSourceIndex = -1;
     const bool wasEdit = mode != Mode::none && mode != Mode::ruler && mode != Mode::scrollX;
     mode = Mode::none;
     endGesture();
@@ -1476,14 +1495,16 @@ void ArrangeView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWh
         const double anchorSample = xToSample (x, pps);
         zoom = juce::jlimit (kMinZoom, kMaxZoom, zoom * std::pow (2.0, wheel.deltaY * 4.0));
         const double newPps = pxPerSample (s.rate);
-        scrollSamples = juce::jmax (0.0, anchorSample - (x - kHeaderWidth) / newPps);
+        scrollSamples = juce::jlimit (0.0, juce::jmax (0.0, (double) s.length - (double) timelineWidth / newPps),
+                                      juce::jmax (0.0, anchorSample - (x - kHeaderWidth) / newPps));
     }
     else if (e.mods.isShiftDown() || std::abs (wheel.deltaX) > std::abs (wheel.deltaY))
     {
         const double pps = pxPerSample (s.rate);
         const bool useX = ! e.mods.isShiftDown() && std::abs (wheel.deltaX) > std::abs (wheel.deltaY);
         const double delta = useX ? wheel.deltaX : (std::abs (wheel.deltaY) > 0.0f ? wheel.deltaY : wheel.deltaX);
-        scrollSamples = juce::jmax (0.0, scrollSamples - delta * 0.25 * timelineWidth / pps);
+        scrollSamples = juce::jlimit (0.0, juce::jmax (0.0, (double) s.length - (double) timelineWidth / pps),
+                                      juce::jmax (0.0, scrollSamples - delta * 0.25 * timelineWidth / pps));
     }
     else
     {
@@ -1662,10 +1683,14 @@ void ArrangeView::clipMenu (ClipRef ref)
     menu.addItem (11, "Clear fades");
     menu.addSeparator();
     menu.addItem (8, "Delete");
+    if (dialogFlag()) return;
+    dialogFlag() = true; // an open menu is a dialog: the timer's external reload must not replace the session under the captured index
     juce::Component::SafePointer<ArrangeView> safe (this);
     menu.showMenuAsync ({}, [safe, ref] (int result)
     {
-        if (safe != nullptr && result > 0) safe->clipAction (ref, result);
+        if (safe == nullptr) return;
+        safe->dialogFlag() = false;
+        if (result > 0) safe->clipAction (ref, result);
     });
 }
 
@@ -1674,10 +1699,14 @@ void ArrangeView::laneMenu (int track, juce::int64 at)
 {
     juce::PopupMenu menu;
     menu.addItem (1, "Paste here");
+    if (dialogFlag()) return;
+    dialogFlag() = true;
     juce::Component::SafePointer<ArrangeView> safe (this);
     menu.showMenuAsync ({}, [safe, track, at] (int result)
     {
-        if (safe != nullptr && result > 0) safe->pasteAt (track, at);
+        if (safe == nullptr) return;
+        safe->dialogFlag() = false;
+        if (result > 0) safe->pasteAt (track, at);
     });
 }
 
@@ -1781,10 +1810,14 @@ void ArrangeView::markerMenu (int index)
     juce::PopupMenu menu;
     menu.addItem (1, "Rename...");
     menu.addItem (2, "Delete");
+    if (dialogFlag()) return;
+    dialogFlag() = true;
     juce::Component::SafePointer<ArrangeView> safe (this);
     menu.showMenuAsync ({}, [safe, index] (int result)
     {
-        if (safe != nullptr && result > 0) safe->markerAction (index, result);
+        if (safe == nullptr) return;
+        safe->dialogFlag() = false;
+        if (result > 0) safe->markerAction (index, result);
     });
 }
 

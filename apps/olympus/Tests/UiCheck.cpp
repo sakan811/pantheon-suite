@@ -181,6 +181,34 @@ juce::MemoryBlock bytesOf (const juce::File& f)
 juce::ModifierKeys cmd() { return juce::ModifierKeys::commandModifier; }
 juce::ModifierKeys cmdShift() { return juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier; }
 
+// A device the checks hand to audioDeviceAboutToStart: the given rate and block size, four active inputs and two active outputs, with the
+// test window's latencies. Nothing is opened or started: the callback only reads what the device says it is.
+struct DummyAudioDevice : juce::AudioIODevice
+{
+    DummyAudioDevice (double r, int b) : juce::AudioIODevice ("Dummy", "Test"), rate (r), buf (b) {}
+    juce::StringArray getOutputChannelNames() override { return { "Out L", "Out R" }; }
+    juce::StringArray getInputChannelNames() override { return { "In 1", "In 2", "In 3", "In 4" }; }
+    juce::Array<double> getAvailableSampleRates() override { return { rate }; }
+    juce::Array<int> getAvailableBufferSizes() override { return { buf }; }
+    int getDefaultBufferSize() override { return buf; }
+    juce::String open (const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
+    void close() override {}
+    bool isOpen() override { return true; }
+    void start (juce::AudioIODeviceCallback*) override {}
+    void stop() override {}
+    bool isPlaying() override { return true; }
+    juce::String getLastError() override { return {}; }
+    int getCurrentBufferSizeSamples() override { return buf; }
+    double getCurrentSampleRate() override { return rate; }
+    int getCurrentBitDepth() override { return 24; }
+    juce::BigInteger getActiveOutputChannels() const override { juce::BigInteger ch; ch.setRange (0, 2, true); return ch; }
+    juce::BigInteger getActiveInputChannels() const override { juce::BigInteger ch; ch.setRange (0, 4, true); return ch; }
+    int getOutputLatencyInSamples() override { return 50; }
+    int getInputLatencyInSamples() override { return 100; }
+    double rate;
+    int buf;
+};
+
 // Every control of the window inside it, below the arrangement's top, and no two of them (or the position read-out) over each other.
 void layoutCheck (MainComponent& w, const char* label)
 {
@@ -1877,32 +1905,6 @@ int main()
 
         // R2.3: audioDeviceAboutToStart called from a background thread while a take is recording marshals to the message thread
         {
-            struct DummyAudioDevice : juce::AudioIODevice
-            {
-                DummyAudioDevice (double r, int b) : juce::AudioIODevice ("Dummy", "Test"), rate (r), buf (b) {}
-                juce::StringArray getOutputChannelNames() override { return { "Out L", "Out R" }; }
-                juce::StringArray getInputChannelNames() override { return { "In 1", "In 2", "In 3", "In 4" }; }
-                juce::Array<double> getAvailableSampleRates() override { return { rate }; }
-                juce::Array<int> getAvailableBufferSizes() override { return { buf }; }
-                int getDefaultBufferSize() override { return buf; }
-                juce::String open (const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
-                void close() override {}
-                bool isOpen() override { return true; }
-                void start (juce::AudioIODeviceCallback*) override {}
-                void stop() override {}
-                bool isPlaying() override { return true; }
-                juce::String getLastError() override { return {}; }
-                int getCurrentBufferSizeSamples() override { return buf; }
-                double getCurrentSampleRate() override { return rate; }
-                int getCurrentBitDepth() override { return 24; }
-                juce::BigInteger getActiveOutputChannels() const override { juce::BigInteger ch; ch.setRange (0, 2, true); return ch; }
-                juce::BigInteger getActiveInputChannels() const override { juce::BigInteger ch; ch.setRange (0, 4, true); return ch; }
-                int getOutputLatencyInSamples() override { return 50; }
-                int getInputLatencyInSamples() override { return 100; }
-                double rate;
-                int buf;
-            };
-
             auto w = makeWindow();
             w->addTracks ({ makeWav ("r23.wav", 24000).getFullPathName() });
             juce::String err;
@@ -2545,6 +2547,8 @@ int main()
         test::check (w->arrange.zoom < ArrangeView::kDefaultZoom
                          && w->arrange.clipBounds ({ 0, 0 }).getX() == ArrangeView::kHeaderWidth,
                      "Cmd+wheel over header clamps x >= kHeaderWidth so scrollSamples does not drift");
+        w->arrange.zoom = 4000.0;   // zoomed in: the content is wider than the view, so a horizontal scroll has somewhere to go (it is bounded now)
+        w->arrange.scrollTo (0);
         w->arrange.mouseWheelMove (makeWheelEvent ({ 400, 100 }, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)),
                                    { 0.02f, -1.0f, false, false, false });
         test::check (w->arrange.clipBounds ({ 0, 0 }).getX() < ArrangeView::kHeaderWidth - 100,
@@ -2604,22 +2608,23 @@ int main()
         test::check (tf != nullptr && tf->isDoubleClickReturnEnabled() && std::abs (tf->getDoubleClickReturnValue()) < 1e-9,
                      "track faderSlider double-click return value is 0.0");
 
-        // 2) zoomBy anchors on visible playhead, else on viewport center
+        // 2) zoomBy anchors on visible playhead, else on viewport center (zoomed in so the content is wider than the view: scroll is bounded)
         w->arrange.scrollTo (0);
-        w->arrange.zoom = 80.0;
-        w->seek (96000);   // 2.0 s -> 160 px from kHeaderWidth
+        w->arrange.zoom = 1600.0;
+        w->seek (20000);   // inside the view at this zoom
         w->zoomBy (2.0);
-        test::check (std::abs (w->arrange.zoom - 160.0) < 1e-6
-                         && std::abs (w->arrange.clipBounds ({ 0, 0 }).getX() - (ArrangeView::kHeaderWidth - 160)) <= 1,
+        test::check (std::abs (w->arrange.zoom - 3200.0) < 1e-6
+                         && std::abs (w->arrange.clipBounds ({ 0, 0 }).getX() - (ArrangeView::kHeaderWidth - juce::roundToInt (10000.0 * 3200.0 / 48000.0))) <= 1,
                      "zoomBy anchors on visible playhead");
 
-        w->arrange.scrollTo (48000);
-        w->arrange.zoom = 80.0;
+        w->arrange.zoom = 1600.0;
+        w->arrange.scrollTo (1 << 30);   // clamps to the content's right edge
         w->seek (0);       // off-screen to the left
+        const double leftSample = w->arrange.scrollSamplesForTest();
         const double timelineW = (double) (w->arrange.getWidth() - ArrangeView::kHeaderWidth);
-        const double centerSample = 48000.0 + (timelineW * 0.5) / (80.0 / 48000.0);
+        const double centerSample = leftSample + (timelineW * 0.5) / (1600.0 / 48000.0);
         w->zoomBy (2.0);
-        const double newPps = 160.0 / 48000.0;
+        const double newPps = 3200.0 / 48000.0;
         const double expectedScroll = centerSample - (timelineW * 0.5) / newPps;
         const int expectedClipX = ArrangeView::kHeaderWidth + juce::roundToInt (-expectedScroll * newPps);
         test::check (std::abs (w->arrange.clipBounds ({ 0, 0 }).getX() - expectedClipX) <= 1,
@@ -2700,6 +2705,328 @@ int main()
         w->arrange.filesDropped ({ scrollWav }, ArrangeView::kHeaderWidth + 20, stripY);
         test::check ((int) w->session.tracks.size() == tracksBeforeDrop + 1,
                      "filesDropped over bottom scroll strip creates a new track instead of targeting occluded track");
+    }
+
+    std::printf ("[42] The take's own first written block is its start (with the head the files opening cost); a device change and REC wait for a render, and a late stale start leaves the newer one kept; a plugin edited and closed at once dirties; a seek inside a block stands; the caps agree; a null output channel, the other held silent; the notes read only under the lock\n");
+    {
+        // The take's start is the playhead of the first block the recorder wrote, not where REC was pressed, and the input its files were
+        // still opening costs is counted and said (findings 2 and 7). Its own settings folder: no monitor chain beside it, so the take is
+        // placed exactly where it began.
+        const auto dir42 = tempFolder().getChildFile ("takes42");
+        dir42.deleteRecursively();
+        dir42.createDirectory();
+        const auto clean42 = dir42.getChildFile ("settings.xml");
+        {
+            auto w = makeWindow (true, clean42);
+            w->session.addEmptyTrack ("Gtr");
+            juce::String error;
+            test::check (w->session.setTrackArm (0, true, error) && w->session.setTrackInput (0, 0, -1, error), "a track armed on input 1");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));   // no latency: the take is placed exactly where it began
+            w->seek (4800);
+            test::check (w->startRecording(), "REC starts at 4800");
+            w->setFilesOpeningForChecks (true);                 // the take's files are still opening (Recorder::start does that on the message thread)
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 2000);                // the transport runs on; the input of these two seconds is not written
+            w->setFilesOpeningForChecks (false);
+            feedDevice (*w, fed, 48000.0, 2400);
+            gErrors.clear();
+            w->stopRecording();
+            const auto& clips = w->session.tracks[0]->clips;
+            test::check (clips.size() == 1 && clips[0].start == 6800 && clips[0].length == 2400,
+                         test::fmt ("the take begins where its first frame was written (6800, not the 4800 REC was pressed at): %d clips, start %d, length %d",
+                                    (int) clips.size(), clips.empty() ? -1 : (int) clips[0].start, clips.empty() ? -1 : (int) clips[0].length));
+            test::check (gErrors.size() == 1 && gErrors[0].contains ("2000 samples") && gErrors[0].contains ("were not written while the files opened"),
+                         "and the head the opening cost is reported with its length: " + (gErrors.empty() ? juce::String ("<nothing>") : gErrors[0]));
+        }
+
+        // The selection is the clip a take actually became: a take that could not be placed leaves the view on the clips, and an older clip
+        // that happens to start where the take would have gone does not win the selection (finding 8).
+        {
+            auto w = makeWindow (true, clean42);
+            w->addTracks ({ makeWav ("older-clip.wav", 24000).getFullPathName() });   // track 0, one clip at sample 0
+            juce::String error;
+            test::check (w->session.setTrackArm (0, true, error), "that track is armed");
+            w->setDeviceForTest (fakeDevice (48000.0, 100, 50));   // a round trip of 150: a take from 0 would begin before the timeline
+            w->arrange.selected = {};
+            w->seek (0);
+            test::check (w->startRecording(), "REC starts at 0");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 100);                   // a take shorter than the latency, so it cannot be placed
+            gErrors.clear();
+            w->stopRecording();
+            test::check (w->session.tracks[0]->clips.size() == 1 && ! gErrors.empty() && gErrors.back().contains ("was not placed"),
+                         "the take that cannot be placed is said, and nothing was added");
+            test::check (! w->arrange.selected.valid(), "and the older clip at its start is not selected for it");
+        }
+
+        // A plugin edited in its own window and closed within a tick marks the project dirty (finding 1): the state the timer compares
+        // against is taken when the first track window opens, not only at its next 15-tick read.
+        {
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("editor-dirty.wav", 24000).getFullPathName() });
+            juce::String error;
+            test::check (w->session.addPlugin (0, "Test Gain", -1, error), "a track plugin for the editor");
+            w->refreshNow();
+            w->openEditor (0, 0);
+            test::check (w->openEditors() == 1, "its window is open");
+            w->session.dirty = false;
+            if (auto* gain = dynamic_cast<test::GainPlugin*> (w->session.tracks[0]->chain[0]->instance.get()))
+                gain->setCurrentProgram (1);                       // what a knob in that window does: the plugin's state changes
+            else
+                test::check (false, "the track plugin is a GainPlugin");
+            w->closeEditors();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (120);   // one tick, well before the periodic read's fifteen
+            test::check (w->session.dirty, "closing that window at once marks the project dirty, so a quit asks and the autosave runs");
+        }
+
+        // REC waits for a render (finding 5): its set-up waits for the session's lock three times, which the render holds for its whole run.
+        {
+            auto w = makeWindow();
+            w->addEmptyTrack ();
+            juce::String error;
+            test::check (w->session.setTrackArm (0, true, error), "a track armed");
+            w->setDeviceForTest (fakeDevice ());
+            w->session.renderBusy = true;
+            gErrors.clear();
+            test::check (! w->startRecording() && ! w->isRecording() && gErrors.size() == 1 && gErrors.back().contains ("A render is running"),
+                         "REC during a render is refused with the reason, and nothing is prepared");
+            w->session.renderBusy = false;
+        }
+
+        // A device change during a render does not freeze this thread (finding 3): the start is kept, the outputs stay held silent while it
+        // waits, and the timer lands it once the render lets the lock go.
+        {
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("device-render.wav", 48000).getFullPathName() });
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->togglePlay();
+            std::atomic<bool> held { false }, release { false };
+            std::thread holder ([&]
+            {
+                w->session.renderBusy = true;                    // what a render does: the flag, then the lock for its whole run
+                const juce::ScopedLock sl (w->session.lock);
+                held = true;
+                while (! release)
+                    std::this_thread::sleep_for (std::chrono::milliseconds (2));
+                w->session.renderBusy = false;
+            });
+            while (! held)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+            DummyAudioDevice dev (44100.0, 256);
+            std::thread worker ([&] { w->io.audioDeviceAboutToStart (&dev); });   // the device's own thread
+            worker.join();
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (300);   // the deferred start runs here, and the timer tries it too
+            const double took = juce::Time::getMillisecondCounterHiRes() - t0;
+            test::check (took < 1000.0, test::fmt ("the message thread never waits for the render's lock: %d ms of dispatch", (int) took));
+            test::check (w->deviceRate == 48000.0 && w->session.sampleRate == 48000.0, "the new rate is not adopted while the render holds the lock");
+            const juce::int64 before = w->position();
+            std::vector<std::vector<float>> in (4, std::vector<float> (256, 0.0f));
+            std::vector<std::vector<float>> out (2, std::vector<float> (256, 0.0f));
+            const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+            float* outPtr[2] = { out[0].data(), out[1].data() };
+            w->io.deviceBlock (inPtr, 4, outPtr, 2, 256);
+            test::check (w->position() == before, "the silent-output guard is still set while the start waits: the block ran nothing");
+            release = true;
+            holder.join();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (200);   // the next tick applies what was kept
+            test::check (w->deviceRate == 44100.0 && w->session.sampleRate == 44100.0, "once the render lets go, the timer adopts the new rate");
+            w->io.deviceBlock (inPtr, 4, outPtr, 2, 256);
+            test::check (w->position() > before, "and the transport runs again");
+        }
+
+        // Two device starts that come quickly, the first one from the device's thread and applied late (review finding 1 of the round after):
+        // the late, stale call must not throw away the newer start that is kept for the timer, nor leave the silent-output guard set.
+        {
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("device-stale.wav", 48000).getFullPathName() });
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->togglePlay();
+            std::atomic<bool> held { false }, release { false };
+            std::thread holder ([&]
+            {
+                w->session.renderBusy = true;                    // what a render does: the flag, then the lock for its whole run
+                const juce::ScopedLock sl (w->session.lock);
+                held = true;
+                while (! release)
+                    std::this_thread::sleep_for (std::chrono::milliseconds (2));
+                w->session.renderBusy = false;
+            });
+            while (! held)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+            DummyAudioDevice at96000 (96000.0, 256), at44100 (44100.0, 256);
+            std::thread worker ([&] { w->io.audioDeviceAboutToStart (&at96000); });   // the device's own thread: its call is only queued
+            worker.join();
+            w->io.audioDeviceAboutToStart (&at44100);   // this thread applies it at once: it finds the render and keeps it for the timer
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (150);   // the first call runs here, and is stale by then
+            test::check (w->deviceRate == 48000.0 && w->session.sampleRate == 48000.0, "the render still holds the lock: no rate is adopted");
+            release = true;
+            holder.join();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (300);   // the next tick applies what was kept
+            test::check (w->deviceRate == 44100.0 && w->session.sampleRate == 44100.0,
+                         test::fmt ("the newer start survived the stale one, which left what it did not defer alone: the device's rate is %d Hz",
+                                    (int) w->deviceRate));
+            const juce::int64 before = w->position();
+            std::vector<std::vector<float>> in (4, std::vector<float> (256, 0.0f));
+            std::vector<std::vector<float>> out (2, std::vector<float> (256, 0.0f));
+            const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+            float* outPtr[2] = { out[0].data(), out[1].data() };
+            w->io.deviceBlock (inPtr, 4, outPtr, 2, 256);
+            test::check (w->position() > before, "and the silent-output guard went with the start it waited for, so the transport runs again");
+        }
+
+        // A seek that lands inside a block stands (finding 4): the callback advances only from the position it loaded, so the block already
+        // built cannot swallow the playhead the message thread put there.
+        {
+            // A plugin that moves the playhead the first time the audio path runs a block: the store lands inside getNextAudioBlock, between
+            // the position it read at its top and the one it writes at its end, which is where a seek from this thread lands in practice.
+            struct SeekOncePlugin : test::GainPlugin
+            {
+                std::function<void()> onFirstBlock;
+                explicit SeekOncePlugin (std::function<void()> cb) : test::GainPlugin ("Seek Once", 0), onFirstBlock (std::move (cb)) {}
+                void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer& m) override
+                {
+                    test::GainPlugin::processBlock (b, m);
+                    if (onFirstBlock) { const auto move = onFirstBlock; onFirstBlock = nullptr; move(); }
+                }
+            };
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("seek-mid.wav", 48000).getFullPathName() });
+            auto* window = w.get();
+            w->session.catalog.addInternal (test::GainPlugin::description ("Seek Once"), [window] (double, int)
+            {
+                return std::make_unique<SeekOncePlugin> ([window] { window->seek (30000); });
+            });
+            juce::String error;
+            test::check (w->session.setChain (0, { "Seek Once" }, error), "a plugin that moves the playhead inside its first block");
+            w->seek (0);
+            w->togglePlay();
+            w->syncTransport();
+            juce::AudioBuffer<float> block (2, 4800);
+            w->renderAudioBlock (block);
+            test::check (w->position() == 30000, "the seek that landed inside the block survives it: " + juce::String ((int) w->position()));
+
+            // and the rate's scaled playhead still goes in the other direction: a device start on this thread converts the session and puts
+            // the position where the same moment of the new rate is
+            auto s = makeWindow();
+            s->addTracks ({ makeWav ("scale-mid.wav", 48000).getFullPathName() });
+            s->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            s->seek (24000);
+            DummyAudioDevice at44100 (44100.0, 512);
+            s->io.audioDeviceAboutToStart (&at44100);
+            test::check (s->session.sampleRate == 44100.0 && s->position() == 22050,
+                         "the playhead keeps its place in seconds at the device's rate: " + juce::String ((int) s->position()));
+        }
+
+        // The caps agree (finding 9): the IN menu stops at what the recorder meters and records, which is what the AUDIO dialog offers.
+        {
+            MainComponent::DeviceState many = fakeDevice (48000.0, 0, 0);
+            many.inputs = 70;
+            many.activeInputs.clear();
+            many.activeInputs.setRange (0, 70, true);
+            const auto choices = MainComponent::inputChoices (many);
+            bool within = ! choices.empty();
+            for (const auto& c : choices)
+                within = within && c.left < Recorder::kMaxInputs && (c.right < 0 || c.right < Recorder::kMaxInputs);
+            test::check (within && choices.back().label == "In " + juce::String (Recorder::kMaxInputs),
+                         test::fmt ("the IN menu stops at the recorder's %d inputs (%d entries, the last %s)",
+                                    Recorder::kMaxInputs, (int) choices.size(), choices.empty() ? "" : choices.back().label.toRawUTF8()));
+        }
+
+        // A null output channel (JUCE leaves those pointers unspecified; CoreAudio and ALSA compact them) is never walked: the transport runs
+        // into the silent scratch instead (finding 10). The channels the device does use are cleared, so its last block is not heard again.
+        {
+            auto w = makeWindow();
+            w->addTracks ({ makeWav ("null-out.wav", 48000).getFullPathName() });
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->togglePlay();
+            std::vector<std::vector<float>> in (4, std::vector<float> (256, 0.0f));
+            std::vector<float> out0 (256, 0.0f);
+            const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+            float* outPtr[2] = { out0.data(), nullptr };
+            const juce::int64 before = w->position();
+            w->io.deviceBlock (inPtr, 4, outPtr, 2, 256);
+            test::check (w->position() == before + 256, "a device block whose second output channel is null still advances the transport");
+            for (float& v : out0)
+                v = 1.0f;                                     // what the block before left in the channel the device does use
+            w->io.deviceBlock (inPtr, 4, outPtr, 2, 256);
+            bool silent = true;
+            for (float v : out0)
+                silent = silent && v == 0.0f;
+            test::check (silent, "and the channel that is not null is cleared, not left to be heard again from the block before");
+        }
+
+        // The notes (finding 6): while the lock is busy the window shows what it read under the lock, and never reads the session unlocked.
+        {
+            auto w = makeWindow();
+            std::atomic<bool> held { false }, release { false };
+            std::thread holder ([&]
+            {
+                const juce::ScopedLock sl (w->session.lock);
+                held = true;
+                while (! release)
+                    std::this_thread::sleep_for (std::chrono::milliseconds (2));
+            });
+            while (! held)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+            const auto during = w->notes();
+            release = true;
+            holder.join();
+            test::check (during.empty(), "with the lock held and nothing read under it yet, notes() gives nothing rather than an unlocked read");
+            test::check (! w->notes().empty(), "and once the lock is free it reads them normally");
+        }
+    }
+
+    // [43] Arrangement guards: a take refuses a seek at the view (no error box per ruler-drag event); the horizontal scroll stays on the
+    // content (the overview strip cannot desync by overscroll); a marker's hit area is no wider than the name is drawn.
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("arrange-guards.wav", 48000).getFullPathName() });
+        w->editor.setSnap (false);
+        w->arrange.recordingFrom = 0.0;   // a take runs
+        w->arrange.playhead = 12000.0;
+        const auto now = juce::Time::getCurrentTime();
+        const juce::Point<int> ruler { ArrangeView::kHeaderWidth + 200, 4 };
+        w->arrange.mouseDown (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), ruler.toFloat(),
+                                                juce::ModifierKeys {}, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                &w->arrange, &w->arrange, now, ruler.toFloat(), now, 1, false));
+        w->arrange.mouseUp (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), ruler.toFloat(),
+                                              juce::ModifierKeys {}, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                              &w->arrange, &w->arrange, now, ruler.toFloat(), now, 1, false));
+        test::check (std::abs (w->arrange.playhead - 12000.0) < 1e-9,
+                     "a ruler press during a take does not move the view's playhead (the transport would refuse it with an error box per event)");
+        w->arrange.recordingFrom = -1.0;
+
+        // overscroll: zoom in so the content is wider than the view, then wheel far past the end
+        w->arrange.zoom = 4000.0;
+        w->arrange.scrollTo (0);
+        const double pps = 4000.0 / 48000.0;
+        const double span = (double) juce::jmax (1, w->arrange.getWidth() - ArrangeView::kHeaderWidth) / pps;
+        const double bound = juce::jmax (0.0, 48000.0 - span);
+        const juce::Point<int> lane { ArrangeView::kHeaderWidth + 100, ArrangeView::kRulerHeight + ArrangeView::kLoopHeight + ArrangeView::kMarkerHeight + 60 };
+        for (int i = 0; i < 6; ++i)
+        {
+            juce::MouseWheelDetails wheel;
+            wheel.deltaX = -10.0f;
+            wheel.deltaY = 0.0f;
+            w->arrange.mouseWheelMove (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), lane.toFloat(),
+                                                         juce::ModifierKeys {}, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                         &w->arrange, &w->arrange, now, lane.toFloat(), now, 1, false), wheel);
+        }
+        test::check (std::abs (w->arrange.scrollSamplesForTest() - bound) < 1.0,
+                     "wheeling past the end stops at the content's edge, so the overview thumb cannot pin right while the lanes scroll into blank space");
+
+        // marker hit area: a long name is drawn in 160 px; a click 200 px past the flag is not on it
+        w->editor.addMarker ("A very long marker name that goes well past one hundred and sixty pixels of drawn text", 0);
+        w->arrange.scrollTo (0);
+        w->arrange.zoom = ArrangeView::kDefaultZoom;
+        w->refreshNow();
+        const int markerY = ArrangeView::kRulerHeight + ArrangeView::kLoopHeight + 4;
+        test::check (w->arrange.markerAtForTest ({ ArrangeView::kHeaderWidth + 10, markerY }) == 0
+                         && w->arrange.markerAtForTest ({ ArrangeView::kHeaderWidth + 200, markerY }) == -1,
+                     "a marker is grabbable where its name is drawn, not over the blank lane past it");
     }
 
     tempFolder().deleteRecursively();

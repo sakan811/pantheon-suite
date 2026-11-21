@@ -5,6 +5,7 @@
 // Set OLYMPUS_PLUGIN_DIR to a folder with built plugin bundles to add the check against the real ones.
 
 #include "Analyze.h"
+#include "Advice.h"
 #include "Check.h"
 #include "Edit.h"
 #include "Mcp.h"
@@ -13,6 +14,7 @@
 #include "TempoTests.h"
 #include "TestPlugin.h"
 
+#include <atomic>
 #include <chrono>
 #include <limits>
 #include <sstream>
@@ -2690,9 +2692,10 @@ void projectValidationChecks()
                             "<Track name=\"T\"><Clip name=\"m\" file=\"gone.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"1000\"/></Track>"
                             "</OlympusProject>");
         Session s2;
-        test::check (s2.load (p2, err) && s2.tracks[0]->clips[0].length == 1000 && ! s2.loopOn
-                         && std::abs (s2.masterDb - 12.0f) < 1e-4f && s2.warnings.joinIntoString ("\n").contains ("+12 dB"),
-                     "extreme rate missing clip safe, loopEnd < loopStart clears loopOn, masterDb > 12 warns");
+        test::check (s2.load (p2, err) && s2.sampleRate == 0.0 && s2.tracks[0]->clips[0].length == 1000 && ! s2.loopOn
+                         && std::abs (s2.masterDb - 12.0f) < 1e-4f
+                         && s2.warnings.joinIntoString ("\n").contains ("+12 dB") && s2.warnings.joinIntoString ("\n").contains ("1e20"),
+                     "extreme rate is unknown with its value in the warnings, missing clip safe, loopEnd < loopStart clears loopOn, masterDb > 12 warns");
 
         const auto p3 = dir.getChildFile ("goodloop.olympus");
         p3.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"48000\" loopStart=\"1000\" loopEnd=\"2000\" loopOn=\"1\"/>");
@@ -2822,17 +2825,19 @@ static void catalogSafetyAndScanChecks()
 
     // Skipped subdirectories inside walkRoot, each holding a .vst3 bundle that must NOT be found
     const char* const skippedDirs[] = {
-        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies",
-        "Application Support", "Caches", "Mobile Documents", "Containers",
         ".git", ".Trash", "_deps", "CMakeFiles", "node_modules",
         "SomeApp.app", "Other.component", "Foo.framework"
     };
     for (const char* sub : skippedDirs)
         walkRoot.getChildFile (sub).getChildFile ("HiddenInside.vst3").createDirectory();
 
+    // A TCC-named folder away from home is an ordinary folder: its bundle IS found (the name rule guards home and home/Library only)
+    const auto musicBundle = walkRoot.getChildFile ("Music").getChildFile ("LegitMusic.vst3");
+    musicBundle.createDirectory();
+
     const auto foundBundles = Catalog::findBundlesIn (walkRoot);
-    test::check (foundBundles.size() == 1 && foundBundles[0] == depth5Bundle,
-                 "findBundlesIn finds bundle at depth 5 and skips depth 6, TCC subdirs, hidden dirs, build dirs, and non-VST3 bundles");
+    test::check (foundBundles.size() == 2 && foundBundles.contains (depth5Bundle) && foundBundles.contains (musicBundle),
+                 "findBundlesIn finds the depth-5 bundle and one in an ordinary 'Music' folder, skipping depth 6, hidden dirs, build dirs and non-VST3 bundles");
 
     // Forbidden roots at depth 0 return empty immediately
     const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
@@ -2852,15 +2857,33 @@ static void catalogSafetyAndScanChecks()
                                    juce::File::getSpecialLocation (juce::File::userMusicDirectory),
                                    juce::File::getSpecialLocation (juce::File::userPicturesDirectory),
                                    juce::File::getSpecialLocation (juce::File::userMoviesDirectory),
-                                   walkRoot.getChildFile ("Desktop"),
-                                   walkRoot.getChildFile ("Documents"),
-                                   walkRoot.getChildFile ("Downloads"),
-                                   walkRoot.getChildFile ("Music"),
-                                   walkRoot.getChildFile ("Pictures"),
-                                   walkRoot.getChildFile ("Movies") })
+                                   home.getChildFile ("Library").getChildFile ("Containers"),
+                                   home.getChildFile ("Library").getChildFile ("Application Support"),
+                                   home.getChildFile ("Library").getChildFile ("Caches"),
+                                   home.getChildFile ("Library").getChildFile ("Group Containers") })
     {
         test::check (Catalog::isForbiddenPluginRoot (forbidden) && Catalog::findBundlesIn (forbidden).isEmpty(),
                      "findBundlesIn refuses forbidden root: " + (forbidden == juce::File() ? juce::String ("<empty>") : forbidden.getFullPathName()));
+    }
+    test::check (! Catalog::isForbiddenPluginRoot (walkRoot.getChildFile ("Music"))
+                     && ! Catalog::isForbiddenPluginRoot (juce::File ("/Volumes/Music/Plug-Ins")),
+                 "a folder named Music away from home is not a forbidden plugin root");
+
+    // 3b. The shared plugins.xml: a save keeps the blacklist another process wrote, and "forget" clears it for real
+    {
+        const auto cacheFile = dir.getChildFile ("shared-plugins.xml");
+        cacheFile.replaceWithText ("<KNOWNPLUGINS><BLACKLISTED id=\"/fake/crasher.vst3\"/></KNOWNPLUGINS>");
+        Catalog stale; // a process whose list was loaded before the crash: it holds no blacklist of its own
+        test::check (stale.blacklisted().isEmpty(), "the stale catalog starts with no blacklist");
+        test::check (stale.saveCache (cacheFile), "the stale catalog saves");
+        Catalog reader;
+        test::check (reader.loadCache (cacheFile) && reader.blacklisted().contains ("/fake/crasher.vst3"),
+                     "a save merges the blacklist the file already holds: the crash guard survives a stale writer");
+        stale.clearBlacklist();
+        test::check (stale.saveCache (cacheFile), "forget-blacklisted saves");
+        Catalog reader2;
+        test::check (reader2.loadCache (cacheFile) && reader2.blacklisted().isEmpty(),
+                     "forget blacklisted plugins is not undone by the merge on the next save");
     }
 
     // 4. Pre-load VST3/AU deduplication
@@ -3067,8 +3090,16 @@ void analyzeChecks()
         nanBuf.setSample (1, 200, std::numeric_limits<float>::infinity());
         const auto rNan = analyze::analyzeBuffer (nanBuf, 48000.0);
         test::check (rNan.valid && std::isfinite (rNan.integratedLufs) && std::isfinite (rNan.truePeakDb)
-                         && std::isfinite (rNan.stereoCorrelationMean) && std::isfinite (rNan.rmsDistanceDb),
-                     "silence/NaN buffer produces finite outputs without crashing");
+                         && std::isfinite (rNan.stereoCorrelationMean) && std::isfinite (rNan.rmsDistanceDb)
+                         && ! rNan.spectrumMeasured && rNan.bands[0].status == "not_measured",
+                     "silence/NaN buffer produces finite outputs without crashing, and says the spectrum was not measured");
+        const auto silentJson = rNan.toVar();
+        const auto* specObj = silentJson["spectrum"].getDynamicObject();
+        test::check (specObj != nullptr && specObj->getProperty ("status").toString() == "not_measured"
+                         && specObj->getProperty ("rms_distance_db").isVoid()
+                         && silentJson["spectrum"]["bands"][0]["measured_db"].isVoid()
+                         && silentJson["spectrum"]["bands"][0]["status"].toString() == "not_measured",
+                     "a silent file reports not_measured with null spectrum numbers, not a perfect balance at 0 dB");
 
         juce::AudioBuffer<float> emptyBuf;
         const auto rEmpty = analyze::analyzeBuffer (emptyBuf, 0.0);
@@ -3086,6 +3117,31 @@ void analyzeChecks()
         test::check (std::abs (rHardPan.stereoCorrelationMean) < 1e-6 && std::abs (rHardPan.stereoCorrelationMin) < 1e-6
                          && std::abs (rHardPan.bandCorrelation[2]) < 1e-6 && rHardPan.lrBalanceDb <= 60.0,
                      "hard-panned stereo reports 0.0 correlation and clamped L/R balance");
+
+        // BS.1770-4: a steady tone has one short-term level, so LRA ~ 0 and the short-term max matches the integrated value
+        juce::AudioBuffer<float> steady (1, 48000 * 4);
+        for (int i = 0; i < steady.getNumSamples(); ++i)
+            steady.setSample (0, i, 0.2f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / 48000.0)));
+        const auto rSteady = analyze::analyzeBuffer (steady, 48000.0);
+        test::check (rSteady.valid && rSteady.lraLu < 0.5
+                         && std::abs (rSteady.shortTermMaxLufs - rSteady.integratedLufs) < 0.5,
+                     "a steady tone has ~0 LRA and its short-term max matches the integrated loudness (half-length hop, mean-relative gate)");
+
+        // Masking reads both channels: hard-panned is ~3 dB below centred at the same amplitude, not ~6 (the mid-only read)
+        juce::AudioBuffer<float> centre (2, 48000);
+        for (int i = 0; i < 48000; ++i)
+        {
+            const float x = 0.25f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * i / 48000.0));
+            centre.setSample (0, i, x);
+            centre.setSample (1, i, x);
+        }
+        analyze::TrackSummary sumPan, sumCentre;
+        std::array<double, pdsp::bands::kCount> bandsPan {}, bandsCentre {};
+        double loudPan = -120.0, loudCentre = -120.0;
+        analyze::analyzeTrackForMasking ("pan", hardPan, 48000.0, sumPan, bandsPan, loudPan);
+        analyze::analyzeTrackForMasking ("centre", centre, 48000.0, sumCentre, bandsCentre, loudCentre);
+        test::check (std::abs ((bandsCentre[2] - bandsPan[2]) - 3.0) < 1.0,
+                     "a hard-panned track reads ~3 dB below the centred one in its band, not ~6 (both channels are measured)");
     }
 
     // 6. Multitrack masking check at 350 Hz (Low-Mid)
@@ -3327,6 +3383,506 @@ void batch1FixesChecks()
     dir.deleteRecursively();
 }
 
+// [55] What a project must not be able to give the timeline: a saved rate that is not a rate, a track gain over the fader, two fades that
+// overlap when the rate is adopted, a position that would overflow when it is scaled, and a plugin whose state changes its buses.
+void projectBoundsChecks()
+{
+    std::printf ("[55] Project bounds: the saved rate band, the track gain range, the fades and positions a rate change scales, the state before the bus check\n");
+    const auto dir = tempFolder().getChildFile ("bounds");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    juce::String err;
+
+    // A: a saved rate outside the rates a device runs at is unknown, with a warning naming what was saved
+    {
+        const auto write = [dir] (const char* name, const char* savedRate)
+        {
+            const auto file = dir.getChildFile (name);
+            file.replaceWithText (juce::String ("<OlympusProject version=\"2\" sampleRate=\"") + savedRate + "\"/>");
+            return file;
+        };
+        Session hi;
+        test::check (hi.load (write ("rate-high.olympus", "1e20"), err) && hi.sampleRate == 0.0
+                         && hi.warnings.size() == 1 && hi.warnings[0].contains ("1e20"),
+                     "a saved rate above the band is unknown, with a warning naming the value");
+        Session lo;
+        test::check (lo.load (write ("rate-low.olympus", "4000"), err) && lo.sampleRate == 0.0
+                         && lo.warnings.size() == 1 && lo.warnings[0].contains ("4000"),
+                     "a saved rate below the band is unknown, with a warning naming the value");
+        Session neg;
+        test::check (neg.load (write ("rate-zero.olympus", "0"), err) && neg.sampleRate == 0.0 && neg.warnings.isEmpty(),
+                     "the saved 0, the rate the app itself does not know yet, stays unknown in silence");
+        Session off;
+        test::check (off.load (write ("rate-minus.olympus", "-48000"), err) && off.sampleRate == 0.0
+                         && off.warnings.size() == 1 && off.warnings[0].contains ("-48000"),
+                     "a saved rate below zero is unknown, with a warning naming the value");
+        Session junk;
+        test::check (junk.load (write ("rate-abc.olympus", "abc"), err) && junk.sampleRate == 0.0
+                         && junk.warnings.size() == 1 && junk.warnings[0].contains ("abc"),
+                     "saved text that is not a number at all is unknown, with a warning naming the text as it was saved");
+        const auto noneFile = dir.getChildFile ("rate-none.olympus");
+        noneFile.replaceWithText ("<OlympusProject version=\"2\"/>");
+        Session none;
+        test::check (none.load (noneFile, err) && none.sampleRate == 0.0 && none.warnings.isEmpty(),
+                     "no saved rate attribute at all stays unknown in silence, like the saved 0");
+        Session edge;
+        test::check (edge.load (write ("rate-8k.olympus", "8000"), err) && std::abs (edge.sampleRate - 8000.0) < 0.5 && edge.warnings.isEmpty(),
+                     "the bottom of the band, 8 kHz, loads as the rate it is");
+        Session top;
+        test::check (top.load (write ("rate-768k.olympus", "768000"), err) && std::abs (top.sampleRate - 768000.0) < 0.5 && top.warnings.isEmpty(),
+                     "and the top, 768 kHz");
+    }
+
+    // B: a track gain is clamped to the fader's range, -100..+12, and a clamp is said
+    {
+        const auto file = dir.getChildFile ("gain.olympus");
+        file.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"48000\">"
+                              "<Track name=\"Loud\" gainDb=\"20\"/>"
+                              "<Track name=\"Mid\" gainDb=\"6\"/>"
+                              "<Track name=\"Gone\" gainDb=\"-500\"/>"
+                              "</OlympusProject>");
+        Session s;
+        test::check (s.load (file, err) && s.tracks.size() == 3, "the project with three faders loads");
+        test::check (close (s.tracks[0]->gainDb, 12.0) && s.warnings.size() == 1 && s.warnings[0].contains ("Loud")
+                         && s.warnings[0].contains ("+12 dB"),
+                     "a saved +20 dB becomes +12, what the fader shows, with the track named in the warning");
+        test::check (close (s.tracks[1]->gainDb, 6.0), "a gain inside the range is kept");
+        test::check (close (s.tracks[2]->gainDb, -100.0), "and the bottom of the fader is kept too");
+    }
+
+    // C: the two fades never overlap, before or after a rate is adopted
+    {
+        const auto file = dir.getChildFile ("fades.olympus");
+        file.replaceWithText ("<OlympusProject version=\"2\" sampleRate=\"96000\">"
+                              "<Track name=\"T\"><Clip name=\"c\" file=\"gone.wav\" path=\"\" start=\"0\" offset=\"0\" length=\"6\" fadeIn=\"3\" fadeOut=\"3\"/></Track>"
+                              "</OlympusProject>");
+        Session s;
+        test::check (s.load (file, err) && s.tracks[0]->clips[0].fadeIn == 3 && s.tracks[0]->clips[0].fadeOut == 3,
+                     "the fades fill the clip exactly at 96 kHz");
+        test::check (s.adoptRate (48000.0, err), "the session takes half the rate");
+        const auto& c = s.tracks[0]->clips[0];
+        test::check (c.length == 3 && c.fadeIn == 2 && c.fadeOut == 1 && c.fadeIn + c.fadeOut <= c.length,
+                    test::fmt ("the scaled fades still do not overlap the clip (%d + %d of %d)", (int) c.fadeIn, (int) c.fadeOut, (int) c.length));
+    }
+
+    // D: a position at the limit does not overflow when the rate is adopted
+    {
+        const auto tooBig = std::to_string ((juce::int64) 1 << 62); // past the limit, yet a number a project can hold
+        const auto file = dir.getChildFile ("huge.olympus");
+        file.replaceWithText (juce::String ("<OlympusProject version=\"2\" sampleRate=\"8000\" loopStart=\"") + tooBig + "\" loopEnd=\"0\" loopOn=\"0\">"
+                              "<Marker name=\"End\" sample=\"" + tooBig + "\"/>"
+                              "<Track name=\"T\"><Clip name=\"c\" file=\"gone.wav\" path=\"\" start=\"" + tooBig + "\" offset=\"0\" length=\"1000\"/></Track>"
+                              "</OlympusProject>");
+        Session s;
+        test::check (s.load (file, err) && s.tracks[0]->clips[0].start == kMaxSafeSample && s.markers[0].start == kMaxSafeSample
+                         && s.loopStart == kMaxSafeSample,
+                     "a position past the limit is loaded at the limit");
+        test::check (s.adoptRate (48000.0, err), "the session takes a rate six times higher");
+        test::check (s.tracks[0]->clips[0].start == kMaxSafeSample && s.markers[0].start == kMaxSafeSample
+                         && s.loopStart == kMaxSafeSample,
+                     "and scaling it six times lands on the limit, never past it and never below zero");
+    }
+
+    // E: a plugin the stereo check refuses when it is set up again is set up again all the same, and stays in its slot
+    {
+        Session s;
+        test::addLayoutPlugin (s.catalog);
+        s.addEmptyTrack ("T");
+        test::check (s.addPlugin (0, "test layout", -1, err), "a plugin whose own state can change its buses is on a track");
+        auto* lay = dynamic_cast<test::StateLayoutPlugin*> (s.tracks[0]->chain[0]->instance.get());
+        test::check (lay != nullptr && lay->preparedRate == 48000.0, "it is set up at 48 kHz, the rate a session with no device starts on");
+        lay->goMono (true);
+        test::check (s.adoptRate (96000.0, err) && lay->preparedRate == 96000.0 && s.tracks[0]->chain.size() == 1,
+                     "at 96 kHz the plugin, which no longer runs stereo, is set up again rather than left with its resources released");
+    }
+
+    // F: the saved state goes on before the plugin is certified, so a state that changed its buses is seen by the check
+    {
+        const auto wav = makeWav ("bounds/tone.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+        const auto file = dir.getChildFile ("state.olympus");
+        Session p;
+        test::addLayoutPlugin (p.catalog);
+        test::check (p.addTrack (wav, "L", err) && p.setChain (0, { "test layout" }, err), "a stereo track with the plugin");
+        auto* live = dynamic_cast<test::StateLayoutPlugin*> (p.tracks[0]->chain[0]->instance.get());
+        test::check (live != nullptr && live->getTotalNumInputChannels() == 2, "as it is made it runs stereo");
+        if (live != nullptr)
+            live->goMono (true);
+        test::check (p.save (file, err), "the project is saved with the state that says the plugin is mono");
+
+        Session q;
+        test::addLayoutPlugin (q.catalog);
+        test::check (q.load (file, err) && q.tracks[0]->chain.size() == 1, "the project loads");
+        test::check (q.tracks[0]->chain[0]->instance == nullptr && q.tracks[0]->chain[0]->savedState.getSize() > 0
+                         && q.warnings.joinIntoString ("\n").contains ("cannot run on a stereo track"),
+                     "the plugin is refused as its state left it, kept unusable with that state, and the warning says why");
+        const auto refused = q.describe() ["tracks"][0]["chain"][0];
+        test::check (! (bool) refused["installed"] && refused["reason"].toString().contains ("cannot run in stereo")
+                         && ! refused["reason"].toString().contains ("not installed"),
+                     "describe() gives the refused slot a reason naming the layout, not a missing plugin");
+        const auto notes = adviceFor (q);
+        test::check (ui::hasNote (notes, "cannot run in stereo", ui::Severity::warning)
+                         && ! ui::hasNote (notes, "not installed", ui::Severity::warning),
+                     "the foot note says the installed plugin cannot run in stereo, not that a plugin is not installed");
+    }
+
+    dir.deleteRecursively();
+}
+
+// [56] The take's start is decided inside its first write: Recorder::push latches it under the busy flag stop() waits for, so a stop at the
+// first block cannot consume -1; an input past the recorder's own limit says so; finishRecording gives back the clips it placed.
+void takeStartAndLimitChecks()
+{
+    std::printf ("[56] Recorder: push latches the take's start with its first write (a stop in flight still gets it), the 64-input limit has its own reason, finishRecording returns the clips it placed, the opening guard is raised after the counters are cleared\n");
+    const auto dir = tempFolder().getChildFile ("take-start");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    juce::String err;
+    std::vector<std::vector<float>> in (2, std::vector<float> (256, 0.25f));
+    const float* ptrs[2] = { in[0].data(), in[1].data() };
+
+    {
+        Recorder rec;
+        rec.prepare (48000.0, 256);
+        test::check (! rec.push (ptrs, 2, 256, 4800) && rec.takeStartSample() == -1, "with no take running nothing is written and no start is latched");
+        Session s;
+        s.addEmptyTrack ("Vox");
+        test::check (s.setTrackArm (0, true, err) && s.setTrackInput (0, 0, 1, err), "a track is armed");
+        test::check (beginRecording (rec, s, dir, 48000.0, err) && rec.takeStartSample() == -1, "the take starts with no block written yet: " + err);
+        test::check (rec.push (ptrs, 2, 256, 4800) && rec.takeStartSample() == 4800, "the first block written latches the take's start");
+        test::check (rec.push (ptrs, 2, 256, 5056) && rec.takeStartSample() == 4800, "a later block does not move it");
+        test::check (rec.push (ptrs, 2, 256) && rec.takeStartSample() == 4800, "a block given without a playhead changes nothing");
+        const auto done = rec.stop();
+        test::check (done.size() == 1 && done[0].frames == 768 && rec.takeStartSample() == 4800, "stop returns with the start it waited for");
+    }
+
+    {
+        // A stop that comes while the first push is still writing waits for it, so the start it latched is there when stop() returns (the
+        // old shape stored it in the caller, after the busy scope, where a stop could come between the write and its start).
+        Recorder rec;
+        rec.prepare (48000.0, 4096);
+        Session s;
+        s.addEmptyTrack ("Vox");
+        test::check (s.setTrackArm (0, true, err) && s.setTrackInput (0, 0, 1, err) && beginRecording (rec, s, dir, 48000.0, err),
+                     "a second take starts: " + err);
+        std::vector<float> big (1 << 19, 0.25f);
+        const float* one[1] = { big.data() };
+        std::thread audio ([&] { rec.push (one, 1, (int) big.size (), 9000); });
+        std::this_thread::sleep_for (std::chrono::milliseconds (3));   // the long block is being written while the take is stopped
+        const auto done = rec.stop();
+        audio.join();
+        test::check (rec.takeStartSample() == 9000, "the stop that came mid-write still gets the first block's start, not -1");
+        test::check (done.size() == 1 && done[0].frames > 0 && done[0].frames % 4096 == 0 && done[0].frames <= rec.framesRecorded(),
+                     test::fmt ("and the file holds whole blocks of what the write accepted (%lld of %lld pushed)",
+                                (long long) (done.empty() ? -1 : (long long) done[0].frames), (long long) rec.framesRecorded()));
+    }
+
+    {
+        // the input the recorder cannot record at all says so by itself, and the counters of a take begin with it
+        Recorder rec;
+        rec.prepare (48000.0, 256);
+        const std::vector<Recorder::Take> past { { 0, Recorder::kMaxInputs, -1, "Many" } };
+        test::check (! rec.start (past, dir, 48000.0, err) && err.contains ("past the recorder's 64-input limit")
+                         && ! err.contains ("not switched on"),
+                     "an input past the recorder's limit is refused with its own reason: " + err);
+        Session s;
+        s.addEmptyTrack ("Vox");
+        test::check (s.setTrackArm (0, true, err) && s.setTrackInput (0, 0, 1, err) && beginRecording (rec, s, dir, 48000.0, err),
+                     "a take on a real input starts: " + err);
+        test::check (rec.samplesSkippedWhileOpening() == 0 && rec.takeStartSample() == -1, "a new take begins with nothing skipped and no start");
+        rec.countSkippedWhileOpening (480);
+        rec.countSkippedWhileOpening (0);
+        test::check (rec.samplesSkippedWhileOpening() == 480, "the frames that arrived while the files opened are counted");
+        const auto done = rec.stop();
+        test::check (done.empty() || done[0].frames == 0, "and none of them was written");
+        test::check (beginRecording (rec, s, dir, 48000.0, err) && rec.samplesSkippedWhileOpening() == 0 && rec.takeStartSample() == -1,
+                     "the next take begins with nothing skipped and no start");
+    }
+
+    {
+        // The guard and the counters are one decision (review finding 3): Recorder::start clears the take's counters and only then raises
+        // the caller's "the files are still opening" flag, so the caller cannot raise it over the counters of the take before it (which is
+        // how a counted block got erased), and a block counted while the guard was up is there when the take stops.
+        std::atomic<bool> opening { false };
+        err.clear();
+        Recorder rec;
+        rec.prepare (48000.0, 256);
+        Session s;
+        s.addEmptyTrack ("Vox");
+        test::check (s.setTrackArm (0, true, err) && s.setTrackInput (0, 0, 1, err)
+                         && beginRecording (rec, s, dir, 48000.0, err, &opening) && err.isEmpty(),
+                     "a take starts with the caller's guard given to start: " + err);
+        test::check (opening.load() && rec.samplesSkippedWhileOpening() == 0 && rec.takeStartSample() == -1,
+                     "start raised the guard itself, over this take's own fresh counters");
+        rec.countSkippedWhileOpening (256);   // what the callback does with a block that arrived while the guard was up
+        const auto done = rec.stop();
+        test::check (rec.samplesSkippedWhileOpening() == 256 && (done.empty() || done[0].frames == 0),
+                     "the counted head survives the take: " + juce::String (rec.samplesSkippedWhileOpening()) + " samples skipped, none written");
+        test::check (beginRecording (rec, s, dir, 48000.0, err, &opening) && opening.load() && rec.samplesSkippedWhileOpening() == 0,
+                     "and the next take clears the count and raises the guard again: " + err);
+        rec.stop();
+    }
+
+    {
+        // finishRecording gives back the clips it placed: the window selects those, not any clip that starts at the same sample
+        const auto wav = makeWav ("take-start/placed.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+        Session s;
+        s.addEmptyTrack ("A");
+        s.addEmptyTrack ("B");
+        Editor ed (s);
+        std::vector<ClipRef> placed;
+        const std::vector<Recorder::Finished> takes { { 1, wav, 4800 }, { 0, wav, 0 } };
+        test::check (finishRecording (takes, 10000, 2000, ed, err, &placed) && placed.size() == 1
+                         && placed[0].track == 1 && placed[0].clip == 0 && s.tracks[1]->clips.size() == 1,
+                     "the clip a take became is returned, and the take with no frames gives nothing");
+        const std::vector<Recorder::Finished> again { { 0, wav, 4800 } };
+        std::vector<ClipRef> second;
+        test::check (finishRecording (again, 10000, 0, ed, err, &second) && second.size() == 1 && second[0].track == 0 && second[0].clip == 0,
+                     "and the next take's clip too, on its own track");
+        test::check (finishRecording (again, 10000, 0, ed, err), "a caller that does not want the clips still gets its answer");
+    }
+
+    dir.deleteRecursively();
+}
+
+namespace
+{
+// Holds the session's lock for a while, as the audio callback or a render does, and says when it has taken it. A server call
+// that comes back only after this let go is a call that waited for the session's lock (one Session, three users). A probe
+// inside a test plugin cannot show it: juce::CriticalSection is recursive, so its own thread always gets tryEnter.
+class LockHolder : public juce::Thread
+{
+public:
+    explicit LockHolder (juce::CriticalSection& l) : Thread ("olympus lock holder"), lock (l) {}
+
+    void run() override
+    {
+        lock.enter();
+        holding.store (true);
+        juce::Thread::sleep (kHoldMs);
+        lock.exit();
+    }
+
+    // Waits until the lock is actually held here, so the call the test makes next cannot start before the hold began.
+    bool waitUntilHeld()
+    {
+        for (int i = 0; i < 200 && ! holding.load(); ++i)
+            juce::Thread::sleep (10);
+        return holding.load();
+    }
+
+    static constexpr int kHoldMs = 600; // generous: the wait/answer boundaries below are ratios of it, so a loaded CI machine still separates them
+
+private:
+    juce::CriticalSection& lock;
+    std::atomic<bool> holding { false };
+};
+
+// A WAV header claiming 30000 channels of 16-bit with 120000 bytes of data declared and one byte written. JUCE computes the
+// bytes per frame from the channels and the depth, so the reader opens with 2 samples and 30000 channels of them.
+juce::File writeHugeChannelWav (const juce::String& name)
+{
+    auto file = tempFolder().getChildFile (name);
+    file.deleteFile();
+    juce::FileOutputStream out (file);
+    out.write ("RIFF", 4);
+    out.writeInt (36 + 120000);
+    out.write ("WAVE", 4);
+    out.write ("fmt ", 4);
+    out.writeInt (16);
+    out.writeShort (1);        // PCM
+    out.writeShort (30000);    // channels
+    out.writeInt (8000);
+    out.writeInt (8000 * 60000); // byte rate
+    out.writeShort (4);        // block align (the reader computes it; 30000 channels would not fit in its 16 bits)
+    out.writeShort (16);       // bits per sample
+    out.write ("data", 4);
+    out.writeInt (120000);
+    out.writeByte (0);         // one byte of payload, so the file is more than its header
+    out.flush();
+    return file;
+}
+} // namespace
+
+// [57] The server's guards, from the 2026-11-21 hunt: a file whose header lies is refused instead of allocated; the arrays that
+// instantiate plugins are capped; text a plugin does not read back is refused with nothing changed; a notification is never
+// answered and a protocol version the server does not speak is answered with its own; a missing 'file' is named; and the tools
+// that touch a hosted plugin instance hold the session's lock.
+void mcpGuardsChecks()
+{
+    std::printf ("[57] MCP guards: the lying WAV header, the caps on set_chain and copy_chain, the text that must round-trip, the protocol, the lock on an instance\n");
+    const auto dir = tempFolder().getChildFile ("mcp-guards");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("mcp-guards/a.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    const auto path = wav.getFullPathName().replace ("\\", "\\\\");
+    juce::String err;
+    Session s;
+    test::addTestPlugins (s.catalog);
+    McpServer server (s);
+    const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+    const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+    const auto said = [] (const juce::var& r, const char* words) { return toolText (r).contains (words); };
+    const auto asked = [] (McpServer& srv, const juce::String& json) { juce::var v; juce::JSON::parse (json, v); return srv.handle (v); };
+
+    // 1. add_track names the argument it is missing instead of talking about a file it never looked at
+    {
+        const auto missing = call ("add_track", "{}");
+        test::check (failed (missing) && said (missing, "Give 'file'"), "add_track with no 'file' asks for it: " + toolText (missing));
+        const auto notText = call ("add_track", "{\"file\":5}");
+        test::check (failed (notText) && said (notText, "path"), "add_track with a 'file' that is not a path says so: " + toolText (notText));
+        const auto blank = call ("add_track", "{\"file\":\"\"}");
+        test::check (failed (blank) && ! said (blank, "contains no audio"), "add_track with a blank path does not report an empty file: " + toolText (blank));
+        const auto null = call ("add_track", "{\"file\":null}");
+        test::check (failed (null) && s.tracks.size() == 0, "a null 'file' is refused and makes no track");
+        test::check (! failed (call ("add_track", "{\"file\":\"" + path + "\",\"name\":\"A\"}")) && s.tracks.size() == 1,
+                     "add_track still adds a track from a real file");
+    }
+
+    // 2. analyze_audio refuses what Session::readAudio refuses, instead of allocating what a header claims
+    {
+        const auto claimed = writeRawWav ("mcp-guards/claim.wav", 48000, 200000000, 0); // 44 bytes claiming 200 MB
+        const auto longHead = writeRawWav ("mcp-guards/long.wav", 8000, 240000000, 1);   // claims 60M samples: over two hours at 8 kHz
+        const auto manyChannels = writeHugeChannelWav ("mcp-guards/channels.wav");
+        const auto empty = writeRawWav ("mcp-guards/empty.wav", 48000, 0, 0);
+        const auto jsonOf = [] (const juce::File& f) { return "{\"file\":\"" + f.getFullPathName().replace ("\\", "\\\\") + "\"}"; };
+        const auto asFile = [&] (const juce::File& f) { return call ("analyze_audio", jsonOf (f)); };
+        const auto claim = asFile (claimed);
+        test::check (failed (claim) && said (claim, "corrupt"), "analyze_audio refuses a WAV whose header claims more than the file holds: " + toolText (claim));
+        const auto tooLong = asFile (longHead);
+        test::check (failed (tooLong) && said (tooLong, "two hours"), "analyze_audio refuses the frames a header declares beyond two hours: " + toolText (tooLong));
+        const auto channels = asFile (manyChannels);
+        test::check (failed (channels) && said (channels, "corrupt"), "analyze_audio refuses a header with 30000 channels: " + toolText (channels));
+        const auto nothing = asFile (empty);
+        test::check (failed (nothing), "analyze_audio refuses a header with no samples: " + toolText (nothing));
+        const auto stillWorks = asFile (wav);
+        test::check (! failed (stillWorks) && (bool) toolJson (stillWorks)["valid"], "analyze_audio still reads a whole file it is given");
+    }
+
+    // 3. the arrays that instantiate one plugin (or copy a chain onto one track) per entry are capped
+    {
+        const auto chainOf = [] (int n) { juce::String items; for (int i = 0; i < n; ++i) items += (i > 0 ? ", " : "") + juce::String ("\"Test Gain\""); return items; };
+        const auto over = call ("set_chain", "{\"track\":0,\"plugins\":[" + chainOf (65) + "]}");
+        test::check (failed (over) && said (over, "64") && s.tracks[0]->chain.size() == 0,
+                     "set_chain refuses 65 plugins with the limit in the reason and leaves the chain alone: " + toolText (over));
+        const auto atTheCap = call ("set_chain", "{\"track\":0,\"plugins\":[" + chainOf (64) + "]}");
+        test::check (! failed (atTheCap) && s.tracks[0]->chain.size() == 64, "set_chain still takes a chain of 64");
+        test::check (! failed (call ("set_chain", "{\"track\":0,\"plugins\":[]}")) && s.tracks[0]->chain.size() == 0, "and [] still clears it");
+        juce::String targets;
+        for (int i = 0; i < 129; ++i) targets += (i > 0 ? ", " : "") + juce::String ("0");
+        const auto wide = call ("copy_chain", "{\"from_track\":0,\"to_tracks\":[" + targets + "]}");
+        test::check (failed (wide) && said (wide, "128"), "copy_chain refuses 129 target tracks with the limit in the reason: " + toolText (wide));
+        const auto second = call ("add_track", "{\"file\":\"" + path + "\",\"name\":\"B\"}");
+        test::check (! failed (second) && s.tracks.size() == 2, "a second track to copy a chain onto");
+        test::check (! failed (call ("set_chain", "{\"track\":0,\"plugins\":[\"Test Gain\"]}"))
+                         && ! failed (call ("copy_chain", "{\"from_track\":0,\"to_tracks\":[1]}"))
+                         && s.tracks[1]->chain.size() == 1,
+                     "copy_chain still copies within the cap");
+    }
+
+    // 4. set_parameter by text: only text the plugin reads back as that value is taken
+    {
+        test::check (! failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\"}")), "Test Gain is on track 0");
+        const auto exact = call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"text\":\"-6\"}");
+        test::check (! failed (exact) && std::abs (gainOf (s, 0, 0) + 6.0) < 0.2, "the text the plugin shows is taken: " + toolText (exact));
+        const auto reformatted = call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"text\":\"12.00\"}");
+        test::check (! failed (reformatted) && std::abs (gainOf (s, 0, 0) - 12.0) < 0.2,
+                     "text the plugin shows with other decimals is taken (\"12.00\" for \"12\"): " + toolText (reformatted));
+        const auto spaced = call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"text\":\" 12 \"}");
+        test::check (! failed (spaced) && std::abs (gainOf (s, 0, 0) - 12.0) < 0.2, "and the same number with the space around it");
+        const auto before = gainOf (s, 0, 0);
+        const auto junk = call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"text\":\"banana\"}");
+        test::check (failed (junk) && said (junk, "gain") && said (junk, "0..1") && std::abs (gainOf (s, 0, 0) - before) < 1e-6,
+                     "text the plugin cannot read is refused with the setting named and nothing changed: " + toolText (junk));
+        const auto prefixJunk = call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"text\":\"12abc\"}");
+        test::check (failed (prefixJunk) && std::abs (gainOf (s, 0, 0) - before) < 1e-6,
+                     "a word after the number is refused, not prefix-parsed as the number: " + toolText (prefixJunk));
+        const auto clamped = call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"text\":\"500\"}");
+        test::check (failed (clamped) && std::abs (gainOf (s, 0, 0) - before) < 1e-6,
+                     "text the plugin would clamp to the end of its range is refused, not set at the rail: " + toolText (clamped));
+        const auto byValue = call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"value\":0.5}");
+        test::check (! failed (byValue) && std::abs (gainOf (s, 0, 0)) < 0.01, "the 'value' path is untouched by the check");
+    }
+
+    // 5. the protocol: a version is echoed only when the server speaks it, and a notification is never answered
+    {
+        const auto version = [&] (const juce::String& wanted)
+        {
+            return asked (server, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"" + wanted + "\"}}")
+                       ["result"]["protocolVersion"].toString();
+        };
+        test::check (version ("2025-06-18") == "2025-06-18" && version ("2025-03-26") == "2025-03-26" && version ("2024-11-05") == "2024-11-05",
+                     "initialize echoes a protocol version the server speaks");
+        test::check (version ("2030-01-01") == "2025-06-18", "initialize answers a version it does not speak with its own: " + version ("2030-01-01"));
+        test::check (version ("") == "2025-06-18", "and a client that names none gets the server's own");
+        test::check (asked (server, "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}").isVoid(), "a notification naming a known method gets no answer at all");
+        test::check (asked (server, "{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\"}").isVoid(), "neither does one naming tools/list");
+        test::check ((int) asked (server, "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"nope\"}")["error"]["code"] == -32601,
+                     "a request with an id and a bad method still gets -32601");
+        test::check ((int) asked (server, "[]")["error"]["code"] == -32600, "an invalid request with no id is still -32600");
+        std::istringstream in ("{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n");
+        std::ostringstream out;
+        server.run (in, out);
+        const auto outText = juce::String (out.str());
+        const auto lines = juce::StringArray::fromLines (outText);
+        int answered = 0;
+        for (auto& l : lines)
+            if (l.trim().isNotEmpty()) ++answered;
+        test::check (answered == 1 && (int) juce::JSON::parse (lines[0])["id"] == 7,
+                     "on stdio a notification writes nothing and the request after it still writes one line ("
+                         + juce::String (answered) + " answered of " + juce::String (lines.size()) + ": " + outText + ")");
+    }
+
+    // 6. the instance tools wait for the session's lock while another user holds it (one Session, three users). A test plugin
+    // cannot show this from inside itself (the lock is recursive for its own thread), so the check is the wait itself.
+    {
+        Session s2;
+        test::addTestPlugins (s2.catalog);
+        test::check (s2.addTrack (wav, "A", err) && err.isEmpty(), "a session of its own for the lock check: " + err);
+        McpServer srv (s2);
+        const auto answer = [&srv] (const char* tool, const juce::String& args) { return toolCall (srv, tool, args); };
+        test::check (! (bool) answer ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\"}")["isError"], "Test Gain is on that track");
+        const auto state = toolJson (answer ("get_plugin_state", "{\"track\":0,\"slot\":0}"))["state"].toString();
+        test::check (state.isNotEmpty(), "get_plugin_state gives the state to hand back");
+        const auto beganFree = juce::Time::getMillisecondCounterHiRes();
+        test::check (! (bool) answer ("list_parameters", "{\"track\":0,\"slot\":0}")["isError"]
+                         && juce::Time::getMillisecondCounterHiRes() - beganFree < LockHolder::kHoldMs * 0.2,
+                     "with the lock free a call comes back at once, so the wait below is the lock and not the work");
+        const auto waitsFor = [&] (const char* tool, const juce::String& args)
+        {
+            LockHolder holder (s2.lock);
+            holder.startThread();
+            if (! holder.waitUntilHeld()) { holder.stopThread (3000); return false; }
+            const auto began = juce::Time::getMillisecondCounterHiRes();
+            const auto r = answer (tool, args);
+            const auto took = juce::Time::getMillisecondCounterHiRes() - began;
+            holder.stopThread (3000);
+            return ! (bool) r["isError"] && took >= LockHolder::kHoldMs * 0.5;
+        };
+        const auto answersAtOnce = [&] (const char* tool, const juce::String& args)
+        {
+            LockHolder holder (s2.lock);
+            holder.startThread();
+            if (! holder.waitUntilHeld()) { holder.stopThread (3000); return false; }
+            const auto began = juce::Time::getMillisecondCounterHiRes();
+            const auto r = answer (tool, args);
+            const auto took = juce::Time::getMillisecondCounterHiRes() - began;
+            holder.stopThread (3000);
+            return (bool) r["isError"] && took < LockHolder::kHoldMs * 0.5;
+        };
+        test::check (waitsFor ("list_parameters", "{\"track\":0,\"slot\":0}"), "list_parameters waits for the session's lock before it reads the plugin");
+        test::check (waitsFor ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"value\":0.5}"), "set_parameter waits for it before it writes");
+        test::check (waitsFor ("get_plugin_state", "{\"track\":0,\"slot\":0}"), "get_plugin_state waits for it");
+        test::check (waitsFor ("set_plugin_state", "{\"track\":0,\"slot\":0,\"state\":\"" + state + "\"}"), "set_plugin_state waits for it");
+        test::check (waitsFor ("load_preset", "{\"track\":0,\"slot\":0,\"preset\":\"Boost\"}"), "load_preset waits for it");
+        test::check (waitsFor ("list_presets", "{\"track\":0,\"slot\":0}"), "list_presets waits for it");
+        test::check (answersAtOnce ("set_plugin_state", "{\"track\":0,\"slot\":0,\"state\":\"!!not base64!!\"}"),
+                     "and the text it cannot decode is refused at once, outside the lock (the instance is never touched): "
+                         + toolText (answer ("set_plugin_state", "{\"track\":0,\"slot\":0,\"state\":\"\"}")));
+    }
+
+    dir.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -3385,6 +3941,9 @@ int main()
     mcpAnalyzeAudioChecks();
     delayRingAndRelativePathChecks();
     batch1FixesChecks();
+    projectBoundsChecks();
+    takeStartAndLimitChecks();
+    mcpGuardsChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

@@ -70,7 +70,14 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
             if (missingAudio)
                 add (ui::Severity::warning, "Track '" + t->name.substring (0, 24) + "': an audio file is missing. The track stays, and its clips play as silence.");
             for (auto& slot : t->chain)
-                if (slot->instance == nullptr) ++missingPlugins;
+                if (slot->instance == nullptr)
+                {
+                    // installed but refused its saved layout is said as that, not as a plugin missing from this machine
+                    if (s.catalog.has (slot->plugin))
+                        add (ui::Severity::warning, ("'" + slot->plugin + "': installed, but it cannot run in stereo with the settings this project saved, so it passes the audio through and keeps them.").substring (0, ui::kMaxNoteChars));
+                    else
+                        ++missingPlugins;
+                }
             anyAudible += s.audible (*t) ? 1 : 0;
         }
     }
@@ -105,7 +112,13 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
         {
             int missingMonitor = 0;
             for (auto& slot : s.monitor)
-                if (slot->instance == nullptr) ++missingMonitor;
+                if (slot->instance == nullptr)
+                {
+                    if (s.catalog.has (slot->plugin))
+                        add (ui::Severity::warning, ("Monitor '" + slot->plugin + "': installed, but it cannot run in stereo with its saved settings; the headphones hear the mix without it.").substring (0, ui::kMaxNoteChars));
+                    else
+                        ++missingMonitor;
+                }
             if (s.monitorBypass)
                 add (ui::Severity::warning, "Monitor: headphone correction is bypassed: you are hearing the uncorrected mix.");
             const double rate = device.rate > 0.0 ? device.rate : (s.sampleRate > 0.0 ? s.sampleRate : 48000.0);

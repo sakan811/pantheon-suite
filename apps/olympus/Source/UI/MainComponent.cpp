@@ -27,6 +27,16 @@ juce::String timeText (juce::int64 sample, double rate)
     return juce::String (minutes).paddedLeft ('0', 2) + ":" + juce::String (std::fmod (s, 60.0), 2).paddedLeft ('0', 5);
 }
 
+// True when a device's output array holds a channel it does not use: JUCE leaves those pointers unspecified (CoreAudio and ALSA compact
+// them, so this is hardening), and nothing may read or write through one (DeviceCallback::deviceBlock).
+bool hasNullChannel (float* const* channels, int numChannels)
+{
+    for (int ch = 0; ch < numChannels; ++ch)
+        if (channels[ch] == nullptr)
+            return true;
+    return false;
+}
+
 // "5.2.480  00:09.50": bar, beat and tick of the position (from the tempo map), then the time.
 juce::String positionText (const Session& s, juce::int64 sample)
 {
@@ -111,6 +121,7 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
     const juce::int64 start = loopStart.load(), end = loopEnd.load(), audioEnd = endOfAudio.load();
     const bool wrap = ! recording && loopOn.load() && end > start;
     juce::int64 pos = position.load();
+    const juce::int64 loaded = pos;
     int done = 0;
     while (done < info.numSamples)
     {
@@ -133,7 +144,10 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
     }
     if (done < info.numSamples)
         info.buffer->clear (info.startSample + done, info.numSamples - done);
-    position = pos;
+    // The playhead moves on from where this block started, and only from there: a seek or a rate's scaled write that landed while the block
+    // was being built is the newer decision, so it stands and this one is dropped (a plain store here would swallow it).
+    juce::int64 expected = loaded;
+    position.compare_exchange_strong (expected, pos);
 }
 
 // Audio thread. One device block: the inputs to the recorder, then the transport into the outputs. The take's first sample is the playhead
@@ -148,14 +162,23 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
                     juce::FloatVectorOperations::clear (out[ch], n);
         return;
     }
-    // the take's first sample is the playhead of the first block the recorder wrote: push says which block that was, so the start and the
-    // write are one decision. The position is read before this block plays.
-    if (! owner.recordStarting.load()
-        && owner.recorder.push (in, numIn, n) && owner.source.recordStart.load() < 0)
-        owner.source.recordStart = owner.source.position.load();
-    if (out == nullptr || numOut <= 0)
+    // the take's first sample and its first write are one event: push() is given this block's playhead (read here, before the block plays)
+    // and latches it itself, inside the busy scope Recorder::stop() waits for, so a stop cannot come between the write and its start.
+    // The blocks that arrive while the take's files open are not written at all; they are counted, so the stop says how much of the head
+    // is missing (Recorder::start makes the folder and the headers on this thread's caller, the message thread).
+    if (owner.recordStarting.load())
+        owner.recorder.countSkippedWhileOpening (n);
+    else
+        owner.recorder.push (in, numIn, n, owner.source.position.load());
+    if (out == nullptr || numOut <= 0 || hasNullChannel (out, numOut))
     {
-        // no outputs: nothing is heard, but the transport still advances, so a take on an input-only device runs and the playhead with it
+        // no outputs to write (none at all, or one the device left null): the channels the device can play are cleared, like the silent
+        // guard above does (a channel left to the last block would be heard again); the transport still advances, into the scratch, so a
+        // take on an input-only device runs and the playhead with it
+        if (out != nullptr)
+            for (int ch = 0; ch < numOut; ++ch)
+                if (out[ch] != nullptr)
+                    juce::FloatVectorOperations::clear (out[ch], n);
         const juce::SpinLock::ScopedTryLockType sl (scratchLock);
         if (sl.isLocked() && n <= scratch.getNumSamples())
         {
@@ -186,42 +209,72 @@ void MainComponent::DeviceCallback::audioDeviceAboutToStart (juce::AudioIODevice
     auto* mm = juce::MessageManager::getInstanceWithoutCreating();
     const bool onMessageThread = mm == nullptr || mm->isThisTheMessageThread();
     const bool hasDevice = started != nullptr;
-    const double rate = hasDevice ? started->getCurrentSampleRate() : 0.0;
-    const int bufSize = hasDevice ? started->getCurrentBufferSizeSamples() : 0;
-    const juce::BigInteger activeIn = hasDevice ? started->getActiveInputChannels() : juce::BigInteger();
-    const std::uint64_t seq = ++owner.deviceStartSeq;
-
-    auto apply = [safe = juce::Component::SafePointer<MainComponent> (&owner), seq, hasDevice, rate, bufSize, activeIn, refresh = ! onMessageThread]
+    MainComponent::DeviceStart start;
+    start.seq = ++owner.deviceStartSeq;
+    start.hasDevice = hasDevice;
+    start.refresh = ! onMessageThread;
+    if (hasDevice)
     {
-        if (safe == nullptr)
-            return;
-        struct ResetStarting
-        {
-            juce::Component::SafePointer<MainComponent> s;
-            std::uint64_t seq;
-            ~ResetStarting() { if (s != nullptr && seq == s->deviceStartSeq.load()) s->deviceStarting = false; }
-        } reset { safe, seq };
-        if (seq != safe->deviceStartSeq.load())
-            return;
-        if (safe->recorder.isRecording())
-            safe->stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
-        safe->readDevice();
-        if (! hasDevice)
-            return;
-        safe->deviceRate = rate;
-        safe->io.prepareScratch (bufSize);
-        safe->recorder.prepare (rate, bufSize, activeIn);
-        safe->adoptDeviceRate();
-        if (refresh)
-            safe->refreshNow();
-    };
+        start.rate = started->getCurrentSampleRate();
+        start.bufSize = started->getCurrentBufferSizeSamples();
+        start.activeInputs = started->getActiveInputChannels();
+    }
     if (onMessageThread)
     {
-        apply();
+        owner.applyDeviceStart (start);
         return;
     }
-    owner.deviceStarting = true;
-    juce::MessageManager::callAsync (std::move (apply));
+    owner.deviceStarting = true;   // silent outputs until the new device is prepared (applyDeviceStart lets go of it, or keeps it while it waits)
+    const auto safe = juce::Component::SafePointer<MainComponent> (&owner);
+    juce::MessageManager::callAsync ([safe, start]
+    {
+        if (safe != nullptr)
+            safe->applyDeviceStart (start);
+    });
+}
+
+// The message thread's part of a device start (see audioDeviceAboutToStart). Nothing here waits for the session's lock while a render holds
+// it for its whole run: the start is kept and the timer tries again once the render is over, because the render's progress window needs this
+// thread to paint and to answer Cancel. A take cannot be running during a render (a render refuses while REC runs, and this ends a take that
+// a device change caught), so waiting costs nothing but the moment the new rate is adopted.
+void MainComponent::applyDeviceStart (const DeviceStart& start)
+{
+    struct ClearStarting
+    {
+        MainComponent* s;
+        std::uint64_t seq;
+        bool keep = false;   // the start waits for a render: the silent-output guard stays set across the deferrals
+        ~ClearStarting() { if (! keep && seq == s->deviceStartSeq.load()) s->deviceStarting = false; }
+    } clear { this, start.seq };
+    if (start.seq != deviceStartSeq.load())
+    {
+        // A newer start (or a device that stopped) took over: this one is stale, and only what it deferred itself is thrown away. The kept
+        // start can be newer than this call (its lambda was queued before it and ran after), and nothing else would apply it: the timer
+        // would find nothing to retry and the silent-output guard would stay set until the next device event.
+        if (pendingDeviceStart.has_value() && pendingDeviceStart->seq == start.seq)
+            pendingDeviceStart.reset();
+        return;
+    }
+    if (session.renderRunning())
+    {
+        pendingDeviceStart = start;
+        deviceStarting = true;   // the device is already the new one and its scratch and recorder are not: hold its blocks silent, and keep
+                                 // the flag set across the deferrals (the timer's apply is what lets go of it)
+        clear.keep = true;
+        return;
+    }
+    pendingDeviceStart.reset();
+    if (recorder.isRecording())
+        stopRecording ("The audio device changed while recording: the take was kept up to where it changed.");
+    readDevice();
+    if (! start.hasDevice)
+        return;
+    deviceRate = start.rate;
+    io.prepareScratch (start.bufSize);
+    recorder.prepare (start.rate, start.bufSize, start.activeInputs);
+    adoptDeviceRate();
+    if (start.refresh)
+        refreshNow();
 }
 
 // Device thread. Only a flag: the timer ends a take that the device stopped under (on the message thread).
@@ -541,7 +594,9 @@ std::vector<ui::Note> MainComponent::notes() const
         notesCache = adviceFor (session, advice);
         return notesCache;
     }
-    return ! notesCache.empty() ? notesCache : adviceFor (session, advice);
+    // The lock is busy or a render runs: what was read with the lock last time, even when that is nothing. adviceFor reads the tracks, the
+    // clips and the latencies, so it is never called here without the lock (the same rule as monitorLatencyMs above).
+    return notesCache;
 }
 
 void MainComponent::askToDiscard (const juce::String& action, std::function<void()> proceed)
@@ -684,7 +739,9 @@ void MainComponent::refreshNow()
 std::vector<MainComponent::InputChoice> MainComponent::inputChoices (const DeviceState& state)
 {
     std::vector<InputChoice> out;
-    const int highest = state.activeInputs.getHighestBit();
+    // The recorder meters and records the first Recorder::kMaxInputs device inputs, so the menu stops there too (an input past them is
+    // refused by the recorder with its own reason, and the AUDIO dialog offers no more than this).
+    const int highest = juce::jmin (state.activeInputs.getHighestBit(), Recorder::kMaxInputs - 1);
     for (int i = 0; i <= highest; ++i)
     {
         if (! state.activeInputs[i])
@@ -692,7 +749,7 @@ std::vector<MainComponent::InputChoice> MainComponent::inputChoices (const Devic
         // the device's own name for the input, when it has one ("In 3: Guitar"); the number is the device's, as the take records it
         const auto name = i < state.inputNames.size() ? state.inputNames[i].trim() : juce::String();
         out.push_back ({ "In " + juce::String (i + 1) + (name.isNotEmpty() ? ": " + name : juce::String()), i, -1 });
-        if (state.activeInputs[i + 1])
+        if (i + 1 < Recorder::kMaxInputs && state.activeInputs[i + 1])
             out.push_back ({ "In " + juce::String (i + 1) + "+" + juce::String (i + 2), i, i + 1 });
     }
     return out;
@@ -747,7 +804,6 @@ void MainComponent::adoptDeviceRate()
     if (deviceRate <= 0.0)
         return;
     const double before = session.sampleRate;
-    const juce::int64 playhead = position();
     juce::String error;
     if (! session.adoptRate (deviceRate, error))
     {
@@ -757,8 +813,26 @@ void MainComponent::adoptDeviceRate()
     if (session.sampleRate == before)
         return;
     editor.clearUndo();
+    // The playhead goes to the same moment in seconds at the new rate, read again now rather than before the (slow) conversion, which may
+    // have left the transport further on. It is put in with a compare-exchange and retried while a block still being built moves it: that
+    // advance only takes effect from the value the block loaded, so this store is not swallowed by it, and the scale is never taken from a
+    // position that is already past. Message thread only; the callback never waits here.
     if (before > 0.0)
-        source.position = (juce::int64) std::llround ((double) playhead * session.sampleRate / before);
+    {
+        const auto scaledFrom = [this, before] (juce::int64 from)
+        { return (juce::int64) std::llround ((double) from * session.sampleRate / before); };
+        bool landed = false;
+        for (int attempt = 0; attempt < 16 && ! landed; ++attempt)
+        {
+            const juce::int64 current = source.position.load();
+            juce::int64 expected = current;
+            landed = source.position.compare_exchange_strong (expected, scaledFrom (current));
+        }
+        if (! landed)   // a block kept moving the playhead while the retries ran out: the store goes in regardless. The device's rate wins
+                        // over a seek that lands in the same moment here — a start redefines where the playhead is (the same second at the
+                        // new rate), so the position it overtakes is not one anyone meant to keep. Nothing else puts it right.
+            source.position.store (scaledFrom (source.position.load ()));
+    }
     refreshNow();
 }
 
@@ -797,7 +871,9 @@ void MainComponent::showAudioSettings()
 {
     if (! audioDialog)
     {
-        audioDialog = std::make_unique<AudioDialog> (std::make_unique<juce::AudioDeviceSelectorComponent> (deviceManager, 0, 32, 0, 2, false, false, false, false));
+        // the inputs the dialog may switch on are exactly the ones the recorder meters and the IN menu offers (Recorder::kMaxInputs), so no
+        // input can be chosen that a take then refuses
+        audioDialog = std::make_unique<AudioDialog> (std::make_unique<juce::AudioDeviceSelectorComponent> (deviceManager, 0, Recorder::kMaxInputs, 0, 2, false, false, false, false));
         audioDialog->setLookAndFeel (&look);
         audioDialog->centreAroundComponent (this, audioDialog->getWidth(), audioDialog->getHeight());
     }
@@ -857,6 +933,13 @@ bool MainComponent::startRecording()
 {
     if (recorder.isRecording())
         return true;
+    // A render holds the session's lock for its whole run, and the set-up below waits for it three times (the take's latency, the session's
+    // prepare, the transport's copy): refused like every other action that runs while a render does (refuseWhileBusy).
+    if (session.renderRunning())
+    {
+        showError ("A render is running: wait for it or cancel it first.");
+        return false;
+    }
     juce::String error;
     if (! device.running)
         error = "No audio device is running: choose the input and output device with Audio.";
@@ -871,9 +954,10 @@ bool MainComponent::startRecording()
     setTakeLatency();
     syncTransport();
     session.prepare (false);
-    source.recordStart = -1;   // set by the first device block the recorder runs in
-    recordStarting = true;
-    if (! beginRecording (recorder, session, recordingFolder(), device.rate, error))
+    // recordStarting: the blocks that arrive until the files are open are counted as skipped, not written. Recorder::start clears this
+    // take's start and its counters and raises the flag itself, after the clear and before it opens the files, so a block counted in the
+    // window is not erased by the count; it is let go of here, once the take began or was refused.
+    if (! beginRecording (recorder, session, recordingFolder(), device.rate, error, &recordStarting))
     {
         recordStarting = false;
         showError (error);
@@ -909,32 +993,38 @@ void MainComponent::stopRecording (const juce::String& problem)
         return;
     source.playing = false;
     const auto takes = recorder.stop();
-    const juce::int64 heard = source.recordStart.exchange (-1);
-    finishRecordingTakes (takes, heard, problem);
+    // where the take really began (the playhead of the first block it wrote, which stop() waited for) and how much of its head never got
+    // written because the files were still opening. The first is -1 when no block ran, the second 0 when the window cost nothing.
+    const juce::int64 heard = recorder.takeStartSample();
+    const juce::int64 headSkipped = recorder.samplesSkippedWhileOpening();
+    finishRecordingTakes (takes, heard, headSkipped, problem);
 }
 
-void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, const juce::String& problem)
+void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, juce::int64 headSkipped,
+                                          const juce::String& problem)
 {
     const juce::int64 start = heard >= 0 ? heard : takeFrom;
     const juce::int64 begin = juce::jmax ((juce::int64) 0, start - takeLatency);
 
     juce::String error;
-    if (! finishRecording (takes, start, (int) takeLatency, editor, error) && error.isEmpty())
+    std::vector<ClipRef> placed;
+    if (! finishRecording (takes, start, (int) takeLatency, editor, error, &placed) && error.isEmpty())
         error = "A take could not be placed on its track.";
     for (const auto& take : takes)
         if (take.frames > 0) { session.dirty = true; break; }   // a take that placed nothing changes nothing
 
+    // the clips the takes actually became, in the order of the takes: not any clip that happens to start at the same sample, which would
+    // win the selection when a take was skipped and scroll the view to a clip the user never recorded
     ClipRef first;
     {
         const juce::ScopedLock sl (session.lock);
-        for (const auto& take : takes)
-        {
-            if (take.frames <= 0 || first.valid() || ! juce::isPositiveAndBelow (take.track, (int) session.tracks.size()))
-                continue;
-            const auto& clips = session.tracks[(size_t) take.track]->clips;
-            for (int c = (int) clips.size() - 1; c >= 0; --c)
-                if (clips[(size_t) c].start == begin) { first = { take.track, c }; break; }
-        }
+        for (const auto& ref : placed)
+            if (ref.valid() && juce::isPositiveAndBelow (ref.track, (int) session.tracks.size())
+                && juce::isPositiveAndBelow (ref.clip, (int) session.tracks[(size_t) ref.track]->clips.size()))
+            {
+                first = ref;
+                break;
+            }
     }
     arrange.recordingFrom = arrange.recordingTo = -1.0;
     arrange.recordingTracks.clear();
@@ -971,6 +1061,13 @@ void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>&
             : juce::String();
         problems.add (amount + where + " were lost because the disk could not keep up: the take is shorter by that much and what follows the loss sits that much early.");
     }
+    // the head the opening cost: those frames of input were never pushed to the takes, so the take begins where its first frame was written
+    // (named as a loss is, because it is one; nothing is padded in)
+    if (headSkipped > 0)
+    {
+        const double ms = device.rate > 0.0 ? 1000.0 * (double) headSkipped / device.rate : 0.0;
+        problems.add (juce::String (headSkipped) + " samples (" + juce::String (ms, 0) + " ms) at the head of the take were not written while the files opened: the take begins where its first frame was written.");
+    }
     if (problem.isNotEmpty()) problems.add (problem);
     if (problems.size() > 0)
         showError (problems.joinIntoString ("\n"));
@@ -989,7 +1086,7 @@ void MainComponent::updateRecording()
     }
     if (! recorder.isRecording())
         return;
-    const juce::int64 heard = source.recordStart.load();
+    const juce::int64 heard = recorder.takeStartSample();
     arrange.recordingFrom = (double) (heard >= 0 ? heard : takeFrom);
     arrange.recordingTo = (double) position();
     repaint ({ positionBox.getX() - 148, kRowC, 140, 28 });
@@ -1843,6 +1940,9 @@ void MainComponent::openEditor (int track, int slot)
         return;
     }
     const auto owner = track < 0 ? juce::String ("Monitor") : session.tracks[(size_t) track]->name;
+    // the window that opens now is the first of a track's, so the state the timer compares against has to be the state as it is now: the
+    // periodic read only runs every 15 ticks, and an edit made and its window closed inside half a second would never be noticed
+    const bool firstTrackEditor = track >= 0 && ! hasOpenTrackEditor();
     windows[s] = makeEditorWindow (owner + " - " + s->plugin, pluginEditor,
                                    [this, s, safe = juce::Component::SafePointer<MainComponent> (this)]
                                    {
@@ -1853,6 +1953,12 @@ void MainComponent::openEditor (int track, int slot)
                                            safe->monitorEditorClosed (s);   // its state may have changed in the window: saved if it is a monitor plugin
                                        });
                                    });
+    if (firstTrackEditor)
+    {
+        const juce::ScopedTryLock sl (session.lock);
+        if (sl.isLocked() && ! session.renderRunning())
+            lastEditorHash = trackPluginStateHash();   // the same read as the timer's: a busy lock leaves it to the next look
+    }
 }
 
 void MainComponent::closeEditors() { windows.clear(); }
@@ -2292,6 +2398,9 @@ void MainComponent::timerCallback()
     // A render holds the session's lock for its whole run and writes the plugins: while it runs the timer never waits for the lock (the
     // arrangement tries it) and reads no plugin. The latency flag stays set until the render is over.
     const bool rendering = session.renderRunning();
+    // a device start that found a render holding the session's lock: tried again here, where waiting for that lock is allowed again
+    if (! rendering && pendingDeviceStart.has_value())
+        applyDeviceStart (*pendingDeviceStart);
     // The audio copy of the transport is not taken here: every change that moves it calls syncTransport (refreshNow, the loop, the arrangement's
     // edits). A timer that took the session's lock would make the audio callback's try-lock miss a block now and then.
     syncPlayhead();
