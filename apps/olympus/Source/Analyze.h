@@ -113,6 +113,7 @@ struct AnalysisResult
     double tiltDbPerOct = 0.0;
     double targetTiltDbPerOct = 0.0;
     double tiltDiffDbPerOct = 0.0;
+    bool spectrumMeasured = false; // no frame rose above the noise floor: the spectrum numbers are then not measurements, and say so
     std::array<BandBalance, pdsp::bands::kCount> bands {};
     std::vector<SpectralDeviation> deviations;
     std::vector<ResonanceRing> resonanceRings;
@@ -502,7 +503,8 @@ inline LoudnessAndPeaks computeLoudnessAndPeaks (const juce::AudioBuffer<float>&
         }
         else
         {
-            for (int b = 0; b + stSteps <= numSteps; ++b)
+            // BS.1770-4: the 3-second blocks overlap by half their length (a 1.5 s hop), not by one gating step
+            for (int b = 0; b + stSteps <= numSteps; b += juce::jmax (1, stSteps / 2))
             {
                 const double sum = kStepPrefix[static_cast<size_t> (b + stSteps)] - kStepPrefix[static_cast<size_t> (b)];
                 const double z = sum / static_cast<double> (actualStSamples);
@@ -521,7 +523,13 @@ inline LoudnessAndPeaks computeLoudnessAndPeaks (const juce::AudioBuffer<float>&
             out.shortTermMinLufs = *std::min_element (stLufs.begin(), stLufs.end());
 
             std::vector<double> lraBlocks;
-            const double lraThresh = out.integratedLufs - 20.0;
+            // BS.1770-4: the relative gate sits 20 LU below the MEAN of the -70-gated blocks, not below the integrated value
+            // (which already had its own -10 LU gate applied, so gating by it dropped quiet blocks the standard keeps)
+            double stMean = 0.0;
+            for (double l : stLufs)
+                stMean += l;
+            stMean /= static_cast<double> (stLufs.size());
+            const double lraThresh = stMean - 20.0;
             for (double l : stLufs)
             {
                 if (l >= lraThresh)
@@ -1294,6 +1302,11 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
         });
     }
 
+    res.spectrumMeasured = hasSpectrum;
+    if (! hasSpectrum)
+        for (auto& b : res.bands)
+            b.status = "not_measured"; // silence is not a perfect match to the target: it was never measured
+
     return res;
 }
 
@@ -1341,10 +1354,14 @@ inline void analyzeTrackForMasking (const juce::String& name,
         const double r = (nCh >= 2) ? detail::sanitize (ptrR[i]) : l;
         const double mono = 0.5 * (l + r);
 
-        std::array<double, pdsp::bands::kCount> parts {};
-        splitter.split (0, mono, parts);
+        // the bands are read from both channels, not the mid only: a hard-panned track carries half its power in one channel
+        // and must not read ~6 dB below a centred one (mono material is unchanged: l == r gives the same mean square)
+        std::array<double, pdsp::bands::kCount> partsL {}, partsR {};
+        splitter.split (0, l, partsL);
+        splitter.split (1, r, partsR);
         for (int b = 0; b < pdsp::bands::kCount; ++b)
-            bandSumSq[static_cast<size_t> (b)] += parts[static_cast<size_t> (b)] * parts[static_cast<size_t> (b)];
+            bandSumSq[static_cast<size_t> (b)] += 0.5 * (partsL[static_cast<size_t> (b)] * partsL[static_cast<size_t> (b)]
+                                                         + partsR[static_cast<size_t> (b)] * partsR[static_cast<size_t> (b)]);
 
         double lo80 = 0.0, hiDummy = 0.0;
         sub80Lp.split (mono, lo80, hiDummy);
@@ -1475,10 +1492,11 @@ inline juce::var AnalysisResult::toVar() const
 
     {
         auto* spec = new juce::DynamicObject();
-        spec->setProperty ("rms_distance_db", rmsDistanceDb);
-        spec->setProperty ("tilt_db_per_oct", tiltDbPerOct);
-        spec->setProperty ("target_tilt_db_per_oct", targetTiltDbPerOct);
-        spec->setProperty ("tilt_diff_db_per_oct", tiltDiffDbPerOct);
+        spec->setProperty ("status", spectrumMeasured ? "ok" : "not_measured");
+        spec->setProperty ("rms_distance_db", spectrumMeasured ? juce::var (rmsDistanceDb) : juce::var());
+        spec->setProperty ("tilt_db_per_oct", spectrumMeasured ? juce::var (tiltDbPerOct) : juce::var());
+        spec->setProperty ("target_tilt_db_per_oct", spectrumMeasured ? juce::var (targetTiltDbPerOct) : juce::var());
+        spec->setProperty ("tilt_diff_db_per_oct", spectrumMeasured ? juce::var (tiltDiffDbPerOct) : juce::var());
 
         juce::Array<juce::var> bandArr;
         for (const auto& b : bands)
@@ -1487,9 +1505,9 @@ inline juce::var AnalysisResult::toVar() const
             bo->setProperty ("name", b.name);
             bo->setProperty ("lo_hz", b.loHz);
             bo->setProperty ("hi_hz", b.hiHz);
-            bo->setProperty ("measured_db", b.measuredDb);
+            bo->setProperty ("measured_db", b.status == "ok" ? juce::var (b.measuredDb) : juce::var());
             bo->setProperty ("target_db", b.targetDb);
-            bo->setProperty ("delta_db", b.deltaDb);
+            bo->setProperty ("delta_db", b.status == "ok" ? juce::var (b.deltaDb) : juce::var());
             bo->setProperty ("status", b.status);
             bandArr.add (juce::var (bo));
         }

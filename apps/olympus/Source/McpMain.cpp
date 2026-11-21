@@ -27,7 +27,11 @@ int main (int argc, char** argv)
     session.catalog.setSuiteOnly (settings.scanSuiteOnly);
     const auto cache = olympus::Settings::pluginCacheFile();
     session.catalog.loadCache (cache);
-    session.catalog.scan (extra);
+    // the first scan (no cache yet) reads only the suite's own plugins, as the window's first scan does: this process has no window and
+    // no way to recover from a plugin that crashes its read, so it must not open third-party code before the user has asked for it
+    olympus::Catalog::ScanOptions options;
+    options.suiteOnly = settings.scanSuiteOnly || ! cache.existsAsFile();
+    session.catalog.scan (extra, options);
     session.catalog.saveCache (cache);
     std::fprintf (stderr, "OlympusMcp: %d plugins found\n", session.catalog.names().size());
     if (project.isNotEmpty())

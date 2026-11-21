@@ -38,11 +38,20 @@ public:
         }
         const auto method = request["method"].toString();
         const auto id = request["id"];
-        const bool isNotification = ! request.hasProperty ("id");
+        // A notification carries no id, so it is never answered, whatever its method names (an answer would carry an id no
+        // client sent). The check sits before the dispatch below, so a notification naming a known method ("ping") stays silent too;
+        // an invalid request is still answered above, and a request that does have an id is answered by the dispatch or with -32601.
+        if (! request.hasProperty ("id"))
+            return {};
         if (method == "initialize")
         {
-            auto requested = request["params"]["protocolVersion"].toString();
-            auto result = object ({ { "protocolVersion", requested.isNotEmpty() ? requested : juce::String ("2025-06-18") },
+            // The versions this server speaks, newest last. The client's is echoed only when it is one of them; agreeing to an
+            // unknown version would tell an agent that the server follows a protocol it has not implemented.
+            static constexpr const char* kOwnProtocol = "2025-06-18";
+            const auto requested = request["params"]["protocolVersion"].toString();
+            const auto version = (requested == "2024-11-05" || requested == "2025-03-26" || requested == kOwnProtocol)
+                                     ? requested : juce::String (kOwnProtocol);
+            auto result = object ({ { "protocolVersion", version },
                                     { "capabilities", object ({ { "tools", object ({}) } }) },
                                     { "serverInfo", object ({ { "name", "olympus" }, { "version", "1.0.0" } }) },
                                     { "instructions", instructions() } });
@@ -64,8 +73,6 @@ public:
             content.add (object ({ { "type", "text" }, { "text", text } }));
             return reply (id, object ({ { "content", content }, { "isError", failed } }));
         }
-        if (isNotification)
-            return {};
         return failure (id, -32601, "Method not found: " + method);
     }
 
@@ -87,6 +94,11 @@ public:
 private:
     Session& session;
     Editor editor; // every timeline edit goes through it (the lock, the undo steps); the server never edits the timeline any other way
+
+    // What one call is allowed to spin up: every entry of these arrays instantiates a plugin (or copies a chain onto a track),
+    // so an unbounded array would make one tool call build thousands of instances.
+    static constexpr int kMaxPluginsPerChain = 64;   // set_chain
+    static constexpr int kMaxChainTargets = 128;     // copy_chain
 
     using Pair = std::pair<const char*, juce::var>;
     static juce::var object (std::initializer_list<Pair> items)
@@ -263,6 +275,11 @@ private:
         }
         if (name == "add_track")
         {
+            // the file is named before anything reads it: a missing or a non-string 'file' is the caller's mistake, not " contains no audio."
+            if (! a.hasProperty ("file") || a["file"].isVoid())
+            { error = "Give 'file' (an audio file path)."; return {}; }
+            if (! a["file"].isString() || a["file"].toString().trim().isEmpty())
+            { error = "'file' must be the path of an audio file (a string)."; return {}; }
             if (! session.addTrack (resolvePath (a["file"].toString()), a["name"].toString(), error)) return {};
             editor.clearUndo(); // tracks are not undone (see Edit.h)
             return session.describe();
@@ -415,6 +432,11 @@ private:
                     err = "Audio file not found: " + f.getFullPathName();
                     return false;
                 }
+                // The same guards Session::readAudio applies before it allocates (it is private, so they are repeated here rather
+                // than shared): a header claiming more frames or more channels than the file can hold would reach setSize below
+                // with an impossible size and die inside JUCE instead of answering with an isError.
+                const juce::int64 fileSize = f.getSize();
+                if (fileSize <= 0) { err = f.getFileName() + " contains no audio."; return false; }
                 juce::AudioFormatManager fm;
                 fm.registerBasicFormats();
                 std::unique_ptr<juce::AudioFormatReader> reader (fm.createReaderFor (f));
@@ -423,12 +445,52 @@ private:
                     err = "Cannot read audio file: " + f.getFullPathName();
                     return false;
                 }
-                if (reader->sampleRate <= 0.0 || reader->numChannels == 0)
+                if (! std::isfinite (reader->sampleRate) || reader->sampleRate <= 0.0)
                 {
-                    err = "Invalid audio format in: " + f.getFullPathName();
+                    err = f.getFileName() + " has an invalid sample rate.";
                     return false;
                 }
-                const int n = (int) std::min<juce::int64> (reader->lengthInSamples, (juce::int64) std::numeric_limits<int>::max());
+                if (reader->numChannels == 0 || reader->lengthInSamples <= 0)
+                {
+                    err = f.getFileName() + " contains no audio.";
+                    return false;
+                }
+                if (reader->lengthInSamples > (juce::int64) std::numeric_limits<int>::max())
+                {
+                    err = f.getFileName() + " is too long to load.";
+                    return false;
+                }
+                if ((double) reader->lengthInSamples > reader->sampleRate * 3600.0 * 2.0)
+                {
+                    err = f.getFileName() + " is longer than two hours.";
+                    return false;
+                }
+                const bool isWav = reader->getFormatName() == "WAV file";
+                const bool isAiff = reader->getFormatName() == "AIFF file";
+                if (isWav || isAiff)
+                {
+                    const juce::int64 minHeader = isWav ? 44 : 54;
+                    const juce::int64 bytesPerSample = (juce::int64) (reader->bitsPerSample / 8);
+                    if (reader->bitsPerSample < 8 || (reader->bitsPerSample % 8) != 0 || bytesPerSample <= 0
+                        || fileSize <= minHeader
+                        || (juce::int64) reader->numChannels > (fileSize - minHeader) / bytesPerSample)
+                    {
+                        err = f.getFileName() + " is truncated or corrupt.";
+                        return false;
+                    }
+                    const juce::int64 frameBytes = (juce::int64) reader->numChannels * bytesPerSample;
+                    if (reader->lengthInSamples > (fileSize - minHeader) / frameBytes)
+                    {
+                        err = f.getFileName() + " is truncated or corrupt.";
+                        return false;
+                    }
+                }
+                else if (reader->lengthInSamples / 8192 > fileSize)
+                {
+                    err = f.getFileName() + " is truncated or corrupt.";
+                    return false;
+                }
+                const int n = (int) reader->lengthInSamples;
                 buf.setSize ((int) reader->numChannels, n);
                 if (n > 0 && ! reader->read (&buf, 0, n, 0, true, true))
                 {
@@ -612,6 +674,8 @@ private:
             const auto* arr = a["to_tracks"].getArray();
             if (arr == nullptr) { error = "Give 'to_tracks' (an array of track numbers or names)."; return {}; }
             if (arr->isEmpty()) { error = "Give at least one target track in 'to_tracks'."; return {}; }
+            if (arr->size() > kMaxChainTargets)
+            { error = "copy_chain writes at most " + juce::String (kMaxChainTargets) + " tracks in one call ('to_tracks' has " + juce::String (arr->size()) + ")."; return {}; }
             std::vector<int> to;
             for (auto& t : *arr)
             {
@@ -630,6 +694,7 @@ private:
         {
             if (! session.removeTrack (track, error)) return {};
             editor.clearUndo(); // tracks are not undone (see Edit.h)
+            editor.clearClipboard(); // as the window does: the clipboard remembers the copy's track by number, and the tracks after this one have moved up
             return session.describe();
         }
         if (name == "set_track")
@@ -821,6 +886,8 @@ private:
         {
             const auto* arr = a["plugins"].getArray();
             if (arr == nullptr) { error = "Give 'plugins' (an array of plugin names, or [] to clear the chain)."; return {}; }
+            if (arr->size() > kMaxPluginsPerChain)
+            { error = "A chain takes at most " + juce::String (kMaxPluginsPerChain) + " plugins in one call ('plugins' has " + juce::String (arr->size()) + ")."; return {}; }
             juce::StringArray plugins;
             for (const auto& p : *arr)
             {
@@ -854,6 +921,26 @@ private:
             return session.setBypass (track, slot, (bool) a["bypass"], error) ? session.describe() : juce::var();
         }
 
+        // What these tools do to the arguments is decoded first, outside the lock below (base64 text and a preset name are the
+        // caller's, not the session's), with the reasons unchanged.
+        juce::MemoryBlock stateFromArg;
+        if (name == "set_plugin_state")
+        {
+            const auto text = a["state"].toString().trim();
+            if (text.isEmpty() || ! stateFromArg.fromBase64Encoding (text) || stateFromArg.getSize() == 0)
+            {
+                error = "Give 'state' as the base64 text from get_plugin_state.";
+                return {};
+            }
+        }
+        juce::String wantedPreset;
+        if (name == "load_preset" && ! nameOrIndexArg (a["preset"], wantedPreset, error, "Give 'preset' (name or number from list_presets)."))
+            return {};
+
+        // The instance belongs to the session: anything that reads or changes one, and the dirty flag, holds its lock, as every
+        // other chain change does (one Session, three users). This is the message-thread path JUCE expects a plugin to be touched
+        // from; the audio callback only tries the lock and goes silent for a block, so the hold here is a momentary one.
+        const juce::ScopedLock sl (session.lock);
         auto* instance = session.tracks[(size_t) track]->chain[(size_t) slot]->instance.get();
         if (instance == nullptr) { error = "That plugin is not installed on this machine, so it has no settings to read or change."; return {}; }
         if (name == "list_parameters")
@@ -868,15 +955,8 @@ private:
         }
         if (name == "set_plugin_state")
         {
-            const auto text = a["state"].toString().trim();
-            juce::MemoryBlock state;
-            if (text.isEmpty() || ! state.fromBase64Encoding (text) || state.getSize() == 0)
-            {
-                error = "Give 'state' as the base64 text from get_plugin_state.";
-                return {};
-            }
             session.dirty = true;
-            instance->setStateInformation (state.getData(), (int) state.getSize());
+            instance->setStateInformation (stateFromArg.getData(), (int) stateFromArg.getSize());
             return parameters (*instance);
         }
         if (name == "list_presets")
@@ -888,16 +968,13 @@ private:
         }
         if (name == "load_preset")
         {
-            juce::String wanted;
-            if (! nameOrIndexArg (a["preset"], wanted, error, "Give 'preset' (name or number from list_presets)."))
-                return {};
             int found = -1;
             for (int i = 0; i < instance->getNumPrograms() && found < 0; ++i)
-                if (instance->getProgramName (i).equalsIgnoreCase (wanted)) found = i;
+                if (instance->getProgramName (i).equalsIgnoreCase (wantedPreset)) found = i;
             if (found < 0)
-                if (const auto idx = parseNonNegativeInt (wanted))
+                if (const auto idx = parseNonNegativeInt (wantedPreset))
                     found = *idx;
-            if (! juce::isPositiveAndBelow (found, instance->getNumPrograms())) { error = "No preset '" + wanted + "' (see list_presets)."; return {}; }
+            if (! juce::isPositiveAndBelow (found, instance->getNumPrograms())) { error = "No preset '" + wantedPreset + "' (see list_presets)."; return {}; }
             session.dirty = true;
             instance->setCurrentProgram (found);
             return parameters (*instance);
@@ -1159,6 +1236,41 @@ private:
         return object ({ { "plugin", instance.getName() }, { "parameters", list } });
     }
 
+    // Does the text the plugin shows say what the caller wrote? JUCE's default text-to-value converter reads what it cannot parse as
+    // 0 (and clamps what is out of range), so a value is only taken when the plugin's own read-out matches the text back: exactly,
+    // ignoring the space a unit leaves ("100 %" for "100%"), or as the same number written with fewer decimals ("-6" for "-6.00").
+    // A plugin whose converter means something else entirely is refused, which is the honest answer to text we cannot confirm.
+    static bool textAsShown (const juce::String& shownIn, const juce::String& wantedIn)
+    {
+        const auto shown = shownIn.trim(), wanted = wantedIn.trim();
+        if (shown.equalsIgnoreCase (wanted)) return true;
+        const auto shownTight = shown.removeCharacters (" \t"), wantedTight = wanted.removeCharacters (" \t");
+        if (shownTight.equalsIgnoreCase (wantedTight)) return true;
+        if (! wantedTight.containsAnyOf ("0123456789") || ! shownTight.containsAnyOf ("0123456789")) return false;
+        // the number is only the leading part: getFloatValue reads a prefix and ignores the rest, so "12abc" would pass as 12.
+        // Split both at the end of their number and require the leftovers to agree too ("dB" for "dB", nothing for nothing).
+        const auto splitNumber = [] (const juce::String& t)
+        {
+            int i = 0;
+            if (i < t.length() && (t[i] == '+' || t[i] == '-')) ++i;
+            while (i < t.length() && juce::CharacterFunctions::isDigit (t[i])) ++i;
+            if (i < t.length() && t[i] == '.') { ++i; while (i < t.length() && juce::CharacterFunctions::isDigit (t[i])) ++i; }
+            if (i < t.length() && (t[i] == 'e' || t[i] == 'E'))
+            {
+                int j = i + 1;
+                if (j < t.length() && (t[j] == '+' || t[j] == '-')) ++j;
+                if (j < t.length() && juce::CharacterFunctions::isDigit (t[j])) { while (j < t.length() && juce::CharacterFunctions::isDigit (t[j])) ++j; i = j; }
+            }
+            return std::make_pair (t.substring (0, i), t.substring (i));
+        };
+        const auto askedParts = splitNumber (wantedTight), saysParts = splitNumber (shownTight);
+        if (askedParts.first.isEmpty() || saysParts.first.isEmpty()) return false;
+        const double asked = askedParts.first.getDoubleValue(), says = saysParts.first.getDoubleValue();
+        return std::isfinite (asked) && std::isfinite (says)
+            && std::abs (asked - says) <= 0.001 * std::max (1.0, std::abs (says))
+            && askedParts.second.equalsIgnoreCase (saysParts.second);
+    }
+
     juce::var setParameter (juce::AudioPluginInstance& instance, const juce::var& a, juce::String& error)
     {
         juce::String which;
@@ -1171,6 +1283,8 @@ private:
             if (const auto idx = parseNonNegativeInt (which))
                 found = juce::isPositiveAndBelow (*idx, instance.getParameters().size()) ? instance.getParameters()[*idx] : nullptr;
         if (found == nullptr) { error = "No setting '" + which + "' (see list_parameters)."; return {}; }
+        const float previous = found->getValue();
+        juce::String wantedText; // stays empty when the value came as a number: the check below is only for the text path
         float value = 0.0f;
         if (a.hasProperty ("value"))
         {
@@ -1181,6 +1295,7 @@ private:
         }
         else if (a["text"].isString() && a["text"].toString().isNotEmpty())
         {
+            wantedText = a["text"].toString().trim();
             value = found->getValueForText (a["text"].toString());
             if (! std::isfinite (value))
             { error = "Could not parse parameter text '" + a["text"].toString() + "'."; return {}; }
@@ -1190,6 +1305,19 @@ private:
         found->beginChangeGesture();
         found->setValueNotifyingHost (value);
         found->endChangeGesture();
+        // Text is the plugin's to interpret, so the plugin's own read-out decides whether it took: JUCE's default converter reads
+        // what it cannot parse (and what is out of range) as an end of the range, which would set a value nobody asked for and
+        // report it as a success. Nothing is left changed when it does not match.
+        if (wantedText.isNotEmpty() && ! textAsShown (found->getCurrentValueAsText(), wantedText))
+        {
+            const auto shownNow = found->getCurrentValueAsText(); // what the plugin read the text as, before the restore puts the old value back
+            found->beginChangeGesture();
+            found->setValueNotifyingHost (previous);
+            found->endChangeGesture();
+            error = "The plugin does not read '" + wantedText + "' as a value of '" + idOf (*found) + "' (it shows '"
+                        + shownNow + "'), so nothing changed. Give 'value' as a number 0..1 (see list_parameters).";
+            return {};
+        }
         session.dirty = true;
         return object ({ { "id", idOf (*found) }, { "name", found->getName (64) }, { "value", (double) found->getValue() }, { "text", found->getCurrentValueAsText() } });
     }

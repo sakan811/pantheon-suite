@@ -77,6 +77,11 @@ public:
             return true;
 
         const auto name = dir.getFileName();
+        // the bare names below are TCC-sensitive only where macOS keeps them: under the home folder or its Library. A folder called
+        // "Music" on another volume (or deep in a plugin tree) is an ordinary folder and must not be refused or silently skipped.
+        const auto parent = dir.getParentDirectory();
+        if (parent != home && parent != home.getChildFile ("Library"))
+            return false;
         static const char* const kProtectedNames[] = {
             "Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies", "Photos", "Photo Booth Library",
             "Mail", "Messages", "Safari", "Calendars", "Contacts", "Reminders", "Notes", "Mobile Documents",
@@ -212,15 +217,29 @@ public:
         return true;
     }
 
-    // Writes the catalog, its blacklist included, in the format loadCache reads.
-    bool saveCache (const juce::File& file) const
+    // Writes the catalog, its blacklist included, in the format loadCache reads. The window and the server each hold their own list and
+    // write this one file: a save keeps the blacklist the file already holds, so a stale process cannot erase the entries that guard
+    // against reading a plugin that crashed the last start again. "Forget blacklisted plugins" sets the flag that skips the merge once.
+    bool saveCache (const juce::File& file)
     {
+        if (! forgetBlacklistOnNextSave)
+            if (auto disk = juce::parseXML (file))
+                if (disk->hasTagName ("KNOWNPLUGINS"))
+                {
+                    juce::KnownPluginList other;
+                    other.recreateFromXml (*disk);
+                    for (const auto& b : other.getBlacklistedFiles())
+                        list.addToBlacklist (b);
+                }
         auto xml = list.createXml();
         if (xml == nullptr)
             return false;
         file.getParentDirectory().createDirectory();
         juce::TemporaryFile temp (file);
-        return xml->writeTo (temp.getFile()) && temp.overwriteTargetFileWithTemporary();
+        const bool wrote = xml->writeTo (temp.getFile()) && temp.overwriteTargetFileWithTemporary();
+        if (wrote)
+            forgetBlacklistOnNextSave = false;
+        return wrote;
     }
 
     // A plugin that is made in code, for the tests (it takes the place of a built bundle).
@@ -262,8 +281,9 @@ public:
 
     // The bundles (and Audio Units) the scan refused to load a second time because they crashed or hung: skipped until the cache is deleted.
     juce::StringArray blacklisted() const { return list.getBlacklistedFiles(); }
-    // Forgets the blacklist: the next scan reads those bundles again (PLUGINS > Forget blacklisted plugins).
-    void clearBlacklist() { list.clearBlacklistedFiles(); }
+    // Forgets the blacklist: the next scan reads those bundles again (PLUGINS > Forget blacklisted plugins). The next save must not
+    // merge the file's old entries back in, or the forget would be undone by the very write that follows it.
+    void clearBlacklist() { list.clearBlacklistedFiles(); forgetBlacklistOnNextSave = true; }
 
     // The name of the plugin `query` means: its whole name as names() gives it, or the start of one, in any case. A name two different plugins
     // share is refused with both of them named. Empty, with the reason in `error`, if there is none or more than one.
@@ -460,6 +480,7 @@ private:
     juce::AudioPluginFormatManager formats;
     juce::KnownPluginList list;
     bool suiteOnlyMode = false;
+    bool forgetBlacklistOnNextSave = false; // set by clearBlacklist: the next save writes the emptied blacklist instead of merging the file's
     std::vector<Internal> internals;
     juce::Array<juce::PluginDescription> all; // the made-in-code ones, then the scanned ones (see refresh)
     juce::StringArray labels;                 // parallel to all

@@ -106,6 +106,8 @@ public:
     bool hasOpenDialog() const { return activeDialog != nullptr || (bool) pendingDialogEnd; }
     void openClipActionForTest (ClipRef ref, int action) { clipAction (ref, action); }
     void openMarkerActionForTest (int index, int action) { markerAction (index, action); }
+    double scrollSamplesForTest() const { return scrollSamples; }
+    int markerAtForTest (juce::Point<int> p) const;
     void finishOpenDialogForTest (bool accept, const juce::String& text = {});
 
     // ---- geometry (view coordinates, for the checks and the window) -------------------------------------------------------------
@@ -209,5 +211,6 @@ private:
     bool draggingFiles = false;
     int dragHoverTrack = -1;
     double dragScrollStart = 0.0, dragTotalSamples = 1.0;
+    int dragSourceIndex = -1; // the mouse source that began the current drag: other pointers' events do not move or end it
 };
 } // namespace olympus::gui

@@ -140,6 +140,18 @@ public:
     double preparedRate = 0.0;
     int blocks = 0, shortBlocks = 0, lastChannels = 0;
 
+protected:
+    // A plugin that picks a layout of its own (a programme that goes mono, say) applies both main buses at once; `isBusesLayoutSupported`
+    // then refuses the layout the host asks for, which is what a real plugin that changes its buses from its state does.
+    void selectMainLayout (const juce::AudioChannelSet& set)
+    {
+        main = set;
+        BusesLayout layouts;
+        layouts.inputBuses.add (set);
+        layouts.outputBuses.add (set);
+        applyBusLayouts (layouts);
+    }
+
 private:
     juce::String displayName;
     juce::AudioChannelSet main;
@@ -175,6 +187,22 @@ public:
     MonoPlugin() : PassPlugin ("Test Mono", juce::AudioChannelSet::mono()) { setPlayConfigDetails (1, 1, 48000.0, 512); }
 };
 
+// Stereo until its saved state says otherwise: the state is one byte, 0 stereo and 1 mono, so a project can hold a plugin whose programme
+// changed its bus layout (a stereo plugin that loads as mono). `goMono` is the same change while it sits in a chain.
+class StateLayoutPlugin : public PassPlugin
+{
+public:
+    StateLayoutPlugin() : PassPlugin ("Test Layout", juce::AudioChannelSet::stereo()) { setPlayConfigDetails (2, 2, 48000.0, 512); }
+    void goMono (bool on) { selectMainLayout (on ? juce::AudioChannelSet::mono() : juce::AudioChannelSet::stereo()); }
+    void getStateInformation (juce::MemoryBlock& m) override
+    {
+        m.setSize (0);
+        juce::MemoryOutputStream o (m, false);
+        o.writeByte (static_cast<juce::uint8> (getTotalNumInputChannels() == 1 ? 1 : 0));
+    }
+    void setStateInformation (const void* data, int size) override { goMono (size > 0 && ((const juce::uint8*) data)[0] != 0); }
+};
+
 // A plugin of this name that only changes the level (for the snapshot, where the names are the suite's), reporting `latency` samples.
 inline void addStandIn (olympus::Catalog& catalog, const juce::String& name, int latency)
 {
@@ -192,5 +220,11 @@ inline void addBusPlugins (olympus::Catalog& catalog)
 {
     catalog.addInternal (GainPlugin::description ("Test Aux"), [] (double, int) { return std::make_unique<AuxPlugin>(); });
     catalog.addInternal (GainPlugin::description ("Test Mono"), [] (double, int) { return std::make_unique<MonoPlugin>(); });
+}
+
+// The plugin whose state chooses its layout, for the checks that need it (its own function, so the catalog's counts stay as they are).
+inline void addLayoutPlugin (olympus::Catalog& catalog)
+{
+    catalog.addInternal (GainPlugin::description ("Test Layout"), [] (double, int) { return std::make_unique<StateLayoutPlugin>(); });
 }
 }
