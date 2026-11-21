@@ -88,22 +88,143 @@ void styleField (juce::TextEditor& field)
 } // namespace
 
 // ---- PluginWindow ------------------------------------------------------------------------------------------------------------
-PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed, bool addToDesktop)
-    : juce::DocumentWindow (title, colours::background, juce::DocumentWindow::closeButton, addToDesktop), onClosed (std::move (closed))
+struct PluginWindow::FrameConstrainer : public juce::ComponentBoundsConstrainer
+{
+    FrameConstrainer (PluginWindow& o, juce::ComponentBoundsConstrainer* i) : owner (o), inner (i)
+    {
+        syncLimits (0, 0);
+    }
+
+    void syncLimits (int extraW, int extraH)
+    {
+        if (inner == nullptr)
+            return;
+        constexpr int kInfiniteLimit = 0x3fffffff;
+        const int minW = inner->getMinimumWidth() < kInfiniteLimit ? inner->getMinimumWidth() + extraW : inner->getMinimumWidth();
+        const int minH = inner->getMinimumHeight() < kInfiniteLimit ? inner->getMinimumHeight() + extraH : inner->getMinimumHeight();
+        const int maxW = inner->getMaximumWidth() < kInfiniteLimit ? inner->getMaximumWidth() + extraW : inner->getMaximumWidth();
+        const int maxH = inner->getMaximumHeight() < kInfiniteLimit ? inner->getMaximumHeight() + extraH : inner->getMaximumHeight();
+        setSizeLimits (minW, minH, maxW, maxH);
+    }
+
+    void checkBounds (juce::Rectangle<int>& bounds,
+                      const juce::Rectangle<int>& previousBounds,
+                      const juce::Rectangle<int>& limits,
+                      bool isStretchingTop,
+                      bool isStretchingLeft,
+                      bool isStretchingBottom,
+                      bool isStretchingRight) override
+    {
+        if (inner == nullptr)
+            return;
+
+        int extraW = 0, extraH = 0;
+        if (auto* peer = owner.getPeer())
+        {
+            const auto f = peer->getFrameSize();
+            extraW = f.getLeftAndRight();
+            extraH = f.getTopAndBottom();
+        }
+        else
+        {
+            const auto b = owner.getBorderThickness();
+            extraW = b.getLeftAndRight();
+            extraH = b.getTopAndBottom() + (owner.isUsingNativeTitleBar() ? 0 : owner.getTitleBarHeight());
+        }
+
+        syncLimits (extraW, extraH);
+
+        juce::Rectangle<int> contentBounds (0, 0,
+                                            juce::jmax (1, bounds.getWidth() - extraW),
+                                            juce::jmax (1, bounds.getHeight() - extraH));
+        const juce::Rectangle<int> prevContent (0, 0,
+                                                juce::jmax (1, previousBounds.getWidth() - extraW),
+                                                juce::jmax (1, previousBounds.getHeight() - extraH));
+        const juce::Rectangle<int> contentLimits (0, 0,
+                                                  juce::jmax (1, limits.getWidth() - extraW),
+                                                  juce::jmax (1, limits.getHeight() - extraH));
+
+        inner->checkBounds (contentBounds, prevContent, contentLimits,
+                            isStretchingTop, isStretchingLeft, isStretchingBottom, isStretchingRight);
+
+        const int newW = contentBounds.getWidth() + extraW;
+        const int newH = contentBounds.getHeight() + extraH;
+        if (isStretchingLeft)
+            bounds.setX (previousBounds.getRight() - newW);
+        if (isStretchingTop)
+            bounds.setY (previousBounds.getBottom() - newH);
+        bounds.setSize (newW, newH);
+    }
+
+    void resizeStart() override
+    {
+        owner.clearPendingInitialCenter();
+        if (inner != nullptr)
+            inner->resizeStart();
+    }
+    void resizeEnd() override { if (inner != nullptr) inner->resizeEnd(); }
+
+    PluginWindow& owner;
+    juce::ComponentBoundsConstrainer* inner = nullptr;
+};
+
+PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed,
+                            bool addToDesktop, juce::Component* centreAround)
+    : juce::DocumentWindow (title, colours::background, juce::DocumentWindow::closeButton, addToDesktop),
+      onClosed (std::move (closed)),
+      centerTarget (centreAround),
+      pendingInitialCenter (addToDesktop)
 {
     setUsingNativeTitleBar (true);
     setContentOwned (editor, true);
     if (editor != nullptr && editor->getConstrainer() != nullptr)
-        setConstrainer (editor->getConstrainer());
+    {
+        frameConstrainer = std::make_unique<FrameConstrainer> (*this, editor->getConstrainer());
+        setConstrainer (frameConstrainer.get());
+    }
     setResizable (editor != nullptr && editor->isResizable(), false);
     setAlwaysOnTop (false);
     // Only a window put on the desktop is placed and shown. Centring asks the displays for the primary one, which a bare X server
     // (CI) does not have: getPrimaryDisplay() is null there and the checks, which build windows with addToDesktop = false, crashed.
     if (addToDesktop)
     {
-        centreAroundComponent (nullptr, getWidth(), getHeight());
-        setVisible (true);
+        centreNow();
+        {
+            const juce::ScopedValueSetter<bool> guard (centeringNow, true);
+            setVisible (true);
+        }
+        juce::Component::SafePointer<PluginWindow> safeThis (this);
+        juce::Timer::callAfterDelay (400, [safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->pendingInitialCenter = false;
+        });
     }
+}
+
+PluginWindow::~PluginWindow()
+{
+    setConstrainer (nullptr);
+}
+
+void PluginWindow::centreNow()
+{
+    const juce::ScopedValueSetter<bool> guard (centeringNow, true);
+    centreAroundComponent (centerTarget.getComponent(), getWidth(), getHeight());
+}
+
+void PluginWindow::childBoundsChanged (juce::Component* child)
+{
+    juce::DocumentWindow::childBoundsChanged (child);
+    if (pendingInitialCenter && child == getContentComponent() && getWidth() > 0 && getHeight() > 0)
+        centreNow();
+}
+
+void PluginWindow::moved()
+{
+    juce::DocumentWindow::moved();
+    if (! centeringNow)
+        pendingInitialCenter = false;
 }
 
 // ---- audio -------------------------------------------------------------------------------------------------------------------
@@ -355,9 +476,9 @@ MainComponent::MainComponent (Options options) : opts (options)
     notify = [] (const juce::String& message) { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Olympus", message); };
     reveal = [] (const juce::File& folder) { folder.revealToUser(); };
     reportError = [] (const juce::String& message) { juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Olympus", message); };
-    makeEditorWindow = [] (const juce::String& title, juce::AudioProcessorEditor* pluginEditor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
+    makeEditorWindow = [this] (const juce::String& title, juce::AudioProcessorEditor* pluginEditor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
     {
-        return std::make_unique<PluginWindow> (title, pluginEditor, std::move (closed));
+        return std::make_unique<PluginWindow> (title, pluginEditor, std::move (closed), true, this);
     };
 
     // the arrangement reports what the user did; the window owns the transport, the files, the menus and the plugin windows

@@ -2375,7 +2375,7 @@ int main()
         test::check (dlg.getWidth() > 0 && dlg.getHeight() > 0 && dlg.isResizable(),
                      "AudioDialog has non-zero width/height and isResizable() is true");
 
-        // 2. PluginWindow forwards editor->getConstrainer() and isResizable()
+        // 2. PluginWindow wraps editor->getConstrainer() and forwards isResizable()
         struct ResizablePlugin : test::GainPlugin
         {
             struct Editor : juce::AudioProcessorEditor
@@ -2392,10 +2392,86 @@ int main()
         };
         ResizablePlugin proc;
         auto* editor = proc.createEditor();
-        auto* expectedConstrainer = editor->getConstrainer();
         PluginWindow pwin ("Test Plugin", editor, {}, false);
-        test::check (pwin.isResizable() && pwin.getConstrainer() == expectedConstrainer && pwin.getConstrainer() != nullptr,
-                     "PluginWindow forwards editor->getConstrainer() and isResizable() for a resizable editor");
+        test::check (pwin.isResizable() && pwin.getConstrainer() != nullptr,
+                     "PluginWindow wraps editor->getConstrainer() and forwards isResizable() for a resizable editor");
+        {
+            const auto b = pwin.getBorderThickness();
+            const int extraW = b.getLeftAndRight();
+            const int extraH = b.getTopAndBottom() + (pwin.isUsingNativeTitleBar() ? 0 : pwin.getTitleBarHeight());
+            const juce::Rectangle<int> limits (0, 0, 2000, 2000);
+            const juce::Rectangle<int> prev (150, 200, 400 + extraW, 300 + extraH);
+            juce::Rectangle<int> bounds (150, 200, 100, 80);
+            pwin.getConstrainer()->checkBounds (bounds, prev, limits, false, false, true, true);
+            test::check (bounds.getX() == 150 && bounds.getY() == 200
+                             && bounds.getWidth() == 240 + extraW && bounds.getHeight() == 160 + extraH,
+                         "PluginWindow constrainer enforces editor limits without corrupting non-zero (x, y)");
+
+            juce::Rectangle<int> leftTopBounds (300, 350, 100, 80);
+            pwin.getConstrainer()->checkBounds (leftTopBounds, prev, limits, true, true, false, false);
+            test::check (leftTopBounds.getRight() == prev.getRight() && leftTopBounds.getBottom() == prev.getBottom()
+                             && leftTopBounds.getWidth() == 240 + extraW && leftTopBounds.getHeight() == 160 + extraH,
+                         "PluginWindow constrainer preserves anchored right/bottom corner when stretching top/left");
+
+            editor->getConstrainer()->setMinimumOnscreenAmounts (20, 20, 20, 20);
+            const juce::Rectangle<int> offsetLimits (1440, 25, 1920, 1055);
+            const juce::Rectangle<int> offsetPrev (1500, 100, 400 + extraW, 300 + extraH);
+            juce::Rectangle<int> offsetBounds (1500, 100, 500 + extraW, 400 + extraH);
+            pwin.getConstrainer()->checkBounds (offsetBounds, offsetPrev, offsetLimits, false, false, true, true);
+            test::check (offsetBounds.getX() == 1500 && offsetBounds.getY() == 100
+                             && offsetBounds.getWidth() == 500 + extraW && offsetBounds.getHeight() == 400 + extraH,
+                         "PluginWindow constrainer keeps non-zero (x, y) and valid size under non-zero-origin limits");
+        }
+
+        // Aspect-ratio + coordinate-overwriting inner constrainer (like VST3PluginWindow) must not jump to negative coordinates
+        struct AspectJumpingPlugin : test::GainPlugin
+        {
+            struct JumpingConstrainer : juce::ComponentBoundsConstrainer
+            {
+                JumpingConstrainer()
+                {
+                    setSizeLimits (320, 200, 1280, 800);
+                    setFixedAspectRatio (1.6);
+                }
+                void checkBounds (juce::Rectangle<int>& bounds, const juce::Rectangle<int>& previousBounds,
+                                  const juce::Rectangle<int>& limits, bool top, bool left, bool bottom, bool right) override
+                {
+                    juce::ComponentBoundsConstrainer::checkBounds (bounds, previousBounds, limits, top, left, bottom, right);
+                    bounds.setPosition (-120, -90);
+                }
+            };
+            struct Editor : juce::AudioProcessorEditor
+            {
+                explicit Editor (juce::AudioProcessor& p) : juce::AudioProcessorEditor (p)
+                {
+                    setConstrainer (&jumping);
+                    setResizable (true, true);
+                    setSize (640, 400);
+                }
+                ~Editor() override { setConstrainer (nullptr); }
+                JumpingConstrainer jumping;
+            };
+            bool hasEditor() const override { return true; }
+            juce::AudioProcessorEditor* createEditor() override { return new Editor (*this); }
+        };
+        AspectJumpingPlugin jumpProc;
+        auto* jumpEditor = jumpProc.createEditor();
+        PluginWindow jumpWin ("Aspect Plugin", jumpEditor, {}, false);
+        {
+            const auto b = jumpWin.getBorderThickness();
+            const int extraW = b.getLeftAndRight();
+            const int extraH = b.getTopAndBottom() + (jumpWin.isUsingNativeTitleBar() ? 0 : jumpWin.getTitleBarHeight());
+            const juce::Rectangle<int> limits (0, 0, 2000, 2000);
+            const juce::Rectangle<int> prev (120, 90, 640 + extraW, 400 + extraH);
+            juce::Rectangle<int> bounds (120, 90, 800 + extraW, 650 + extraH);
+            jumpWin.getConstrainer()->checkBounds (bounds, prev, limits, false, false, true, true);
+            const int contentW = bounds.getWidth() - extraW;
+            const int contentH = bounds.getHeight() - extraH;
+            test::check (bounds.getX() == 120 && bounds.getY() == 90
+                             && contentW >= 320 && contentW <= 1280
+                             && std::abs ((double) contentW / (double) contentH - 1.6) < 0.02,
+                         "PluginWindow constrainer enforces aspect/limits while ignoring negative (x, y) from inner constrainer");
+        }
 
         struct FixedPlugin : test::GainPlugin
         {

@@ -120,10 +120,23 @@ public:
 class PluginWindow : public juce::DocumentWindow
 {
 public:
-    PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed, bool addToDesktop = true);
-    ~PluginWindow() override { setConstrainer (nullptr); }
+    PluginWindow (const juce::String& title, juce::AudioProcessorEditor* editor, std::function<void()> closed,
+                  bool addToDesktop = true, juce::Component* centreAround = nullptr);
+    ~PluginWindow() override;
     void closeButtonPressed() override { if (onClosed) onClosed(); }
+    void childBoundsChanged (juce::Component* child) override;
+    void moved() override;
+    void clearPendingInitialCenter() { pendingInitialCenter = false; }
     std::function<void()> onClosed;
+
+private:
+    struct FrameConstrainer;
+    void centreNow();
+
+    std::unique_ptr<FrameConstrainer> frameConstrainer;
+    juce::Component::SafePointer<juce::Component> centerTarget;
+    bool pendingInitialCenter = false;
+    bool centeringNow = false;
 };
 
 // The whole window: the project buttons and the transport along the top, the arrangement (ArrangeView) in the body, and the notes at the
