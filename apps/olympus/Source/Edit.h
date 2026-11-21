@@ -40,11 +40,11 @@ public:
     // is read into the pool first, so the first file sets the session's rate. A clip that does not fit in the file is refused.
     ClipRef addClip (int track, const juce::File& file, juce::int64 start, juce::int64 offset, juce::int64 length, juce::String& error)
     {
-        EditState before;
+        std::optional<EditState> before;
         {
             const juce::ScopedLock sl (session.lock);
             if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
-            before = session.captureEdit();
+            before = captureIfNeeded();
         }
         // The file is decoded by the session with the lock free (the audio callback would be silent for the whole decode otherwise), and the
         // clip is checked and inserted under it in one step: a refusal leaves the session as it was, and nothing is recorded.
@@ -63,7 +63,7 @@ public:
         Clip* c = clipAt (track, clip, error);
         if (c == nullptr) return {};
         if (at <= c->start || at >= c->end()) { error = "The split point must be inside the clip (after " + juce::String (c->start) + ", before " + juce::String (c->end()) + ")."; return {}; }
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         const juce::int64 cut = at - c->start;
         Clip right = *c;
         right.start = at;
@@ -88,7 +88,7 @@ public:
         if (c == nullptr) return false;
         const juce::int64 start = juce::jmax ((juce::int64) 0, newStart);
         if (start == c->start) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         c->start = start;
         record (before, "Move clip");
         return true;
@@ -102,7 +102,7 @@ public:
         if (! isTrack (newTrack)) { error = "No track " + juce::String (newTrack); return {}; }
         if (newTrack == track)
             return moveClip (track, clip, newStart, error) ? ClipRef { track, clip } : ClipRef {};
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         auto& from = session.tracks[(size_t) track]->clips;
         Clip moved = from[(size_t) clip];
         from.erase (from.begin() + clip);
@@ -125,7 +125,7 @@ public:
         const juce::int64 start = juce::jmax (low, juce::jmin (high, newStart));
         const juce::int64 shift = start - c->start;
         if (shift == 0) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         const juce::int64 length = c->length - shift;
         c->start = start;
         c->offset += shift;
@@ -150,7 +150,7 @@ public:
         const juce::int64 end = juce::jmax (low, juce::jmin (juce::jmax (low, high), newEnd));
         const juce::int64 length = end - c->start;
         if (length == c->length) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         c->length = length;
         c->fadeIn = juce::jmin (c->fadeIn, length);
         c->fadeOut = juce::jmin (c->fadeOut, length - c->fadeIn);
@@ -164,7 +164,7 @@ public:
         const juce::ScopedLock sl (session.lock);
         Clip* c = clipAt (track, clip, error);
         if (c == nullptr) return {};
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         Clip copy = *c;
         copy.start = c->end();
         auto& clips = session.tracks[(size_t) track]->clips;
@@ -177,7 +177,7 @@ public:
     {
         const juce::ScopedLock sl (session.lock);
         if (clipAt (track, clip, error) == nullptr) return false;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         auto& clips = session.tracks[(size_t) track]->clips;
         clips.erase (clips.begin() + clip);
         record (before, "Delete clip");
@@ -187,12 +187,13 @@ public:
     // The clip's gain, clamped to -100..+24 dB.
     bool setClipGain (int track, int clip, float db, juce::String& error)
     {
+        if (! std::isfinite (db)) { error = "Clip gain must be a finite number."; return false; }
         const juce::ScopedLock sl (session.lock);
         Clip* c = clipAt (track, clip, error);
         if (c == nullptr) return false;
         const float gain = juce::jlimit (-100.0f, 24.0f, db);
         if (same (gain, c->gainDb)) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         c->gainDb = gain;
         record (before, "Clip gain");
         return true;
@@ -207,7 +208,7 @@ public:
         const juce::int64 in = juce::jlimit ((juce::int64) 0, c->length, fadeIn);
         const juce::int64 out = juce::jmin (juce::jlimit ((juce::int64) 0, c->length, fadeOut), c->length - in);
         if (in == c->fadeIn && out == c->fadeOut) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         c->fadeIn = in;
         c->fadeOut = out;
         record (before, "Clip fades");
@@ -220,7 +221,7 @@ public:
         Clip* c = clipAt (track, clip, error);
         if (c == nullptr) return false;
         if (mute == c->mute) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         c->mute = mute;
         record (before, mute ? "Mute clip" : "Unmute clip");
         return true;
@@ -234,7 +235,7 @@ public:
         const auto text = name.trim();
         if (text.isEmpty()) { error = "The name is empty."; return false; }
         if (text == c->name) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         c->name = text;
         record (before, "Rename clip");
         return true;
@@ -264,7 +265,7 @@ public:
         Clip* c = clipAt (ref.track, ref.clip, error);
         if (c == nullptr) return false;
         storeClipboard (*c, ref.track);
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         auto& clips = session.tracks[(size_t) ref.track]->clips;
         clips.erase (clips.begin() + ref.clip);
         record (before, "Cut clip");
@@ -281,7 +282,7 @@ public:
         if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
         if (at < 0) { error = "The paste position must be 0 or later."; return {}; }
         if (std::abs (clipboardRate - session.sampleRate) > 0.5) { error = "The clipboard holds audio at another sample rate: copy the clip again."; return {}; }
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         Clip copy = *clipboard;
         copy.start = at;
         auto& clips = session.tracks[(size_t) track]->clips;
@@ -301,12 +302,13 @@ public:
     // The fader, clamped to -100..+12 dB.
     bool setTrackGain (int track, float db, juce::String& error)
     {
+        if (! std::isfinite (db)) { error = "Track gain must be a finite number."; return false; }
         const juce::ScopedLock sl (session.lock);
         if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
         auto& t = *session.tracks[(size_t) track];
         const float gain = juce::jlimit (-100.0f, 12.0f, db);
         if (same (gain, t.gainDb)) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         t.gainDb = gain;
         record (before, "Track gain");
         return true;
@@ -315,12 +317,13 @@ public:
     // The balance, clamped to -1..1.
     bool setTrackPan (int track, float pan, juce::String& error)
     {
+        if (! std::isfinite (pan)) { error = "Track pan must be a finite number."; return false; }
         const juce::ScopedLock sl (session.lock);
         if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
         auto& t = *session.tracks[(size_t) track];
         const float value = juce::jlimit (-1.0f, 1.0f, pan);
         if (same (value, t.pan)) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         t.pan = value;
         record (before, "Track pan");
         return true;
@@ -332,7 +335,7 @@ public:
         if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
         auto& t = *session.tracks[(size_t) track];
         if (on == t.mute) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         t.mute = on;
         record (before, on ? "Mute track" : "Unmute track");
         return true;
@@ -344,7 +347,7 @@ public:
         if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
         auto& t = *session.tracks[(size_t) track];
         if (on == t.solo) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         t.solo = on;
         record (before, on ? "Solo track" : "Unsolo track");
         return true;
@@ -358,7 +361,7 @@ public:
         const auto text = name.trim();
         if (text.isEmpty()) { error = "The name is empty."; return false; }
         if (text == t.name) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         t.name = text;
         record (before, "Rename track");
         return true;
@@ -367,10 +370,11 @@ public:
     // The master gain, clamped to -100..+12 dB.
     void setMasterDb (float db)
     {
+        if (! std::isfinite (db)) return;
         const juce::ScopedLock sl (session.lock);
         const float value = juce::jlimit (-100.0f, 12.0f, db);
         if (same (value, session.masterDb)) return;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.masterDb = value;
         record (before, "Master gain");
     }
@@ -384,7 +388,7 @@ public:
         TempoMap probe = session.tempo;
         probe.setTempo (beat, bpm);
         if (sameTempo (probe, session.tempo)) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.tempo.setTempo (beat, bpm);
         record (before, "Tempo");
         return true;
@@ -400,7 +404,7 @@ public:
             error = index == 0 ? "The first tempo is the start of the project and cannot be removed." : "No tempo " + juce::String (index);
             return false;
         }
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.tempo.removeTempo (index);
         record (before, "Remove tempo");
         return true;
@@ -413,7 +417,7 @@ public:
         TempoMap probe = session.tempo;
         probe.setSignature (num, den);
         if (probe.numerator == session.tempo.numerator && probe.denominator == session.tempo.denominator) return;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.tempo.setSignature (num, den);
         record (before, "Time signature");
     }
@@ -425,7 +429,7 @@ public:
         const juce::int64 s = juce::jmax ((juce::int64) 0, start), e = juce::jmax ((juce::int64) 0, end);
         const bool isOn = on && e > s;
         if (s == session.loopStart && e == session.loopEnd && isOn == session.loopOn) return;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.loopStart = s;
         session.loopEnd = e;
         session.loopOn = isOn;
@@ -437,7 +441,7 @@ public:
     {
         const juce::ScopedLock sl (session.lock);
         if (on == session.metronomeOn) return;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.metronomeOn = on;
         record (before, on ? "Metronome on" : "Metronome off");
     }
@@ -447,7 +451,7 @@ public:
     int addMarker (const juce::String& name, juce::int64 at)
     {
         const juce::ScopedLock sl (session.lock);
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         const int index = session.addMarker (name, at);
         record (before, "Add marker");
         return index;
@@ -460,7 +464,7 @@ public:
         if (! isMarker (index)) { error = "No marker " + juce::String (index); return false; }
         const juce::int64 start = juce::jmax ((juce::int64) 0, at);
         if (start == session.markers[(size_t) index].start) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.moveMarker (index, start, error);
         record (before, "Move marker");
         return true;
@@ -473,7 +477,7 @@ public:
         const auto text = name.trim();
         if (text.isEmpty()) { error = "The name is empty."; return false; }
         if (text == session.markers[(size_t) index].name) return true;
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.markers[(size_t) index].name = text;
         record (before, "Rename marker");
         return true;
@@ -483,7 +487,7 @@ public:
     {
         const juce::ScopedLock sl (session.lock);
         if (! isMarker (index)) { error = "No marker " + juce::String (index); return false; }
-        const auto before = session.captureEdit();
+        auto before = captureIfNeeded();
         session.removeMarker (index, error);
         record (before, "Remove marker");
         return true;
@@ -518,8 +522,8 @@ public:
     }
 
     // ---- undo -----------------------------------------------------------------------------------------------------------------
-    bool canUndo() const { return ! undoSteps.empty(); }
-    bool canRedo() const { return ! redoSteps.empty(); }
+    bool canUndo() const { return gestureDepth == 0 && ! undoSteps.empty(); }
+    bool canRedo() const { return gestureDepth == 0 && ! redoSteps.empty(); }
 
     // Puts back the state before the last edit (the current one goes to the redo stack). False when there is nothing to undo, or when
     // the track count changed since: then both stacks are cleared.
@@ -552,8 +556,14 @@ public:
 
     void clearUndo()
     {
+        const juce::ScopedLock sl (session.lock);
         undoSteps.clear();
         redoSteps.clear();
+        if (gestureDepth > 0)
+        {
+            gestureInvalid = true;
+            gestureChanged = false;
+        }
     }
 
     // The label of the edit that undo would revert ("Split clip"), or "" when there is none.
@@ -574,14 +584,21 @@ public:
                 editor.gestureTracks = (int) editor.session.tracks.size();
                 editor.gestureLabel = label;
                 editor.gestureChanged = false;
+                editor.gestureInvalid = false;
             }
         }
 
         ~Gesture()
         {
             const juce::ScopedLock sl (editor.session.lock);
-            if (--editor.gestureDepth == 0 && editor.gestureChanged)
-                editor.push ({ std::move (editor.gestureBefore), editor.gestureTracks, editor.gestureLabel });
+            if (--editor.gestureDepth == 0)
+            {
+                if (editor.gestureChanged && ! editor.gestureInvalid)
+                    editor.push ({ std::move (editor.gestureBefore), editor.gestureTracks, editor.gestureLabel });
+                editor.gestureInvalid = false;
+                editor.gestureChanged = false;
+                editor.gestureBefore = {};
+            }
         }
 
         Gesture (const Gesture&) = delete;
@@ -608,20 +625,30 @@ private:
     double clipboardRate = 0.0;           // the session's rate when it was copied: a paste at another rate is refused
     int gestureDepth = 0;
     bool gestureChanged = false;
+    bool gestureInvalid = false;
     EditState gestureBefore;
     int gestureTracks = 0;
     juce::String gestureLabel;
 
+    std::optional<EditState> captureIfNeeded() const
+    {
+        if (gestureDepth > 0)
+            return std::nullopt;
+        return session.captureEdit();
+    }
+
     // Called after a change, with the state from before it. Inside a gesture the step waits for the gesture's end.
-    void record (const EditState& before, const juce::String& label)
+    void record (std::optional<EditState>& before, const juce::String& label)
     {
         session.dirty = true;
         if (gestureDepth > 0)
         {
-            gestureChanged = true;
+            if (! gestureInvalid)
+                gestureChanged = true;
             return;
         }
-        push ({ before, (int) session.tracks.size(), label });
+        if (before)
+            push ({ std::move (*before), (int) session.tracks.size(), label });
     }
 
     void push (Step step)
