@@ -246,6 +246,7 @@ juce::MouseEvent mouseAt (ArrangeView& view, juce::Point<int> p)
 
 int main()
 {
+    std::setvbuf (stdout, nullptr, _IOLBF, 0);   // a crash then leaves the last line printed in the CI log, not the last 4 KiB lost
     juce::ScopedJuceInitialiser_GUI gui;
 
     std::printf ("[1] Window shape\n");
