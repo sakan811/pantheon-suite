@@ -56,9 +56,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     # The session, render, project file and MCP server (OlympusTests), the window driven with synthetic events (OlympusUiCheck), and the app and the server must build.
+    # The two checks are built and run first, so a failing check ends the job before the app is compiled.
     # No audio device and no display are needed. A macOS build is not covered here.
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # ccache keeps the object files of every target (each one compiles its own JUCE); CI restores and saves this folder.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,13 +71,56 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev \
+          sudo apt-get install -y ccache libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev \
             libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
+      - name: Restore the compiler cache
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-olympus-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-olympus-${{ runner.os }}-
+      - name: Restore the JUCE sources
+        id: juce-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/JUCE
+          key: juce-${{ hashFiles('cmake/Juce.cmake') }}
+      - name: Fetch the JUCE sources
+        # Only when the cache missed. cmake/Juce.cmake uses third_party/JUCE when it has a CMakeLists.txt, so CMake clones nothing.
+        # The tag is read from cmake/Juce.cmake, so the version is written there only.
+        if: steps.juce-restore.outputs.cache-hit != 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          TAG=$(sed -n 's/^set(PANTHEON_JUCE_TAG "\([^"]*\)").*/\1/p' cmake/Juce.cmake)
+          test -n "$TAG"
+          git clone --depth 1 --branch "$TAG" https://github.com/juce-framework/JUCE third_party/JUCE
+      - name: Save the JUCE sources
+        # Saved right after the clone, so a run that fails later still leaves them in the cache. third_party/ is git-ignored.
+        if: steps.juce-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/JUCE
+          key: juce-${{ hashFiles('cmake/Juce.cmake') }}
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build --target OlympusTests OlympusUiCheck OlympusMcp Olympus -j 4
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build the checks
+        # The two checks come first: a failing check ends the job before the app and the server are compiled.
+        run: cmake --build build --target OlympusTests OlympusUiCheck -j $(nproc)
       - name: Session, render, project file and MCP server tests
         run: ./build/OlympusTests_artefacts/Release/OlympusTests
       - name: Window check
         run: ./build/OlympusUiCheck_artefacts/Release/OlympusUiCheck
+      - name: Build the app and the server
+        run: cmake --build build --target OlympusMcp Olympus -j $(nproc)
+      - name: ccache statistics
+        if: always()
+        run: ccache -s
+      - name: Save the compiler cache
+        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-olympus-${{ runner.os }}-${{ github.sha }}
