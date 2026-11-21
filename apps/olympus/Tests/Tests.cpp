@@ -419,6 +419,17 @@ void mcpChecks()
     juce::var unknown;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"nope\"}", unknown);
     test::check ((int) server.handle (unknown)["error"]["code"] == -32601, "an unknown method is an error");
+    juce::var badReq;
+    juce::JSON::parse ("[]", badReq);
+    test::check ((int) server.handle (badReq)["error"]["code"] == -32600, "invalid JSON-RPC request ([]) returns -32600");
+    const auto unknownWithTrack = call ("no_such_tool", "{\"track\":9}");
+    test::check ((bool) unknownWithTrack["isError"] && text (unknownWithTrack).contains ("Unknown tool"),
+                 "unknown tool with 'track' returns Unknown tool error");
+    test::check ((bool) call ("set_master", "{\"master_db\":\"bad\"}")["isError"], "set_master rejects non-numeric string");
+    test::check ((bool) call ("set_tempo", "{\"bpm\":120,\"beat\":\"bad\"}")["isError"]
+                     && (bool) call ("set_time_signature", "{\"numerator\":4.5,\"denominator\":4}")["isError"]
+                     && (bool) call ("set_time_signature", "{\"numerator\":true,\"denominator\":4}")["isError"],
+                 "set_tempo and set_time_signature reject bad types");
 
     test::check (parsed (call ("list_plugins", "{}"))["installed"].size() == 2, "list_plugins");
     const auto wav = makeWav ("mcp.wav", 48000.0, 2, 48000, 0.5f, 500.0).getFullPathName().replace ("\\", "\\\\");
@@ -614,6 +625,18 @@ void mcpTimelineChecks()
     test::check (d["tracks"][0]["clips"].size() == 2 && d["tempo"].size() == 2 && d["markers"].size() == 1 && ! (bool) d["loop"]["on"]
                      && std::abs ((double) d["master_db"] + 3.0) < 1e-4 && d["time_signature"].toString() == "6/8",
                  "project_info: the clips, tempo, markers, loop, master and time signature");
+
+    // add_clip with sampleRate == 0 and start_seconds: 0 sets the session sampleRate from the first file
+    {
+        Session emptyRateSession;
+        emptyRateSession.tracks.push_back (std::make_unique<Track>());
+        emptyRateSession.tracks[0]->name = "Empty";
+        McpServer emptyServer (emptyRateSession);
+        const auto r0 = toolCall (emptyServer, "add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":0}");
+        test::check (! (bool) r0["isError"] && std::abs (emptyRateSession.sampleRate - 48000.0) < 1e-6
+                         && emptyRateSession.tracks[0]->clips.size() == 1,
+                     "add_clip with sampleRate == 0 and start_seconds: 0 succeeds and sets session rate");
+    }
 }
 
 bool close (double a, double b) { return std::abs (a - b) < 1e-4; }
@@ -3050,6 +3073,19 @@ void analyzeChecks()
         juce::AudioBuffer<float> emptyBuf;
         const auto rEmpty = analyze::analyzeBuffer (emptyBuf, 0.0);
         test::check (! rEmpty.valid && std::isfinite (rEmpty.integratedLufs), "empty/0-rate buffer handled safely");
+
+        const auto rNaNSr = analyze::analyzeBuffer (nanBuf, std::numeric_limits<double>::quiet_NaN());
+        const auto rInfSr = analyze::analyzeBuffer (nanBuf, std::numeric_limits<double>::infinity());
+        test::check (! rNaNSr.valid && ! rInfSr.valid, "NaN and +Inf sampleRate rejected cleanly");
+
+        juce::AudioBuffer<float> hardPan (2, 48000);
+        hardPan.clear();
+        for (int i = 0; i < 48000; ++i)
+            hardPan.setSample (0, i, 0.25f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * i / 48000.0)));
+        const auto rHardPan = analyze::analyzeBuffer (hardPan, 48000.0);
+        test::check (std::abs (rHardPan.stereoCorrelationMean) < 1e-6 && std::abs (rHardPan.stereoCorrelationMin) < 1e-6
+                         && std::abs (rHardPan.bandCorrelation[2]) < 1e-6 && rHardPan.lrBalanceDb <= 60.0,
+                     "hard-panned stereo reports 0.0 correlation and clamped L/R balance");
     }
 
     // 6. Multitrack masking check at 350 Hz (Low-Mid)
@@ -3138,6 +3174,9 @@ void mcpAnalyzeAudioChecks()
 
         const auto rBoth = call ("analyze_audio", "{\"file\":\"" + pathA + "\",\"track\":0}");
         test::check (failed (rBoth), "analyze_audio with both file and track returns isError");
+
+        const auto rBlankTrack = call ("analyze_audio", "{\"track\":\"\"}");
+        test::check (failed (rBlankTrack), "analyze_audio with empty track string returns isError");
     }
 
     tempFolder().getChildFile ("mcp-analyze").deleteRecursively();
@@ -3189,6 +3228,101 @@ void delayRingAndRelativePathChecks()
     const auto rAdd = toolCall (server, "add_track", "{\"file\":\"" + relWav + "\",\"name\":\"Rel\"}");
     test::check (! (bool) rAdd["isError"] && mcpSession.tracks.size() == 1 && ! mcpSession.tracks[0]->clips.empty(),
                  "McpServer add_track resolves relative file path safely");
+    const auto rHugeSec = toolCall (server, "add_clip", "{\"track\":0,\"file\":\"" + relWav + "\",\"start_seconds\":1e20}");
+    test::check ((bool) rHugeSec["isError"], "McpServer samplesOf rejects huge finite seconds");
+    const auto rHugeBeat = toolCall (server, "add_clip", "{\"track\":0,\"file\":\"" + relWav + "\",\"start_beats\":1e20}");
+    test::check ((bool) rHugeBeat["isError"], "McpServer samplesOf rejects huge finite beats");
+    juce::AudioBuffer<float> tiny (1, 128);
+    tiny.clear();
+    const auto nanRes = analyze::analyzeBuffer (tiny, 48000.0, "modern_pop", std::numeric_limits<double>::quiet_NaN());
+    test::check (std::isfinite (nanRes.targetLufs) && std::abs (nanRes.targetLufs - (-14.0)) < 1e-9,
+                 "analyzeBuffer defaults non-finite targetLufs to -14.0");
+
+    dir.deleteRecursively();
+}
+
+void batch1FixesChecks()
+{
+    std::printf ("[54] Batch 1 fixes: Editor NaN rejection, Gesture clearUndo, addEmptyTrack latency, renderStems head stop, 3/8 metronome\n");
+    const auto dir = tempFolder().getChildFile ("batch1");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("batch1/tone.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    juce::String err;
+
+    // 1. Editor NaN/Inf rejection + Gesture clearUndo + canUndo/canRedo during Gesture
+    {
+        Session s;
+        test::check (s.addTrack (wav, "T", err), "added track for NaN checks");
+        Editor ed (s);
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        test::check (ed.setTrackGain (0, -3.0f, err) && ed.setTrackPan (0, 0.25f, err) && ed.setClipGain (0, 0, -2.0f, err),
+                     "initial finite edits succeed");
+        ed.setMasterDb (-4.0f);
+
+        test::check (! ed.setTrackGain (0, nan, err) && ! ed.setTrackGain (0, inf, err) && close (s.tracks[0]->gainDb, -3.0),
+                     "NaN/Inf rejected by setTrackGain");
+        test::check (! ed.setTrackPan (0, nan, err) && ! ed.setTrackPan (0, -inf, err) && close (s.tracks[0]->pan, 0.25),
+                     "NaN/Inf rejected by setTrackPan");
+        test::check (! ed.setClipGain (0, 0, nan, err) && ! ed.setClipGain (0, 0, inf, err) && close (s.tracks[0]->clips[0].gainDb, -2.0),
+                     "NaN/Inf rejected by setClipGain");
+        ed.setMasterDb (nan);
+        ed.setMasterDb (inf);
+        test::check (close (s.masterDb, -4.0), "NaN/Inf ignored by setMasterDb");
+
+        test::check (ed.canUndo(), "canUndo is true before gesture");
+        {
+            Gesture g (ed, "Drag");
+            test::check (! ed.canUndo() && ! ed.canRedo(), "canUndo and canRedo are false during an active Gesture");
+            ed.setTrackGain (0, -6.0f, err);
+            ed.clearUndo();
+            ed.setTrackGain (0, -8.0f, err);
+        }
+        test::check (! ed.canUndo() && ! ed.canRedo(), "clearUndo during Gesture prevents stale undo step on exit");
+    }
+
+    // 2. addEmptyTrack inherits maxLatency() delay compensation + renderStems stops head on finish & cancel
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        test::check (s.addTrack (wav, "Latent", err) && s.setChain (0, { "Test Delay" }, err), "latent track ready");
+        const int maxLat = s.tracks[0]->latency();
+        const int emptyIdx = s.addEmptyTrack ("Empty");
+        test::check (maxLat > 0 && s.tracks[(size_t) emptyIdx]->delaySamples == maxLat,
+                     "addEmptyTrack inherits maxLatency() delay compensation");
+
+        RenderOptions opts;
+        opts.folder = dir.getChildFile ("out");
+        RenderResult res;
+        test::check (s.renderStems (opts, res, err) && ! s.head.playing.load() && ! s.head.getPosition()->getIsPlaying(),
+                     "renderStems leaves head.playing false on completion");
+
+        RenderOptions cancelOpts;
+        cancelOpts.folder = dir.getChildFile ("cancel");
+        RenderResult cancelRes;
+        test::check (! s.renderStems (cancelOpts, cancelRes, err, [] (float) { return false; })
+                         && cancelRes.stopped && ! s.head.playing.load() && ! s.head.getPosition()->getIsPlaying(),
+                     "renderStems leaves head.playing false on cancel");
+    }
+
+    // 3. 3/8 metronome downbeat accent accuracy
+    {
+        Session s;
+        s.sampleRate = 48000.0;
+        s.tempo.sampleRate = 48000.0;
+        s.tempo.setSignature (3, 8);
+        s.metronomeOn = true;
+        juce::AudioBuffer<float> block (2, 256);
+        s.processBlock (block, 0);
+        const float p0 = block.getMagnitude (0, 0, 256);
+        s.processBlock (block, 24000);
+        const float p1 = block.getMagnitude (0, 0, 256);
+        s.processBlock (block, 72000);
+        const float p3 = block.getMagnitude (0, 0, 256);
+        test::check (p0 > 0.30f && p1 > 0.15f && p1 < 0.28f && p3 > 0.30f,
+                     test::fmt ("3/8 metronome accents beat 0 (%.3f) and beat 3 (%.3f), not beat 1 (%.3f)", p0, p3, p1));
+    }
 
     dir.deleteRecursively();
 }
@@ -3250,6 +3384,7 @@ int main()
     analyzeChecks();
     mcpAnalyzeAudioChecks();
     delayRingAndRelativePathChecks();
+    batch1FixesChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

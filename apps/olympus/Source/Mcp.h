@@ -31,6 +31,11 @@ public:
     // One incoming message; the reply, or a void var for a notification (which has none).
     juce::var handle (const juce::var& request)
     {
+        if (! request.isObject() || ! request["method"].isString())
+        {
+            const auto id = request.isObject() ? request.getProperty ("id", juce::var()) : juce::var();
+            return failure (id, -32600, "Invalid Request");
+        }
         const auto method = request["method"].toString();
         const auto id = request["id"];
         const bool isNotification = ! request.hasProperty ("id");
@@ -248,7 +253,9 @@ private:
         }
         if (name == "save_project")
         {
-            const auto path = a["path"].toString();
+            const auto path = a["path"].toString().trim();
+            if (a.hasProperty ("path") && ! a["path"].isVoid() && (! a["path"].isString() || path.isEmpty()))
+            { error = "Give 'path': a non-empty project path (or omit 'path' to save to the current file)."; return {}; }
             const auto file = path.isNotEmpty() ? resolvePath (path) : session.projectFile;
             if (file == juce::File()) { error = "No path: this project has not been saved yet."; return {}; }
             if (! session.save (file.hasFileExtension ("olympus") ? file : file.withFileExtension ("olympus"), error)) return {};
@@ -265,19 +272,26 @@ private:
         if (name == "set_tempo")
         {
             if (! a.hasProperty ("bpm")) { error = "Give 'bpm' (20 to 300)."; return {}; }
-            const double bpm = (double) a["bpm"];
-            const double beat = a.hasProperty ("beat") ? (double) a["beat"] : 0.0;
-            if (! std::isfinite (beat) || beat < 0.0) { error = "'beat' must be 0 or more: quarter notes from the start of the project."; return {}; }
+            double bpm = 0.0;
+            if (! finiteNumber (a["bpm"], bpm)) { error = "'bpm' must be a number (20 to 300)."; return {}; }
+            double beat = 0.0;
+            if (a.hasProperty ("beat"))
+            {
+                if (! finiteNumber (a["beat"], beat) || beat < 0.0)
+                { error = "'beat' must be a number 0 or more: quarter notes from the start of the project."; return {}; }
+            }
             if (! (bpm >= TempoMap::kMinBpm && bpm <= TempoMap::kMaxBpm)) { error = "'bpm' must be 20 to 300 (got " + juce::String (bpm) + ")."; return {}; }
             if (! editor.setTempo (beat, bpm, error)) return {};
             return session.describe();
         }
         if (name == "set_time_signature")
         {
-            const int num = a.hasProperty ("numerator") ? (int) a["numerator"] : 0;
-            const int den = a.hasProperty ("denominator") ? (int) a["denominator"] : 0;
-            if (num < 1 || num > 32) { error = "'numerator' must be 1 to 32 (beats per bar)."; return {}; }
-            if (den != 1 && den != 2 && den != 4 && den != 8 && den != 16 && den != 32) { error = "'denominator' must be 1, 2, 4, 8, 16 or 32."; return {}; }
+            int num = 0, den = 0;
+            if (! a.hasProperty ("numerator") || ! wholeNumber (a["numerator"], num) || num < 1 || num > 32)
+            { error = "'numerator' must be a whole number from 1 to 32 (beats per bar)."; return {}; }
+            if (! a.hasProperty ("denominator") || ! wholeNumber (a["denominator"], den)
+                || (den != 1 && den != 2 && den != 4 && den != 8 && den != 16 && den != 32))
+            { error = "'denominator' must be 1, 2, 4, 8, 16 or 32."; return {}; }
             editor.setSignature (num, den);
             return session.describe();
         }
@@ -304,13 +318,15 @@ private:
             const auto end = position (a, "end", error);
             if (! end) return {};
             if (*end <= *start) { error = "The loop end must be after its start."; return {}; }
+            if (a.hasProperty ("on") && ! a["on"].isBool()) { error = "'on' must be true or false."; return {}; }
             editor.setLoop (*start, *end, a.hasProperty ("on") ? (bool) a["on"] : true);
             return session.describe();
         }
         if (name == "set_master")
         {
             if (! a.hasProperty ("master_db")) { error = "Give 'master_db' (-100 to +12)."; return {}; }
-            const double db = (double) a["master_db"];
+            double db = 0.0;
+            if (! finiteNumber (a["master_db"], db)) { error = "'master_db' must be a number (-100 to +12 dB)."; return {}; }
             if (! (db >= -100.0 && db <= 12.0)) { error = "'master_db' must be -100 to +12 dB (got " + juce::String (db) + ")."; return {}; }
             editor.setMasterDb ((float) db);
             return session.describe();
@@ -340,8 +356,18 @@ private:
 
         if (name == "analyze_audio")
         {
-            const bool hasFile = a.hasProperty ("file") && a["file"].toString().isNotEmpty();
-            const bool hasTrack = a.hasProperty ("track") && ! a["track"].isVoid() && a["track"].toString().isNotEmpty();
+            const bool hasFile = a.hasProperty ("file") && ! a["file"].isVoid();
+            if (hasFile && (! a["file"].isString() || a["file"].toString().trim().isEmpty()))
+            {
+                error = "Give a valid 'file' path (or omit 'file').";
+                return {};
+            }
+            const bool hasTrack = a.hasProperty ("track") && ! a["track"].isVoid();
+            if (hasTrack && a["track"].isString() && a["track"].toString().trim().isEmpty())
+            {
+                error = "Give 'track' (a track number from 0, or a track name), or omit 'track' to analyze the whole mix.";
+                return {};
+            }
             if (hasFile && hasTrack)
             {
                 error = "Give either 'file' or 'track', not both.";
@@ -486,24 +512,37 @@ private:
             if (! session.renderStems (opts, res, error))
                 return {};
 
-            juce::AudioBuffer<float> mixBuf;
-            double mixRate = 0.0;
-            if (! readWavFile (juce::File (res.mixFile), mixBuf, mixRate, error))
-                return {};
-            const double effectiveRate = mixRate > 0.0 ? mixRate : session.sampleRate;
-            const auto mixAnalysis = analyze::analyzeBuffer (mixBuf, effectiveRate, target, targetLufs);
+            analyze::AnalysisResult mixAnalysis;
+            double effectiveRate = 0.0;
+            {
+                juce::AudioBuffer<float> mixBuf;
+                double mixRate = 0.0;
+                if (! readWavFile (juce::File (res.mixFile), mixBuf, mixRate, error))
+                    return {};
+                effectiveRate = mixRate > 0.0 ? mixRate : session.sampleRate;
+                mixAnalysis = analyze::analyzeBuffer (mixBuf, effectiveRate, target, targetLufs);
+            }
 
-            std::vector<analyze::TrackAudio> stemBuffers;
-            stemBuffers.reserve (res.stems.size());
-            for (const auto& s : res.stems)
+            std::vector<analyze::TrackSummary> trackSummaries;
+            std::vector<std::array<double, pdsp::bands::kCount>> trackBands;
+            trackSummaries.reserve (res.stems.size());
+            trackBands.reserve (res.stems.size());
+            double loudestBandDb = -120.0;
             {
                 juce::AudioBuffer<float> sb;
-                double sRate = 0.0;
-                if (! readWavFile (juce::File (s.file), sb, sRate, error))
-                    return {};
-                stemBuffers.push_back ({ s.track, std::move (sb) });
+                for (const auto& s : res.stems)
+                {
+                    double sRate = 0.0;
+                    if (! readWavFile (juce::File (s.file), sb, sRate, error))
+                        return {};
+                    analyze::TrackSummary summary;
+                    std::array<double, pdsp::bands::kCount> bands {};
+                    analyze::analyzeTrackForMasking (s.track, sb, effectiveRate, summary, bands, loudestBandDb);
+                    trackSummaries.push_back (std::move (summary));
+                    trackBands.push_back (bands);
+                }
             }
-            const auto masking = analyze::analyzeMasking (stemBuffers, effectiveRate);
+            const auto masking = analyze::buildMaskingResult (std::move (trackSummaries), trackBands, loudestBandDb);
             const auto maskingVar = masking.toVar();
 
             return object ({ { "mix", mixAnalysis.toVar() },
@@ -511,27 +550,62 @@ private:
                              { "masking", maskingVar } });
         }
 
-        // everything below names a track
-        const auto trackArg = a.hasProperty ("from_track") ? a["from_track"] : a["track"];
-        if (name == "render_stems" || trackArg.isVoid())
+        if (name == "render_stems")
         {
-            if (name == "render_stems")
+            if (! a.hasProperty ("folder") || ! a["folder"].isString() || a["folder"].toString().trim().isEmpty())
+            { error = "Give 'folder': a non-empty folder path."; return {}; }
+            RenderOptions o;
+            o.folder = resolvePath (a["folder"].toString().trim());
+            if (a.hasProperty ("tail_seconds"))
             {
-                RenderOptions o;
-                o.folder = resolvePath (a["folder"].toString());
-                o.tailSeconds = a.hasProperty ("tail_seconds") ? (double) a["tail_seconds"] : 0.0;
-                o.writeMix = a.hasProperty ("mix") ? (bool) a["mix"] : true;
-                o.bits = a.hasProperty ("bits") ? (int) a["bits"] : 32;
-                RenderResult r;
-                if (! session.renderStems (o, r, error)) return {};
-                juce::Array<juce::var> stems;
-                for (auto& s : r.stems) stems.add (object ({ { "track", s.track }, { "file", s.file }, { "peak_db", s.peakDb } }));
-                return object ({ { "stems", stems }, { "mix", r.mixFile }, { "mix_peak_db", r.mixPeakDb }, { "seconds", r.seconds } });
+                double tail = 0.0;
+                if (! finiteNumber (a["tail_seconds"], tail) || tail < 0.0 || tail > 60.0)
+                { error = "'tail_seconds' must be a number from 0 to 60."; return {}; }
+                o.tailSeconds = tail;
             }
-            error = "Unknown tool '" + name + "' or a missing 'track'.";
+            if (a.hasProperty ("mix"))
+            {
+                if (! a["mix"].isBool()) { error = "'mix' must be true or false."; return {}; }
+                o.writeMix = (bool) a["mix"];
+            }
+            if (a.hasProperty ("bits"))
+            {
+                int bits = 0;
+                if (! wholeNumber (a["bits"], bits) || (bits != 16 && bits != 24 && bits != 32))
+                { error = "'bits' must be 16, 24 or 32."; return {}; }
+                o.bits = bits;
+            }
+            RenderResult r;
+            if (! session.renderStems (o, r, error)) return {};
+            juce::Array<juce::var> stems;
+            for (auto& s : r.stems) stems.add (object ({ { "track", s.track }, { "file", s.file }, { "peak_db", s.peakDb } }));
+            return object ({ { "stems", stems }, { "mix", r.mixFile }, { "mix_peak_db", r.mixPeakDb }, { "seconds", r.seconds } });
+        }
+
+        // everything below names a track: verify tool name before resolving track
+        const bool isCopyChain = (name == "copy_chain");
+        const bool isTrackTool = isCopyChain || name == "remove_track" || name == "set_track"
+                                 || name == "add_clip" || name == "move_clip" || name == "split_clip"
+                                 || name == "trim_clip" || name == "delete_clip" || name == "set_clip"
+                                 || name == "add_plugin" || name == "set_chain" || name == "move_plugin"
+                                 || name == "remove_plugin" || name == "bypass_plugin"
+                                 || name == "list_parameters" || name == "set_parameter"
+                                 || name == "get_plugin_state" || name == "set_plugin_state"
+                                 || name == "list_presets" || name == "load_preset";
+        if (! isTrackTool)
+        {
+            error = "Unknown tool '" + name + "'.";
             return {};
         }
-        if (name == "copy_chain")
+
+        const auto trackArg = isCopyChain ? (a.hasProperty ("from_track") ? a["from_track"] : a["track"]) : a["track"];
+        if (trackArg.isVoid())
+        {
+            error = isCopyChain ? "Give 'from_track' (a track number from 0, or a track name)."
+                                : "Give 'track' (a track number from 0, or a track name).";
+            return {};
+        }
+        if (isCopyChain)
         {
             const int from = session.findTrack (trackArg, error);
             if (from < 0) return {};
@@ -560,32 +634,65 @@ private:
         }
         if (name == "set_track")
         {
-            // the name is checked before anything is applied: a call that fails changes nothing and pushes no undo step
+            // every value is checked before anything is applied: a call that fails changes nothing and pushes no undo step
+            double gainDb = 0.0, pan = 0.0;
+            if (a.hasProperty ("gain_db") && (! finiteNumber (a["gain_db"], gainDb) || ! std::isfinite ((float) gainDb)))
+            { error = "'gain_db' must be a finite number."; return {}; }
+            if (a.hasProperty ("pan") && (! finiteNumber (a["pan"], pan) || ! std::isfinite ((float) pan)))
+            { error = "'pan' must be a finite number (-1 to 1)."; return {}; }
+            if (a.hasProperty ("mute") && ! a["mute"].isBool())
+            { error = "'mute' must be true or false."; return {}; }
+            if (a.hasProperty ("solo") && ! a["solo"].isBool())
+            { error = "'solo' must be true or false."; return {}; }
             const bool renaming = a.hasProperty ("name") && a["name"].toString().isNotEmpty();
             if (renaming && a["name"].toString().trim().isEmpty()) { error = "The name is empty."; return {}; }
             // one gesture: the settings given are one undo step
             Gesture g (editor, "Track settings");
-            if (a.hasProperty ("gain_db") && ! editor.setTrackGain (track, (float) (double) a["gain_db"], error)) return {};
-            if (a.hasProperty ("pan") && ! editor.setTrackPan (track, (float) (double) a["pan"], error)) return {};
+            if (a.hasProperty ("gain_db") && ! editor.setTrackGain (track, (float) gainDb, error)) return {};
+            if (a.hasProperty ("pan") && ! editor.setTrackPan (track, (float) pan, error)) return {};
             if (a.hasProperty ("mute") && ! editor.setTrackMute (track, (bool) a["mute"], error)) return {};
             if (a.hasProperty ("solo") && ! editor.setTrackSolo (track, (bool) a["solo"], error)) return {};
-            if (a.hasProperty ("name") && a["name"].toString().isNotEmpty() && ! editor.renameTrack (track, a["name"].toString(), error)) return {};
+            if (renaming && ! editor.renameTrack (track, a["name"].toString(), error)) return {};
             return session.describe();
         }
 
         // clips: numbered from 0 on the track; positions as seconds or beats (see position)
         if (name == "add_clip")
         {
+            if (! a.hasProperty ("file") || ! a["file"].isString() || a["file"].toString().trim().isEmpty())
+            { error = "Give 'file': the absolute path of an audio file."; return {}; }
             const auto file = resolvePath (a["file"].toString());
-            if (! a.hasProperty ("file") || a["file"].toString().isEmpty()) { error = "Give 'file': the absolute path of an audio file."; return {}; }
-            const auto start = position (a, "start", error);
-            if (! start) return {};
+
+            const bool inSeconds = a.hasProperty ("start_seconds");
+            const bool inBeats = a.hasProperty ("start_beats");
+            if (inSeconds && inBeats) { error = "Give 'start_seconds' or 'start_beats' (exactly one)."; return {}; }
+            juce::int64 startSample = 0;
+            if (inSeconds || inBeats)
+            {
+                const std::string key = inSeconds ? "start_seconds" : "start_beats";
+                double val = 0.0;
+                if (! finiteNumber (a[key.c_str()], val) || val < 0.0)
+                { error = juce::String (key.c_str()) + " must be a number 0 or more."; return {}; }
+                if (val > 0.0)
+                {
+                    const auto s = samplesOf (a, key, inBeats, error);
+                    if (! s) return {};
+                    startSample = *s;
+                }
+            }
+
             juce::int64 offset = 0, length = 0;
             if (a.hasProperty ("offset_seconds"))
             {
-                const auto v = samplesOf (a, "offset_seconds", false, error);
-                if (! v) return {};
-                offset = *v;
+                double val = 0.0;
+                if (! finiteNumber (a["offset_seconds"], val) || val < 0.0)
+                { error = "offset_seconds must be a number 0 or more."; return {}; }
+                if (val > 0.0)
+                {
+                    const auto v = samplesOf (a, "offset_seconds", false, error);
+                    if (! v) return {};
+                    offset = *v;
+                }
             }
             if (a.hasProperty ("length_seconds"))
             {
@@ -594,7 +701,7 @@ private:
                 if (*v == 0) { error = "'length_seconds' must be more than 0 (leave it out to play to the end of the file)."; return {}; }
                 length = *v;
             }
-            if (! editor.addClip (track, file, *start, offset, length, error).valid()) return {};
+            if (! editor.addClip (track, file, startSample, offset, length, error).valid()) return {};
             return session.describe();
         }
         if (name == "move_clip")
@@ -657,6 +764,11 @@ private:
             const bool given = a.hasProperty ("gain_db") || a.hasProperty ("fade_in_seconds") || a.hasProperty ("fade_out_seconds")
                                || a.hasProperty ("mute") || a.hasProperty ("name");
             if (! given) { error = "Give at least one of 'gain_db', 'fade_in_seconds', 'fade_out_seconds', 'mute' or 'name'."; return {}; }
+            double gainDb = 0.0;
+            if (a.hasProperty ("gain_db") && (! finiteNumber (a["gain_db"], gainDb) || ! std::isfinite ((float) gainDb)))
+            { error = "'gain_db' must be a finite number."; return {}; }
+            if (a.hasProperty ("mute") && ! a["mute"].isBool())
+            { error = "'mute' must be true or false."; return {}; }
             if (a.hasProperty ("name") && a["name"].toString().trim().isEmpty()) { error = "The name is empty."; return {}; }
 
             // every value is read and checked before anything changes
@@ -685,7 +797,7 @@ private:
             }
 
             Gesture g (editor, "Clip settings");
-            if (a.hasProperty ("gain_db") && ! editor.setClipGain (track, clip, (float) (double) a["gain_db"], error)) return {};
+            if (a.hasProperty ("gain_db") && ! editor.setClipGain (track, clip, (float) gainDb, error)) return {};
             if ((fadeIn || fadeOut) && ! editor.setClipFades (track, clip, fadeIn ? *fadeIn : currentIn, fadeOut ? *fadeOut : currentOut, error)) return {};
             if (a.hasProperty ("mute") && ! editor.setClipMute (track, clip, (bool) a["mute"], error)) return {};
             if (a.hasProperty ("name") && ! editor.renameClip (track, clip, a["name"].toString(), error)) return {};
@@ -794,6 +906,36 @@ private:
         return {};
     }
 
+    static bool finiteNumber (const juce::var& v, double& out) noexcept
+    {
+        if (! (v.isInt() || v.isInt64() || v.isDouble()))
+            return false;
+        out = (double) v;
+        return std::isfinite (out);
+    }
+
+    static bool wholeNumber (const juce::var& v, int& out) noexcept
+    {
+        if (v.isInt()) { out = (int) v; return true; }
+        if (v.isInt64())
+        {
+            const auto n = (juce::int64) v;
+            if (n < std::numeric_limits<int>::min() || n > std::numeric_limits<int>::max()) return false;
+            out = (int) n;
+            return true;
+        }
+        if (v.isDouble())
+        {
+            const double d = (double) v;
+            if (! std::isfinite (d) || std::trunc (d) != d
+                || d < (double) std::numeric_limits<int>::min() || d > (double) std::numeric_limits<int>::max())
+                return false;
+            out = (int) d;
+            return true;
+        }
+        return false;
+    }
+
     static bool nameOrIndexArg (const juce::var& v, juce::String& out, juce::String& error, const char* prompt)
     {
         if (v.isString())
@@ -883,10 +1025,29 @@ private:
         if (! std::isfinite (value) || value < 0.0) { error = juce::String (name.c_str()) + " must be 0 or more."; return {}; }
         const juce::ScopedLock sl (session.lock);
         if (session.sampleRate <= 0.0) { error = "The session has no sample rate yet, so no time can be placed: add a track first."; return {}; }
-        if (! beats) return (juce::int64) std::llround (value * session.sampleRate);
-        TempoMap map = session.tempo;
-        map.sampleRate = session.sampleRate;
-        return (juce::int64) std::llround (map.beatsToSamples (value));
+        constexpr double kMaxSamples = (double) (std::numeric_limits<juce::int64>::max() / 4);
+        if (! std::isfinite (value * session.sampleRate) || std::abs (value * session.sampleRate) > kMaxSamples)
+        {
+            error = juce::String (name.c_str()) + " is too large.";
+            return {};
+        }
+        double samples = 0.0;
+        if (! beats)
+        {
+            samples = value * session.sampleRate;
+        }
+        else
+        {
+            TempoMap map = session.tempo;
+            map.sampleRate = session.sampleRate;
+            samples = map.beatsToSamples (value);
+        }
+        if (! std::isfinite (samples) || std::abs (samples) > kMaxSamples)
+        {
+            error = juce::String (name.c_str()) + " is too large.";
+            return {};
+        }
+        return (juce::int64) std::llround (samples);
     }
 
     // A position on the timeline: `key`_seconds or `key`_beats, exactly one of them.
@@ -913,7 +1074,23 @@ private:
             if (! s.containsOnly ("0123456789"))
             {
                 for (int slot = 0; slot < (int) chain.size(); ++slot)
-                    if (chain[(size_t) slot]->plugin.startsWithIgnoreCase (s)) return slot;
+                    if (chain[(size_t) slot]->plugin.equalsIgnoreCase (s)) return slot;
+                int prefixMatch = -1;
+                int prefixCount = 0;
+                for (int slot = 0; slot < (int) chain.size(); ++slot)
+                {
+                    if (chain[(size_t) slot]->plugin.startsWithIgnoreCase (s))
+                    {
+                        if (prefixMatch < 0) prefixMatch = slot;
+                        ++prefixCount;
+                    }
+                }
+                if (prefixCount == 1) return prefixMatch;
+                if (prefixCount > 1)
+                {
+                    error = "Plugin name '" + which.toString() + "' is ambiguous on that track (matches " + juce::String (prefixCount) + " slots); use a slot number.";
+                    return -1;
+                }
                 error = "No plugin '" + which.toString() + "' on that track";
                 return -1;
             }
@@ -994,19 +1171,24 @@ private:
             if (const auto idx = parseNonNegativeInt (which))
                 found = juce::isPositiveAndBelow (*idx, instance.getParameters().size()) ? instance.getParameters()[*idx] : nullptr;
         if (found == nullptr) { error = "No setting '" + which + "' (see list_parameters)."; return {}; }
-        float value;
+        float value = 0.0f;
         if (a.hasProperty ("value"))
         {
-            const auto& vv = a["value"];
-            if (! (vv.isInt() || vv.isInt64() || vv.isDouble()) || ! std::isfinite ((double) vv))
-            { error = "'value' must be a number (0..1)."; return {}; }
-            value = (float) (double) vv;
+            double d = 0.0;
+            if (! finiteNumber (a["value"], d) || d < 0.0 || d > 1.0)
+            { error = "'value' must be a number in 0..1."; return {}; }
+            value = (float) d;
         }
         else if (a["text"].isString() && a["text"].toString().isNotEmpty())
+        {
             value = found->getValueForText (a["text"].toString());
+            if (! std::isfinite (value))
+            { error = "Could not parse parameter text '" + a["text"].toString() + "'."; return {}; }
+            value = juce::jlimit (0.0f, 1.0f, value);
+        }
         else { error = "Give 'value' (0..1) or 'text'."; return {}; }
         found->beginChangeGesture();
-        found->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, value));
+        found->setValueNotifyingHost (value);
         found->endChangeGesture();
         session.dirty = true;
         return object ({ { "id", idOf (*found) }, { "name", found->getName (64) }, { "value", (double) found->getValue() }, { "text", found->getCurrentValueAsText() } });
