@@ -419,54 +419,116 @@ bool ArrangeView::isInteracting() const
 
 std::shared_ptr<const ArrangeSnapshot> ArrangeView::snapshotPtr (bool takePeaks) const
 {
-    // The message thread never waits for the lock: a render holds it for its whole run. While it is busy the last model is returned (the
-    // tracks do not change under a render: the window is modal over it).
-    // The audio thread holds it for a moment each block, so a miss is retried; only a render (renderRunning) makes this give up.
-    const juce::ScopedTryLock sl (session.lock);
-    while (! sl.isLocked())
+    // Fast path when the session's revision has not changed since lastSnapshot was built:
+    // - without peaks (paint, hit testing), return lastSnapshot immediately without acquiring session.lock;
+    // - with peaks (30 Hz refresh), try-lock briefly to exchange the track peaks into peakScratch, release before cloning, and avoid
+    //   allocating when all peaks are 0.0f (lastSnapshot always keeps 0.0f peaks). Never sleep/spin if the lock is busy.
+    if (lastSnapshot != nullptr && session.revision.load (std::memory_order_acquire) == lastSnapshotRevision)
     {
-        if (session.renderRunning())
+        if (! takePeaks)
+            return lastSnapshot;
+
+        bool lockedAndMatched = false;
+        bool anyPeak = false;
         {
-            if (lastSnapshot == nullptr)
-                return std::make_shared<const ArrangeSnapshot>();
-            auto copy = std::make_shared<ArrangeSnapshot> (*lastSnapshot);
-            for (auto& t : copy->tracks)
-                t.peakL = t.peakR = 0.0f;
-            return copy;
+            const juce::ScopedTryLock sl (session.lock);
+            if (sl.isLocked() && session.tracks.size() == lastSnapshot->tracks.size())
+            {
+                lockedAndMatched = true;
+                const size_t n = session.tracks.size();
+                peakScratch.resize (n);
+                for (size_t i = 0; i < n; ++i)
+                {
+                    const float pL = session.tracks[i]->peakL.exchange (0.0f);
+                    const float pR = session.tracks[i]->peakR.exchange (0.0f);
+                    peakScratch[i] = { pL, pR };
+                    if (pL != 0.0f || pR != 0.0f)
+                        anyPeak = true;
+                }
+            }
         }
-        juce::Thread::sleep (1);
-        sl.retryLock();
+        if (! lockedAndMatched || ! anyPeak)
+            return lastSnapshot;
+
+        auto copy = std::make_shared<ArrangeSnapshot> (*lastSnapshot);
+        for (size_t i = 0; i < copy->tracks.size(); ++i)
+        {
+            copy->tracks[i].peakL = peakScratch[i].first;
+            copy->tracks[i].peakR = peakScratch[i].second;
+        }
+        return copy;
     }
-    auto s = std::make_shared<ArrangeSnapshot>();
-    s->rate = session.sampleRate > 0.0 ? session.sampleRate : kFallbackRate;
-    s->tempo = session.tempo;
-    s->grid = session.grid;
-    s->markers = session.markers;
-    s->loopOn = session.loopOn;
-    s->loopStart = session.loopStart;
-    s->loopEnd = session.loopEnd;
-    for (auto& t : session.tracks)
+
+    // Rebuild path (first snapshot or revision changed). Try-lock first; never sleep/spin if another thread holds the lock when a
+    // cached snapshot exists or a render is running. Only wait once if lastSnapshot is null and no render is running.
+    auto buildSnapshot = [this, takePeaks]() -> std::shared_ptr<const ArrangeSnapshot>
     {
-        ArrangeSnapshot::TrackView v;
-        v.name = t->name;
-        v.gainDb = t->gainDb;
-        v.pan = t->pan;
-        v.mute = t->mute;
-        v.solo = t->solo;
-        v.armed = t->armed;
-        v.inputLeft = t->inputLeft;
-        v.inputRight = t->inputRight;
-        v.clips = t->clips;
+        const auto rev = session.revision.load (std::memory_order_acquire);
+        auto s = std::make_shared<ArrangeSnapshot>();
+        s->rate = session.sampleRate > 0.0 ? session.sampleRate : kFallbackRate;
+        s->tempo = session.tempo;
+        s->grid = session.grid;
+        s->markers = session.markers;
+        s->loopOn = session.loopOn;
+        s->loopStart = session.loopStart;
+        s->loopEnd = session.loopEnd;
+        const size_t n = session.tracks.size();
         if (takePeaks)
+            peakScratch.resize (n);
+        bool anyPeak = false;
+        for (size_t i = 0; i < n; ++i)
         {
-            v.peakL = t->peakL.exchange (0.0f);
-            v.peakR = t->peakR.exchange (0.0f);
+            const auto& t = session.tracks[i];
+            ArrangeSnapshot::TrackView v;
+            v.name = t->name;
+            v.gainDb = t->gainDb;
+            v.pan = t->pan;
+            v.mute = t->mute;
+            v.solo = t->solo;
+            v.armed = t->armed;
+            v.inputLeft = t->inputLeft;
+            v.inputRight = t->inputRight;
+            v.clips = t->clips;
+            if (takePeaks)
+            {
+                const float pL = t->peakL.exchange (0.0f);
+                const float pR = t->peakR.exchange (0.0f);
+                peakScratch[i] = { pL, pR };
+                if (pL != 0.0f || pR != 0.0f)
+                    anyPeak = true;
+            }
+            s->length = juce::jmax (s->length, t->length());
+            s->tracks.push_back (std::move (v));
         }
-        s->length = juce::jmax (s->length, t->length());
-        s->tracks.push_back (std::move (v));
+        lastSnapshot = s;
+        lastSnapshotRevision = rev;
+        if (! takePeaks || ! anyPeak)
+            return s;
+
+        auto copy = std::make_shared<ArrangeSnapshot> (*s);
+        for (size_t i = 0; i < copy->tracks.size(); ++i)
+        {
+            copy->tracks[i].peakL = peakScratch[i].first;
+            copy->tracks[i].peakR = peakScratch[i].second;
+        }
+        return copy;
+    };
+
+    {
+        const juce::ScopedTryLock sl (session.lock);
+        if (sl.isLocked())
+            return buildSnapshot();
     }
-    lastSnapshot = s;
-    return s;
+    if (lastSnapshot != nullptr || session.renderRunning())
+        return lastSnapshot != nullptr ? lastSnapshot : std::make_shared<const ArrangeSnapshot>();
+
+    const juce::ScopedLock waitSl (session.lock);
+    return buildSnapshot();
+}
+
+const ArrangeSnapshot* ArrangeView::snapshotPtrForTest (bool takePeaks) const
+{
+    return snapshotPtr (takePeaks).get();
 }
 
 ArrangeSnapshot ArrangeView::snapshot (bool takePeaks) const

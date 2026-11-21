@@ -177,6 +177,8 @@ public:
     // it: it tries the lock or skips, and reads the plugins only when this is false.
     std::atomic<bool> renderBusy { false };
     bool renderRunning() const { return renderBusy.load(); }
+    std::atomic<juce::uint64> revision { 1 };
+    void bumpRevision() { revision.fetch_add (1, std::memory_order_release); }
     std::vector<std::unique_ptr<Track>> tracks;
     double sampleRate = 0.0; // 0 until the first clip is added
     juce::File projectFile;
@@ -285,6 +287,7 @@ public:
         auto& clips = tracks[(size_t) track]->clips;
         clips.push_back (std::move (clip));
         dirty = true;
+        bumpRevision();
         return (int) clips.size() - 1;
     }
 
@@ -401,7 +404,7 @@ public:
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
         auto& t = *tracks[(size_t) track];
-        if (t.armed != on) { t.armed = on; dirty = true; }
+        if (t.armed != on) { t.armed = on; dirty = true; bumpRevision(); }
         return true;
     }
 
@@ -413,7 +416,7 @@ public:
         if (left < 0) { error = "The left input must be 0 or more."; return false; }
         if (right < -1) { error = "The right input must be 0 or more, or -1 for a mono input."; return false; }
         auto& t = *tracks[(size_t) track];
-        if (t.inputLeft != left || t.inputRight != right) { t.inputLeft = left; t.inputRight = right; dirty = true; }
+        if (t.inputLeft != left || t.inputRight != right) { t.inputLeft = left; t.inputRight = right; dirty = true; bumpRevision(); }
         return true;
     }
 
@@ -426,6 +429,7 @@ public:
         const int index = (int) (at - markers.begin());
         markers.insert (at, std::move (m));
         dirty = true;
+        bumpRevision();
         return index;
     }
 
@@ -435,6 +439,7 @@ public:
         if (! juce::isPositiveAndBelow (index, (int) markers.size())) { error = "No marker " + juce::String (index); return false; }
         markers.erase (markers.begin() + index);
         dirty = true;
+        bumpRevision();
         return true;
     }
 
@@ -448,6 +453,7 @@ public:
         auto at = std::upper_bound (markers.begin(), markers.end(), m.start, [] (juce::int64 s, const Marker& o) { return s < o.start; });
         markers.insert (at, std::move (m));
         dirty = true;
+        bumpRevision();
         return true;
     }
 
@@ -503,6 +509,7 @@ public:
         chain.erase (chain.begin() + from);
         chain.insert (chain.begin() + to, std::move (moved));
         dirty = true;
+        bumpRevision();
         return true;
     }
 
@@ -643,6 +650,7 @@ public:
         const juce::ScopedLock sl (lock);
         position = position < 0 || position > (int) monitor.size() ? (int) monitor.size() : position;
         monitor.insert (monitor.begin() + position, std::move (slot));
+        bumpRevision();
         return true;
     }
 
@@ -652,6 +660,7 @@ public:
         if (! juce::isPositiveAndBelow (index, (int) monitor.size())) { error = "No monitor plugin " + juce::String (index); return false; }
         if (monitor[(size_t) index]->instance != nullptr) monitor[(size_t) index]->instance->setPlayHead (nullptr);
         monitor.erase (monitor.begin() + index);
+        bumpRevision();
         return true;
     }
 
@@ -671,6 +680,7 @@ public:
         auto slot = std::move (monitor[(size_t) from]);
         monitor.erase (monitor.begin() + from);
         monitor.insert (monitor.begin() + to, std::move (slot));
+        bumpRevision();
         return true;
     }
 
@@ -680,6 +690,7 @@ public:
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (index, (int) monitor.size())) { error = "No monitor plugin " + juce::String (index); return false; }
         monitor[(size_t) index]->bypass = bypass;
+        bumpRevision();
         return true;
     }
 
@@ -687,6 +698,7 @@ public:
     void setMonitorBypass (bool bypass)
     {
         monitorBypass = bypass;
+        bumpRevision();
     }
 
     // The latency the monitor path adds (a bypassed plugin or chain adds none). The takes are not moved by it: see Record.h.
@@ -774,6 +786,7 @@ public:
             for (auto& s : monitor)
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
             monitor.clear();
+            bumpRevision();
             return true;
         }
         const auto xml = juce::parseXML (file);
@@ -803,6 +816,7 @@ public:
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         monitor = std::move (fresh);
         monitorBypass = xml->getBoolAttribute ("bypass");
+        bumpRevision();
         return true;
     }
 
@@ -1347,6 +1361,7 @@ public:
         name = nextName;
         projectFile = file;
         dirty = false;
+        bumpRevision();
         return true;
     }
 
@@ -1519,6 +1534,7 @@ public:
             clearDelayRingsLocked();
         }
         dirty = false;
+        bumpRevision();
         return true;
     }
 
@@ -1583,6 +1599,7 @@ public:
         loopOn = e.loopOn;
         metronomeOn = e.metronomeOn;
         dirty = true;
+        bumpRevision();
     }
 
     // An empty session under a name: no tracks, no audio pool, the timeline at its defaults. Plugins stop listening to the playhead.
@@ -1607,6 +1624,7 @@ public:
         name = projectName.isNotEmpty() ? projectName : "Untitled";
         dirty = false;
         warnings.clear();
+        bumpRevision();
     }
 
     // What the session holds, as the MCP server and the tests read it.
@@ -2019,6 +2037,8 @@ private:
                     configure (*s->instance, r, false);
                     s->instance->reset();
                 }
+        if (changed)
+            bumpRevision();
     }
 
     // Stereo main buses, every other bus (a sidechain, an extra output) disabled, then the rate and the block, then the verdict. Returns false
@@ -2107,6 +2127,7 @@ private:
                 t->delayPos = 0;
             }
         }
+        bumpRevision();
     }
 
     // The fader and the balance of a track as the two channel gains.

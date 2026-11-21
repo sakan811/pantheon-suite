@@ -3258,6 +3258,103 @@ int main()
         juce::MessageManager::getInstance()->runDispatchLoopUntil (200);   // the start lands (no take to end)
     }
 
+    // [47] Playback lock-contention avoidance: ArrangeSnapshot caches by Session::revision, paint/refresh/notes/updateMasterFader do not
+    // block when Session::lock is held, and the timer defers autosave and skips trackPluginStateHash while playing.
+    {
+        const auto dir47 = tempFolder().getChildFile ("playback-lock-free");
+        dir47.deleteRecursively();
+        dir47.createDirectory();
+        auto w = makeWindow (true, dir47.getChildFile ("settings.xml"));
+        w->addTracks ({ makeWav ("rev.wav", 48000).getFullPathName() });
+        w->arrange.refresh();
+        const auto* snap1 = w->arrange.snapshotPtrForTest (false);
+        const auto* snap2 = w->arrange.snapshotPtrForTest (false);
+        test::check (snap1 != nullptr && snap1 == snap2, "ArrangeSnapshot reuses the cached pointer when session.revision is unchanged");
+
+        juce::String error;
+        test::check (w->editor.setTrackMute (0, true, error), "mutating the track bumps session.revision");
+        const auto* snap3 = w->arrange.snapshotPtrForTest (false);
+        test::check (snap3 != nullptr && snap3 != snap1, "ArrangeSnapshot rebuilds once session.revision changes");
+
+        // Warm caches for notes(), monitorLatencyMs(), and updateMasterFader()
+        test::check (! w->notes().empty(), "notes() populates its cache");
+        w->monitorLatencyMs();
+        w->updateMaster (0.0);
+
+        // Start playback and hold session.lock from a background thread (without renderBusy) to simulate audio-thread contention
+        w->togglePlay();
+        test::check (w->isPlaying(), "transport is playing");
+        {
+            std::atomic<bool> held { false }, release { false }, done { false };
+            std::thread holder ([&]
+            {
+                const juce::ScopedLock sl (w->session.lock);
+                held = true;
+                while (! release)
+                    std::this_thread::sleep_for (std::chrono::milliseconds (2));
+            });
+            std::thread watchdog ([&]
+            {
+                const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds (3);
+                while (! done && std::chrono::steady_clock::now() < limit)
+                    std::this_thread::sleep_for (std::chrono::milliseconds (5));
+                release = true;
+            });
+            while (! held)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            const auto* cachedSnap = w->arrange.snapshotPtrForTest (false);
+            const auto img = w->arrange.createComponentSnapshot (w->arrange.getLocalBounds());
+            w->arrange.refresh();
+            const auto n = w->notes();
+            w->updateMaster (0.0);
+            const double took = juce::Time::getMillisecondCounterHiRes() - t0;
+            done = true;
+            release = true;
+            holder.join();
+            watchdog.join();
+
+            test::check (took < 1000.0, test::fmt ("paint, refresh, notes, and updateMasterFader return without blocking while session.lock is held: %d ms", (int) took));
+            test::check (cachedSnap == snap3, "snapshotPtr(false) returns the cached snapshot without locking");
+            test::check (img.isValid() && ! n.empty(), "arrange paint and cached notes succeed while session.lock is held");
+        }
+        w->togglePlay();
+
+        // Timer skips autosaveNow() and trackPluginStateHash() while playing, then runs them once stopped
+        test::check (w->session.addPlugin (0, "Test Gain", -1, error), "add Test Gain to track 0");
+        w->openEditor (0, 0);
+        test::check (w->openEditors() == 1, "track plugin editor is open");
+        w->session.dirty = false;
+        w->autosaveFile().deleteFile();
+
+        w->togglePlay();
+        test::check (w->isPlaying(), "playback restarted for timer check");
+        w->session.tracks[0]->chain[0]->instance->getParameters()[0]->setValueNotifyingHost (0.75f);
+        for (int i = 0; i < 20; ++i)
+            w->runTimerForChecks();
+        test::check (! w->session.dirty, "trackPluginStateHash() is skipped while playing");
+
+        w->togglePlay();
+        test::check (! w->isPlaying(), "playback stopped");
+        for (int i = 0; i < 16; ++i)
+            w->runTimerForChecks();
+        test::check (w->session.dirty, "trackPluginStateHash() detects the plugin edit once stopped");
+
+        // Deferring autosaveNow() while playing, then running it once stopped
+        w->autosaveFile().deleteFile();
+        w->togglePlay();
+        test::check (w->isPlaying(), "playback restarted for autosave check");
+        w->expireAutosaveForChecks();
+        w->runTimerForChecks();
+        test::check (! w->autosaveFile().existsAsFile(), "autosaveNow() is deferred while playing");
+
+        w->togglePlay();
+        test::check (! w->isPlaying(), "playback stopped for deferred autosave");
+        w->runTimerForChecks();
+        test::check (w->autosaveFile().existsAsFile(), "deferred autosave runs once stopped");
+    }
+
     tempFolder().deleteRecursively();
     return test::finish ("OlympusUiCheck");
 }

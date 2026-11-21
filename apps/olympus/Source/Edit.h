@@ -500,6 +500,7 @@ public:
         if (on == session.snapOn) return;
         session.snapOn = on;
         session.dirty = true;
+        session.bumpRevision();
     }
 
     void setGrid (Grid g)
@@ -508,6 +509,7 @@ public:
         if (g == session.grid) return;
         session.grid = g;
         session.dirty = true;
+        session.bumpRevision();
     }
 
     // The sample a position snaps to: the nearest grid line of the session's grid when snap is on (halfway goes up), else the sample
@@ -641,6 +643,7 @@ private:
     void record (std::optional<EditState>& before, const juce::String& label)
     {
         session.dirty = true;
+        session.bumpRevision();
         if (gestureDepth > 0)
         {
             if (! gestureInvalid)

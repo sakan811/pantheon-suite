@@ -108,6 +108,7 @@ public:
     void openMarkerActionForTest (int index, int action) { markerAction (index, action); }
     double scrollSamplesForTest() const { return scrollSamples; }
     int markerAtForTest (juce::Point<int> p) const;
+    const ArrangeSnapshot* snapshotPtrForTest (bool takePeaks = false) const;
     void finishOpenDialogForTest (bool accept, const juce::String& text = {});
 
     // ---- geometry (view coordinates, for the checks and the window) -------------------------------------------------------------
@@ -164,8 +165,11 @@ private:
     double lastRefreshRecFrom = -1.0, lastRefreshRecTo = -1.0;
     std::vector<int> lastRefreshRecTracks;
 
-    // The model of the last snapshot taken with the lock. While a render holds the session's lock, snapshot returns this instead of waiting.
+    // The model of the last snapshot taken with the lock (always with zeroed peaks). When revision is unchanged or a render holds the lock,
+    // snapshotPtr returns this without waiting or rebuilding.
     mutable std::shared_ptr<const ArrangeSnapshot> lastSnapshot;
+    mutable juce::uint64 lastSnapshotRevision = 0;
+    mutable std::vector<std::pair<float, float>> peakScratch;
     std::shared_ptr<const ArrangeSnapshot> snapshotPtr (bool takePeaks = false) const;
     ArrangeSnapshot snapshot (bool takePeaks = false) const;
     double pxPerSample (double rate) const;
