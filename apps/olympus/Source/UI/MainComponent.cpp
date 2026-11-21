@@ -87,9 +87,13 @@ PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEdito
         setConstrainer (editor->getConstrainer());
     setResizable (editor != nullptr && editor->isResizable(), false);
     setAlwaysOnTop (false);
-    centreAroundComponent (nullptr, getWidth(), getHeight());
+    // Only a window put on the desktop is placed and shown. Centring asks the displays for the primary one, which a bare X server
+    // (CI) does not have: getPrimaryDisplay() is null there and the checks, which build windows with addToDesktop = false, crashed.
     if (addToDesktop)
+    {
+        centreAroundComponent (nullptr, getWidth(), getHeight());
         setVisible (true);
+    }
 }
 
 // ---- audio -------------------------------------------------------------------------------------------------------------------
