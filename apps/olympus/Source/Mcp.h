@@ -9,6 +9,7 @@
 #include "Session.h"
 #include "Tempo.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -401,7 +402,7 @@ private:
                     err = "Invalid audio format in: " + f.getFullPathName();
                     return false;
                 }
-                const int n = (int) juce::jmin<juce::int64> (reader->lengthInSamples, (juce::int64) std::numeric_limits<int>::max());
+                const int n = (int) std::min<juce::int64> (reader->lengthInSamples, (juce::int64) std::numeric_limits<int>::max());
                 buf.setSize ((int) reader->numChannels, n);
                 if (n > 0 && ! reader->read (&buf, 0, n, 0, true, true))
                 {
