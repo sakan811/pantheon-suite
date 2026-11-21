@@ -319,6 +319,224 @@ inline juce::String formatDb (double db, bool withSign = true)
         return "+" + juce::String (rounded, 1);
     return juce::String (rounded, 1);
 }
+
+struct LoudnessAndPeaks
+{
+    double integratedLufs = -120.0;
+    double shortTermMaxLufs = -120.0;
+    double shortTermMinLufs = -120.0;
+    double lraLu = 0.0;
+    double truePeakDb = -120.0;
+    double samplePeakDb = -120.0;
+    int64_t clippedSamples = 0;
+    double dcOffsetDb = -120.0;
+    double rmsDb = -120.0;
+    double crestFactorDb = 0.0;
+    double plrDb = 0.0;
+    double headroomDb = 120.0;
+};
+
+inline LoudnessAndPeaks computeLoudnessAndPeaks (const juce::AudioBuffer<float>& audio,
+                                                 double sampleRate,
+                                                 bool computeShortTermAndLra)
+{
+    LoudnessAndPeaks out;
+    const int numChannels = audio.getNumChannels();
+    const int numSamples = audio.getNumSamples();
+    if (! std::isfinite (sampleRate) || sampleRate <= 0.0 || numChannels <= 0 || numSamples <= 0)
+        return out;
+
+    // 1. Peaks, True Peak, Clipping, DC Offset, RMS & K-weighted squared sum
+    const int kWeightCh = std::min (numChannels, 2);
+    std::array<KWeightingFilter, 2> kFilters;
+    for (int c = 0; c < kWeightCh; ++c)
+        kFilters[static_cast<size_t> (c)].prepare (sampleRate);
+
+    std::vector<const float*> chPtrs (static_cast<size_t> (numChannels), nullptr);
+    for (int c = 0; c < numChannels; ++c)
+        chPtrs[static_cast<size_t> (c)] = audio.getReadPointer (c);
+
+    std::vector<pdsp::TruePeakReader> tpReaders (static_cast<size_t> (numChannels));
+    std::vector<double> dcSums (static_cast<size_t> (numChannels), 0.0);
+    const int stepSamples = std::max (1, static_cast<int> (std::llround (0.1 * sampleRate)));
+    const int numSteps = numSamples / stepSamples;
+    std::vector<double> kStepPrefix (static_cast<size_t> (numSteps + 1), 0.0);
+
+    double maxSamplePeak = 0.0;
+    double maxTruePeak = 0.0;
+    double totalSumSq = 0.0;
+    double totalKWeightedPower = 0.0;
+    double stepKPower = 0.0;
+    int stepPos = 0;
+    size_t stepIdx = 0;
+    int64_t clipped = 0;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        double kSamplePower = 0.0;
+        for (int c = 0; c < numChannels; ++c)
+        {
+            const double x = sanitize (chPtrs[static_cast<size_t> (c)][i]);
+            const double ax = std::abs (x);
+            maxSamplePeak = std::max (maxSamplePeak, ax);
+            if (ax >= 1.0)
+                ++clipped;
+
+            const double tp = tpReaders[static_cast<size_t> (c)].push (x, true);
+            maxTruePeak = std::max (maxTruePeak, std::max (tp, ax));
+
+            dcSums[static_cast<size_t> (c)] += x;
+            totalSumSq += x * x;
+
+            if (c < kWeightCh)
+            {
+                const double kx = kFilters[static_cast<size_t> (c)].process (x);
+                kSamplePower += kx * kx;
+            }
+        }
+        totalKWeightedPower += kSamplePower;
+        stepKPower += kSamplePower;
+        if (++stepPos == stepSamples)
+        {
+            kStepPrefix[stepIdx + 1] = kStepPrefix[stepIdx] + stepKPower;
+            ++stepIdx;
+            stepKPower = 0.0;
+            stepPos = 0;
+        }
+    }
+
+    // Flush true-peak interpolator delay tail
+    for (int c = 0; c < numChannels; ++c)
+        for (int j = 0; j < pdsp::kTruePeakDelay; ++j)
+            maxTruePeak = std::max (maxTruePeak, tpReaders[static_cast<size_t> (c)].push (0.0, true));
+
+    double maxDc = 0.0;
+    for (int c = 0; c < numChannels; ++c)
+        maxDc = std::max (maxDc, std::abs (dcSums[static_cast<size_t> (c)] / static_cast<double> (numSamples)));
+
+    const double rmsLin = std::sqrt (totalSumSq / (static_cast<double> (numSamples) * static_cast<double> (numChannels)));
+    out.samplePeakDb = maxSamplePeak > 1e-12 ? 20.0 * std::log10 (maxSamplePeak) : -120.0;
+    out.truePeakDb = maxTruePeak > 1e-12 ? 20.0 * std::log10 (maxTruePeak) : -120.0;
+    out.clippedSamples = clipped;
+    out.dcOffsetDb = maxDc > 1e-12 ? 20.0 * std::log10 (maxDc) : -120.0;
+    out.rmsDb = rmsLin > 1e-12 ? 20.0 * std::log10 (rmsLin) : -120.0;
+    out.crestFactorDb = (maxSamplePeak > 1e-12 && rmsLin > 1e-12) ? (out.samplePeakDb - out.rmsDb) : 0.0;
+    out.headroomDb = -out.truePeakDb;
+
+    // 2. ITU-R BS.1770-4 Integrated Loudness, Short-Term Max/Min, LRA
+    const int blockSamples = std::max (1, static_cast<int> (std::llround (0.4 * sampleRate)));
+    const int blockSteps = std::max (1, static_cast<int> (std::llround (static_cast<double> (blockSamples) / static_cast<double> (stepSamples))));
+    const int actualBlockSamples = blockSteps * stepSamples;
+
+    std::vector<double> blockPowers;
+    if (numSamples < blockSamples || numSteps < blockSteps)
+    {
+        const double z = totalKWeightedPower / static_cast<double> (numSamples);
+        if (z > 0.0)
+            blockPowers.push_back (z);
+    }
+    else
+    {
+        blockPowers.reserve (static_cast<size_t> (numSteps - blockSteps + 1));
+        for (int b = 0; b + blockSteps <= numSteps; ++b)
+        {
+            const double sum = kStepPrefix[static_cast<size_t> (b + blockSteps)] - kStepPrefix[static_cast<size_t> (b)];
+            blockPowers.push_back (sum / static_cast<double> (actualBlockSamples));
+        }
+    }
+
+    double gate1Sum = 0.0;
+    int gate1Count = 0;
+    for (double z : blockPowers)
+    {
+        if (z > 1e-12)
+        {
+            const double l = -0.691 + 10.0 * std::log10 (z);
+            if (l > -70.0)
+            {
+                gate1Sum += z;
+                ++gate1Count;
+            }
+        }
+    }
+
+    if (gate1Count > 0)
+    {
+        const double gammaR = -0.691 + 10.0 * std::log10 (gate1Sum / static_cast<double> (gate1Count)) - 10.0;
+        double gate2Sum = 0.0;
+        int gate2Count = 0;
+        for (double z : blockPowers)
+        {
+            if (z > 1e-12)
+            {
+                const double l = -0.691 + 10.0 * std::log10 (z);
+                if (l > -70.0 && l >= gammaR)
+                {
+                    gate2Sum += z;
+                    ++gate2Count;
+                }
+            }
+        }
+        if (gate2Count > 0)
+            out.integratedLufs = -0.691 + 10.0 * std::log10 (gate2Sum / static_cast<double> (gate2Count));
+    }
+
+    out.plrDb = (out.integratedLufs > -70.0 && out.truePeakDb > -120.0) ? (out.truePeakDb - out.integratedLufs) : 0.0;
+
+    if (computeShortTermAndLra)
+    {
+        const int stSamples = std::max (1, static_cast<int> (std::llround (3.0 * sampleRate)));
+        const int stSteps = std::max (1, static_cast<int> (std::llround (static_cast<double> (stSamples) / static_cast<double> (stepSamples))));
+        const int actualStSamples = stSteps * stepSamples;
+
+        std::vector<double> stLufs;
+        if (numSamples < stSamples || numSteps < stSteps)
+        {
+            const double z = totalKWeightedPower / static_cast<double> (numSamples);
+            if (z > 1e-12)
+            {
+                const double l = -0.691 + 10.0 * std::log10 (z);
+                if (l > -70.0)
+                    stLufs.push_back (l);
+            }
+        }
+        else
+        {
+            for (int b = 0; b + stSteps <= numSteps; ++b)
+            {
+                const double sum = kStepPrefix[static_cast<size_t> (b + stSteps)] - kStepPrefix[static_cast<size_t> (b)];
+                const double z = sum / static_cast<double> (actualStSamples);
+                if (z > 1e-12)
+                {
+                    const double l = -0.691 + 10.0 * std::log10 (z);
+                    if (l > -70.0)
+                        stLufs.push_back (l);
+                }
+            }
+        }
+
+        if (! stLufs.empty())
+        {
+            out.shortTermMaxLufs = *std::max_element (stLufs.begin(), stLufs.end());
+            out.shortTermMinLufs = *std::min_element (stLufs.begin(), stLufs.end());
+
+            std::vector<double> lraBlocks;
+            const double lraThresh = out.integratedLufs - 20.0;
+            for (double l : stLufs)
+            {
+                if (l >= lraThresh)
+                    lraBlocks.push_back (l);
+            }
+            if (lraBlocks.size() >= 2)
+            {
+                std::sort (lraBlocks.begin(), lraBlocks.end());
+                out.lraLu = percentileSorted (lraBlocks, 0.95) - percentileSorted (lraBlocks, 0.10);
+            }
+        }
+    }
+
+    return out;
+}
 } // namespace detail
 
 inline TargetProfile getTargetProfile (const juce::String& targetName)
@@ -401,12 +619,14 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
                                      const juce::String& targetName = "modern_pop",
                                      double targetLufs = -14.0)
 {
+    if (! std::isfinite (targetLufs))
+        targetLufs = -14.0;
     AnalysisResult res;
     const int numChannels = audio.getNumChannels();
     const int numSamples = audio.getNumSamples();
     const TargetProfile profile = getTargetProfile (targetName);
 
-    res.sampleRate = sampleRate;
+    res.sampleRate = std::isfinite (sampleRate) ? sampleRate : 0.0;
     res.numChannels = numChannels;
     res.numSamples = numSamples;
     res.targetName = profile.name;
@@ -421,195 +641,34 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
         res.bands[static_cast<size_t> (b)].hiHz = pdsp::bands::kBands[static_cast<size_t> (b)].hiHz;
     }
 
-    if (sampleRate <= 0.0 || numChannels <= 0 || numSamples <= 0)
+    if (! std::isfinite (sampleRate) || sampleRate < 25.0 || numChannels <= 0 || numSamples <= 0)
         return res;
 
     res.valid = true;
     res.durationSeconds = static_cast<double> (numSamples) / sampleRate;
 
     // -------------------------------------------------------------------------
-    // 1. Peaks, True Peak, Clipping, DC Offset, RMS & K-weighted squared sum
+    // 1 & 2. Peaks, True Peak, Clipping, DC Offset, RMS & ITU-R BS.1770-4 Loudness
     // -------------------------------------------------------------------------
-    const int kWeightCh = std::min (numChannels, 2);
-    std::array<detail::KWeightingFilter, 2> kFilters;
-    for (int c = 0; c < kWeightCh; ++c)
-        kFilters[static_cast<size_t> (c)].prepare (sampleRate);
-
-    std::vector<pdsp::TruePeakReader> tpReaders (static_cast<size_t> (numChannels));
-    std::vector<double> dcSums (static_cast<size_t> (numChannels), 0.0);
-    const int stepSamples = std::max (1, static_cast<int> (std::llround (0.1 * sampleRate)));
-    const int numSteps = numSamples / stepSamples;
-    std::vector<double> kStepPrefix (static_cast<size_t> (numSteps + 1), 0.0);
-
-    double maxSamplePeak = 0.0;
-    double maxTruePeak = 0.0;
-    double totalSumSq = 0.0;
-    double totalKWeightedPower = 0.0;
-    double stepKPower = 0.0;
-    int stepPos = 0;
-    size_t stepIdx = 0;
-    int64_t clipped = 0;
-
-    for (int i = 0; i < numSamples; ++i)
     {
-        double kSamplePower = 0.0;
-        for (int c = 0; c < numChannels; ++c)
-        {
-            const double x = detail::sanitize (audio.getSample (c, i));
-            const double ax = std::abs (x);
-            maxSamplePeak = std::max (maxSamplePeak, ax);
-            if (ax >= 1.0)
-                ++clipped;
-
-            const double tp = tpReaders[static_cast<size_t> (c)].push (x, true);
-            maxTruePeak = std::max (maxTruePeak, std::max (tp, ax));
-
-            dcSums[static_cast<size_t> (c)] += x;
-            totalSumSq += x * x;
-
-            if (c < kWeightCh)
-            {
-                const double kx = kFilters[static_cast<size_t> (c)].process (x);
-                kSamplePower += kx * kx;
-            }
-        }
-        totalKWeightedPower += kSamplePower;
-        stepKPower += kSamplePower;
-        if (++stepPos == stepSamples)
-        {
-            kStepPrefix[stepIdx + 1] = kStepPrefix[stepIdx] + stepKPower;
-            ++stepIdx;
-            stepKPower = 0.0;
-            stepPos = 0;
-        }
+        const auto lp = detail::computeLoudnessAndPeaks (audio, sampleRate, true);
+        res.integratedLufs = lp.integratedLufs;
+        res.shortTermMaxLufs = lp.shortTermMaxLufs;
+        res.shortTermMinLufs = lp.shortTermMinLufs;
+        res.lraLu = lp.lraLu;
+        res.truePeakDb = lp.truePeakDb;
+        res.samplePeakDb = lp.samplePeakDb;
+        res.clippedSamples = lp.clippedSamples;
+        res.dcOffsetDb = lp.dcOffsetDb;
+        res.rmsDb = lp.rmsDb;
+        res.crestFactorDb = lp.crestFactorDb;
+        res.plrDb = lp.plrDb;
+        res.headroomDb = lp.headroomDb;
     }
 
-    // Flush true-peak interpolator delay tail
-    for (int c = 0; c < numChannels; ++c)
-        for (int j = 0; j < pdsp::kTruePeakDelay; ++j)
-            maxTruePeak = std::max (maxTruePeak, tpReaders[static_cast<size_t> (c)].push (0.0, true));
-
-    double maxDc = 0.0;
-    for (int c = 0; c < numChannels; ++c)
-        maxDc = std::max (maxDc, std::abs (dcSums[static_cast<size_t> (c)] / static_cast<double> (numSamples)));
-
-    const double rmsLin = std::sqrt (totalSumSq / (static_cast<double> (numSamples) * static_cast<double> (numChannels)));
-    res.samplePeakDb = maxSamplePeak > 1e-12 ? 20.0 * std::log10 (maxSamplePeak) : -120.0;
-    res.truePeakDb = maxTruePeak > 1e-12 ? 20.0 * std::log10 (maxTruePeak) : -120.0;
-    res.clippedSamples = clipped;
-    res.dcOffsetDb = maxDc > 1e-12 ? 20.0 * std::log10 (maxDc) : -120.0;
-    res.rmsDb = rmsLin > 1e-12 ? 20.0 * std::log10 (rmsLin) : -120.0;
-    res.crestFactorDb = (maxSamplePeak > 1e-12 && rmsLin > 1e-12) ? (res.samplePeakDb - res.rmsDb) : 0.0;
-    res.headroomDb = -res.truePeakDb;
-
-    // -------------------------------------------------------------------------
-    // 2. ITU-R BS.1770-4 Integrated Loudness, Short-Term Max/Min, LRA
-    // -------------------------------------------------------------------------
-    const int blockSamples = std::max (1, static_cast<int> (std::llround (0.4 * sampleRate)));
-    const int stSamples = std::max (1, static_cast<int> (std::llround (3.0 * sampleRate)));
-    const int blockSteps = std::max (1, static_cast<int> (std::llround (static_cast<double> (blockSamples) / static_cast<double> (stepSamples))));
-    const int stSteps = std::max (1, static_cast<int> (std::llround (static_cast<double> (stSamples) / static_cast<double> (stepSamples))));
-    const int actualBlockSamples = blockSteps * stepSamples;
-    const int actualStSamples = stSteps * stepSamples;
-
-    std::vector<double> blockPowers;
-    if (numSamples < blockSamples || numSteps < blockSteps)
-    {
-        const double z = totalKWeightedPower / static_cast<double> (numSamples);
-        if (z > 0.0)
-            blockPowers.push_back (z);
-    }
-    else
-    {
-        for (int b = 0; b + blockSteps <= numSteps; ++b)
-        {
-            const double sum = kStepPrefix[static_cast<size_t> (b + blockSteps)] - kStepPrefix[static_cast<size_t> (b)];
-            blockPowers.push_back (sum / static_cast<double> (actualBlockSamples));
-        }
-    }
-
-    double gate1Sum = 0.0;
-    int gate1Count = 0;
-    for (double z : blockPowers)
-    {
-        if (z > 1e-12)
-        {
-            const double l = -0.691 + 10.0 * std::log10 (z);
-            if (l > -70.0)
-            {
-                gate1Sum += z;
-                ++gate1Count;
-            }
-        }
-    }
-
-    if (gate1Count > 0)
-    {
-        const double gammaR = -0.691 + 10.0 * std::log10 (gate1Sum / static_cast<double> (gate1Count)) - 10.0;
-        double gate2Sum = 0.0;
-        int gate2Count = 0;
-        for (double z : blockPowers)
-        {
-            if (z > 1e-12)
-            {
-                const double l = -0.691 + 10.0 * std::log10 (z);
-                if (l > -70.0 && l >= gammaR)
-                {
-                    gate2Sum += z;
-                    ++gate2Count;
-                }
-            }
-        }
-        if (gate2Count > 0)
-            res.integratedLufs = -0.691 + 10.0 * std::log10 (gate2Sum / static_cast<double> (gate2Count));
-    }
-
-    res.plrDb = (res.integratedLufs > -70.0 && res.truePeakDb > -120.0) ? (res.truePeakDb - res.integratedLufs) : 0.0;
-
-    std::vector<double> stLufs;
-    if (numSamples < stSamples || numSteps < stSteps)
-    {
-        const double z = totalKWeightedPower / static_cast<double> (numSamples);
-        if (z > 1e-12)
-        {
-            const double l = -0.691 + 10.0 * std::log10 (z);
-            if (l > -70.0)
-                stLufs.push_back (l);
-        }
-    }
-    else
-    {
-        for (int b = 0; b + stSteps <= numSteps; ++b)
-        {
-            const double sum = kStepPrefix[static_cast<size_t> (b + stSteps)] - kStepPrefix[static_cast<size_t> (b)];
-            const double z = sum / static_cast<double> (actualStSamples);
-            if (z > 1e-12)
-            {
-                const double l = -0.691 + 10.0 * std::log10 (z);
-                if (l > -70.0)
-                    stLufs.push_back (l);
-            }
-        }
-    }
-
-    if (! stLufs.empty())
-    {
-        res.shortTermMaxLufs = *std::max_element (stLufs.begin(), stLufs.end());
-        res.shortTermMinLufs = *std::min_element (stLufs.begin(), stLufs.end());
-
-        std::vector<double> lraBlocks;
-        const double lraThresh = res.integratedLufs - 20.0;
-        for (double l : stLufs)
-        {
-            if (l >= lraThresh)
-                lraBlocks.push_back (l);
-        }
-        if (lraBlocks.size() >= 2)
-        {
-            std::sort (lraBlocks.begin(), lraBlocks.end());
-            res.lraLu = detail::percentileSorted (lraBlocks, 0.95) - detail::percentileSorted (lraBlocks, 0.10);
-        }
-    }
+    const bool isStereo = (numChannels >= 2);
+    const float* ptrL = audio.getReadPointer (0);
+    const float* ptrR = isStereo ? audio.getReadPointer (1) : ptrL;
 
     // -------------------------------------------------------------------------
     // 3. Low-End Crest Factor (20-250 Hz) & Stereo / Phase / Mono Compatibility
@@ -620,8 +679,11 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
         lowCrestLp.set (sampleRate, 250.0);
 
         pdsp::LR4 lowMonoLpL, lowMonoLpR;
-        lowMonoLpL.set (sampleRate, 150.0);
-        lowMonoLpR.set (sampleRate, 150.0);
+        if (isStereo)
+        {
+            lowMonoLpL.set (sampleRate, 150.0);
+            lowMonoLpR.set (sampleRate, 150.0);
+        }
 
         const int corrWin = std::max (1, static_cast<int> (std::llround (0.1 * sampleRate)));
         const int lowCrestWin = std::max (1, static_cast<int> (std::llround (0.4 * sampleRate)));
@@ -639,12 +701,10 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
         int lcCount = 0;
         std::vector<double> lcCrests;
 
-        const bool isStereo = (numChannels >= 2);
-
         for (int i = 0; i < numSamples; ++i)
         {
-            const double l = detail::sanitize (audio.getSample (0, i));
-            const double r = isStereo ? detail::sanitize (audio.getSample (1, i)) : l;
+            const double l = detail::sanitize (ptrL[i]);
+            const double r = isStereo ? detail::sanitize (ptrR[i]) : l;
             const double mid = 0.5 * (l + r);
 
             totalL2 += l * l;
@@ -652,14 +712,15 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
             totalMono2 += mid * mid;
 
             // Low-end (<150 Hz) mono loss
-            double loL = 0.0, hiDummy = 0.0;
-            lowMonoLpL.split (l, loL, hiDummy);
-            double loR = loL;
             if (isStereo)
+            {
+                double loL = 0.0, loR = 0.0, hiDummy = 0.0;
+                lowMonoLpL.split (l, loL, hiDummy);
                 lowMonoLpR.split (r, loR, hiDummy);
-            const double loMid = 0.5 * (loL + loR);
-            lowStereoAvgSum += 0.5 * (loL * loL + loR * loR);
-            lowMono2 += loMid * loMid;
+                const double loMid = 0.5 * (loL + loR);
+                lowStereoAvgSum += 0.5 * (loL * loL + loR * loR);
+                lowMono2 += loMid * loMid;
+            }
 
             // Low-end crest (20-250 Hz)
             double dummy = 0.0, bp = 0.0;
@@ -694,7 +755,7 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
                     if (avgPwr >= 1e-7) // > -70 dBFS
                     {
                         const double denom = std::sqrt (winL2 * winR2);
-                        const double c = denom > 1e-24 ? std::clamp (winLR / denom, -1.0, 1.0) : 1.0;
+                        const double c = denom > 1e-24 ? std::clamp (winLR / denom, -1.0, 1.0) : 0.0;
                         corrSum += c;
                         corrMin = (activeCorrWins == 0) ? c : std::min (corrMin, c);
                         ++activeCorrWins;
@@ -719,7 +780,7 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
                 res.stereoCorrelationMin = corrMin;
             }
             if (totalL2 > 1e-12 || totalR2 > 1e-12)
-                res.lrBalanceDb = 10.0 * std::log10 ((totalL2 + 1e-20) / (totalR2 + 1e-20));
+                res.lrBalanceDb = std::clamp (10.0 * std::log10 ((totalL2 + 1e-20) / (totalR2 + 1e-20)), -60.0, 60.0);
 
             const double stereoAvg = 0.5 * (totalL2 + totalR2);
             if (stereoAvg > 1e-12)
@@ -747,27 +808,53 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
         const int numFrames = (numSamples <= fftSize) ? 1 : ((numSamples - fftSize) / hopSize + 1);
         std::vector<double> framePowers (static_cast<size_t> (numFrames), 0.0);
 
-        const bool isStereo = (numChannels >= 2);
         double activeFrameSum = 0.0;
         int activeFrameCount = 0;
 
-        for (int f = 0; f < numFrames; ++f)
+        if (numSamples <= fftSize)
         {
-            const int start = f * hopSize;
-            const int len = std::min (fftSize, numSamples - start);
             double pwr = 0.0;
-            for (int n = 0; n < len; ++n)
+            for (int n = 0; n < numSamples; ++n)
             {
-                const double l = detail::sanitize (audio.getSample (0, start + n));
-                const double r = isStereo ? detail::sanitize (audio.getSample (1, start + n)) : l;
+                const double l = detail::sanitize (ptrL[n]);
+                const double r = isStereo ? detail::sanitize (ptrR[n]) : l;
                 pwr += 0.5 * (l * l + r * r);
             }
-            pwr /= static_cast<double> (std::max (1, len));
-            framePowers[static_cast<size_t> (f)] = pwr;
+            pwr /= static_cast<double> (std::max (1, numSamples));
+            framePowers[0] = pwr;
             if (pwr >= 1e-9) // >= -90 dBFS
             {
                 activeFrameSum += pwr;
                 ++activeFrameCount;
+            }
+        }
+        else
+        {
+            const int numChunks = numFrames + 3; // fftSize == 4 * hopSize
+            std::vector<double> chunkSums (static_cast<size_t> (numChunks), 0.0);
+            for (int c = 0; c < numChunks; ++c)
+            {
+                const int start = c * hopSize;
+                double s = 0.0;
+                for (int n = 0; n < hopSize; ++n)
+                {
+                    const double l = detail::sanitize (ptrL[start + n]);
+                    const double r = isStereo ? detail::sanitize (ptrR[start + n]) : l;
+                    s += 0.5 * (l * l + r * r);
+                }
+                chunkSums[static_cast<size_t> (c)] = s;
+            }
+
+            for (int f = 0; f < numFrames; ++f)
+            {
+                const size_t fi = static_cast<size_t> (f);
+                const double pwr = (chunkSums[fi] + chunkSums[fi + 1] + chunkSums[fi + 2] + chunkSums[fi + 3]) / static_cast<double> (fftSize);
+                framePowers[fi] = pwr;
+                if (pwr >= 1e-9) // >= -90 dBFS
+                {
+                    activeFrameSum += pwr;
+                    ++activeFrameCount;
+                }
             }
         }
 
@@ -806,6 +893,23 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
                 bandBinHi[static_cast<size_t> (b)] = std::clamp (bHi, 1, maxBin);
             }
 
+            // Precompute bin ranges for the 6 MusicBands
+            std::array<int, pdsp::bands::kCount> mbBinLo {}, mbBinHi {};
+            mbBinLo.fill (maxBin + 1);
+            mbBinHi.fill (0);
+            if (isStereo)
+            {
+                for (int k = 1; k <= maxBin; ++k)
+                {
+                    const double hz = static_cast<double> (k) * binHz;
+                    if (hz < 20.0 || hz > 20000.0)
+                        continue;
+                    const int mb = pdsp::bands::bandAt (hz);
+                    mbBinLo[static_cast<size_t> (mb)] = std::min (mbBinLo[static_cast<size_t> (mb)], k);
+                    mbBinHi[static_cast<size_t> (mb)] = std::max (mbBinHi[static_cast<size_t> (mb)], k);
+                }
+            }
+
             for (int f = 0; f < numFrames; ++f)
             {
                 const double pwr = framePowers[static_cast<size_t> (f)];
@@ -823,9 +927,9 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
                     const float w = (len == fftSize)
                         ? hann[static_cast<size_t> (n)]
                         : (len == 1 ? 1.0f : 0.5f * (1.0f - std::cos (2.0f * juce::MathConstants<float>::pi * static_cast<float> (n) / static_cast<float> (len - 1))));
-                    fftBufL[static_cast<size_t> (n)] = static_cast<float> (detail::sanitize (audio.getSample (0, start + n))) * w;
+                    fftBufL[static_cast<size_t> (n)] = static_cast<float> (detail::sanitize (ptrL[start + n])) * w;
                     if (isStereo)
-                        fftBufR[static_cast<size_t> (n)] = static_cast<float> (detail::sanitize (audio.getSample (1, start + n))) * w;
+                        fftBufR[static_cast<size_t> (n)] = static_cast<float> (detail::sanitize (ptrR[start + n])) * w;
                 }
 
                 fft.performRealOnlyForwardTransform (fftBufL.data());
@@ -857,19 +961,22 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
 
                 if (isStereo)
                 {
-                    for (int k = 1; k <= maxBin; ++k)
+                    for (int mb = 0; mb < pdsp::bands::kCount; ++mb)
                     {
-                        const double hz = static_cast<double> (k) * binHz;
-                        if (hz < 20.0 || hz > 20000.0)
-                            continue;
-                        const int mb = pdsp::bands::bandAt (hz);
-                        const double lRe = fftBufL[static_cast<size_t> (2 * k)];
-                        const double lIm = fftBufL[static_cast<size_t> (2 * k + 1)];
-                        const double rRe = fftBufR[static_cast<size_t> (2 * k)];
-                        const double rIm = fftBufR[static_cast<size_t> (2 * k + 1)];
-                        corrCross[static_cast<size_t> (mb)] += (lRe * rRe + lIm * rIm);
-                        corrL[static_cast<size_t> (mb)] += (lRe * lRe + lIm * lIm);
-                        corrR[static_cast<size_t> (mb)] += (rRe * rRe + rIm * rIm);
+                        double cross = 0.0, lSum = 0.0, rSum = 0.0;
+                        for (int k = mbBinLo[static_cast<size_t> (mb)]; k <= mbBinHi[static_cast<size_t> (mb)]; ++k)
+                        {
+                            const double lRe = fftBufL[static_cast<size_t> (2 * k)];
+                            const double lIm = fftBufL[static_cast<size_t> (2 * k + 1)];
+                            const double rRe = fftBufR[static_cast<size_t> (2 * k)];
+                            const double rIm = fftBufR[static_cast<size_t> (2 * k + 1)];
+                            cross += (lRe * rRe + lIm * rIm);
+                            lSum += (lRe * lRe + lIm * lIm);
+                            rSum += (rRe * rRe + rIm * rIm);
+                        }
+                        corrCross[static_cast<size_t> (mb)] += cross;
+                        corrL[static_cast<size_t> (mb)] += lSum;
+                        corrR[static_cast<size_t> (mb)] += rSum;
                     }
                 }
 
@@ -890,9 +997,13 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
                 {
                     for (int mb = 0; mb < pdsp::bands::kCount; ++mb)
                     {
-                        const double denom = std::sqrt (corrL[static_cast<size_t> (mb)] * corrR[static_cast<size_t> (mb)]);
-                        res.bandCorrelation[static_cast<size_t> (mb)] =
-                            (denom > 1e-24) ? std::clamp (corrCross[static_cast<size_t> (mb)] / denom, -1.0, 1.0) : 1.0;
+                        const double lE = corrL[static_cast<size_t> (mb)];
+                        const double rE = corrR[static_cast<size_t> (mb)];
+                        const double denom = std::sqrt (lE * rE);
+                        if (denom > 1e-24)
+                            res.bandCorrelation[static_cast<size_t> (mb)] = std::clamp (corrCross[static_cast<size_t> (mb)] / denom, -1.0, 1.0);
+                        else
+                            res.bandCorrelation[static_cast<size_t> (mb)] = (lE > 1e-24 || rE > 1e-24) ? 0.0 : 1.0;
                     }
                 }
             }
@@ -1006,10 +1117,12 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
         for (int b = 3; b + 3 < kNumSpectrumBands; ++b)
         {
             const double f = res.bandFreqsHz[static_cast<size_t> (b)];
-            if (f < 250.0 || f > maxAnalyzedHz)
+            if (f < 250.0)
                 continue;
+            if (res.bandFreqsHz[static_cast<size_t> (b + 3)] > maxAnalyzedHz)
+                break;
             const double m = res.measuredDb[static_cast<size_t> (b)];
-            if (m < res.measuredDb[static_cast<size_t> (b - 1)] || m < res.measuredDb[static_cast<size_t> (b + 1)])
+            if (m <= res.measuredDb[static_cast<size_t> (b - 1)] || m < res.measuredDb[static_cast<size_t> (b + 1)])
                 continue;
             const double leftMean = 0.5 * (res.measuredDb[static_cast<size_t> (b - 2)] + res.measuredDb[static_cast<size_t> (b - 3)]);
             const double rightMean = 0.5 * (res.measuredDb[static_cast<size_t> (b + 2)] + res.measuredDb[static_cast<size_t> (b + 3)]);
@@ -1184,93 +1297,98 @@ inline AnalysisResult analyzeBuffer (const juce::AudioBuffer<float>& audio,
     return res;
 }
 
-inline MaskingResult analyzeMasking (const std::vector<TrackAudio>& tracks, double sampleRate)
+inline void analyzeTrackForMasking (const juce::String& name,
+                                    const juce::AudioBuffer<float>& audio,
+                                    double sampleRate,
+                                    TrackSummary& summary,
+                                    std::array<double, pdsp::bands::kCount>& outBandDb,
+                                    double& loudestBandDb)
 {
-    MaskingResult out;
-    if (sampleRate <= 0.0 || tracks.empty())
-        return out;
+    summary = {};
+    summary.name = name;
+    summary.dominantBand = "None";
+    outBandDb.fill (-120.0);
 
-    struct TrackBandData
+    if (! std::isfinite (sampleRate) || sampleRate < 25.0)
+        return;
+
+    const int nCh = audio.getNumChannels();
+    const int nSamp = audio.getNumSamples();
+    if (nCh <= 0 || nSamp <= 0)
+        return;
+
+    const auto lp = detail::computeLoudnessAndPeaks (audio, sampleRate, false);
+    summary.integratedLufs = lp.integratedLufs;
+    summary.truePeakDb = lp.truePeakDb;
+    summary.crestFactorDb = lp.crestFactorDb;
+
+    // Compute per-band absolute RMS dB via BandSplitter so track-to-track levels are directly comparable
+    std::array<double, pdsp::bands::kCount> bandSumSq {};
+    double sub80SumSq = 0.0;
+    double totalSumSq = 0.0;
+
+    pdsp::BandSplitter splitter;
+    splitter.prepare (sampleRate);
+    pdsp::LR4 sub80Lp;
+    sub80Lp.set (sampleRate, 80.0);
+
+    const float* ptrL = audio.getReadPointer (0);
+    const float* ptrR = (nCh >= 2) ? audio.getReadPointer (1) : ptrL;
+
+    for (int i = 0; i < nSamp; ++i)
     {
-        std::array<double, pdsp::bands::kCount> bandDb {};
-    };
-    std::vector<TrackBandData> trackBands (tracks.size());
-    double loudestBandDb = -120.0;
+        const double l = detail::sanitize (ptrL[i]);
+        const double r = (nCh >= 2) ? detail::sanitize (ptrR[i]) : l;
+        const double mono = 0.5 * (l + r);
 
-    for (size_t idx = 0; idx < tracks.size(); ++idx)
-    {
-        const auto& t = tracks[idx];
-        const auto ar = analyzeBuffer (t.audio, sampleRate);
+        std::array<double, pdsp::bands::kCount> parts {};
+        splitter.split (0, mono, parts);
+        for (int b = 0; b < pdsp::bands::kCount; ++b)
+            bandSumSq[static_cast<size_t> (b)] += parts[static_cast<size_t> (b)] * parts[static_cast<size_t> (b)];
 
-        TrackSummary summary;
-        summary.name = t.name;
-        summary.integratedLufs = ar.integratedLufs;
-        summary.truePeakDb = ar.truePeakDb;
-        summary.crestFactorDb = ar.crestFactorDb;
-
-        // Compute per-band absolute RMS dB via BandSplitter so track-to-track levels are directly comparable
-        const int nCh = t.audio.getNumChannels();
-        const int nSamp = t.audio.getNumSamples();
-        std::array<double, pdsp::bands::kCount> bandSumSq {};
-        double sub80SumSq = 0.0;
-        double totalSumSq = 0.0;
-
-        if (nCh > 0 && nSamp > 0)
-        {
-            pdsp::BandSplitter splitter;
-            splitter.prepare (sampleRate);
-            pdsp::LR4 sub80Lp;
-            sub80Lp.set (sampleRate, 80.0);
-
-            for (int i = 0; i < nSamp; ++i)
-            {
-                const double l = detail::sanitize (t.audio.getSample (0, i));
-                const double r = (nCh >= 2) ? detail::sanitize (t.audio.getSample (1, i)) : l;
-                const double mono = 0.5 * (l + r);
-
-                std::array<double, pdsp::bands::kCount> parts {};
-                splitter.split (0, mono, parts);
-                for (int b = 0; b < pdsp::bands::kCount; ++b)
-                    bandSumSq[static_cast<size_t> (b)] += parts[static_cast<size_t> (b)] * parts[static_cast<size_t> (b)];
-
-                double lo80 = 0.0, hiDummy = 0.0;
-                sub80Lp.split (mono, lo80, hiDummy);
-                sub80SumSq += lo80 * lo80;
-                totalSumSq += mono * mono;
-            }
-
-            summary.sub80Ratio = totalSumSq > 1e-18 ? std::clamp (sub80SumSq / totalSumSq, 0.0, 1.0) : 0.0;
-
-            int domIdx = 0;
-            double domDb = -120.0;
-            for (int b = 0; b < pdsp::bands::kCount; ++b)
-            {
-                const double meanSq = bandSumSq[static_cast<size_t> (b)] / static_cast<double> (nSamp);
-                const double db = meanSq > 1e-12 ? 10.0 * std::log10 (meanSq) : -120.0;
-                trackBands[idx].bandDb[static_cast<size_t> (b)] = db;
-                if (db > domDb)
-                {
-                    domDb = db;
-                    domIdx = b;
-                }
-                if (db > loudestBandDb)
-                    loudestBandDb = db;
-            }
-            summary.dominantBand = pdsp::bands::kBands[static_cast<size_t> (domIdx)].name;
-        }
-
-        out.tracks.push_back (std::move (summary));
+        double lo80 = 0.0, hiDummy = 0.0;
+        sub80Lp.split (mono, lo80, hiDummy);
+        sub80SumSq += lo80 * lo80;
+        totalSumSq += mono * mono;
     }
 
-    // Pairwise masking conflicts
-    for (size_t i = 0; i < tracks.size(); ++i)
+    summary.sub80Ratio = totalSumSq > 1e-18 ? std::clamp (sub80SumSq / totalSumSq, 0.0, 1.0) : 0.0;
+
+    int domIdx = 0;
+    double domDb = -120.0;
+    for (int b = 0; b < pdsp::bands::kCount; ++b)
     {
-        for (size_t j = i + 1; j < tracks.size(); ++j)
+        const double meanSq = bandSumSq[static_cast<size_t> (b)] / static_cast<double> (nSamp);
+        const double db = meanSq > 1e-12 ? 10.0 * std::log10 (meanSq) : -120.0;
+        outBandDb[static_cast<size_t> (b)] = db;
+        if (db > domDb)
+        {
+            domDb = db;
+            domIdx = b;
+        }
+        if (db > loudestBandDb)
+            loudestBandDb = db;
+    }
+    if (domDb > -120.0)
+        summary.dominantBand = pdsp::bands::kBands[static_cast<size_t> (domIdx)].name;
+}
+
+inline MaskingResult buildMaskingResult (std::vector<TrackSummary> summaries,
+                                         const std::vector<std::array<double, pdsp::bands::kCount>>& trackBands,
+                                         double loudestBandDb)
+{
+    MaskingResult out;
+    out.tracks = std::move (summaries);
+
+    // Pairwise masking conflicts
+    for (size_t i = 0; i < out.tracks.size(); ++i)
+    {
+        for (size_t j = i + 1; j < out.tracks.size(); ++j)
         {
             for (int b = 0; b < pdsp::bands::kCount; ++b)
             {
-                const double eA = trackBands[i].bandDb[static_cast<size_t> (b)];
-                const double eB = trackBands[j].bandDb[static_cast<size_t> (b)];
+                const double eA = trackBands[i][static_cast<size_t> (b)];
+                const double eB = trackBands[j][static_cast<size_t> (b)];
                 if (eA <= -90.0 || eB <= -90.0)
                     continue;
                 const double diff = std::abs (eA - eB);
@@ -1282,14 +1400,14 @@ inline MaskingResult analyzeMasking (const std::vector<TrackAudio>& tracks, doub
                     juce::String sug;
                     if (b <= 1)
                         sug = "High-pass the non-bass element above " + juce::String (static_cast<int> (info.hiHz))
-                            + " Hz or carve -3.0 dB at " + juce::String (std::llround (centerHz)) + " Hz on " + tracks[j].name + ".";
+                            + " Hz or carve -3.0 dB at " + juce::String (std::llround (centerHz)) + " Hz on " + out.tracks[j].name + ".";
                     else
-                        sug = "Cut -2.5 dB at " + juce::String (std::llround (centerHz)) + " Hz (Q 1.5) on " + tracks[j].name
+                        sug = "Cut -2.5 dB at " + juce::String (std::llround (centerHz)) + " Hz (Q 1.5) on " + out.tracks[j].name
                             + " or pan tracks apart for separation.";
 
                     out.conflicts.push_back ({
-                        tracks[i].name,
-                        tracks[j].name,
+                        out.tracks[i].name,
+                        out.tracks[j].name,
                         info.name,
                         info.loHz,
                         info.hiHz,
@@ -1302,6 +1420,23 @@ inline MaskingResult analyzeMasking (const std::vector<TrackAudio>& tracks, doub
     }
 
     return out;
+}
+
+inline MaskingResult analyzeMasking (const std::vector<TrackAudio>& tracks, double sampleRate)
+{
+    MaskingResult out;
+    if (! std::isfinite (sampleRate) || sampleRate < 25.0 || tracks.empty())
+        return out;
+
+    std::vector<TrackSummary> summaries (tracks.size());
+    std::vector<std::array<double, pdsp::bands::kCount>> trackBands (tracks.size());
+    double loudestBandDb = -120.0;
+
+    for (size_t idx = 0; idx < tracks.size(); ++idx)
+        analyzeTrackForMasking (tracks[idx].name, tracks[idx].audio, sampleRate,
+                                summaries[idx], trackBands[idx], loudestBandDb);
+
+    return buildMaskingResult (std::move (summaries), trackBands, loudestBandDb);
 }
 
 inline juce::var AnalysisResult::toVar() const
