@@ -1366,7 +1366,7 @@ public:
         // becomes unknown too, and is said with the text as it was saved. An unknown rate is set by the device or by a file.
         const bool rateIsUsable = std::isfinite (savedRate) && savedRate >= kMinValidRate && savedRate <= kMaxValidRate;
         double rate = rateIsUsable ? savedRate : 0.0;
-        if (rate == 0.0 && savedRateText.isNotEmpty() && savedRateText != "0")
+        if (! (rate > 0.0) && savedRateText.isNotEmpty() && savedRateText != "0")
             problems.add ("The saved sample rate '" + savedRateText + "' is not a rate Olympus can use, so it is unknown until the device sets one.");
         std::vector<double> slotPreparedRates;
         std::vector<std::unique_ptr<Track>> loaded;
