@@ -1590,6 +1590,22 @@ void recorderChecks()
                  "the second take gets the next number");
     test::check (first.size() == 2 && readWav (first[0].file).getNumSamples() == frames && maxError (readWav (first[0].file), 0, in[0]) < 1e-6,
                  "and the first take is not overwritten");
+
+    // the meters with only some inputs switched on: they read the active ones by their absolute number, and an input that is off stays
+    // silent. No take runs: the meters are kept anyway (push runs on every block the opening and start guards pass).
+    {
+        Recorder subset;
+        juce::BigInteger on;
+        on.setBit (1);
+        on.setBit (3);
+        subset.prepare (rate, 512, on);
+        std::vector<float> a (256, 0.5f), b (256, 0.25f);
+        const float* ptrs[2] = { a.data(), b.data() };
+        subset.push (ptrs, 2, 256);
+        test::check (std::abs (subset.inputPeak (1) - 0.5f) < 1e-6f && std::abs (subset.inputPeak (3) - 0.25f) < 1e-6f
+                         && subset.inputPeak (0) == 0.0f && subset.inputPeak (2) == 0.0f,
+                     "the meters read the active inputs by their absolute number; an input that is off stays silent");
+    }
 }
 
 void finishChecks()

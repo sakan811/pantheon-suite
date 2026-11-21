@@ -18,7 +18,8 @@
 //   beginRecording the armed tracks of a session become takes; refused, with the reason, when no track is armed.
 //   finishRecording puts the finished takes on their tracks as clips: one undo step, starting `latencyCompensation` samples early.
 //
-// Threads: prepare() is called with the device stopped. push() may run from the audio thread only while a take is running. stop() waits
+// Threads: prepare() is called with the device stopped. push() runs from the audio thread on every device block the opening and start
+// guards pass: the meters always, the takes only while one runs (a block the guards hold is counted as skipped, not pushed). stop() waits
 // for a push that is in flight (the `busy` flag) before it lets the writers go, so a file never receives a block after it is closed.
 namespace olympus
 {
@@ -100,8 +101,12 @@ public:
             const bool on = activeInputs[i];
             position[(size_t) i].store (on ? active : -1);
             if (on)
+            {
+                activeList[(size_t) active] = i;
                 ++active;
+            }
         }
+        numActive = active;
         prepared.store (true);
     }
 
@@ -192,11 +197,11 @@ public:
 
     // Audio thread. The inputs of one device block: inputs[k] holds numSamples samples of the k-th ACTIVE device input (the callback's order,
     // see prepare); takes and meters name inputs by their absolute number. Blocks longer than the prepared maximum are cut. Meters are kept
-    // whether or not a take runs; takes are written only while one runs. Returns true when the block's first frame went to the takes.
+    // whether or not a take runs; takes are written only while one runs. Returns true when this is the take's first block.
     // `blockStart` is the playhead at this block's first frame, which the caller reads before the block plays (the recorder does not own the
-    // transport); the first block a take accepts puts it in `takeStart` with one compare-exchange, inside the busy scope stop() waits for, so
-    // the take's start and its first write are one event that a stop cannot come between (DeviceCallback::deviceBlock). Callers with no
-    // playhead omit it, and `takeStart` stays as it is.
+    // transport); the first block of the take latches it in `takeStart` with one compare-exchange, even if the writers refuse its frames
+    // (those are counted lost), inside the busy scope stop() waits for, so the take's start and its first block are one event that a stop
+    // cannot come between (DeviceCallback::deviceBlock). Callers with no playhead omit it, and `takeStart` stays as it is.
     bool push (const float* const* inputs, int numInputs, int numSamples, juce::int64 blockStart = kNoBlockStart)
     {
         const juce::SpinLock::ScopedTryLockType sl (prepareLock);
@@ -214,13 +219,14 @@ public:
         if (rec && blockStart >= 0)
         {
             juce::int64 none = -1;
-            takeStart.compare_exchange_strong (none, blockStart);   // only the first accepted block of the take wins
+            takeStart.compare_exchange_strong (none, blockStart);   // only the first block of the take wins, refused frames or not
         }
         for (int offset = 0; offset < numSamples; offset += blockMax)
         {
             const int n = juce::jmin (blockMax, numSamples - offset);
-            for (int input = 0; input < kMaxInputs; ++input)
+            for (int k = 0; k < numActive; ++k)   // the active inputs only, not all kMaxInputs slots: prepare builds the list under this lock
             {
+                const int input = activeList[(size_t) k];
                 const int at = positionOf (input);
                 if (at < 0 || at >= numInputs)
                     continue;
@@ -288,8 +294,9 @@ public:
     juce::int64 framesRecorded() const { return framesPushed.load(); }
     // Frames a take could not take because its disk writer fell behind. Should stay 0.
     juce::int64 samplesDropped() const { return dropped.load(); }
-    // Where the take's first written block began (the playhead the caller gave push()), -1 when no block was written. Decided inside push(),
-    // under the busy flag stop() waits for, so a stop at the first block cannot consume it before it lands. start() clears it.
+    // Where the take's first block began (the playhead the caller gave push()), -1 when no block ran; the first block latches it even if its
+    // frames were refused. Decided inside push(), under the busy flag stop() waits for, so a stop at the first block cannot consume it
+    // before it lands. start() clears it.
     juce::int64 takeStartSample() const { return takeStart.load(); }
     // Frames of input that arrived while the take's files were opening and were not pushed (start() and the headers are the message
     // thread's work, push() is the audio thread's). The caller counts them with countSkippedWhileOpening(); the window reports them at stop
@@ -359,9 +366,11 @@ private:
     int bufferSamples = 65536;
     std::atomic<bool> prepared { false }, recording { false }, busy { false };
     std::atomic<juce::int64> framesPushed { 0 }, dropped { 0 };
-    std::atomic<juce::int64> takeStart { -1 }, headSkipped { 0 }; // where the take's first written block began; frames it never got
+    std::atomic<juce::int64> takeStart { -1 }, headSkipped { 0 }; // where the take's first block began; frames it never got
     std::array<std::atomic<float>, kMaxInputs> meters;
     std::array<std::atomic<int>, kMaxInputs> position;   // per absolute input: its position in the callback, or -1
+    std::array<int, kMaxInputs> activeList {};           // the active absolute inputs, compact: what push()'s meters walk
+    int numActive = 0;                                   // (both written by prepare and read by push under prepareLock)
 };
 
 // Starts a take on every armed track of the session, each on its own inputs. Refused, with the reason, when no track is armed. Takes the
