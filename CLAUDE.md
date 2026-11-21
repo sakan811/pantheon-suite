@@ -23,6 +23,20 @@ apps/<name>/     one self-contained standalone application each (no plugin forma
   by relative path. There is no root CMake project: each plugin fetches its own JUCE, all at the one version in [cmake/Juce.cmake](cmake/Juce.cmake)
   (see below).
 
+## Mastering chain
+
+1. `Apollo Curve` (corrective / linear-phase EQ)
+2. `Iris Prism` (dynamic EQ & tonal balance)
+3. `Nemesis Hush` (de-essing)
+4. `Atlas Span` (multiband dynamics)
+5. `Hera Bond` (glue compression)
+6. `Dionysus Warmth` (harmonic saturation)
+7. `Hephaestus Forge` (harmonic balance / missing fundamentals)
+8. `Castor Pair` (stereo width & mono bass)
+9. `Aegis Ceiling` (true-peak limiting)
+10. `Hermes Level` (loudness, true-peak & mono/reference metering)
+11. `Themis Verdict` (final mastering check & verification)
+
 ## Building and checking: use scripts/build.sh
 
 [scripts/build.sh](scripts/build.sh) is the one way to configure, build and check a plugin or app (`scripts/build.sh hestia`, `scripts/build.sh aegis ui snap`, `scripts/build.sh orpheus app`); its header says what it takes. Use it instead of
