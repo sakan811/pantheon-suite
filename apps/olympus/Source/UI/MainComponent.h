@@ -13,6 +13,7 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <cstdint>
 #include <map>
 
 #include <pantheon/ui/Advice.h>
@@ -422,6 +423,8 @@ private:
     void deleteAutosaves();                         // after a save, NEW, or a quit / open that drops the changes
     void recoverFrom (const juce::File& autosave, const juce::File& project);
     void showPluginsMenu();
+    void populatePluginMenu (juce::PopupMenu& menu, std::function<void (const juce::String&)> onPick);
+    void showPluginSearch (std::function<void (const juce::String&)> onPick);
     void showSignature (int numerator, int denominator);
     void applyBpm();
     void syncPlayhead() { arrange.playhead = (double) position(); }
@@ -436,6 +439,8 @@ private:
     void loadMonitorChain();                        // reads monitor.xml once the catalog is filled
     void saveMonitorChain();                        // writes monitor.xml; nothing before the chain was read (never overwrites an unread file)
     void monitorEditorClosed (const Slot* slot);    // a monitor plugin's window was closed: its state may have changed
+    bool hasOpenTrackEditor() const;
+    juce::int64 trackPluginStateHash() const;
     Slot* slotOf (int track, int slot, juce::String& error);  // a track's chain slot, or with track -1 the monitor chain's
 
     Options opts;
@@ -453,6 +458,7 @@ private:
     juce::TooltipWindow tooltips { this, 600 };
     HardwareLookAndFeel look;
     std::unique_ptr<AudioDialog> audioDialog;
+    juce::Component::SafePointer<juce::AlertWindow> searchWindow;
     std::map<const Slot*, std::unique_ptr<juce::Component>> windows;
     juce::String shownTitle;
     juce::String lastPositionText;
@@ -471,6 +477,9 @@ private:
     // callback never ran); the device stopped (set by the device thread, read by the timer)
     juce::int64 takeLatency = 0, takeFrom = 0;
     std::atomic<bool> deviceStopped { false };
+    std::atomic<bool> deviceStarting { false };
+    std::atomic<bool> recordStarting { false };
+    std::atomic<std::uint64_t> deviceStartSeq { 0 };
     juce::String monitorProblem;                    // why monitor.xml could not be read (shown on the foot), empty when it was
     // the master section's state: the meter's two bars, the held peak and its time, the latched CLIP, and the fader's one undo step while dragged
     MeterBallistics masterLeft, masterRight;

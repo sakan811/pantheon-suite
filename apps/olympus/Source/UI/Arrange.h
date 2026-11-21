@@ -35,6 +35,7 @@ public:
     static constexpr int kLoopHeight = 22;     // the LOOP strip
     static constexpr int kMarkerHeight = 26;   // the marker lane
     static constexpr int kLaneHeight = 92;     // one track
+    static constexpr int kScrollStripHeight = 8; // slim horizontal overview/scrollbar strip
     static constexpr int kDesignWidth = 1280, kDesignHeight = ui::editorHeightFor (kDesignWidth);
     static constexpr double kDefaultZoom = 80.0; // pixels per second
 
@@ -55,6 +56,8 @@ public:
     std::function<void (const juce::String&)> reportError;                     // an edit the Editor refused, with its reason
     // Audio files dropped on the lanes: the track under the drop, or -1 when it is below the last track, and the sample it lands on.
     std::function<void (const juce::StringArray& files, int track, juce::int64 at)> onFilesDropped;
+    // A project file (.olympus) dropped on the arrangement: handed to the window for busy/discard checks.
+    std::function<void (const juce::File& file)> onProjectDropped;
     // The IN button of a track: the window shows the device's inputs and sets the track's input (Session::setTrackInput).
     std::function<void (int track)> onInputMenu;
     // The input a track records, the peak it reads from that input (linear; reading resets it), and whether the meters show it: the
@@ -72,6 +75,7 @@ public:
     // scrolls into view when it moved out of it (with followPlayhead). The window calls it on its timer.
     void refresh();
     void zoomToFit();                                   // the whole session across the lanes, from the start
+    void zoomBy (double factor);                        // anchored on visible playhead, else viewport center
     void scrollTo (juce::int64 sample);                 // the left edge of the timeline
 
     // ---- editing from the keyboard and the window (each one is a single undo step) ---------------------------------------------
@@ -107,20 +111,28 @@ public:
     // ---- geometry (view coordinates, for the checks and the window) -------------------------------------------------------------
     ClipRef clipAt (juce::Point<int> point) const;       // the clip under the point, invalid when none
     juce::Rectangle<int> clipBounds (ClipRef ref) const; // where the clip is drawn; empty when the reference is not a clip
+    bool hitFadeIn (ClipRef ref, juce::Point<int> point) const;
+    bool hitFadeOut (ClipRef ref, juce::Point<int> point) const;
 
     // ---- juce::Component ------------------------------------------------------------------------------------------------------
     void paint (juce::Graphics& g) override;
     void resized() override;
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+    juce::MouseCursor getMouseCursor() override;
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     bool keyPressed (const juce::KeyPress& key) override;
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void fileDragEnter (const juce::StringArray& files, int x, int y) override;
+    void fileDragMove (const juce::StringArray& files, int x, int y) override;
+    void fileDragExit (const juce::StringArray& files) override;
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum class Mode { none, ruler, loop, marker, move, trimStart, trimEnd, fadeIn, fadeOut };
+    enum class Mode { none, ruler, loop, marker, scrollX, move, trimStart, trimEnd, fadeIn, fadeOut };
     friend class ArrangeTrackHeader; // the header column reads and edits through the view's Editor and callbacks
 
     Session& session;
@@ -152,6 +164,7 @@ private:
 
     // The model of the last snapshot taken with the lock. While a render holds the session's lock, snapshot returns this instead of waiting.
     mutable std::shared_ptr<const ArrangeSnapshot> lastSnapshot;
+    std::shared_ptr<const ArrangeSnapshot> snapshotPtr (bool takePeaks = false) const;
     ArrangeSnapshot snapshot (bool takePeaks = false) const;
     double pxPerSample (double rate) const;
     int sampleToX (double sample, double pps) const;
@@ -162,6 +175,11 @@ private:
     juce::Rectangle<int> clipRect (int track, juce::int64 start, juce::int64 length, double pps) const;
     int markerAt (const ArrangeSnapshot& s, juce::Point<int> p, double pps) const;
     int maxScrollY (int trackCount) const;
+    bool hitFadeIn (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
+    bool hitFadeOut (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
+    juce::Rectangle<int> scrollStripBounds() const;
+    void scrollThumbMetrics (const ArrangeSnapshot& s, double pps, float& thumbX, float& thumbW, double& totalSamples) const;
+    void updateDropHover (const juce::StringArray& files, int x, int y);
 
     void seekTo (juce::int64 sample);
     void layoutHeaders();
@@ -187,5 +205,9 @@ private:
     bool localDialogOpen = false;
     juce::Component::SafePointer<juce::AlertWindow> activeDialog;
     std::function<void (bool, const juce::String&)> pendingDialogEnd;
+    juce::Point<int> hoverPos { -1, -1 };
+    bool draggingFiles = false;
+    int dragHoverTrack = -1;
+    double dragScrollStart = 0.0, dragTotalSamples = 1.0;
 };
 } // namespace olympus::gui

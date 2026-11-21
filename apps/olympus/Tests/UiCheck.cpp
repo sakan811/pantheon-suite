@@ -2516,6 +2516,192 @@ int main()
                      "Export button refuses while a render is running");
     }
 
+    std::printf ("[40] Batch 3 checks: 0-track dirty askToDiscard, wheel clamp / Shift+scroll, and trimStart fade preservation\n");
+    {
+        // 1) askToDiscard prompts when dirty == true even if tracks.empty() (e.g. tempo/grid edit or deleting last track)
+        auto w = makeWindow();
+        w->editor.setGrid (Grid::Half);
+        test::check (w->session.dirty && w->session.tracks.empty(), "session is dirty with 0 tracks after grid edit");
+        gAsked.clear();
+        gAnswer = false;
+        bool proceeded = false;
+        w->askToDiscard ("Start a new project and lose them?", [&] { proceeded = true; });
+        test::check (gAsked.size() == 1 && ! proceeded, "askToDiscard prompts when dirty == true and tracks.empty(), and Cancel stops");
+        gAnswer = true;
+        w->askToDiscard ("Start a new project and lose them?", [&] { proceeded = true; });
+        test::check (gAsked.size() == 2 && proceeded, "askToDiscard proceeds when confirmed on 0-track dirty project");
+
+        // 2) Cmd+wheel clamps x >= kHeaderWidth and Shift+scroll prefers deltaY over small deltaX noise
+        w->addTracks ({ makeWav ("wheel40.wav", 48000).getFullPathName() });
+        w->editor.setSnap (false);
+        w->refreshNow();
+        const auto now = juce::Time::getCurrentTime();
+        auto makeWheelEvent = [&] (juce::Point<int> p, juce::ModifierKeys mods)
+        {
+            return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), p.toFloat(), mods, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                     &w->arrange, &w->arrange, now, p.toFloat(), now, 1, false);
+        };
+        w->arrange.mouseWheelMove (makeWheelEvent ({ 10, 100 }, cmd()), { 0.0f, -0.5f, false, false, false });
+        test::check (w->arrange.zoom < ArrangeView::kDefaultZoom
+                         && w->arrange.clipBounds ({ 0, 0 }).getX() == ArrangeView::kHeaderWidth,
+                     "Cmd+wheel over header clamps x >= kHeaderWidth so scrollSamples does not drift");
+        w->arrange.mouseWheelMove (makeWheelEvent ({ 400, 100 }, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)),
+                                   { 0.02f, -1.0f, false, false, false });
+        test::check (w->arrange.clipBounds ({ 0, 0 }).getX() < ArrangeView::kHeaderWidth - 100,
+                     "Shift+scroll uses deltaY to scroll horizontally even when deltaX has small noise");
+
+        // 3) trimStart drag preserves original fadeIn/fadeOut when dragging inward then back out before mouseUp
+        w->arrange.scrollTo (0);
+        w->arrange.zoom = ArrangeView::kDefaultZoom;
+        w->refreshNow();
+        juce::String err;
+        test::check (w->editor.setClipFades (0, 0, 8000, 8000, err), "initial clip fades set to 8000 samples");
+        const auto bounds = w->arrange.clipBounds ({ 0, 0 });
+        const juce::Point<int> leftEdge { bounds.getX() + 2, bounds.getCentreY() };
+        const juce::Point<int> farInward { bounds.getRight() - 4, bounds.getCentreY() };
+        w->arrange.mouseDown (mouseAt (w->arrange, leftEdge));
+        w->arrange.mouseDrag (mouseAt (w->arrange, farInward));
+        test::check (w->session.tracks[0]->clips[0].length < 8000 && w->session.tracks[0]->clips[0].fadeIn < 8000,
+                     "dragging trimStart inward temporarily shortens clip and fades");
+        w->arrange.mouseDrag (mouseAt (w->arrange, leftEdge));
+        w->arrange.mouseUp (mouseAt (w->arrange, leftEdge));
+        test::check (w->session.tracks[0]->clips[0].start == 0
+                         && w->session.tracks[0]->clips[0].length == 48000
+                         && w->session.tracks[0]->clips[0].fadeIn == 8000
+                         && w->session.tracks[0]->clips[0].fadeOut == 8000,
+                     "dragging trimStart back out before mouseUp restores original fadeIn and fadeOut");
+
+        // trimEnd drag preserves original fadeIn/fadeOut when dragging inward then back out before mouseUp
+        const juce::Point<int> rightEdge { bounds.getRight() - 2, bounds.getCentreY() };
+        const juce::Point<int> farLeft { bounds.getX() + 4, bounds.getCentreY() };
+        w->arrange.mouseDown (mouseAt (w->arrange, rightEdge));
+        w->arrange.mouseDrag (mouseAt (w->arrange, farLeft));
+        test::check (w->session.tracks[0]->clips[0].length < 8000 && w->session.tracks[0]->clips[0].fadeOut < 8000,
+                     "dragging trimEnd inward temporarily shortens clip and fades");
+        w->arrange.mouseDrag (mouseAt (w->arrange, rightEdge));
+        w->arrange.mouseUp (mouseAt (w->arrange, rightEdge));
+        test::check (w->session.tracks[0]->clips[0].start == 0
+                         && w->session.tracks[0]->clips[0].length == 48000
+                         && w->session.tracks[0]->clips[0].fadeIn == 8000
+                         && w->session.tracks[0]->clips[0].fadeOut == 8000,
+                     "dragging trimEnd back out before mouseUp restores original fadeIn and fadeOut");
+    }
+
+    std::printf ("[41] Batch 4 checks: fade handles from 0, cursors, zoomBy anchor, double-click faders, Alt+Click seek, empty togglePlay\n");
+    {
+        auto w = makeWindow();
+        gNotes.clear();
+        w->togglePlay();
+        test::check (! w->isPlaying() && gNotes.size() == 1, "togglePlay with no tracks notifies instead of playing silently");
+
+        w->addTracks ({ makeWav ("batch4.wav", 192000).getFullPathName() });
+        w->refreshNow();
+
+        // 1) faderSlider and masterFader double-click return value is 0.0
+        auto* tf = w->arrange.faderSlider (0);
+        test::check (w->masterFader.isDoubleClickReturnEnabled() && std::abs (w->masterFader.getDoubleClickReturnValue()) < 1e-9,
+                     "masterFader double-click return value is 0.0");
+        test::check (tf != nullptr && tf->isDoubleClickReturnEnabled() && std::abs (tf->getDoubleClickReturnValue()) < 1e-9,
+                     "track faderSlider double-click return value is 0.0");
+
+        // 2) zoomBy anchors on visible playhead, else on viewport center
+        w->arrange.scrollTo (0);
+        w->arrange.zoom = 80.0;
+        w->seek (96000);   // 2.0 s -> 160 px from kHeaderWidth
+        w->zoomBy (2.0);
+        test::check (std::abs (w->arrange.zoom - 160.0) < 1e-6
+                         && std::abs (w->arrange.clipBounds ({ 0, 0 }).getX() - (ArrangeView::kHeaderWidth - 160)) <= 1,
+                     "zoomBy anchors on visible playhead");
+
+        w->arrange.scrollTo (48000);
+        w->arrange.zoom = 80.0;
+        w->seek (0);       // off-screen to the left
+        const double timelineW = (double) (w->arrange.getWidth() - ArrangeView::kHeaderWidth);
+        const double centerSample = 48000.0 + (timelineW * 0.5) / (80.0 / 48000.0);
+        w->zoomBy (2.0);
+        const double newPps = 160.0 / 48000.0;
+        const double expectedScroll = centerSample - (timelineW * 0.5) / newPps;
+        const int expectedClipX = ArrangeView::kHeaderWidth + juce::roundToInt (-expectedScroll * newPps);
+        test::check (std::abs (w->arrange.clipBounds ({ 0, 0 }).getX() - expectedClipX) <= 1,
+                     "zoomBy anchors on viewport center when playhead is off-screen");
+
+        // 3) hitFadeIn / hitFadeOut at 0 do not swallow trimStart / trimEnd at the 6 px clip edge, drag-create fades, clipMenu fade actions, and hover cursors
+        w->editor.setSnap (false);
+        w->arrange.scrollTo (0);
+        w->arrange.zoom = ArrangeView::kDefaultZoom;
+        w->refreshNow();
+        const auto cb = w->arrange.clipBounds ({ 0, 0 });
+        const juce::Point<int> topEdgeLeft { cb.getX() + 2, cb.getY() + 2 };
+        const juce::Point<int> topEdgeRight { cb.getRight() - 2, cb.getY() + 2 };
+        const juce::Point<int> fadeZeroLeft { cb.getX() + 9, cb.getY() + 2 };
+        const juce::Point<int> fadeZeroRight { cb.getRight() - 9, cb.getY() + 2 };
+        test::check (! w->arrange.hitFadeIn ({ 0, 0 }, topEdgeLeft) && ! w->arrange.hitFadeOut ({ 0, 0 }, topEdgeRight),
+                     "hitFadeIn and hitFadeOut do not swallow the 6 px clip edge when fadeIn == 0 and fadeOut == 0");
+        test::check (w->arrange.hitFadeIn ({ 0, 0 }, fadeZeroLeft) && w->arrange.hitFadeOut ({ 0, 0 }, fadeZeroRight),
+                     "hitFadeIn and hitFadeOut hit inset top corner handles when fadeIn == 0 and fadeOut == 0");
+
+        // Clicking top-left 6 px edge trims start (not fadeIn), and clicking top-right 6 px edge trims end (not fadeOut)
+        w->arrange.mouseDown (mouseAt (w->arrange, topEdgeLeft));
+        w->arrange.mouseDrag (mouseAt (w->arrange, topEdgeLeft + juce::Point<int> (20, 0)));
+        w->arrange.mouseUp (mouseAt (w->arrange, topEdgeLeft + juce::Point<int> (20, 0)));
+        test::check (w->session.tracks[0]->clips[0].start > 0 && w->session.tracks[0]->clips[0].fadeIn == 0,
+                     "dragging top-left 6 px clip edge trims start instead of creating fadeIn");
+        w->editor.undo();
+        w->refreshNow();
+
+        const auto origLen = w->session.tracks[0]->clips[0].length;
+        w->arrange.mouseDown (mouseAt (w->arrange, topEdgeRight));
+        w->arrange.mouseDrag (mouseAt (w->arrange, topEdgeRight - juce::Point<int> (20, 0)));
+        w->arrange.mouseUp (mouseAt (w->arrange, topEdgeRight - juce::Point<int> (20, 0)));
+        test::check (w->session.tracks[0]->clips[0].length < origLen && w->session.tracks[0]->clips[0].fadeOut == 0,
+                     "dragging top-right 6 px clip edge trims end instead of creating fadeOut");
+        w->editor.undo();
+        w->refreshNow();
+
+        w->arrange.mouseMove (mouseAt (w->arrange, fadeZeroLeft));
+        test::check (w->arrange.getMouseCursor() == juce::MouseCursor::LeftRightResizeCursor,
+                     "hovering fade handle shows LeftRightResizeCursor");
+        w->arrange.mouseMove (mouseAt (w->arrange, cb.getCentre()));
+        test::check (w->arrange.getMouseCursor() == juce::MouseCursor::NormalCursor,
+                     "hovering clip body shows NormalCursor");
+
+        w->arrange.mouseDown (mouseAt (w->arrange, fadeZeroLeft));
+        w->arrange.mouseDrag (mouseAt (w->arrange, fadeZeroLeft + juce::Point<int> (40, 0)));
+        w->arrange.mouseUp (mouseAt (w->arrange, fadeZeroLeft + juce::Point<int> (40, 0)));
+        test::check (w->session.tracks[0]->clips[0].fadeIn > 0, "dragging inset top-left fade handle from 0 creates fadeIn");
+
+        w->arrange.openClipActionForTest ({ 0, 0 }, 9);
+        test::check (w->session.tracks[0]->clips[0].fadeIn == 24000, "clipMenu Fade in (0.5 s) sets 24000 samples at 48 kHz");
+        w->arrange.openClipActionForTest ({ 0, 0 }, 10);
+        test::check (w->session.tracks[0]->clips[0].fadeOut == 24000, "clipMenu Fade out (0.5 s) sets 24000 samples at 48 kHz");
+        w->arrange.openClipActionForTest ({ 0, 0 }, 11);
+        test::check (w->session.tracks[0]->clips[0].fadeIn == 0 && w->session.tracks[0]->clips[0].fadeOut == 0,
+                     "clipMenu Clear fades resets both fades to 0");
+
+        // 4) Alt+Click in empty lane space seeks the playhead
+        w->editor.setSnap (false);
+        const auto now = juce::Time::getCurrentTime();
+        const juce::Point<int> emptyLane { ArrangeView::kHeaderWidth + 160, ArrangeView::kRulerHeight + ArrangeView::kLoopHeight + ArrangeView::kMarkerHeight + 140 };
+        w->arrange.mouseDown (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), emptyLane.toFloat(),
+                                                juce::ModifierKeys (juce::ModifierKeys::altModifier), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                &w->arrange, &w->arrange, now, emptyLane.toFloat(), now, 1, false));
+        test::check (std::abs (w->position() - 96000) <= 1000, "Alt+Click in empty lane space seeks playhead");
+
+        // 5) trackAt returns -1 in the bottom scroll strip (no hit/drop on occluded tracks)
+        const auto scrollWav = makeWav ("strip_drop.wav", 48000).getFullPathName();
+        while ((int) w->session.tracks.size() * ArrangeView::kLaneHeight
+               <= w->arrange.getHeight() - ArrangeView::kRulerHeight - ArrangeView::kLoopHeight - ArrangeView::kMarkerHeight)
+            w->addTracks ({ scrollWav });
+        w->refreshNow();
+        const int tracksBeforeDrop = (int) w->session.tracks.size();
+        const int stripY = w->arrange.getHeight() - ArrangeView::kScrollStripHeight / 2;
+        test::check (! w->arrange.clipAt ({ ArrangeView::kHeaderWidth + 20, stripY }).valid(),
+                     "clipAt over bottom scroll strip returns invalid even when tracks extend underneath");
+        w->arrange.filesDropped ({ scrollWav }, ArrangeView::kHeaderWidth + 20, stripY);
+        test::check ((int) w->session.tracks.size() == tracksBeforeDrop + 1,
+                     "filesDropped over bottom scroll strip creates a new track instead of targeting occluded track");
+    }
+
     tempFolder().deleteRecursively();
     return test::finish ("OlympusUiCheck");
 }
