@@ -357,7 +357,12 @@ public:
     void openLastProjectAtStart();
     double monitorLatencyMs() const;                           // the chain's latency in ms at the device's rate (0 when bypassed)
     mutable int monitorLatencyCacheSamples = 0;                // the last latency read with the lock (kept while a render or a busy lock)
+    mutable juce::uint64 monitorLatencyCacheRevision = 0;
     mutable std::vector<ui::Note> notesCache;                  // the last notes read with the lock (kept while a render or a busy lock)
+    mutable juce::uint64 cachedNotesRevision = 0;
+    mutable AdviceDevice cachedNotesAdvice;
+    mutable bool cachedNotesSuiteOnly = false;
+    mutable int cachedNotesCatalogCount = -1;
 
     bool keyPressed (const juce::KeyPress& key) override;
     void paint (juce::Graphics&) override;
@@ -392,6 +397,8 @@ public:
     void setFilesOpeningForChecks (bool opening) { recordStarting = opening; }
     // Checks only: the scan's state, so the empty-scan note can be checked while a scan is queued or running.
     void setScanStateForChecks (bool queued, bool running) { scanQueued = queued; scanning = running; }
+    void runTimerForChecks() { timerCallback(); }
+    void expireAutosaveForChecks() { lastAutosaveMs = -1.0e9; }
     juce::Rectangle<int> positionBox;                // the position read-out (bars.beats.ticks and mm:ss.ss)
     // the MONITOR strip: one button per plugin of the monitor chain, '+', the CORRECTION switch and the chain's latency
     juce::Rectangle<int> monitorStrip;
@@ -519,6 +526,7 @@ private:
     float masterHoldDb = -100.0f;
     double masterHoldMs = -1.0e9;
     bool clipLatched = false;
+    juce::uint64 lastMasterRevision = 0;
     std::unique_ptr<Editor::Gesture> masterGesture;
     void updateMasterFader();                       // the fader follows the session (undo, a project): not while it is dragged
 };

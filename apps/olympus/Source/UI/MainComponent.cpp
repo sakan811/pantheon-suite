@@ -736,10 +736,32 @@ std::vector<ui::Note> MainComponent::notes() const
     advice.scanning = scanning || scanQueued;
     monitorLatencyMs();   // refreshes the cache with a try-lock (never waits: notes() runs in paint)
     advice.monitorLatencySamples = monitorLatencyCacheSamples;
+    const auto rev = session.revision.load (std::memory_order_acquire);
+    const bool suiteOnly = session.catalog.suiteOnly();
+    const int catalogCount = session.catalog.names().size();
+    const bool cacheValid = cachedNotesRevision != 0
+        && rev == cachedNotesRevision
+        && advice.running == cachedNotesAdvice.running
+        && juce::exactlyEqual (advice.rate, cachedNotesAdvice.rate)
+        && advice.inputs == cachedNotesAdvice.inputs
+        && juce::exactlyEqual (advice.roundTripMs, cachedNotesAdvice.roundTripMs)
+        && advice.monitorProblem == cachedNotesAdvice.monitorProblem
+        && advice.monitorSkipped == cachedNotesAdvice.monitorSkipped
+        && advice.projectSkipped == cachedNotesAdvice.projectSkipped
+        && advice.scanning == cachedNotesAdvice.scanning
+        && advice.monitorLatencySamples == cachedNotesAdvice.monitorLatencySamples
+        && suiteOnly == cachedNotesSuiteOnly
+        && catalogCount == cachedNotesCatalogCount;
+    if (isPlaying() && cacheValid && ! notesCache.empty())
+        return notesCache;
     const juce::ScopedTryLock sl (session.lock);
     if (sl.isLocked() && ! session.renderRunning())
     {
         notesCache = adviceFor (session, advice);
+        cachedNotesRevision = rev;
+        cachedNotesAdvice = advice;
+        cachedNotesSuiteOnly = suiteOnly;
+        cachedNotesCatalogCount = catalogCount;
         return notesCache;
     }
     // The lock is busy or a render runs: what was read with the lock last time, even when that is nothing. adviceFor reads the tracks, the
@@ -1286,9 +1308,13 @@ void MainComponent::updateMasterFader()
 {
     if (masterFader.isMouseButtonDown())
         return;
+    const auto rev = session.revision.load (std::memory_order_acquire);
+    if (rev == lastMasterRevision)
+        return;
     const juce::ScopedTryLock sl (session.lock);
     if (! sl.isLocked())
         return;
+    lastMasterRevision = rev;
     // within 0.05 dB is the same gain: the slider snaps to its interval (0.01), and a tighter test would set it again on every tick
     if (std::abs (masterFader.getValue() - (double) session.masterDb) > 0.05)
     {
@@ -2189,15 +2215,20 @@ void MainComponent::monitorEditorClosed (const Slot* slot)
 double MainComponent::monitorLatencyMs() const
 {
     const double rate = device.running && device.rate > 0.0 ? device.rate : (session.sampleRate > 0.0 ? session.sampleRate : 48000.0);
-    // Paint and the timer read this: they never wait for Session::lock (a render holds it for its whole run). The lock is tried, and the
-    // last value is kept while it is busy or a render runs (Session::monitorLatency takes it blocking, so it is not called here).
-    const juce::ScopedTryLock sl (session.lock);
-    if (sl.isLocked() && ! session.renderRunning())
+    // Paint and the timer read this: they never wait for Session::lock (a render holds it for its whole run). Only re-read under a try-lock
+    // when session.revision changed; keep the last value while the lock is busy or a render runs.
+    const auto rev = session.revision.load (std::memory_order_acquire);
+    if (rev != monitorLatencyCacheRevision)
     {
-        int sum = 0;
-        if (! session.monitorBypass)
-            for (auto& s : session.monitor) sum += s->latency();
-        monitorLatencyCacheSamples = sum;
+        const juce::ScopedTryLock sl (session.lock);
+        if (sl.isLocked() && ! session.renderRunning())
+        {
+            int sum = 0;
+            if (! session.monitorBypass)
+                for (auto& s : session.monitor) sum += s->latency();
+            monitorLatencyCacheSamples = sum;
+            monitorLatencyCacheRevision = rev;
+        }
     }
     return 1000.0 * (double) monitorLatencyCacheSamples / rate;
 }
@@ -2568,24 +2599,29 @@ void MainComponent::timerCallback()
     if (rendering)
         return;
     updateTransport();
-    // the autosave: every kAutosaveInterval seconds, the project is written beside its file if it has changes (autosaveNow)
-    if (juce::Time::getMillisecondCounterHiRes() - lastAutosaveMs >= kAutosaveInterval * 1000.0)
+    // the autosave: every kAutosaveInterval seconds, the project is written beside its file if it has changes (autosaveNow); deferred
+    // during playback or recording so disk IO and Session::lock never contend with the audio callback.
+    if (! isPlaying() && ! recorder.isRecording()
+        && juce::Time::getMillisecondCounterHiRes() - lastAutosaveMs >= kAutosaveInterval * 1000.0)
     {
         lastAutosaveMs = juce::Time::getMillisecondCounterHiRes();
         autosaveNow();
     }
     // A plugin edited in its own window changes the project: notice it by what the plugins would save. Read every 15 ticks while a track
-    // plugin window is open, and once more when the last one closes (so an edit made just before the close is not lost). The plugins are read
-    // under the lock, which is only tried: processBlock may run beside it, and a busy lock is looked at again on the next tick.
-    const bool closing = ! hasOpenTrackEditor();
-    if (! (closing ? lastEditorHash == 0 : (++tick % 15 != 0)))
+    // plugin window is open, and once more when the last one closes (so an edit made just before the close is not lost). Skipped while
+    // playing or recording so getStateInformation and Session::lock do not disturb real-time audio.
+    if (! isPlaying() && ! recorder.isRecording())
     {
-        const juce::ScopedTryLock sl (session.lock);
-        if (sl.isLocked())
+        const bool closing = ! hasOpenTrackEditor();
+        if (! (closing ? lastEditorHash == 0 : (++tick % 15 != 0)))
         {
-            const auto hash = trackPluginStateHash();
-            if (lastEditorHash != 0 && hash != lastEditorHash) session.dirty = true;
-            lastEditorHash = closing ? 0 : hash;
+            const juce::ScopedTryLock sl (session.lock);
+            if (sl.isLocked())
+            {
+                const auto hash = trackPluginStateHash();
+                if (lastEditorHash != 0 && hash != lastEditorHash) session.dirty = true;
+                lastEditorHash = closing ? 0 : hash;
+            }
         }
     }
     if (++externalCheckTick >= 15)
