@@ -109,7 +109,8 @@ PluginWindow::PluginWindow (const juce::String& title, juce::AudioProcessorEdito
 // ---- audio -------------------------------------------------------------------------------------------------------------------
 // The callback plays the session block by block. A block never crosses the loop's end: it is cut there, and the rest comes from the
 // loop's start. Without a loop the playback stops at the end of the audio (the longest track, and the latency of its chains). While a take
-// runs, neither happens: the loop does not wrap and the playhead goes on past the end of the audio.
+// runs, neither happens: the loop does not wrap and the playhead goes on past the end of the audio. The click with no audio has no end to
+// stop at either: it runs free until the click goes off.
 void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
 {
     if (! playing.load())
@@ -119,6 +120,7 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
     }
     const bool recording = owner.recorder.isRecording();
     const juce::int64 start = loopStart.load(), end = loopEnd.load(), audioEnd = endOfAudio.load();
+    const bool clickOnly = metronomeOn.load() && audioEnd <= 0;
     const bool wrap = ! recording && loopOn.load() && end > start;
     juce::int64 pos = position.load();
     const juce::int64 loaded = pos;
@@ -127,12 +129,12 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
     {
         if (wrap && pos >= end)
             pos = start;
-        else if (! wrap && ! recording && pos >= audioEnd)
+        else if (! wrap && ! recording && ! clickOnly && pos >= audioEnd)
         {
             playing = false;
             break;
         }
-        const juce::int64 room = wrap ? end - pos : recording ? (juce::int64) info.numSamples : audioEnd - pos;
+        const juce::int64 room = wrap ? end - pos : (recording || clickOnly) ? (juce::int64) info.numSamples : audioEnd - pos;
         const int n = (int) juce::jmin ((juce::int64) juce::jmin (kBlockSize, info.numSamples - done), room);
         chunk.setSize (2, n, false, false, true);
         owner.session.processBlock (chunk, pos);
@@ -156,6 +158,11 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
 {
     if (owner.deviceStarting.load())
     {
+        // a take still runs (or its files are still opening) until the message thread ends it (applyDeviceStart): these frames are not
+        // written, so they are counted as skipped, like the ones that arrive while the take's files open, and the stop reports them with
+        // the rest of the missing head
+        if (owner.recorder.isRecording() || owner.recordStarting.load())
+            owner.recorder.countSkippedWhileOpening (n);
         if (out != nullptr && numOut > 0)
             for (int ch = 0; ch < numOut; ++ch)
                 if (out[ch] != nullptr)
@@ -179,11 +186,31 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
             for (int ch = 0; ch < numOut; ++ch)
                 if (out[ch] != nullptr)
                     juce::FloatVectorOperations::clear (out[ch], n);
-        const juce::SpinLock::ScopedTryLockType sl (scratchLock);
-        if (sl.isLocked() && n <= scratch.getNumSamples())
+        // the transport runs in chunks of the prepared scratch, so a block bigger than it still advances the playhead (and the take's
+        // start with it). A chunk whose scratch lock is missed advances the position alone while playing, with the same compare-exchange
+        // the block's end uses: a seek that landed meanwhile stands and this advance is dropped. No allocation, and the lock is never held
+        // across chunks.
+        for (int offset = 0; offset < n;)
         {
-            juce::AudioSourceChannelInfo info (&scratch, 0, n);
-            owner.source.getNextAudioBlock (info);
+            const juce::SpinLock::ScopedTryLockType sl (scratchLock);
+            const int cap = sl.isLocked() ? scratch.getNumSamples() : 0;
+            if (cap > 0)
+            {
+                const int chunk = juce::jmin (n - offset, cap);
+                juce::AudioSourceChannelInfo info (&scratch, 0, chunk);
+                owner.source.getNextAudioBlock (info);   // advances the position itself
+                offset += chunk;
+            }
+            else
+            {
+                const int chunk = juce::jmin (n - offset, kBlockSize);
+                if (owner.source.playing.load())   // a stopped transport does not advance, as in the hit branch's getNextAudioBlock
+                {
+                    juce::int64 expected = owner.source.position.load();
+                    owner.source.position.compare_exchange_strong (expected, expected + chunk);
+                }
+                offset += chunk;
+            }
         }
         return;
     }
@@ -993,8 +1020,8 @@ void MainComponent::stopRecording (const juce::String& problem)
         return;
     source.playing = false;
     const auto takes = recorder.stop();
-    // where the take really began (the playhead of the first block it wrote, which stop() waited for) and how much of its head never got
-    // written because the files were still opening. The first is -1 when no block ran, the second 0 when the window cost nothing.
+    // where the take really began (the playhead of its first block, which stop() waited for) and how much of its head never got written
+    // because the files were still opening. The first is -1 when no block ran, the second 0 when the window cost nothing.
     const juce::int64 heard = recorder.takeStartSample();
     const juce::int64 headSkipped = recorder.samplesSkippedWhileOpening();
     finishRecordingTakes (takes, heard, headSkipped, problem);
@@ -1061,12 +1088,12 @@ void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>&
             : juce::String();
         problems.add (amount + where + " were lost because the disk could not keep up: the take is shorter by that much and what follows the loss sits that much early.");
     }
-    // the head the opening cost: those frames of input were never pushed to the takes, so the take begins where its first frame was written
-    // (named as a loss is, because it is one; nothing is padded in)
+    // the head the start cost (the files opening, or the device's start guard): those frames of input were never pushed to the takes, so
+    // the take begins where its first frame was written (named as a loss is, because it is one; nothing is padded in)
     if (headSkipped > 0)
     {
         const double ms = device.rate > 0.0 ? 1000.0 * (double) headSkipped / device.rate : 0.0;
-        problems.add (juce::String (headSkipped) + " samples (" + juce::String (ms, 0) + " ms) at the head of the take were not written while the files opened: the take begins where its first frame was written.");
+        problems.add (juce::String (headSkipped) + " samples (" + juce::String (ms, 0) + " ms) at the head of the take were not written before the take could run: the take begins where its first frame was written.");
     }
     if (problem.isNotEmpty()) problems.add (problem);
     if (problems.size() > 0)
@@ -1329,6 +1356,7 @@ void MainComponent::toggleLoop()
 void MainComponent::toggleMetronome()
 {
     editor.setMetronome (! session.metronomeOn);
+    syncTransport();   // the callback's copy of the click follows the switch, so a click-only playback stops when it goes off
     updateTransport();
 }
 
@@ -1436,6 +1464,7 @@ void MainComponent::syncTransport()
     source.loopOn = session.loopOn;
     source.loopStart = session.loopStart;
     source.loopEnd = session.loopEnd;
+    source.metronomeOn = session.metronomeOn;
     source.endOfAudio = session.length() + session.maxLatency();
 }
 

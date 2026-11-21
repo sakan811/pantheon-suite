@@ -2735,7 +2735,7 @@ int main()
             test::check (clips.size() == 1 && clips[0].start == 6800 && clips[0].length == 2400,
                          test::fmt ("the take begins where its first frame was written (6800, not the 4800 REC was pressed at): %d clips, start %d, length %d",
                                     (int) clips.size(), clips.empty() ? -1 : (int) clips[0].start, clips.empty() ? -1 : (int) clips[0].length));
-            test::check (gErrors.size() == 1 && gErrors[0].contains ("2000 samples") && gErrors[0].contains ("were not written while the files opened"),
+            test::check (gErrors.size() == 1 && gErrors[0].contains ("2000 samples") && gErrors[0].contains ("were not written before the take could run"),
                          "and the head the opening cost is reported with its length: " + (gErrors.empty() ? juce::String ("<nothing>") : gErrors[0]));
         }
 
@@ -3027,6 +3027,159 @@ int main()
         test::check (w->arrange.markerAtForTest ({ ArrangeView::kHeaderWidth + 10, markerY }) == 0
                          && w->arrange.markerAtForTest ({ ArrangeView::kHeaderWidth + 200, markerY }) == -1,
                      "a marker is grabbable where its name is drawn, not over the blank lane past it");
+    }
+
+    // [44] The click with no audio: an empty track plays while the metronome is on (the transport's copy follows the switch), the click is
+    // heard, and turning it off stops the playback at the empty audio's end. With audio, the click does not move the end.
+    {
+        const auto dir44 = tempFolder().getChildFile ("click-only");
+        dir44.deleteRecursively();
+        dir44.createDirectory();
+        auto w = makeWindow (true, dir44.getChildFile ("settings.xml"));
+        w->session.addEmptyTrack ("Click");
+        press (w->metronomeButton);
+        test::check (w->session.metronomeOn, "the click is on");
+        w->togglePlay();
+        test::check (w->isPlaying(), "an empty track plays with the click on");
+        juce::AudioBuffer<float> block (2, 512);
+        w->renderAudioBlock (block);
+        test::check (w->isPlaying() && w->position() == 512, "the click-only block advances the playhead and keeps playing");
+        test::check (block.getMagnitude (0, 0, 512) > 0.1f, "and the click is heard in it");
+        w->renderAudioBlock (block);
+        test::check (w->isPlaying() && w->position() == 1024, "a second block runs on past where the audio would end");
+        press (w->metronomeButton);
+        test::check (! w->session.metronomeOn, "the click is off");
+        w->renderAudioBlock (block);
+        test::check (! w->isPlaying(), "with the click off, the empty audio's end stops the playback");
+        w->togglePlay();
+        test::check (! w->isPlaying(), "and playing an empty session with no click is refused");
+    }
+    {
+        const auto dir44b = tempFolder().getChildFile ("click-end");
+        dir44b.deleteRecursively();
+        dir44b.createDirectory();
+        auto w = makeWindow (true, dir44b.getChildFile ("settings.xml"));
+        w->addTracks ({ makeWav ("click-end.wav").getFullPathName() });
+        press (w->metronomeButton);
+        const auto end = w->session.length() + w->session.maxLatency();
+        w->seek (end - 100);
+        w->togglePlay();
+        juce::AudioBuffer<float> block (2, 512);
+        w->renderAudioBlock (block);
+        test::check (! w->isPlaying() && w->position() == end, "with audio and the click on, playing still stops at the end of the audio");
+    }
+
+    // [45] A device with no outputs: a block bigger than the prepared scratch still advances the playhead by all of it (in scratch-sized
+    // chunks), and the take's start and frames follow; a null output channel on an oversized block advances too, its live channel cleared;
+    // the scratch-miss path advances only a playing transport.
+    {
+        const auto dir45 = tempFolder().getChildFile ("no-out-big");
+        dir45.deleteRecursively();
+        dir45.createDirectory();
+        auto w = makeWindow (true, dir45.getChildFile ("settings.xml"));
+        juce::String error;
+        w->session.addEmptyTrack ("Mic");
+        test::check (w->session.setTrackArm (0, true, error) && w->session.setTrackInput (0, 0, -1, error), "a track armed on input 1");
+        w->setDeviceForTest (fakeDevice (48000.0, 0, 0));   // the scratch is 256 samples
+        w->seek (0);
+        test::check (w->startRecording(), "REC starts");
+        std::vector<float> in (1000, 0.25f);
+        const float* inPtr[1] = { in.data() };
+        w->io.deviceBlock (inPtr, 1, nullptr, 0, 1000);      // four times the scratch
+        test::check (w->position() == 1000, "a no-output block bigger than the scratch advances the playhead by all of it: " + juce::String ((int) w->position()));
+        w->stopRecording();
+        const auto& clips = w->session.tracks[0]->clips;
+        test::check (clips.size() == 1 && clips[0].start == 0 && clips[0].length == 1000,
+                     "and the take holds every frame of it, from where the playhead was");
+    }
+    {
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("null-big.wav", 48000).getFullPathName() });
+        w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+        w->togglePlay();
+        std::vector<float> in (1000, 0.0f), out0 (1000, 1.0f);
+        const float* inPtr[1] = { in.data() };
+        float* outPtr[2] = { out0.data(), nullptr };
+        const juce::int64 before = w->position();
+        w->io.deviceBlock (inPtr, 1, outPtr, 2, 1000);
+        test::check (w->position() == before + 1000, "a null output channel on an oversized block still advances the transport");
+        bool silent = true;
+        for (float v : out0)
+            silent = silent && v == 0.0f;
+        test::check (silent, "and the channel that is not null is cleared");
+    }
+    {
+        // the scratch-miss path, forced without contention: no device was set, so the scratch is empty and every chunk misses it. A
+        // stopped transport does not advance the playhead there (as in the hit branch), a playing one still does.
+        auto w = makeWindow();
+        w->addTracks ({ makeWav ("miss-path.wav").getFullPathName() });
+        std::vector<float> in (1000, 0.0f);
+        const float* inPtr[1] = { in.data() };
+        const juce::int64 before = w->position();
+        w->io.deviceBlock (inPtr, 1, nullptr, 0, 1000);
+        test::check (w->position() == before, "a stopped transport does not advance on the scratch-miss path");
+        w->togglePlay();
+        w->io.deviceBlock (inPtr, 1, nullptr, 0, 1000);
+        test::check (w->position() == before + 1000, "a playing transport still advances on it");
+    }
+
+    // [46] A device start while a take runs: the blocks the silent-output guard holds are neither written nor lost uncounted — they are
+    // counted as skipped, and the stop the start lands reports them with their length. The same while the take's files are still opening
+    // (recording not up yet): the two guards together still count every held block.
+    {
+        const auto dir46 = tempFolder().getChildFile ("start-skips");
+        dir46.deleteRecursively();
+        dir46.createDirectory();
+        auto w = makeWindow (true, dir46.getChildFile ("settings.xml"));
+        juce::String error;
+        w->session.addEmptyTrack ("Mic");
+        test::check (w->session.setTrackArm (0, true, error) && w->session.setTrackInput (0, 0, -1, error), "a track armed on input 1");
+        w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+        test::check (w->startRecording(), "REC starts");
+        std::vector<float> in (256, 0.25f), out0 (256, 0.0f), out1 (256, 0.0f);
+        const float* inPtr[1] = { in.data() };
+        float* outPtr[2] = { out0.data(), out1.data() };
+        w->io.deviceBlock (inPtr, 1, outPtr, 2, 256);   // one block written
+        // the device's own thread announces a change: the silent guard goes up, the message thread has not applied the start yet
+        std::thread worker ([&] { w->io.audioDeviceAboutToStart (nullptr); });
+        worker.join();
+        test::check (w->isRecording(), "the take still runs while the start waits for the message thread");
+        w->io.deviceBlock (inPtr, 1, outPtr, 2, 256);
+        w->io.deviceBlock (inPtr, 1, outPtr, 2, 256);   // two blocks the guard holds: not written, counted
+        test::check (w->recorderForChecks().samplesSkippedWhileOpening() == 512,
+                     "the frames the silent guard held are counted as skipped: " + juce::String ((int) w->recorderForChecks().samplesSkippedWhileOpening()));
+        gErrors.clear();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);   // the start lands and ends the take
+        test::check (! w->isRecording(), "the device change ended the take");
+        const auto& clips = w->session.tracks[0]->clips;
+        test::check (clips.size() == 1 && clips[0].length == 256, "the take keeps what was written before the change");
+        test::check (! gErrors.empty() && gErrors.back().contains ("512 samples") && gErrors.back().contains ("were not written before the take could run"),
+                     "and the stop reports the held frames with their length: " + (gErrors.empty() ? juce::String ("<nothing>") : gErrors.back()));
+    }
+    {
+        // a device start while the take's files are still opening: recording is not up yet (Recorder::start sets it only after the files
+        // open), so the silent guard must count the held blocks itself, not leave them to the opening guard its early return hides
+        const auto dir46b = tempFolder().getChildFile ("start-skips-opening");
+        dir46b.deleteRecursively();
+        dir46b.createDirectory();
+        auto w = makeWindow (true, dir46b.getChildFile ("settings.xml"));
+        juce::String error;
+        w->session.addEmptyTrack ("Mic");
+        test::check (w->session.setTrackArm (0, true, error) && w->session.setTrackInput (0, 0, -1, error), "a track armed on input 1");
+        w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+        w->setFilesOpeningForChecks (true);   // the files are still opening: no take runs yet
+        std::thread worker ([&] { w->io.audioDeviceAboutToStart (nullptr); });
+        worker.join();
+        test::check (! w->isRecording(), "no take runs yet while the files open");
+        std::vector<float> in (256, 0.25f), out0 (256, 0.0f), out1 (256, 0.0f);
+        const float* inPtr[1] = { in.data() };
+        float* outPtr[2] = { out0.data(), out1.data() };
+        w->io.deviceBlock (inPtr, 1, outPtr, 2, 256);
+        w->io.deviceBlock (inPtr, 1, outPtr, 2, 256);   // two blocks both guards hold: counted, not dropped between them
+        test::check (w->recorderForChecks().samplesSkippedWhileOpening() == 512,
+                     "the frames held while the files open and the device starts are counted as skipped: " + juce::String ((int) w->recorderForChecks().samplesSkippedWhileOpening()));
+        w->setFilesOpeningForChecks (false);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);   // the start lands (no take to end)
     }
 
     tempFolder().deleteRecursively();

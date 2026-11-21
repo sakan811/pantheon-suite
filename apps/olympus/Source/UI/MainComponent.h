@@ -246,7 +246,7 @@ public:
     void seek (juce::int64 sample);
     juce::int64 position() const { return source.position.load(); }
     bool isPlaying() const { return source.playing.load(); }
-    // Copies what the audio thread needs (the loop, the end of the audio) from the session. Message thread; the timer does it too.
+    // Copies what the audio thread needs (the loop, the click, the end of the audio) from the session. Message thread; the timer does it too.
     void syncTransport();
     // What the audio callback does for one block: the same code, so the checks can drive the loop and the end of the audio.
     void renderAudioBlock (juce::AudioBuffer<float>& buffer) { juce::AudioSourceChannelInfo info (&buffer, 0, buffer.getNumSamples()); source.getNextAudioBlock (info); }
@@ -388,8 +388,8 @@ public:
     ArrangeView arrange { session, editor };
 
 private:
-    // The audio callback's copy of the transport: the playhead, the loop and the end of the audio. The callback reads and writes only these.
-    // (Where a take began is the recorder's, Recorder::push decides it with the write itself.)
+    // The audio callback's copy of the transport: the playhead, the loop, the click and the end of the audio. The callback reads and writes
+    // only these. (Where a take began is the recorder's, Recorder::push decides it with the write itself.)
     struct Source
     {
         explicit Source (MainComponent& m) : owner (m) {}
@@ -398,6 +398,7 @@ private:
         std::atomic<juce::int64> position { 0 };
         std::atomic<bool> playing { false };
         std::atomic<bool> loopOn { false };
+        std::atomic<bool> metronomeOn { false };
         std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 }, endOfAudio { 0 };
         juce::AudioBuffer<float> chunk { 2, kBlockSize };
     };
