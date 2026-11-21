@@ -49,8 +49,7 @@ struct Settings
     {
         if (! pedal.existsAsFile())
             return false;
-        pedal.deleteFile();
-        return true;
+        return pedal.deleteFile();
     }
 
     static Settings load (const juce::File& file = defaultFile())
@@ -61,7 +60,8 @@ struct Settings
         if (auto xml = juce::parseXML (file); xml != nullptr && xml->hasTagName ("OlympusSettings"))
         {
             for (auto* f : xml->getChildWithTagNameIterator ("PluginFolder"))
-                s.pluginFolders.addIfNotAlreadyThere (f->getStringAttribute ("path"));
+                if (const auto path = f->getStringAttribute ("path"); path.trim().isNotEmpty())
+                    s.pluginFolders.addIfNotAlreadyThere (path);
             s.lastProject = xml->getStringAttribute ("lastProject");
             s.scanSuiteOnly = xml->getBoolAttribute ("scanSuiteOnly", false);
             s.extraLatencySamples = juce::jlimit (0, 1000000, xml->getIntAttribute ("extraLatency", 0));

@@ -8,6 +8,9 @@
 #include "Settings.h"
 
 #include <functional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 // The plugins Olympus can put on a stem: every VST3 bundle the folders hold (and every Audio Unit on macOS), read when the catalog is scanned and
 // loaded at run time. Nothing here is linked against a plugin, so the dependency still points one way: Olympus never links a plugin's code.
@@ -160,12 +163,19 @@ public:
 
             const auto candidates = candidatesFor (format, extra, options.includeSystem, options.suiteOnly);
             // a plugin no longer where it was (or, with a rescan, every one of this format) is taken out before it is read again
+            std::unordered_set<std::string> candidateSet;
+            if (! options.rescan)
+            {
+                candidateSet.reserve ((size_t) candidates.size());
+                for (const auto& c : candidates)
+                    candidateSet.insert (c.toStdString());
+            }
             const bool filterSuite = suiteOnlyMode || options.suiteOnly;
             const auto types = list.getTypes();
             for (const auto& t : types)
                 if (t.pluginFormatName == format.getName()
                     && (! filterSuite || suiteNames().contains (t.name))
-                    && (options.rescan || ! candidates.contains (t.fileOrIdentifier)))
+                    && (options.rescan || candidateSet.count (t.fileOrIdentifier.toStdString()) == 0))
                     list.removeType (t);
 
             juce::PluginDirectoryScanner scanner (list, format, juce::FileSearchPath(), false, options.deadMansPedal, false);
@@ -347,8 +357,14 @@ private:
             juce::Array<juce::File> bundles;
             for (int i = 0; i < path.getNumPaths(); ++i)
                 findBundles (path[i], 0, bundles);
+            std::unordered_set<std::string> seen;
+            seen.reserve ((size_t) bundles.size());
             for (const auto& bundle : bundles)
-                out.addIfNotAlreadyThere (bundle.getFullPathName());
+            {
+                const auto p = bundle.getFullPathName();
+                if (seen.insert (p.toStdString()).second)
+                    out.add (p);
+            }
         }
         else
         {
@@ -356,14 +372,14 @@ private:
         }
         const bool filterSuite = suiteOnlyMode || onlySuite;
         const bool isAu = format.getName() == "AudioUnit";
-        const auto currentTypes = list.getTypes();
+        const auto vst3Names = isAu ? vst3NameSet (list.getTypes()) : std::unordered_set<std::string> {};
         juce::StringArray kept;
         for (const auto& c : out)
         {
             const auto candidateName = candidatePluginName (format, c);
             if (filterSuite && ! suiteNames().contains (candidateName) && ! suiteNames().contains (format.getNameOfPluginFromIdentifier (c)))
                 continue;
-            if (isAu && candidateName.isNotEmpty() && hasVst3Named (currentTypes, candidateName))
+            if (isAu && candidateName.isNotEmpty() && vst3Names.count (candidateName.toLowerCase().toStdString()) > 0)
                 continue;
             kept.add (c);
         }
@@ -379,35 +395,51 @@ private:
         for (const auto& i : internals)
             all.add (i.description);
         const auto scanned = list.getTypes();
+        const auto vst3Names = vst3NameSet (scanned);
+        struct ScannedKey
+        {
+            std::string name, maker, format;
+            bool operator== (const ScannedKey& o) const { return name == o.name && maker == o.maker && format == o.format; }
+        };
+        struct ScannedHash
+        {
+            size_t operator() (const ScannedKey& k) const
+            {
+                size_t h = std::hash<std::string>{} (k.name);
+                h ^= std::hash<std::string>{} (k.maker) + 0x9e3779b9u + (h << 6) + (h >> 2);
+                h ^= std::hash<std::string>{} (k.format) + 0x9e3779b9u + (h << 6) + (h >> 2);
+                return h;
+            }
+        };
+        std::unordered_set<ScannedKey, ScannedHash> seenScanned;
+        seenScanned.reserve ((size_t) scanned.size());
         for (const auto& t : scanned)
         {
             if (suiteOnlyMode && ! suiteNames().contains (t.name))
                 continue;
-            if (t.pluginFormatName == "AudioUnit" && hasVst3Named (scanned, t.name))
+            if (t.pluginFormatName == "AudioUnit" && vst3Names.count (t.name.toLowerCase().toStdString()) > 0)
                 continue;
-            bool copy = false;
-            for (int i = (int) internals.size(); i < all.size(); ++i)
-                copy = copy || (all.getReference (i).name == t.name && all.getReference (i).manufacturerName == t.manufacturerName
-                                && all.getReference (i).pluginFormatName == t.pluginFormatName);
-            if (! copy)
+            if (seenScanned.insert ({ t.name.toStdString(), t.manufacturerName.toStdString(), t.pluginFormatName.toStdString() }).second)
                 all.add (t);
         }
-        for (int i = 0; i < all.size(); ++i)
+        std::unordered_map<std::string, int> nameCounts;
+        nameCounts.reserve ((size_t) all.size());
+        for (const auto& d : all)
+            ++nameCounts[d.name.toStdString()];
+        for (const auto& d : all)
         {
-            const auto& d = all.getReference (i);
-            int same = 0;
-            for (int j = 0; j < all.size(); ++j)
-                same += all.getReference (j).name == d.name ? 1 : 0;
+            const int same = nameCounts[d.name.toStdString()];
             labels.add (same > 1 ? d.name + " (" + (d.manufacturerName.isNotEmpty() ? d.manufacturerName : d.pluginFormatName) + ")" : d.name);
         }
     }
 
-    static bool hasVst3Named (const juce::Array<juce::PluginDescription>& types, const juce::String& name)
+    static std::unordered_set<std::string> vst3NameSet (const juce::Array<juce::PluginDescription>& types)
     {
+        std::unordered_set<std::string> names;
         for (const auto& t : types)
-            if (t.pluginFormatName == "VST3" && t.name.equalsIgnoreCase (name))
-                return true;
-        return false;
+            if (t.pluginFormatName == "VST3")
+                names.insert (t.name.toLowerCase().toStdString());
+        return names;
     }
 
     // The .vst3 bundles under `dir`, not looking inside a bundle or a build's own dependency folders.
