@@ -289,7 +289,8 @@ public:
     }
 
     // The audio of a file, shared with every clip that plays it: a file already in the pool is not read again. The first file sets the
-    // session's rate (and tempo.sampleRate). Null, with the reason, if the file cannot be read.
+    // session's rate (and tempo.sampleRate) and prepares the tracks' plugins and their latency compensation for it, for addTrack and
+    // addClip alike. Null, with the reason, if the file cannot be read.
     std::shared_ptr<const juce::AudioBuffer<float>> loadPooled (const juce::File& file, juce::String& error)
     {
         double rate = 0.0;
@@ -302,7 +303,10 @@ public:
         {
             const juce::ScopedLock sl (lock);
             if (sampleRate <= 0.0)
+            {
                 setSampleRateLocked (rate);
+                prepareLocked (false); // every track's plugins at the new rate, and the latency compensation (addClip never prepares)
+            }
         }
         return audio;
     }
@@ -908,6 +912,7 @@ public:
     // buffer of the pool is resampled once (a buffer shared by clips stays shared), and every clip, marker and the loop is scaled to the new
     // rate in samples (so it keeps its seconds; a clip keeps at least one sample). Then every plugin of every track and the monitor chain
     // is set up again for the new rate. The undo steps are not converted: the window clears them. A rate that is the same changes nothing.
+    // A rate whose resampled length would overflow int is refused whole, before anything changes.
     bool adoptRate (double rate, juce::String& error)
     {
         if (! (rate > 0.0) || ! std::isfinite (rate)) { error = "The sample rate must be above zero."; return false; }
@@ -916,6 +921,23 @@ public:
             return true;
         const double old = sampleRate;
         const double k = old > 0.0 ? rate / old : 1.0;
+
+        // pre-flight: every clip's buffer must fit the resampler's length guard before anything changes, so a refused rate leaves the
+        // whole session as it was (a buffer kept at the old rate under a new one would be resampled down by the next adoptRate)
+        if (old > 0.0)
+            for (auto& t : tracks)
+                for (auto& c : t->clips)
+                {
+                    if (c.audio == nullptr)
+                        continue;
+                    const double wanted = std::ceil ((double) c.audio->getNumSamples() / (old / rate)); // the length resampled() would want
+                    if (! std::isfinite (wanted) || wanted > (double) (std::numeric_limits<int>::max() - 16))
+                    {
+                        error = "Clip '" + c.name + "' on track '" + t->name + "' cannot be resampled to " + juce::String (rate)
+                                + " Hz; the rate is unchanged.";
+                        return false;
+                    }
+                }
 
         // every distinct buffer of the clips, converted once; the old ones are kept alive until the clips are changed
         std::map<const juce::AudioBuffer<float>*, std::shared_ptr<const juce::AudioBuffer<float>>> converted;
@@ -966,6 +988,7 @@ public:
             m.start = scale (m.start);
         loopStart = scale (loopStart);
         loopEnd = scale (loopEnd);
+        loopOn = loopOn && loopEnd > loopStart; // a narrow loop can scale to equal ends: off then, as load() and Editor::setLoop keep it
 
         setSampleRateLocked (rate);  // also the tempo's rate, and the monitor chain
         prepareLocked (false);       // every plugin of every track
@@ -1121,7 +1144,7 @@ public:
         juce::int64 mixFlushed = 0;
 
         const juce::int64 end = stemLength + totalLatency;
-        juce::AudioBuffer<float> block (2, options.writeStems ? kBlockSize : 0);
+        juce::AudioBuffer<float> block (2, kBlockSize);
         struct HeadStop
         {
             Session& session;
@@ -1142,27 +1165,26 @@ public:
                 const juce::int64 last = juce::jmin ((juce::int64) n, stemLength + o.latency - start);
                 if (last <= first) continue;
                 const int count = (int) (last - first);
-                if (options.writeStems)
+                // the gained samples, sanitised once for both paths: the mix is the sum of the written stems, so a sample the gain pushes
+                // past float (or a plugin's NaN) is zeroed here, not in the sum, where it would take the other tracks' audio with it
+                block.setSize (2, count, false, false, true);
+                for (int ch = 0; ch < 2; ++ch)
                 {
-                    block.setSize (2, count, false, false, true);
-                    for (int ch = 0; ch < 2; ++ch)
-                    {
-                        block.copyFrom (ch, 0, o.track->scratch, ch, (int) first, count);
-                        block.applyGain (ch, 0, count, ch == 0 ? o.left : o.right);
-                        auto* dst = block.getWritePointer (ch);
-                        for (int i = 0; i < count; ++i)
-                            if (! std::isfinite (dst[i]))
-                                dst[i] = 0.0f;
-                        const float mag = block.getMagnitude (ch, 0, count);
-                        if (std::isfinite (mag))
-                            o.peak = juce::jmax (o.peak, mag);
-                    }
-                    if (o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count))
-                    {
-                        error = "Writing " + o.file.getFileName() + " failed.";
-                        discardRun();
-                        return false;
-                    }
+                    block.copyFrom (ch, 0, o.track->scratch, ch, (int) first, count);
+                    block.applyGain (ch, 0, count, ch == 0 ? o.left : o.right);
+                    auto* dst = block.getWritePointer (ch);
+                    for (int i = 0; i < count; ++i)
+                        if (! std::isfinite (dst[i]))
+                            dst[i] = 0.0f;
+                    const float mag = block.getMagnitude (ch, 0, count);
+                    if (std::isfinite (mag))
+                        o.peak = juce::jmax (o.peak, mag);
+                }
+                if (options.writeStems && o.writer != nullptr && ! o.writer->writeFromAudioSampleBuffer (block, 0, count))
+                {
+                    error = "Writing " + o.file.getFileName() + " failed.";
+                    discardRun();
+                    return false;
                 }
                 if (options.writeMix)
                 {
@@ -1172,10 +1194,9 @@ public:
                     const int s2 = count - s1;
                     for (int ch = 0; ch < 2; ++ch)
                     {
-                        const float g = ch == 0 ? o.left : o.right;
-                        mixRing.addFrom (ch, r0, o.track->scratch, ch, (int) first, s1, g);
+                        mixRing.addFrom (ch, r0, block, ch, 0, s1, 1.0f);
                         if (s2 > 0)
-                            mixRing.addFrom (ch, 0, o.track->scratch, ch, (int) first + s1, s2, g);
+                            mixRing.addFrom (ch, 0, block, ch, s1, s2, 1.0f);
                     }
                 }
             }
