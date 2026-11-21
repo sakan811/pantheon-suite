@@ -1526,6 +1526,7 @@ void ArrangeView::askText (const juce::String& title, const juce::String& prompt
         safe->dialogFlag() = false;
         if (accept && okCb) okCb (text);
     };
+    if (headlessDialogs) return;   // checks only: no native window; finishOpenDialogForTest ends the dialog
     auto* box = new juce::AlertWindow (title, prompt, juce::MessageBoxIconType::NoIcon);
     box->addTextEditor ("text", initial, {});
     box->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));

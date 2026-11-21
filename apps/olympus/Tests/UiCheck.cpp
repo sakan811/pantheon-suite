@@ -74,7 +74,8 @@ std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true, const juce::
         options.fillCatalog = [] (olympus::Catalog& catalog) { test::addTestPlugins (catalog); };
     auto w = std::make_unique<MainComponent> (options);
     w->setSize (MainComponent::kDesignWidth, MainComponent::kDesignHeight);
-    w->reportError = [] (const juce::String& m) { gErrors.push_back (m); };
+    w->arrange.headlessDialogs = true;   // no native AlertWindow: CI has no display
+    w->reportError =[] (const juce::String& m) { gErrors.push_back (m); };
     w->makeEditorWindow = [] (const juce::String&, juce::AudioProcessorEditor* editor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
     {
         gClosers.push_back (closed);
@@ -2014,6 +2015,7 @@ int main()
             {
                 ArrangeView tempArrange (w->session, w->editor);
                 tempArrange.dialogOpen = &sharedDialogOpen;
+                tempArrange.headlessDialogs = true;
                 tempArrange.openMarkerActionForTest (0, 1);
                 test::check (sharedDialogOpen && tempArrange.hasOpenDialog(), "tempArrange opened askText and set sharedDialogOpen");
             }

@@ -96,6 +96,9 @@ public:
     bool isInteracting() const;
 
     // Checks only: drive an open askText box (clip gain, rename clip, rename marker) without clicking its native modal buttons.
+    // With headlessDialogs on, askText opens no native box (a bare X server aborts on one) and only holds the dialog's state, which
+    // finishOpenDialogForTest ends; the checks set it.
+    bool headlessDialogs = false;
     bool hasOpenDialog() const { return activeDialog != nullptr || (bool) pendingDialogEnd; }
     void openClipActionForTest (ClipRef ref, int action) { clipAction (ref, action); }
     void openMarkerActionForTest (int index, int action) { markerAction (index, action); }
