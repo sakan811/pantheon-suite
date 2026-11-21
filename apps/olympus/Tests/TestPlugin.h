@@ -5,6 +5,8 @@
 
 #include "Catalog.h"
 
+#include <limits>
+
 // Plugins made in code for the tests, so the session, the render and the server are checked without a built plugin:
 // a gain with two presets, and the same with a latency (a delay that reports it, like a look-ahead limiter does).
 namespace test
@@ -13,6 +15,8 @@ class GainPlugin : public juce::AudioPluginInstance
 {
 public:
     double preparedRate = 0.0; // the rate of the last prepareToPlay (the rate checks read it)
+    bool emitNan = false;      // when set, one NaN at the start of every block it outputs (the render's sanitising checks); off by default
+    bool rateLatency = false;  // when set, the latency follows the prepared rate (preparedRate / 100 samples); off by default
     explicit GainPlugin (int latencyInSamples = 0) : GainPlugin (latencyInSamples > 0 ? "Test Delay" : "Test Gain", latencyInSamples) {}
     GainPlugin (const juce::String& pluginName, int latencyInSamples) : displayName (pluginName), latency (latencyInSamples)
     {
@@ -37,7 +41,15 @@ public:
         return d;
     }
 
-    void prepareToPlay (double rate, int) override { preparedRate = rate; ring.setSize (2, juce::jmax (1, latency)); ring.clear(); pos = 0; }
+    void prepareToPlay (double rate, int) override
+    {
+        preparedRate = rate;
+        if (rateLatency)
+            setLatencySamples ((int) (rate / 100.0)); // getLatencySamples is not virtual here: the rate-dependent latency is reported, not overridden
+        ring.setSize (2, juce::jmax (1, latency)); ring.clear(); pos = 0;
+    }
+    // Opt in while it sits in a chain: reports the latency of the rate it is prepared at now, and of every later prepare.
+    void useRateLatency() { rateLatency = true; setLatencySamples ((int) (preparedRate / 100.0)); }
     void releaseResources() override {}
     void reset() override { ring.clear(); pos = 0; }
     // A plugin that changes its latency while it runs (a linear-phase switch, say): it reports the change to its listeners, as
@@ -69,6 +81,8 @@ public:
             }
         }
         if (latency > 0) pos = (pos + b.getNumSamples()) % latency;
+        if (emitNan && b.getNumSamples() > 0)
+            b.setSample (0, 0, std::numeric_limits<float>::quiet_NaN());
     }
     using juce::AudioProcessor::processBlock;
 

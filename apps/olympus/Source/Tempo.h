@@ -220,7 +220,9 @@ public:
         const int beatIndex = std::clamp (static_cast<int> (std::floor (pos + kGridEps)), 0, beatsInBar - 1);
 
         BarBeat result;
-        result.bar = static_cast<int> (barIndex) + 1;
+        // barIndex is unbounded (a timeline position can be huge either way): saturate both ends before the cast so it cannot overflow int
+        result.bar = static_cast<int> (std::clamp (barIndex, static_cast<double> (std::numeric_limits<int>::min() + 1),
+                                                   static_cast<double> (std::numeric_limits<int>::max() - 1))) + 1;
         result.beat = beatIndex + 1;
         result.fraction = std::clamp (pos - beatIndex, 0.0, 1.0);
         return result;

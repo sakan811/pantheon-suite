@@ -38,7 +38,8 @@ juce::File tempFolder()
 }
 
 // A WAV of `channels` channels at `rate`: a sine (amplitude `level`, `freq`), or, with freq 0, one impulse of 0.5 at sample `impulseAt`.
-juce::File makeWav (const juce::String& name, double rate, int channels, int length, float level, double freq, int impulseAt = 100)
+// `bits` 32 writes float, which holds samples past the 24-bit range (the gain-overflow checks).
+juce::File makeWav (const juce::String& name, double rate, int channels, int length, float level, double freq, int impulseAt = 100, int bits = 24)
 {
     juce::AudioBuffer<float> b (channels, length);
     b.clear();
@@ -49,7 +50,7 @@ juce::File makeWav (const juce::String& name, double rate, int channels, int len
     file.deleteFile();
     juce::WavAudioFormat wav;
     std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
-    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (rate).withNumChannels (channels).withBitsPerSample (24));
+    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (rate).withNumChannels (channels).withBitsPerSample (bits));
     writer->writeFromAudioSampleBuffer (b, 0, length);
     return file;
 }
@@ -3883,6 +3884,197 @@ void mcpGuardsChecks()
     dir.deleteRecursively();
 }
 
+// [58] The 2026-11-21 hunt, batch 2: the mix is the sum of the written stems through a plugin's NaN and a gain that overflows float (a
+// mix-only render writes the same bytes); a resample whose wanted length overflows refuses the rate whole; barBeatAt saturates its bar at
+// both ends; a loop that scales to equal ends goes off; processMonitor leaves a non-zero block alone while the lock is busy; the first
+// imported file's rate prepares the tracks' plugins, and the first clip's rate follows a rate-dependent latency.
+void batch2FixesChecks()
+{
+    std::printf ("[58] Batch 2 fixes: the mix sums the written stems through a NaN and a gain overflow, a resample overflow refuses the rate, the bar saturates both ends, a collapsed loop goes off, the monitor's busy lock, the first file's rate prepares the tracks and their latencies\n");
+    const auto dir = tempFolder().getChildFile ("batch2");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    juce::String err;
+
+    // 1. A plugin's NaN is zeroed once in the gained block both paths read, so the stem and the mix read the same samples
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        const auto sine = makeWav ("batch2/nan-sine.wav", 48000.0, 2, 48000, 0.5f, 1000.0);
+        const auto tone = makeWav ("batch2/nan-tone.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+        test::check (s.addTrack (sine, "NaN", err) && s.addTrack (tone, "Tone", err), "two tracks");
+        test::check (s.addPlugin (0, "test gain", -1, err), "a gain on the first");
+        auto* g = dynamic_cast<test::GainPlugin*> (s.tracks[0]->chain[0]->instance.get());
+        test::check (g != nullptr, "it is the test gain");
+        g->emitNan = true;   // one NaN at the start of every block it processes: the stem samples 0, 512, 1024, ...
+        RenderOptions o;
+        o.folder = dir.getChildFile ("nan");
+        RenderResult r;
+        test::check (s.renderStems (o, r, err), "render with the NaN plugin: " + err);
+        const auto stem0 = readWav (o.folder.getChildFile ("01-NaN.wav"));
+        const auto stem1 = readWav (o.folder.getChildFile ("02-Tone.wav"));
+        const auto mix = readWav (o.folder.getChildFile ("mix.wav"));
+        test::check (stem0.getNumSamples() == 48000 && stem1.getNumSamples() == 48000 && mix.getNumSamples() == 48000,
+                     "the stems and the mix are as long as the audio");
+        test::check (stem0.getSample (0, 0) == 0.0f && stem0.getSample (0, 512) == 0.0f, "the stem zeroed the NaN at the block starts");
+        test::check (std::abs (stem1.getSample (0, 512)) > 0.1f, "the other track is audible at the NaN position");
+        bool sums = true;
+        for (int ch = 0; ch < 2 && sums; ++ch)
+            for (int i = 0; i < 48000; ++i)
+                if (std::abs (mix.getSample (ch, i) - (stem0.getSample (ch, i) + stem1.getSample (ch, i))) > 1e-6f) { sums = false; break; }
+        test::check (sums, "the mix is the sum of the written stems, sample for sample, the NaN positions included");
+    }
+
+    // 2. A resample whose wanted length overflows int refuses the rate whole: nothing changes, and a later sane rate still converts
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        const auto tiny = makeWav ("batch2/tiny8k.wav", 8000.0, 2, 100, 0.5f, 440.0);
+        test::check (s.addTrack (tiny, "Keep", err) && s.sampleRate == 8000.0, "a 100-sample file at 8 kHz sets the session's rate");
+        const auto* before = s.tracks[0]->clips[0].audio.get();
+        // wanted = ceil(100 * rate / 8000) > INT_MAX - 16: the resampler cannot make it, so the rate is refused before anything changes
+        const double huge = 8000.0 * 2.2e9 / 100.0;
+        test::check (! s.adoptRate (huge, err), "the rate is refused");
+        test::check (err.contains ("Keep") && err.contains ("tiny8k"), "the error names the track and the clip: " + err);
+        test::check (s.sampleRate == 8000.0 && s.tracks[0]->clips[0].audio.get() == before
+                     && s.tracks[0]->clips[0].audio->getNumSamples() == 100,
+                     "the session is unchanged: the same rate, the same buffer, still 100 samples");
+        test::check (s.adoptRate (48000.0, err) && s.tracks[0]->clips[0].audio->getNumSamples() == 600,
+                     "a sane rate afterwards resamples the kept buffer once, to 600 samples");
+    }
+
+    // 3. barBeatAt saturates the bar instead of casting an out-of-range double to int
+    {
+        TempoMap m;   // 48 kHz, 120 bpm, 4/4
+        const auto far = m.barBeatAt (1e18);
+        test::check (far.bar == std::numeric_limits<int>::max(), "a position past every bar saturates at INT_MAX");
+        test::check (far.beat >= 1 && far.beat <= 4 && far.fraction >= 0.0 && far.fraction <= 1.0,
+                     "the beat and the fraction stay in range there");
+        const auto neg = m.barBeatAt (-1e18);
+        test::check (neg.bar == std::numeric_limits<int>::min() + 2, "a position before every bar saturates at the low end");
+        test::check (neg.beat >= 1 && neg.beat <= 4 && neg.fraction >= 0.0 && neg.fraction <= 1.0,
+                     "the beat and the fraction stay in range there too");
+        const auto normal = m.barBeatAt (96000.0);
+        test::check (normal.bar == 2 && normal.beat == 1, "an ordinary position is unchanged");
+    }
+
+    // 4. A loop that scales to equal ends goes off; a wide one stays on
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        const auto tiny = makeWav ("batch2/loop8k.wav", 8000.0, 2, 8000, 0.5f, 440.0);
+        test::check (s.addTrack (tiny, "Loop", err), "a track at 8 kHz");
+        s.loopStart = 100;
+        s.loopEnd = 101;   // one sample wide
+        s.loopOn = true;
+        test::check (s.adoptRate (2000.0, err) && s.loopStart == 25 && s.loopEnd == 25,
+                     "the loop scales to equal ends (100 and 101 at a quarter of the rate)");
+        test::check (! s.loopOn, "a loop with no width is off, not an enabled zero-width loop");
+        s.loopStart = 1000;
+        s.loopEnd = 5000;
+        s.loopOn = true;
+        test::check (s.adoptRate (8000.0, err) && s.loopStart == 4000 && s.loopEnd == 20000 && s.loopOn,
+                     "a wide loop stays on through the same kind of change");
+    }
+
+    // 5. processMonitor leaves a non-zero block byte-unchanged while the lock is busy (the try-lock missed). The holder is another thread:
+    // juce::CriticalSection is recursive, so the test's own thread would always get the try-lock.
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        const auto wav = makeWav ("batch2/mon.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+        test::check (s.addTrack (wav, "M", err) && s.addMonitorPlugin ("test gain", -1, err), "a monitor gain");
+        setMonitorGain (s, 0, 6.0);
+        juce::AudioBuffer<float> out (2, 1300), before (2, 1300);
+        fillSine (out, 440.0, 0.5f, 48000.0);
+        before.makeCopyOf (out);
+        std::atomic<bool> held { false }, release { false };
+        std::thread holder ([&s, &held, &release]
+        {
+            const juce::ScopedLock sl (s.lock);
+            held = true;
+            while (! release.load())
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        });
+        while (! held.load())
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        s.processMonitor (out);
+        test::check (sameAudio (out, before), "while the lock is busy every sample of the block is left as it was");
+        release = true;
+        holder.join();
+        s.processMonitor (out);
+        test::check (scaledBy (out, before, juce::Decibels::decibelsToGain (6.0f)), "with the lock free the same block goes through the gain");
+    }
+
+    // 6. The first imported file's rate re-prepares the tracks' plugins, without a play or a prepare call
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        s.addEmptyTrack ("Early");
+        test::check (s.addPlugin (0, "test gain", -1, err) && s.sampleRate == 0.0, "a plugin before any rate is known");
+        auto* g = dynamic_cast<test::GainPlugin*> (s.tracks[0]->chain[0]->instance.get());
+        test::check (g != nullptr && g->preparedRate == 48000.0, "it is prepared at the 48 kHz fallback");
+        const auto wav96 = makeWav ("batch2/first96.wav", 96000.0, 2, 9600, 0.5f, 440.0);
+        test::check (s.addTrack (wav96, "Audio", err) && s.sampleRate == 96000.0, "the first file sets the session's rate");
+        test::check (g->preparedRate == 96000.0, "the track's plugin is prepared at it, without togglePlay or prepare");
+    }
+
+    // 7. A finite sample the gain pushes past float is zeroed in the gained block both paths read: the mix stays the sum of the written
+    // stems at the overflow positions, and a mix-only render writes the same mix.wav bytes as a full one
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        const auto huge = makeWav ("batch2/huge.wav", 48000.0, 2, 4800, 1e37f, 440.0, 100, 32);
+        const auto tone = makeWav ("batch2/ovf-tone.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+        test::check (s.addTrack (huge, "Huge", err) && s.addTrack (tone, "Tone", err), "two tracks");
+        s.tracks[0]->clips[0].gainDb = 24.0f; // clip +24 dB and fader +12 dB: 1e37 * 15.85 * 3.98 is past FLT_MAX at the sine's peaks
+        s.tracks[0]->gainDb = 12.0f;
+        err.clear();
+        RenderOptions o;
+        o.folder = dir.getChildFile ("ovf-full");
+        RenderResult r;
+        test::check (s.renderStems (o, r, err), "the full render: " + err);
+        const auto stem0 = readWav (o.folder.getChildFile ("01-Huge.wav"));
+        const auto stem1 = readWav (o.folder.getChildFile ("02-Tone.wav"));
+        const auto mix = readWav (o.folder.getChildFile ("mix.wav"));
+        test::check (stem0.getSample (0, 27) == 0.0f && std::abs (stem1.getSample (0, 27)) > 0.1f,
+                     "the overflowed sample is zero in the stem while the other track is audible there");
+        bool sums = true;
+        for (int ch = 0; ch < 2 && sums; ++ch)
+            for (int i = 0; i < 4800; ++i)
+                if (std::abs (mix.getSample (ch, i) - (stem0.getSample (ch, i) + stem1.getSample (ch, i))) > 1e-6f) { sums = false; break; }
+        test::check (sums, "the mix is the sum of the written stems at the overflow positions too");
+        RenderOptions o2;
+        o2.folder = dir.getChildFile ("ovf-mix");
+        o2.writeStems = false;
+        test::check (s.renderStems (o2, r, err), "the mix-only render: " + err);
+        juce::MemoryBlock full, mixOnly;
+        test::check (o.folder.getChildFile ("mix.wav").loadFileAsData (full) && o2.folder.getChildFile ("mix.wav").loadFileAsData (mixOnly)
+                     && full == mixOnly, "the mix-only render's mix.wav is byte for byte the full render's");
+    }
+
+    // 8. The first audio through addClip (not addTrack) prepares the tracks and follows a rate-dependent latency, without a play or prepare
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        s.addEmptyTrack ("Early");
+        s.addEmptyTrack ("Late");
+        test::check (s.addPlugin (0, "test gain", -1, err) && s.sampleRate == 0.0, "a plugin before any rate is known");
+        auto* g = dynamic_cast<test::GainPlugin*> (s.tracks[0]->chain[0]->instance.get());
+        test::check (g != nullptr && g->preparedRate == 48000.0, "it is prepared at the 48 kHz fallback");
+        g->useRateLatency(); // its latency now follows the prepared rate: 480 at the fallback, 960 at 96 kHz
+        test::check (g->getLatencySamples() == 480, "the latency at the fallback rate");
+        const auto wav96 = makeWav ("batch2/clip96.wav", 96000.0, 2, 9600, 0.5f, 440.0);
+        test::check (s.addClip (0, wav96, 0, err) >= 0 && s.sampleRate == 96000.0, "the first audio is a clip, not a track");
+        test::check (g->preparedRate == 96000.0 && g->getLatencySamples() == 960, "the plugin is prepared at the file's rate");
+        const int expected = s.maxLatency() - s.tracks[1]->latency();
+        test::check (expected == 960 && s.tracks[1]->delaySamples == expected,
+                     "the other track's delay follows the new latency, without togglePlay or prepare");
+    }
+
+    dir.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -3944,6 +4136,7 @@ int main()
     projectBoundsChecks();
     takeStartAndLimitChecks();
     mcpGuardsChecks();
+    batch2FixesChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
