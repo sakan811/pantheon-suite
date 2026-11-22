@@ -57,16 +57,12 @@ juce::String bpmText (double bpm)
 juce::Rectangle<int> monitorLatencyArea (juce::Rectangle<int> strip) { return { strip.getRight() - 176 - 8 - 120, strip.getY(), 120, strip.getHeight() }; }
 int monitorPlusX (juce::Rectangle<int> strip) { return monitorLatencyArea (strip).getX() - 8 - 28; }
 
-// The maker of a plugin, from the catalog's own description (the labels names() gives are "Name" or, for two of one name, "Name (Maker)").
-juce::String makerOf (const Catalog& catalog, const juce::String& label)
+// Suffix shown on a slot item when its wet/dry blend is not 100% wet.
+juce::String slotWetSuffix (float wet)
 {
-    for (const auto& d : catalog.descriptions())
-    {
-        const auto maker = d.manufacturerName.isNotEmpty() ? d.manufacturerName : juce::String ("Other");
-        if (label == d.name || label == d.name + " (" + (d.manufacturerName.isNotEmpty() ? d.manufacturerName : d.pluginFormatName) + ")")
-            return maker;
-    }
-    return "Other";
+    if (wet >= 0.999f)
+        return {};
+    return "  (" + juce::String (juce::roundToInt (wet * 100.0f)) + "% wet)";
 }
 
 juce::juce_wchar lowerCase (juce::juce_wchar c) { return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c; }
@@ -483,8 +479,9 @@ MainComponent::MainComponent (Options options) : opts (options)
 
     // the arrangement reports what the user did; the window owns the transport, the files, the menus and the plugin windows
     arrange.dialogOpen = &dialogOpen;
+    editor.onBeforeStructureChange = [this] { closeTrackEditors(); arrange.clearSelection(); };
     arrange.onSeek = [this] (juce::int64 s) { seek (s); };
-    arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); if (pianoRoll.isVisible()) pianoRoll.refresh(); repaint (noteStrip); };
+    arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); if (pianoRoll.isVisible()) pianoRoll.refresh(); if (mixer.isVisible()) mixer.refresh(); repaint (noteStrip); };
     arrange.onTrackMenu = [this] (int track) { showTrackMenu (track); };
     arrange.onRemoveTrack = [this] (int track) { removeTrack (track); };
     arrange.onFilesDropped = [this] (const juce::StringArray& files, int track, juce::int64 at)
@@ -496,6 +493,11 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.onInputMenu = [this] (int track) { showInputMenu (track); };
     arrange.onOpenMidiClip = [this] (MidiClipRef ref)
     {
+        if (mixer.isVisible())
+        {
+            mixer.setVisible (false);
+            mixerButton.setToggleState (false, juce::dontSendNotification);
+        }
         pianoRoll.setTarget (ref);
         pianoRoll.setVisible (true);
         resized();
@@ -526,15 +528,66 @@ MainComponent::MainComponent (Options options) : opts (options)
         updateTitle();
         updateTransport();
         arrange.refresh();
+        if (mixer.isVisible()) mixer.refresh();
         repaint (noteStrip);
     };
     pianoRoll.reportError = [this] (const juce::String& message) { showError (message); };
     addChildComponent (pianoRoll);
 
-    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &importButton, &pluginsButton, &renderButton, &exportButton, &audioButton,
+    mixer.onOpenPlugin = [this] (int track, int slot) { openEditor (track, slot); };
+    mixer.onAddPlugin = [this] (int track, juce::Rectangle<int> anchor)
+    {
+        if (session.renderRunning())
+        {
+            showError ("A render is running: wait for it or cancel it first.");
+            return;
+        }
+        if (session.catalog.names().isEmpty())
+        {
+            juce::PopupMenu menu;
+            menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
+            menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (mixer.localAreaToGlobal (anchor)));
+            return;
+        }
+        const auto safe = juce::Component::SafePointer<MainComponent> (this);
+        openPluginPicker (getLocalArea (&mixer, anchor), [safe, track] (const juce::String& n)
+        {
+            if (safe == nullptr) return;
+            if (safe->session.renderRunning())
+            {
+                safe->showError ("A render is running: wait for it or cancel it first.");
+                return;
+            }
+            juce::String error;
+            bool ok = false;
+            if (track == -2)
+                ok = safe->editor.addMasterPlugin (n, -1, error);
+            else if (juce::isPositiveAndBelow (track, (int) safe->session.tracks.size()))
+                ok = safe->editor.addPlugin (track, n, -1, error);
+            if (! ok && error.isNotEmpty())
+                safe->showError (error);
+            safe->requestRefresh();
+        });
+    };
+    mixer.onPluginMenu = [this] (int track, int slot, juce::Rectangle<int> anchor) { showMixerSlotMenu (track, slot, anchor); };
+    mixer.onStructure = [this]
+    {
+        syncTransport();
+        updateTitle();
+        updateTransport();
+        updateMasterFader();
+        refreshMasterFxButton();
+        arrange.refresh();
+        if (pianoRoll.isVisible()) pianoRoll.refresh();
+        repaint (noteStrip);
+    };
+    mixer.reportError = [this] (const juce::String& message) { showError (message); };
+    addChildComponent (mixer);
+
+    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &addBusButton, &importButton, &pluginsButton, &renderButton, &exportButton, &audioButton,
                      &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton })
         addAndMakeVisible (*b);
-    for (auto* b : { &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton })
+    for (auto* b : { &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &mixerButton })
     {
         b->setClickingTogglesState (false);   // the session says what state they are in: see updateTransport
         addAndMakeVisible (*b);
@@ -570,10 +623,16 @@ MainComponent::MainComponent (Options options) : opts (options)
     addAndMakeVisible (masterClipLamp);
     masterClipLamp.setTooltip ("CLIP: lit once the master reaches 0 dBFS (the device's output is held at full scale). Click to clear it.");
     masterClipLamp.onClick = [this] { clearMasterClip(); };
+    addAndMakeVisible (masterFxButton);
+    masterFxButton.setClickingTogglesState (false);
+    masterFxButton.lamp = colours::amber;
+    masterFxButton.setWantsKeyboardFocus (false);
+    masterFxButton.setTooltip ("Master bus FX chain");
+    masterFxButton.onClick = [this] { showMasterMenu(); };
     // a focused button would take Space and Return for itself: the keys stay with the window
-    for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &importButton, &pluginsButton,
+    for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &addBusButton, &importButton, &pluginsButton,
                                                              &renderButton, &exportButton, &audioButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton,
-                                                             &zoomFitButton, &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &guideButton,
+                                                             &zoomFitButton, &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &mixerButton, &guideButton,
                                                              &signatureBox, &gridBox })
         c->setWantsKeyboardFocus (false);
 
@@ -583,6 +642,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     saveAsButton.onClick = [this] { saveProjectAs(); };
     addTrackButton.onClick = [this] { addEmptyTrack(); };
     addMidiButton.onClick = [this] { addMidiTrack(); };
+    addBusButton.onClick = [this] { addBusTrack(); };
     importButton.onClick = [this] { chooseAndImport(); };
     pluginsButton.onClick = [this] { showPluginsMenu(); };
     renderButton.onClick = [this] { chooseAndRender(); };
@@ -599,12 +659,14 @@ MainComponent::MainComponent (Options options) : opts (options)
     zoomOutButton.onClick = [this] { zoomBy (1.0 / 1.5); };
     zoomInButton.onClick = [this] { zoomBy (1.5); };
     zoomFitButton.onClick = [this] { arrange.zoomToFit(); arrange.repaint(); };
+    mixerButton.onClick = [this] { toggleMixer(); };
 
     newButton.setTooltip ("Empty the session.");
     openButton.setTooltip ("Open a saved project (.olympus).");
     saveButton.setTooltip ("Save the project: the tracks, clips, chains, tempo, markers and loop, and every plugin's settings. Cmd+S.");
     addTrackButton.setTooltip ("Add an empty track.");
     addMidiButton.setTooltip ("Add a MIDI track with the built-in synth.");
+    addBusButton.setTooltip ("Add a submix / aux bus track.");
     importButton.setTooltip ("Audio files: each one becomes a track with its clip at the playhead. You can also drop them on the window or a lane.");
     pluginsButton.setTooltip ("Where plugins (VST3, and Audio Units on macOS) are looked for, which were found, and a rescan.");
     renderButton.setTooltip ("Write one WAV per audible track, after its clips, chain, fader and pan, and the mix.");
@@ -616,11 +678,12 @@ MainComponent::MainComponent (Options options) : opts (options)
     loopButton.setTooltip ("Loop the region between the loop markers (L). A loop with no range yet covers the first four bars.");
     metronomeButton.setTooltip ("A click on every beat, a higher one on the bar. Not in the stems. (Undoable.)");
     snapButton.setTooltip ("Snap moves and edges to the grid.");
-    undoButton.setTooltip ("Undo the last edit (Cmd+Z). Adding or removing a track or a plugin cannot be undone.");
+    undoButton.setTooltip ("Undo the last edit (Cmd+Z).");
     redoButton.setTooltip ("Redo (Shift+Cmd+Z).");
     zoomOutButton.setTooltip ("Zoom out (-).");
     zoomInButton.setTooltip ("Zoom in (+).");
     zoomFitButton.setTooltip ("Zoom so the whole session fits.");
+    mixerButton.setTooltip ("Show or hide the console Mixer view.");
     bpmField.setTooltip ("The tempo in beats per minute (20 to 300). Type a number and press Return. With tempo changes in the project, the field shows the tempo at the playhead.");
     signatureBox.setTooltip ("The time signature of the project.");
     gridBox.setTooltip ("The grid that snap and the lines of the ruler follow.");
@@ -705,13 +768,18 @@ MainComponent::~MainComponent()
     // a take still running keeps its files (Record.h: the takes are never deleted); the project is going away with the window
     if (recorder.isRecording())
         recorder.stop();
+    session.recording = false;
     if (opts.audioDevice)
     {
         deviceManager.removeChangeListener (this);
         deviceManager.removeAudioCallback (&io);
     }
-    if (searchWindow != nullptr)
-        searchWindow->exitModalState (0);
+    if (pickerBox != nullptr)
+    {
+        pickerBox->exitModalState (0);
+        removeChildComponent (pickerBox);
+        pickerBox = nullptr;
+    }
     audioDialog.reset();
     closeEditors();
     setLookAndFeel (nullptr);
@@ -851,6 +919,7 @@ void MainComponent::updateTransport()
     loopButton.setToggleState (session.loopOn, juce::dontSendNotification);
     metronomeButton.setToggleState (session.metronomeOn, juce::dontSendNotification);
     snapButton.setToggleState (session.snapOn, juce::dontSendNotification);
+    mixerButton.setToggleState (mixer.isVisible(), juce::dontSendNotification);
     if (gridBox.getSelectedItemIndex() != (int) session.grid) gridBox.setSelectedItemIndex ((int) session.grid, juce::dontSendNotification);
     showSignature (session.tempo.numerator, session.tempo.denominator);
     undoButton.setEnabled (editor.canUndo());
@@ -886,6 +955,7 @@ void MainComponent::updateTransport()
     if (recChanged || recNow)
         repaint ({ positionBox.getX() - 148, kRowC, 140, 28 });
     refreshMonitorStrip();
+    refreshMasterFxButton();
     updateTitle();
 }
 
@@ -930,6 +1000,8 @@ void MainComponent::refreshNow()
     arrange.refresh();
     if (pianoRoll.isVisible())
         pianoRoll.refresh();
+    if (mixer.isVisible())
+        mixer.refresh();
     updateTransport();
     repaint();
 }
@@ -1163,6 +1235,7 @@ bool MainComponent::startRecording()
         return false;
     }
     source.playing = true;
+    session.recording = true;
     recordStarting = false;
     session.dirty = true;   // a take's WAV is on disk from its first block: the project is dirty now, so a quit asks and the autosave runs
     {
@@ -1192,6 +1265,7 @@ void MainComponent::stopRecording (const juce::String& problem)
         return;
     source.playing = false;
     const auto takes = recorder.stop();
+    session.recording = false;
     // where the take really began (the playhead of its first block, which stop() waited for) and how much of its head never got written
     // because the files were still opening. The first is -1 when no block ran, the second 0 when the window cost nothing.
     const juce::int64 heard = recorder.takeStartSample();
@@ -1329,6 +1403,7 @@ void MainComponent::clearMasterClip()
     clipLatched = false;
     masterClipLamp.lit = false;
     masterClipLamp.repaint();
+    mixer.clearMasterClip();
 }
 
 // The fader shows the session's gain (undo, a project, the server): it is not moved while the user drags it, and not while a block or a render
@@ -1352,6 +1427,36 @@ void MainComponent::updateMasterFader()
     }
 }
 
+void MainComponent::refreshMasterFxButton()
+{
+    if (session.renderRunning())
+        return;
+    const juce::ScopedTryLock sl (session.lock);
+    if (! sl.isLocked())
+        return;
+    const int n = (int) session.masterChain.size();
+    const auto text = n > 0 ? ("FX (" + juce::String (n) + ")") : juce::String ("FX");
+    if (masterFxButton.getButtonText() != text)
+        masterFxButton.setButtonText (text);
+    const bool lit = n > 0;
+    if (masterFxButton.getToggleState() != lit)
+        masterFxButton.setToggleState (lit, juce::dontSendNotification);
+    juce::String tip;
+    if (n == 0)
+    {
+        tip = "Master bus FX chain";
+    }
+    else
+    {
+        juce::StringArray names;
+        for (const auto& s : session.masterChain)
+            names.add (s->plugin + (s->instance == nullptr ? " (not installed)" : s->bypass ? " (bypassed)" : "") + slotWetSuffix (s->wet));
+        tip = "Master bus FX chain: " + names.joinIntoString (", ");
+    }
+    if (masterFxButton.getTooltip() != tip)
+        masterFxButton.setTooltip (tip);
+}
+
 // ---- actions -----------------------------------------------------------------------------------------------------------------
 void MainComponent::newProject()
 {
@@ -1367,8 +1472,7 @@ void MainComponent::newProject()
     clearMasterClip();   // a new project starts with no CLIP latched
     adoptDeviceRate();
     seek (0);
-    arrange.selected = {};
-    arrange.selectedMidi = {};
+    arrange.clearSelection();
     if (pianoRoll.isVisible())
     {
         pianoRoll.clearTarget();
@@ -1403,8 +1507,7 @@ bool MainComponent::openProject (const juce::File& file)
     editor.clearClipboard();
     clearMasterClip(); // a project opened starts with no CLIP latched, as NEW does
     adoptDeviceRate(); // a project at another rate is converted to the device's
-    arrange.selected = {};
-    arrange.selectedMidi = {};
+    arrange.clearSelection();
     if (pianoRoll.isVisible())
     {
         pianoRoll.clearTarget();
@@ -1481,9 +1584,14 @@ void MainComponent::importFiles (const juce::StringArray& files, int track, juce
         int target = track;
         if (fresh)
         {
+            juce::String loadErr;
+            if (session.loadPooled (file, loadErr) == nullptr)
+            {
+                problems.add (loadErr);
+                continue;
+            }
             // each file is a track of its own, its clip at `at`
-            target = session.addEmptyTrack (file.getFileNameWithoutExtension());
-            editor.clearUndo();   // the track is not undone; the clip is (below)
+            target = editor.addEmptyTrack (file.getFileNameWithoutExtension());
             next = juce::jmax ((juce::int64) 0, at);
         }
         juce::String error;
@@ -1494,8 +1602,7 @@ void MainComponent::importFiles (const juce::StringArray& files, int track, juce
             if (fresh)
             {
                 juce::String ignored;
-                session.removeTrack (target, ignored);
-                editor.clearUndo();
+                editor.removeTrack (target, ignored);
             }
             continue;
         }
@@ -1510,26 +1617,34 @@ void MainComponent::importFiles (const juce::StringArray& files, int track, juce
 
 void MainComponent::addEmptyTrack()
 {
-    session.addEmptyTrack ({});
-    editor.clearUndo();
+    editor.addEmptyTrack ({});
     refreshNow();
 }
 
 void MainComponent::addMidiTrack()
 {
-    session.addMidiTrack ({});
-    editor.clearUndo();
+    editor.addMidiTrack ({});
+    refreshNow();
+}
+
+void MainComponent::addBusTrack()
+{
+    juce::String error;
+    if (editor.addBusTrack ({}, error) < 0 && error.isNotEmpty())
+        showError (error);
     refreshNow();
 }
 
 void MainComponent::undoEdit()
 {
+    if (recorder.isRecording()) return;
     editor.undo();
     refreshNow();
 }
 
 void MainComponent::redoEdit()
 {
+    if (recorder.isRecording()) return;
     editor.redo();
     refreshNow();
 }
@@ -1572,12 +1687,10 @@ void MainComponent::removeTrack (int index)
     }
     closeTrackEditors();
     juce::String error;
-    if (session.removeTrack (index, error))
+    if (editor.removeTrack (index, error))
     {
-        editor.clearUndo();
         editor.clearClipboard();   // it remembers the copy's track by number: the tracks after the removed one have moved up
-        arrange.selected = {};
-        arrange.selectedMidi = {};
+        arrange.clearSelection();
         if (pianoRoll.isVisible())
         {
             pianoRoll.clearTarget();
@@ -1607,6 +1720,7 @@ juce::String MainComponent::renderTo (const juce::File& folder, const std::funct
 
 void MainComponent::togglePlay()
 {
+    if (session.renderRunning()) return;
     if (recorder.isRecording()) { stopRecording(); return; }
     if (source.playing.load()) { source.playing = false; return; }
     if (session.tracks.empty() || (session.length() <= 0 && ! session.loopOn && ! session.metronomeOn))
@@ -1822,10 +1936,12 @@ void MainComponent::runRenderJob (const juce::File& folder, RenderOptions choice
 {
     if (folder == juce::File())
         return;
-    // the message thread stops the transport and closes the tracks' plugin windows before the worker starts:
-    // a window is never destroyed on the worker (renderTo's editorsClosed)
+    // the message thread stops the transport, closes the tracks' plugin windows and prepares plugins for offline
+    // rendering before the worker starts: a window or prepare call is never run on the worker
     source.playing = false;
     closeTrackEditors();
+    session.prepare (true);
+    struct RestoreRealtime { Session& s; ~RestoreRealtime() { s.prepare (false); } } restoreRealtime { session };
     if (chooseRenderFolder)
     {
         RenderResult result;
@@ -1984,180 +2100,566 @@ void MainComponent::showPluginsMenu()
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&pluginsButton));
 }
 
-void MainComponent::populatePluginMenu (juce::PopupMenu& menu, std::function<void (const juce::String&)> onPick)
+void MainComponent::markDirty()
 {
-    const auto safe = juce::Component::SafePointer<MainComponent> (this);
-    const auto names = session.catalog.names();
-    if (names.isEmpty())
-    {
-        menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
-        return;
-    }
-    menu.addItem ("Search plugins...", [safe, onPick]
-    {
-        if (safe != nullptr) safe->showPluginSearch (onPick);
-    });
-    menu.addSeparator();
-    if (names.size() <= 25)
-    {
-        for (const auto& n : names)
-            menu.addItem (n, [safe, onPick, n] { if (safe != nullptr && onPick) onPick (n); });
-    }
-    else
-    {
-        std::map<juce::String, juce::PopupMenu> makers;
-        for (const auto& n : names)
-            makers[makerOf (session.catalog, n)].addItem (n, [safe, onPick, n] { if (safe != nullptr && onPick) onPick (n); });
-        for (auto& [maker, sub] : makers)
-            menu.addSubMenu (maker, sub);
-    }
+    session.dirty = true;
+    updateTitle();
 }
 
-void MainComponent::showPluginSearch (std::function<void (const juce::String&)> onPick)
+void MainComponent::addWetDryMenu (juce::PopupMenu& menu, int track, int slotIndex, float currentWet)
 {
-    if (dialogOpen) return;
-    dialogOpen = true;
-    auto* box = new juce::AlertWindow ("Search plugins", "Filter by plugin name or maker:", juce::MessageBoxIconType::NoIcon);
-    searchWindow = box;
-    box->addTextEditor ("query", {}, {});
-    box->addButton ("Find", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::PopupMenu wetMenu;
     const auto safe = juce::Component::SafePointer<MainComponent> (this);
-    const auto safeBox = juce::Component::SafePointer<juce::AlertWindow> (box);
-    box->enterModalState (true, juce::ModalCallbackFunction::create ([safe, safeBox, onPick] (int result)
+    static constexpr float kWetPresets[] = { 1.0f, 0.75f, 0.50f, 0.25f, 0.10f, 0.0f };
+    for (const float w : kWetPresets)
     {
-        if (safe == nullptr) return;
-        safe->searchWindow = nullptr;
-        if (result != 1 || safeBox == nullptr) { safe->dialogOpen = false; return; }
-        const auto query = safeBox->getTextEditorContents ("query").trim();
-        if (query.isEmpty()) { safe->dialogOpen = false; return; }
-
-        juce::StringArray matches;
-        for (const auto& n : safe->session.catalog.names())
+        const int pct = juce::roundToInt (w * 100.0f);
+        const bool ticked = std::abs (currentWet - w) <= 0.01f;
+        wetMenu.addItem (juce::String (pct) + "%", true, ticked, [safe, track, slotIndex, w]
         {
-            const auto maker = makerOf (safe->session.catalog, n);
-            if (n.containsIgnoreCase (query) || maker.containsIgnoreCase (query))
-                matches.add (n);
-        }
-        if (matches.isEmpty())
-        {
-            safe->dialogOpen = false;
-            safe->showError ("No plugin matching \"" + query + "\".");
-            return;
-        }
-        for (const auto& n : matches)
-        {
-            if (n.equalsIgnoreCase (query))
+            if (safe == nullptr)
+                return;
+            juce::String error;
+            if (! safe->session.setPluginWet (track, slotIndex, w, error))
             {
-                safe->dialogOpen = false;
-                if (onPick) onPick (n);
+                safe->showError (error);
                 return;
             }
-        }
-        if (matches.size() == 1)
-        {
-            safe->dialogOpen = false;
-            if (onPick) onPick (matches[0]);
-            return;
-        }
-        juce::PopupMenu sub;
-        for (const auto& n : matches)
-        {
-            const auto maker = makerOf (safe->session.catalog, n);
-            const auto label = maker != "Other" ? (n + "  [" + maker + "]") : n;
-            sub.addItem (label, [safe, onPick, n] { if (safe != nullptr && onPick) onPick (n); });
-        }
-        sub.showMenuAsync (juce::PopupMenu::Options(), [safe] (int)
-        {
-            if (safe != nullptr) safe->dialogOpen = false;
+            if (track == -1)
+            {
+                safe->saveMonitorChain();
+                safe->refreshMonitorStrip();
+            }
+            else
+            {
+                safe->markDirty();
+                safe->requestRefresh();
+            }
         });
-    }), true);
+    }
+    menu.addSubMenu ("Wet / Dry", wetMenu);
+}
+
+void MainComponent::addSidechainMenu (juce::PopupMenu& menu, int track, int slotIndex, int currentSource)
+{
+    if (track < 0)
+        return;
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    juce::PopupMenu scMenu;
+    scMenu.addItem ("None", true, currentSource == -1, [safe, track, slotIndex]
+    {
+        if (safe == nullptr) return;
+        juce::String error;
+        if (! safe->editor.setSlotSidechain (track, slotIndex, -1, error))
+            safe->showError (error);
+        safe->requestRefresh();
+    });
+    const int n = (int) session.tracks.size();
+    for (int src = 0; src < n; ++src)
+    {
+        if (src == track) continue;
+        juce::String scErr;
+        const bool allowed = session.canSidechainTrack (track, src, scErr);
+        const auto label = "Track " + juce::String (src + 1) + ": " + session.tracks[(size_t) src]->name
+                           + (session.tracks[(size_t) src]->isBus() ? " (Bus)" : "");
+        scMenu.addItem (label, allowed, currentSource == src, [safe, track, slotIndex, src]
+        {
+            if (safe == nullptr) return;
+            juce::String error;
+            if (! safe->editor.setSlotSidechain (track, slotIndex, src, error))
+                safe->showError (error);
+            safe->requestRefresh();
+        });
+    }
+    menu.addSubMenu ("Sidechain", scMenu);
+}
+
+void MainComponent::openPluginPicker (juce::Rectangle<int> anchor, std::function<void (const juce::String&)> onPick)
+{
+    if (session.catalog.names().isEmpty())
+        return;
+    if (pickerBox != nullptr)
+    {
+        pickerBox->exitModalState (0);
+        pickerBox = nullptr;
+    }
+    auto picker = std::make_unique<PluginPicker> (session.catalog, std::move (onPick));
+    auto& box = juce::CallOutBox::launchAsynchronously (std::move (picker), anchor, this);
+    pickerBox = &box;
 }
 
 void MainComponent::showAddPluginMenu (int track)
 {
     if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return;
+    if (session.tracks[(size_t) track]->frozen)
+    {
+        showError ("Unfreeze track to edit plugins.");
+        return;
+    }
+    if (session.catalog.names().isEmpty())
+    {
+        juce::PopupMenu menu;
+        menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
+        menu.showMenuAsync (juce::PopupMenu::Options());
+        return;
+    }
+    const auto pos = getMouseXYRelative();
+    const auto anchor = getLocalBounds().contains (pos)
+                        ? juce::Rectangle<int> (pos.x, pos.y, 1, 1)
+                        : juce::Rectangle<int> (arrange.getX() + 120, arrange.getY() + 40, 1, 1);
     const auto safe = juce::Component::SafePointer<MainComponent> (this);
-    juce::PopupMenu menu;
-    populatePluginMenu (menu, [safe, track] (const juce::String& n)
+    openPluginPicker (anchor, [safe, track] (const juce::String& n)
     {
         if (safe == nullptr) return;
         if (! juce::isPositiveAndBelow (track, (int) safe->session.tracks.size())) return;
         juce::String error;
-        if (! safe->session.addPlugin (track, n, -1, error)) safe->showError (error);
-        safe->editor.clearUndo();
+        if (! safe->editor.addPlugin (track, n, -1, error)) safe->showError (error);
         safe->requestRefresh();
     });
-    menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
-// The FX menu of a track: one submenu per plugin (its first item opens the plugin's window, then bypass, move and remove), and Add plugin.
+// The FX menu of a track: one submenu per plugin (its first item opens the plugin's window, then bypass, wet/dry, sidechain, move and remove), Add plugin, Output, Aux Sends, and Freeze/Unfreeze track.
 void MainComponent::showTrackMenu (int track)
 {
-    if (! juce::isPositiveAndBelow (track, (int) session.tracks.size())) return;
-    const auto safe = juce::Component::SafePointer<MainComponent> (this);
-    const auto& chain = session.tracks[(size_t) track]->chain;
-    const int count = (int) chain.size();
-
-    juce::PopupMenu menu;
-    if (count == 0)
-        menu.addItem ("No plugins on this track yet", false, false, nullptr);
-    for (int s = 0; s < count; ++s)
+    if (session.renderRunning())
     {
-        const bool missing = chain[(size_t) s]->instance == nullptr;
-        const bool bypassed = chain[(size_t) s]->bypass;
-        juce::PopupMenu sub;
-        sub.addItem ("Open", ! missing, false, [safe, track, s] { if (safe != nullptr) safe->openEditor (track, s); });
-        sub.addItem (bypassed ? "Switch on" : "Bypass", [safe, track, s, bypassed]
-        {
-            if (safe == nullptr) return;
-            juce::String error;
-            if (! safe->session.setBypass (track, s, ! bypassed, error)) safe->showError (error);
-            safe->requestRefresh();
-        });
-        sub.addItem ("Move earlier", s > 0, false, [safe, track, s]
-        {
-            if (safe == nullptr) return;
-            safe->closeTrackEditors();
-            juce::String e;
-            safe->session.movePlugin (track, s, s - 1, e);
-            safe->requestRefresh();
-        });
-        sub.addItem ("Move later", s < count - 1, false, [safe, track, s]
-        {
-            if (safe == nullptr) return;
-            safe->closeTrackEditors();
-            juce::String e;
-            safe->session.movePlugin (track, s, s + 1, e);
-            safe->requestRefresh();
-        });
-        sub.addSeparator();
-        sub.addItem ("Remove", [safe, track, s]
-        {
-            if (safe == nullptr) return;
-            safe->closeTrackEditors();
-            juce::String error;
-            if (safe->session.removePlugin (track, s, error)) safe->editor.clearUndo(); else safe->showError (error);
-            safe->requestRefresh();
-        });
-        menu.addSubMenu (chain[(size_t) s]->plugin + (missing ? "  (not installed)" : bypassed ? "  (bypassed)" : ""), sub);
+        showError ("A render is running: wait for it or cancel it first.");
+        return;
     }
-    menu.addSeparator();
-    menu.addItem ("Add plugin...", [safe, track] { if (safe != nullptr) safe->showAddPluginMenu (track); });
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    juce::PopupMenu menu;
+    bool frozen = false;
+    bool isBus = false;
+    {
+        const juce::ScopedTryLock sl (session.lock);
+        if (! sl.isLocked())
+            return;
+        if (! juce::isPositiveAndBelow (track, (int) session.tracks.size()))
+            return;
+        const auto& trk = *session.tracks[(size_t) track];
+        frozen = trk.frozen;
+        isBus = trk.isBus();
+        const auto& chain = trk.chain;
+        const int count = (int) chain.size();
+
+        if (count == 0)
+            menu.addItem ("No plugins on this track yet", false, false, nullptr);
+        for (int s = 0; s < count; ++s)
+        {
+            const bool missing = chain[(size_t) s]->instance == nullptr;
+            const bool bypassed = chain[(size_t) s]->bypass;
+            const float wet = chain[(size_t) s]->wet;
+            const bool hasSidechain = ! missing && chain[(size_t) s]->instance->getTotalNumInputChannels() > 2;
+            const int scTrack = chain[(size_t) s]->sidechainTrack;
+            juce::PopupMenu sub;
+            sub.addItem ("Open", ! missing && ! frozen, false, [safe, track, s] { if (safe != nullptr) safe->openEditor (track, s); });
+            sub.addItem (bypassed ? "Switch on" : "Bypass", ! frozen, false, [safe, track, s, bypassed]
+            {
+                if (safe == nullptr) return;
+                juce::String error;
+                if (! safe->editor.bypassPlugin (track, s, ! bypassed, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+            if (! frozen)
+                addWetDryMenu (sub, track, s, wet);
+            if (! frozen && hasSidechain)
+                addSidechainMenu (sub, track, s, scTrack);
+            sub.addItem ("Move earlier", ! frozen && s > 0, false, [safe, track, s]
+            {
+                if (safe == nullptr) return;
+                safe->closeTrackEditors();
+                juce::String e;
+                safe->editor.movePlugin (track, s, s - 1, e);
+                safe->requestRefresh();
+            });
+            sub.addItem ("Move later", ! frozen && s < count - 1, false, [safe, track, s]
+            {
+                if (safe == nullptr) return;
+                safe->closeTrackEditors();
+                juce::String e;
+                safe->editor.movePlugin (track, s, s + 1, e);
+                safe->requestRefresh();
+            });
+            sub.addSeparator();
+            sub.addItem ("Remove", ! frozen, false, [safe, track, s]
+            {
+                if (safe == nullptr) return;
+                safe->closeTrackEditors();
+                juce::String error;
+                if (! safe->editor.removePlugin (track, s, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+            menu.addSubMenu (chain[(size_t) s]->plugin + (missing ? "  (not installed)" : bypassed ? "  (bypassed)" : "") + slotWetSuffix (wet), sub);
+        }
+        menu.addSeparator();
+        menu.addItem ("Add plugin...", ! frozen, false, [safe, track] { if (safe != nullptr) safe->showAddPluginMenu (track); });
+        if (frozen)
+            menu.addItem ("Unfreeze track to edit plugins", false, false, nullptr);
+
+        // Output routing submenu (Master or any non-self Bus track)
+        juce::PopupMenu outMenu;
+        outMenu.addItem ("Master", true, trk.outputTrack == -1, [safe, track]
+        {
+            if (safe == nullptr) return;
+            juce::String error;
+            if (! safe->editor.setTrackOutput (track, -1, error)) safe->showError (error);
+            safe->requestRefresh();
+        });
+        for (int b = 0; b < (int) session.tracks.size(); ++b)
+        {
+            if (b == track || ! session.tracks[(size_t) b]->isBus())
+                continue;
+            const auto busLabel = "Track " + juce::String (b + 1) + ": " + session.tracks[(size_t) b]->name;
+            outMenu.addItem (busLabel, true, trk.outputTrack == b, [safe, track, b]
+            {
+                if (safe == nullptr) return;
+                juce::String error;
+                if (! safe->editor.setTrackOutput (track, b, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+        }
+        menu.addSeparator();
+        menu.addSubMenu ("Output", outMenu);
+
+        // Aux Sends submenu
+        juce::PopupMenu sendsMenu;
+        bool anyBus = false;
+        for (int b = 0; b < (int) session.tracks.size(); ++b)
+        {
+            if (b == track || ! session.tracks[(size_t) b]->isBus())
+                continue;
+            anyBus = true;
+            int sendIdx = -1;
+            AuxSend cur;
+            for (int si = 0; si < (int) trk.sends.size(); ++si)
+            {
+                if (trk.sends[(size_t) si].targetTrack == b)
+                {
+                    sendIdx = si;
+                    cur = trk.sends[(size_t) si];
+                    break;
+                }
+            }
+            juce::PopupMenu busMenu;
+            if (sendIdx < 0)
+            {
+                for (float db : { 0.0f, -6.0f, -12.0f })
+                {
+                    busMenu.addItem ("Send at " + juce::String (juce::roundToInt (db)) + " dB", true, false, [safe, track, b, db]
+                    {
+                        if (safe == nullptr) return;
+                        juce::String error;
+                        if (! safe->editor.setTrackSend (track, b, db, false, false, error)) safe->showError (error);
+                        safe->requestRefresh();
+                    });
+                }
+            }
+            else
+            {
+                for (float db : { 0.0f, -6.0f, -12.0f })
+                {
+                    const bool ticked = std::abs (cur.levelDb - db) < 0.05f;
+                    busMenu.addItem (juce::String (juce::roundToInt (db)) + " dB", true, ticked, [safe, track, b, db, pre = cur.preFader, mute = cur.mute]
+                    {
+                        if (safe == nullptr) return;
+                        juce::String error;
+                        if (! safe->editor.setTrackSend (track, b, db, pre, mute, error)) safe->showError (error);
+                        safe->requestRefresh();
+                    });
+                }
+                busMenu.addSeparator();
+                busMenu.addItem ("Pre-fader", true, cur.preFader, [safe, track, b, lvl = cur.levelDb, pre = cur.preFader, mute = cur.mute]
+                {
+                    if (safe == nullptr) return;
+                    juce::String error;
+                    if (! safe->editor.setTrackSend (track, b, lvl, ! pre, mute, error)) safe->showError (error);
+                    safe->requestRefresh();
+                });
+                busMenu.addItem ("Mute", true, cur.mute, [safe, track, b, lvl = cur.levelDb, pre = cur.preFader, mute = cur.mute]
+                {
+                    if (safe == nullptr) return;
+                    juce::String error;
+                    if (! safe->editor.setTrackSend (track, b, lvl, pre, ! mute, error)) safe->showError (error);
+                    safe->requestRefresh();
+                });
+                busMenu.addSeparator();
+                busMenu.addItem ("Remove", true, false, [safe, track, sendIdx]
+                {
+                    if (safe == nullptr) return;
+                    juce::String error;
+                    if (! safe->editor.removeTrackSend (track, sendIdx, error)) safe->showError (error);
+                    safe->requestRefresh();
+                });
+            }
+            auto busLabel = "Track " + juce::String (b + 1) + ": " + session.tracks[(size_t) b]->name;
+            if (sendIdx >= 0)
+                busLabel += " (" + juce::String (cur.levelDb, 1) + " dB" + (cur.preFader ? ", pre" : "") + (cur.mute ? ", muted" : "") + ")";
+            sendsMenu.addSubMenu (busLabel, busMenu);
+        }
+        if (! anyBus)
+            sendsMenu.addItem ("No bus tracks yet", false, false, nullptr);
+        menu.addSubMenu ("Aux Sends", sendsMenu);
+    }
+
+    if (! isBus || frozen)
+    {
+        menu.addSeparator();
+        menu.addItem (frozen ? "Unfreeze track" : "Freeze track", [safe, track, frozen]
+        {
+            if (safe == nullptr) return;
+            if (safe->session.renderRunning())
+            {
+                safe->showError ("A render is running: wait for it or cancel it first.");
+                return;
+            }
+            if (safe->recorder.isRecording())
+            {
+                safe->showError ("Stop the recording before freezing or unfreezing a track.");
+                return;
+            }
+            juce::String error;
+            if (frozen)
+            {
+                if (! safe->editor.unfreezeTrack (track, error))
+                    safe->showError (error);
+            }
+            else
+            {
+                safe->closeTrackEditors();
+                juce::File folder;
+                juce::String trackName;
+                {
+                    const juce::ScopedLock sl (safe->session.lock);
+                    if (! juce::isPositiveAndBelow (track, (int) safe->session.tracks.size()))
+                        return;
+                    const auto projName = juce::File::createLegalFileName (safe->session.name.isNotEmpty() ? safe->session.name : "Untitled");
+                    folder = safe->session.projectFile != juce::File()
+                                 ? safe->session.projectFile.getParentDirectory().getChildFile (projName + " Frozen")
+                                 : juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Olympus Frozen");
+                    trackName = safe->session.tracks[(size_t) track]->name;
+                }
+                const auto trackLegal = juce::File::createLegalFileName (trackName.isNotEmpty() ? trackName : ("Track " + juce::String (track + 1)));
+                const auto targetWav = folder.getNonexistentChildFile (juce::String (track + 1).paddedLeft ('0', 2) + "-" + trackLegal + "-frozen", ".wav", false);
+                if (! safe->editor.freezeTrack (track, targetWav, error))
+                    safe->showError (error);
+            }
+            safe->requestRefresh();
+        });
+    }
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
-// A plugin's slot: a track's chain (track >= 0), or the monitor chain with track -1.
+void MainComponent::showAddMasterPluginMenu()
+{
+    if (session.renderRunning())
+    {
+        showError ("A render is running: wait for it or cancel it first.");
+        return;
+    }
+    if (session.catalog.names().isEmpty())
+    {
+        juce::PopupMenu menu;
+        menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&masterFxButton));
+        return;
+    }
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    openPluginPicker (masterFxButton.getBounds(), [safe] (const juce::String& n)
+    {
+        if (safe == nullptr) return;
+        if (safe->session.renderRunning())
+        {
+            safe->showError ("A render is running: wait for it or cancel it first.");
+            return;
+        }
+        juce::String error;
+        if (! safe->editor.addMasterPlugin (n, -1, error))
+            safe->showError (error);
+        safe->requestRefresh();
+    });
+}
+
+// The FX menu of the master bus: one submenu per plugin (open, bypass, wet/dry, move, remove), and Add plugin.
+void MainComponent::showMasterMenu()
+{
+    if (session.renderRunning())
+    {
+        showError ("A render is running: wait for it or cancel it first.");
+        return;
+    }
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    juce::PopupMenu menu;
+    {
+        const juce::ScopedTryLock sl (session.lock);
+        if (! sl.isLocked())
+            return;
+        const auto& chain = session.masterChain;
+        const int count = (int) chain.size();
+        if (count == 0)
+            menu.addItem ("No plugins on the master bus yet", false, false, nullptr);
+        for (int s = 0; s < count; ++s)
+        {
+            const bool missing = chain[(size_t) s]->instance == nullptr;
+            const bool bypassed = chain[(size_t) s]->bypass;
+            const float wet = chain[(size_t) s]->wet;
+            juce::PopupMenu sub;
+            sub.addItem ("Open", ! missing, false, [safe, s] { if (safe != nullptr) safe->openEditor (-2, s); });
+            sub.addItem (bypassed ? "Switch on" : "Bypass", [safe, s, bypassed]
+            {
+                if (safe == nullptr) return;
+                juce::String error;
+                if (! safe->editor.bypassMasterPlugin (s, ! bypassed, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+            addWetDryMenu (sub, -2, s, wet);
+            sub.addItem ("Move earlier", s > 0, false, [safe, s]
+            {
+                if (safe == nullptr) return;
+                safe->closeTrackEditors();
+                juce::String e;
+                safe->editor.moveMasterPlugin (s, s - 1, e);
+                safe->requestRefresh();
+            });
+            sub.addItem ("Move later", s < count - 1, false, [safe, s]
+            {
+                if (safe == nullptr) return;
+                safe->closeTrackEditors();
+                juce::String e;
+                safe->editor.moveMasterPlugin (s, s + 1, e);
+                safe->requestRefresh();
+            });
+            sub.addSeparator();
+            sub.addItem ("Remove", [safe, s]
+            {
+                if (safe == nullptr) return;
+                safe->closeTrackEditors();
+                juce::String error;
+                if (! safe->editor.removeMasterPlugin (s, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+            menu.addSubMenu (chain[(size_t) s]->plugin + (missing ? "  (not installed)" : bypassed ? "  (bypassed)" : "") + slotWetSuffix (wet), sub);
+        }
+    }
+    menu.addSeparator();
+    menu.addItem ("Add plugin...", [safe] { if (safe != nullptr) safe->showAddMasterPluginMenu(); });
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&masterFxButton));
+}
+
+void MainComponent::toggleMixer()
+{
+    const bool show = ! mixer.isVisible();
+    if (show && pianoRoll.isVisible())
+    {
+        pianoRoll.clearTarget();
+        pianoRoll.setVisible (false);
+    }
+    mixer.setVisible (show);
+    mixerButton.setToggleState (show, juce::dontSendNotification);
+    if (show)
+        mixer.refresh();
+    resized();
+    repaint();
+}
+
+void MainComponent::showMixerSlotMenu (int track, int slot, juce::Rectangle<int> anchor)
+{
+    if (session.renderRunning())
+    {
+        showError ("A render is running: wait for it or cancel it first.");
+        return;
+    }
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    juce::PopupMenu menu;
+    {
+        const juce::ScopedTryLock sl (session.lock);
+        if (! sl.isLocked())
+            return;
+        const std::vector<std::unique_ptr<Slot>>* chain = nullptr;
+        if (track == -2)
+            chain = &session.masterChain;
+        else if (juce::isPositiveAndBelow (track, (int) session.tracks.size()))
+            chain = &session.tracks[(size_t) track]->chain;
+        if (chain == nullptr || ! juce::isPositiveAndBelow (slot, (int) chain->size()))
+            return;
+
+        const auto& s = (*chain)[(size_t) slot];
+        const bool missing = s->instance == nullptr;
+        const bool bypassed = s->bypass;
+        const float wet = s->wet;
+        const int count = (int) chain->size();
+        const bool frozen = track >= 0 && session.tracks[(size_t) track]->frozen;
+
+        menu.addItem ("Open", ! missing && ! frozen, false, [safe, track, slot] { if (safe != nullptr) safe->openEditor (track, slot); });
+        menu.addItem (bypassed ? "Switch on" : "Bypass", ! frozen, false, [safe, track, slot, bypassed]
+        {
+            if (safe == nullptr) return;
+            juce::String error;
+            const bool ok = track == -2 ? safe->editor.bypassMasterPlugin (slot, ! bypassed, error)
+                                        : safe->editor.bypassPlugin (track, slot, ! bypassed, error);
+            if (! ok) safe->showError (error);
+            safe->requestRefresh();
+        });
+        if (! frozen)
+            addWetDryMenu (menu, track, slot, wet);
+        if (! frozen && track >= 0 && ! missing && s->instance->getTotalNumInputChannels() > 2)
+            addSidechainMenu (menu, track, slot, s->sidechainTrack);
+        menu.addItem ("Move earlier", ! frozen && slot > 0, false, [safe, track, slot]
+        {
+            if (safe == nullptr) return;
+            safe->closeTrackEditors();
+            juce::String error;
+            const bool ok = track == -2 ? safe->editor.moveMasterPlugin (slot, slot - 1, error)
+                                        : safe->editor.movePlugin (track, slot, slot - 1, error);
+            if (! ok) safe->showError (error);
+            safe->requestRefresh();
+        });
+        menu.addItem ("Move later", ! frozen && slot < count - 1, false, [safe, track, slot]
+        {
+            if (safe == nullptr) return;
+            safe->closeTrackEditors();
+            juce::String error;
+            const bool ok = track == -2 ? safe->editor.moveMasterPlugin (slot, slot + 1, error)
+                                        : safe->editor.movePlugin (track, slot, slot + 1, error);
+            if (! ok) safe->showError (error);
+            safe->requestRefresh();
+        });
+        menu.addSeparator();
+        menu.addItem ("Remove", ! frozen, false, [safe, track, slot]
+        {
+            if (safe == nullptr) return;
+            safe->closeTrackEditors();
+            juce::String error;
+            const bool ok = track == -2 ? safe->editor.removeMasterPlugin (slot, error)
+                                        : safe->editor.removePlugin (track, slot, error);
+            if (! ok) safe->showError (error);
+            safe->requestRefresh();
+        });
+        if (frozen)
+        {
+            menu.addSeparator();
+            menu.addItem ("Unfreeze track to edit plugins", false, false, nullptr);
+        }
+    }
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (mixer.localAreaToGlobal (anchor)));
+}
+
+// A plugin's slot: a track's chain (track >= 0), the monitor chain (track == -1), or the master chain (track == -2).
 Slot* MainComponent::slotOf (int track, int slot, juce::String& error)
 {
     if (track >= 0) return session.slotAt (track, slot, error);
     if (track == -1) return session.monitorSlotAt (slot, error);
+    if (track == -2) return session.masterSlot (slot, error);
     error = "No track " + juce::String (track);
     return nullptr;
 }
 
 void MainComponent::openEditor (int track, int slot)
 {
+    if (track >= 0 && juce::isPositiveAndBelow (track, (int) session.tracks.size()) && session.tracks[(size_t) track]->frozen)
+    {
+        showError ("Unfreeze track to edit plugins.");
+        return;
+    }
     juce::String error;
     auto* s = slotOf (track, slot, error);
     if (s == nullptr || s->instance == nullptr)
@@ -2172,10 +2674,13 @@ void MainComponent::openEditor (int track, int slot)
         showError (s->plugin + " has no editor window");   // a plugin that says it has one but gives none: said, not silent
         return;
     }
-    const auto owner = track < 0 ? juce::String ("Monitor") : session.tracks[(size_t) track]->name;
-    // the window that opens now is the first of a track's, so the state the timer compares against has to be the state as it is now: the
-    // periodic read only runs every 15 ticks, and an edit made and its window closed inside half a second would never be noticed
-    const bool firstTrackEditor = track >= 0 && ! hasOpenTrackEditor();
+    const auto owner = track == -1 ? juce::String ("Monitor")
+                     : track == -2 ? juce::String ("Master")
+                                   : session.tracks[(size_t) track]->name;
+    // the window that opens now is the first of the project's (a track or the master chain), so the state the timer compares against has to
+    // be the state as it is now: the periodic read only runs every 15 ticks, and an edit made and its window closed inside half a second
+    // would never be noticed
+    const bool firstTrackEditor = track != -1 && ! hasOpenTrackEditor();
     windows[s] = makeEditorWindow (owner + " - " + s->plugin, pluginEditor,
                                    [this, s, safe = juce::Component::SafePointer<MainComponent> (this)]
                                    {
@@ -2196,7 +2701,7 @@ void MainComponent::openEditor (int track, int slot)
 
 void MainComponent::closeEditors() { windows.clear(); }
 
-// The editors of the tracks' plugins only: a monitor plugin's window stays open across NEW and OPEN, and when a track is removed or rendered.
+// The editors of the project's plugins (tracks and master): a monitor plugin's window stays open across NEW and OPEN, and when a track is removed or rendered.
 void MainComponent::closeTrackEditors()
 {
     for (auto it = windows.begin(); it != windows.end();)
@@ -2395,7 +2900,7 @@ void MainComponent::refreshMonitorStrip()
     }
 }
 
-// The menu of a monitor plugin: its window, its bypass, its place, and its removal (the chain is saved after each).
+// The menu of a monitor plugin: its window, its bypass, wet/dry, its place, and its removal (the chain is saved after each).
 void MainComponent::showMonitorMenu (int index)
 {
     juce::String error;
@@ -2405,6 +2910,7 @@ void MainComponent::showMonitorMenu (int index)
     const bool missing = slot->instance == nullptr, bypassed = slot->bypass;
     const int count = (int) session.monitor.size();
     juce::PopupMenu menu;
+    menu.addSectionHeader (slot->plugin + (missing ? "  (not installed)" : bypassed ? "  (bypassed)" : "") + slotWetSuffix (slot->wet));
     menu.addItem ("Open", ! missing, false, [safe, slot]
     {
         if (safe == nullptr) return;
@@ -2417,6 +2923,7 @@ void MainComponent::showMonitorMenu (int index)
         for (int i = 0; i < (int) safe->session.monitor.size(); ++i)
             if (safe->session.monitor[(size_t) i].get() == slot) { safe->setMonitorPluginBypass (i, ! bypassed); return; }
     });
+    addWetDryMenu (menu, -1, index, slot->wet);
     menu.addSeparator();
     menu.addItem ("Move left", index > 0, false, [safe, index] { if (safe != nullptr) safe->moveMonitorPlugin (index, index - 1); });
     menu.addItem ("Move right", index < count - 1, false, [safe, index] { if (safe != nullptr) safe->moveMonitorPlugin (index, index + 1); });
@@ -2430,7 +2937,7 @@ void MainComponent::showMonitorMenu (int index)
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
-// The plugins to add to the monitor chain: searchable, and over 25 plugins grouped into one sub-menu per maker.
+// The plugins to add to the monitor chain: opens the searchable PluginPicker anchored at the '+' button.
 void MainComponent::showAddMonitorMenu()
 {
     if (! monitorLoaded)
@@ -2439,13 +2946,18 @@ void MainComponent::showAddMonitorMenu()
                                                : juce::String ("The monitor chain is read after the plugin scan has finished."));
         return;
     }
+    if (session.catalog.names().isEmpty())
+    {
+        juce::PopupMenu menu;
+        menu.addItem ("No plugin found: use PLUGINS", false, false, nullptr);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&monitorAddButton));
+        return;
+    }
     const auto safe = juce::Component::SafePointer<MainComponent> (this);
-    juce::PopupMenu menu;
-    populatePluginMenu (menu, [safe] (const juce::String& n)
+    openPluginPicker (monitorAddButton.getBounds(), [safe] (const juce::String& n)
     {
         if (safe != nullptr) safe->addMonitorPlugin (n);
     });
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&monitorAddButton));
 }
 
 // ---- autosave and recovery ----------------------------------------------------------------------------------------------------------
@@ -2573,27 +3085,31 @@ bool MainComponent::hasOpenTrackEditor() const
 juce::int64 MainComponent::trackPluginStateHash() const
 {
     juce::uint64 h = 14695981039346656037ULL;
+    auto hashSlot = [&h, this] (const Slot& s)
+    {
+        const auto mb = session.stateOf (s);
+        const auto* data = static_cast<const juce::uint8*> (mb.getData());
+        const size_t n = mb.getSize();
+        h ^= (juce::uint64) n;
+        h *= 1099511628211ULL;
+        for (size_t i = 0; i < n; ++i)
+        {
+            h ^= data[i];
+            h *= 1099511628211ULL;
+        }
+    };
     for (const auto& t : session.tracks)
         for (const auto& s : t->chain)
-        {
-            const auto mb = session.stateOf (*s);
-            const auto* data = static_cast<const juce::uint8*> (mb.getData());
-            const size_t n = mb.getSize();
-            h ^= (juce::uint64) n;
-            h *= 1099511628211ULL;
-            for (size_t i = 0; i < n; ++i)
-            {
-                h ^= data[i];
-                h *= 1099511628211ULL;
-            }
-        }
+            hashSlot (*s);
+    for (const auto& s : session.masterChain)
+        hashSlot (*s);
     return h == 0 ? 1 : (juce::int64) h;
 }
 
 bool MainComponent::checkExternalProjectChange()
 {
     if (session.projectFile == juce::File() || session.renderRunning() || dialogOpen || recorder.isRecording() || isPlaying()
-        || masterGesture != nullptr || masterFader.isMouseButtonDown() || arrange.isInteracting())
+        || masterGesture != nullptr || masterFader.isMouseButtonDown() || arrange.isInteracting() || mixer.isInteracting())
         return false;
     if (! session.projectFile.existsAsFile())
         return false;
@@ -2651,6 +3167,8 @@ void MainComponent::timerCallback()
     syncPlayhead();
     arrange.showInputLevels = ! isPlaying() || recorder.isRecording();
     updateRecording();
+    if (mixer.isVisible())
+        mixer.tickMeters();
     updateMaster (juce::Time::getMillisecondCounterHiRes());   // the master's meter, peak read-out and CLIP: the only reader of the master's peaks
     // a plugin reported a new latency (its listener only sets a flag): the tracks' delays follow it, and the read-outs below show it
     if (! rendering && session.takeLatencyChange())
@@ -2664,6 +3182,8 @@ void MainComponent::timerCallback()
         return;
     if (pianoRoll.isVisible())
         pianoRoll.refresh();
+    if (mixer.isVisible())
+        mixer.refresh();
     updateTransport();
     // the autosave: every kAutosaveInterval seconds, the project is written beside its file if it has changes (autosaveNow); deferred
     // during playback or recording so disk IO and Session::lock never contend with the audio callback.
@@ -2721,6 +3241,15 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (is ('c')) { arrange.copySelected(); return true; }
         if (is ('x')) { arrange.cutSelected(); return true; }
         if (is ('v')) { syncPlayhead(); arrange.pasteAtPlayhead(); return true; }
+        if (is ('a'))
+        {
+            if (! pianoRoll.isVisible() || arrange.hasKeyboardFocus (true))
+            {
+                arrange.selectAll();
+                return true;
+            }
+            return false;
+        }
         return false;
     }
     if (typing)
@@ -2750,23 +3279,26 @@ void MainComponent::resized()
     int x = 290;
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton })
     {
-        b->setBounds (x, rowA, 64, h);
-        x += 69;
+        const int bw = b == &saveAsButton ? 64 : 58;
+        b->setBounds (x, rowA, bw, h);
+        x += bw + 4;
     }
     x += 6;
-    addTrackButton.setBounds (x, rowA, 82, h);
-    x += 87;
-    addMidiButton.setBounds (x, rowA, 66, h);
-    x += 71;
-    importButton.setBounds (x, rowA, 96, h);
-    x += 101;
-    pluginsButton.setBounds (x, rowA, 74, h);
-    x += 79;
-    renderButton.setBounds (x, rowA, 98, h);
-    x += 103;
-    exportButton.setBounds (x, rowA, 72, h);
-    x += 77;
-    audioButton.setBounds (x, rowA, 72, h);
+    addTrackButton.setBounds (x, rowA, 78, h);
+    x += 82;
+    addMidiButton.setBounds (x, rowA, 62, h);
+    x += 66;
+    addBusButton.setBounds (x, rowA, 58, h);
+    x += 62;
+    importButton.setBounds (x, rowA, 92, h);
+    x += 96;
+    pluginsButton.setBounds (x, rowA, 70, h);
+    x += 74;
+    renderButton.setBounds (x, rowA, 94, h);
+    x += 98;
+    exportButton.setBounds (x, rowA, 68, h);
+    x += 72;
+    audioButton.setBounds (x, rowA, 68, h);
     guideButton.setBounds (w - kMargin - 70, rowA, 70, h);
 
     // row B: the transport, then the zoom
@@ -2784,18 +3316,20 @@ void MainComponent::resized()
     redoButton.setBounds (x, rowB, 54, hb);         x += 60;
     zoomOutButton.setBounds (x, rowB, 30, hb);      x += 36;
     zoomInButton.setBounds (x, rowB, 30, hb);       x += 36;
-    zoomFitButton.setBounds (x, rowB, 44, hb);
+    zoomFitButton.setBounds (x, rowB, 44, hb);      x += 50;
+    mixerButton.setBounds (x, rowB, 56, hb);
 
     // row C: the device's summary, the take's time or the track count, and the position
     positionBox = { w - kMargin - 184, kRowC, 184, hc };
-    deviceLabel.setBounds (290, kRowC, juce::jmax (120, positionBox.getX() - 154 - 290), hc);
-    // the master section, in row C left of the device line (x 16 to 282): MASTER (painted), the fader, the stereo meter's two bars, the peak
-    // read-out and the CLIP lamp
+    deviceLabel.setBounds (340, kRowC, juce::jmax (120, positionBox.getX() - 154 - 340), hc);
+    // the master section, in row C left of the device line (x 16 to 334): MASTER (painted), the fader, the stereo meter's two bars, the peak
+    // read-out, the CLIP lamp and the FX button
     masterFader.setBounds (68, kRowC + 6, 80, 16);
     masterBarLeft = { 152.0f, (float) kRowC + 4.0f, 36.0f, 9.0f };
     masterBarRight = { 152.0f, (float) kRowC + 15.0f, 36.0f, 9.0f };
     masterPeakLabel.setBounds (192, kRowC, 46, hc);
     masterClipLamp.setBounds (240, kRowC, 42, hc);
+    masterFxButton.setBounds (288, kRowC + 2, 46, hc - 4);
 
     noteStrip = { kMargin, r.getHeight() - kMargin - ui::kNoteStripHeight, w - 2 * kMargin, ui::kNoteStripHeight };
     bodyArea = { kMargin, kBodyTop, w - 2 * kMargin, noteStrip.getY() - 10 - kBodyTop };
@@ -2807,6 +3341,15 @@ void MainComponent::resized()
         arrange.setBounds (bodyArea.withHeight (arrangeH));
         pianoRoll.setBounds (bodyArea.getX(), arrange.getBottom() + gap, bodyArea.getWidth(),
                              juce::jmax (0, bodyArea.getBottom() - (arrange.getBottom() + gap)));
+    }
+    else if (mixer.isVisible())
+    {
+        const int gap = 6;
+        const int avail = juce::jmax (0, bodyArea.getHeight() - gap);
+        const int arrangeH = juce::roundToInt (avail * 0.58);
+        arrange.setBounds (bodyArea.withHeight (arrangeH));
+        mixer.setBounds (bodyArea.getX(), arrange.getBottom() + gap, bodyArea.getWidth(),
+                         juce::jmax (0, bodyArea.getBottom() - (arrange.getBottom() + gap)));
     }
     else
     {

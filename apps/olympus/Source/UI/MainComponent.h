@@ -6,7 +6,9 @@
 #include "Advice.h"
 #include "Arrange.h"
 #include "LampButton.h"
+#include "MixerView.h"
 #include "PianoRoll.h"
+#include "PluginPicker.h"
 #include "../Edit.h"
 #include "../Record.h"
 #include "LevelMeter.h"
@@ -226,6 +228,7 @@ public:
     void importFiles (const juce::StringArray& files, int track, juce::int64 at);
     void addEmptyTrack();
     void addMidiTrack();
+    void addBusTrack();
     void undoEdit();
     void redoEdit();
     void toggleLoop();
@@ -255,11 +258,11 @@ public:
     bool addPluginFolder (const juce::File& folder);
     bool isScanQueued() const { return scanQueued; }
     bool isScanning() const { return scanning; }
-    // Opens the editor of a plugin: track `track`'s chain slot `slot`, or with track -1 a plugin of the monitor chain. One window per plugin.
+    // Opens the editor of a plugin: track `track`'s chain slot `slot`, with track -1 a plugin of the monitor chain, or with track -2 a plugin of the master chain. One window per plugin.
     void openEditor (int track, int slot);
     int openEditors() const { return (int) windows.size(); }
     void closeEditors();
-    // Closes the editors of the tracks' plugins, not those of the monitor chain (which stay open across NEW and OPEN).
+    // Closes the editors of the project's plugins (tracks and master), not those of the monitor chain (which stay open across NEW and OPEN).
     void closeTrackEditors();
     // Brings the arrangement, the transport and the title up to date now.
     void refreshNow();
@@ -322,9 +325,12 @@ public:
     std::function<void()> onTitleChanged;
     std::vector<ui::Note> notes() const;
 
-    // The menus of a track: its plugins (open, bypass, move, remove) and the plugins to add.
+    // The menus of a track and the master bus: their plugins (open, bypass, move, remove) and the plugins to add.
+    void openPluginPicker (juce::Rectangle<int> anchor, std::function<void (const juce::String&)> onPick);
     void showAddPluginMenu (int track);
     void showTrackMenu (int track);
+    void showAddMasterPluginMenu();
+    void showMasterMenu();
 
     // ---- the monitor chain (Session::monitor): playback only, saved in monitor.xml, not in the project and not an undo step ----------------
     // Each change is saved at once. The chain is read once, after the catalog is filled (at start, or after the first scan).
@@ -360,16 +366,18 @@ public:
     // ---- the controls (public so the checks can find and press them) ---------------------------------------------------------------
     ui::GuideButton guideButton { guideTitle(), guideText() };
     juce::TextButton newButton { "New" }, openButton { "Open" }, saveButton { "Save" }, saveAsButton { "Save as" }, addTrackButton { "Add track" },
-        addMidiButton { "+ MIDI" }, importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, exportButton { "Export" }, audioButton { "Audio" };
+        addMidiButton { "+ MIDI" }, addBusButton { "+ Bus" }, importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, exportButton { "Export" }, audioButton { "Audio" };
     juce::TextButton rewindButton { "|<" }, undoButton { "Undo" }, redoButton { "Redo" }, zoomOutButton { "-" }, zoomInButton { "+" }, zoomFitButton { "Fit" };
-    LampButton playButton { "Play" }, recordButton { "Rec" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" };
+    LampButton playButton { "Play" }, recordButton { "Rec" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" },
+        mixerButton { "Mixer" };
     juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
     juce::ComboBox signatureBox, gridBox;
     juce::Label deviceLabel;                         // the device summary, under the buttons
-    // the master section, in row C left of the device line: the MASTER fader (one undo step a drag), a stereo meter, the peak read-out and CLIP
+    // the master section, in row C left of the device line: the MASTER fader (one undo step a drag), a stereo meter, the peak read-out, CLIP and FX
     juce::Slider masterFader;
     juce::Label masterPeakLabel;
     ClipLamp masterClipLamp;
+    LampButton masterFxButton { "FX" };
     // The master section's read-outs. updateMaster (the timer) reads the session's peaks, the only reader; the checks call it with their own times.
     static constexpr double kMasterHoldMs = 2000.0;  // the peak read-out holds the highest peak this long
     void updateMaster (double nowMs);
@@ -394,6 +402,7 @@ public:
     LampButton monitorBypassButton { "Correction" };
     ArrangeView arrange { session, editor };
     PianoRollView pianoRoll { session, editor };
+    MixerView mixer { session, editor };
 
 private:
     // The audio callback's copy of the transport: the playhead, the loop, the click and the end of the audio. The callback reads and writes
@@ -434,8 +443,11 @@ private:
     void deleteAutosaves();                         // after a save, NEW, or a quit / open that drops the changes
     void recoverFrom (const juce::File& autosave, const juce::File& project);
     void showPluginsMenu();
-    void populatePluginMenu (juce::PopupMenu& menu, std::function<void (const juce::String&)> onPick);
-    void showPluginSearch (std::function<void (const juce::String&)> onPick);
+    void showMixerSlotMenu (int track, int slot, juce::Rectangle<int> anchor);
+    void toggleMixer();
+    void addWetDryMenu (juce::PopupMenu& menu, int track, int slotIndex, float currentWet);
+    void addSidechainMenu (juce::PopupMenu& menu, int track, int slotIndex, int currentSource);
+    void markDirty();
     void showSignature (int numerator, int denominator);
     void applyBpm();
     void syncPlayhead() { arrange.playhead = (double) position(); }
@@ -465,7 +477,7 @@ private:
     void monitorEditorClosed (const Slot* slot);    // a monitor plugin's window was closed: its state may have changed
     bool hasOpenTrackEditor() const;
     juce::int64 trackPluginStateHash() const;
-    Slot* slotOf (int track, int slot, juce::String& error);  // a track's chain slot, or with track -1 the monitor chain's
+    Slot* slotOf (int track, int slot, juce::String& error);  // a track's chain slot, the monitor chain's (-1), or the master chain's (-2)
 
     Options opts;
     bool monitorLoaded = false;                     // the chain is read: until then no save writes monitor.xml
@@ -482,7 +494,7 @@ private:
     juce::TooltipWindow tooltips { this, 600 };
     HardwareLookAndFeel look;
     std::unique_ptr<AudioDialog> audioDialog;
-    juce::Component::SafePointer<juce::AlertWindow> searchWindow;
+    juce::Component::SafePointer<juce::CallOutBox> pickerBox;
     std::map<const Slot*, std::unique_ptr<juce::Component>> windows;
     juce::String shownTitle;
     juce::String lastPositionText;
@@ -517,5 +529,6 @@ private:
     juce::uint64 lastMasterRevision = 0;
     std::unique_ptr<Editor::Gesture> masterGesture;
     void updateMasterFader();                       // the fader follows the session (undo, a project): not while it is dragged
+    void refreshMasterFxButton();                   // the master FX button's label, lamp and tooltip follow session.masterChain
 };
 }

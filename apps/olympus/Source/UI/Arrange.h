@@ -45,10 +45,17 @@ public:
 
     // ---- what the window sets and reads ---------------------------------------------------------------------------------------
     double playhead = 0.0;          // samples; the window sets it from the transport (a seek here also moves it)
-    ClipRef selected;               // the clip the keys and the menu act on; invalid when none
-    MidiClipRef selectedMidi;       // the MIDI clip selected; invalid when none
+    ClipRef selected;               // the primary audio clip the keys and the menu act on; invalid when none
+    MidiClipRef selectedMidi;       // the primary MIDI clip selected; invalid when none
+    std::vector<ClipRef> selectedClips; // all currently selected clips (audio and MIDI)
     double zoom = kDefaultZoom;     // pixels per second, kept within 0.05 .. 4000
     bool followPlayhead = true;     // refresh() scrolls when the playhead moves out of view
+
+    bool isSelected (int track, int index, bool isMidi = false) const;
+    int selectedCount() const;
+    const std::vector<ClipRef>& selectedList() const { return selectedClips; }
+    void clearSelection();
+    void selectAll();
 
     // ---- callbacks ------------------------------------------------------------------------------------------------------------
     std::function<void (juce::int64)> onSeek;                                  // the ruler, the marker lane or a drag there moved the playhead
@@ -146,7 +153,7 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum class Mode { none, ruler, loop, marker, scrollX, move, moveMidi, trimStart, trimEnd, fadeIn, fadeOut, autoPoint };
+    enum class Mode { none, ruler, loop, marker, scrollX, marquee, move, moveMidi, trimStart, trimEnd, fadeIn, fadeOut, autoPoint };
     friend class ArrangeTrackHeader; // the header column reads and edits through the view's Editor and callbacks
 
     Session& session;
@@ -178,8 +185,27 @@ private:
     double lastRefreshZoom = kDefaultZoom;
     ClipRef lastRefreshSelected;
     MidiClipRef lastRefreshSelectedMidi;
+    struct DragClipOrigin
+    {
+        ClipRef ref;
+        juce::int64 origStart = 0;
+    };
+    std::vector<DragClipOrigin> dragClips;
+    juce::int64 dragMinOrigStart = 0;
+    ClipRef pendingSingleSelect;
+    bool didDragMove = false;
+    juce::Rectangle<int> marqueeRect;
+    bool marqueeAdditive = false;
+    std::vector<ClipRef> marqueeBaseSelection;
+    std::vector<ClipRef> lastRefreshSelectedClips;
+    juce::Rectangle<int> lastRefreshMarqueeRect;
     double lastRefreshRecFrom = -1.0, lastRefreshRecTo = -1.0;
     std::vector<int> lastRefreshRecTracks;
+
+    std::vector<ClipRef> effectiveSelection() const;
+    void syncPrimaryFromSelection();
+    void selectSingleClip (ClipRef ref);
+    void toggleClipSelection (ClipRef ref);
 
     // The model of the last snapshot taken with the lock (always with zeroed peaks). When revision is unchanged or a render holds the lock,
     // snapshotPtr returns this without waiting or rebuilding.

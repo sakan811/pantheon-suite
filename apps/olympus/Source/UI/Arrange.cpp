@@ -99,6 +99,9 @@ struct ArrangeSnapshot
         int inputLeft = 0, inputRight = -1;
         float peakL = 0.0f, peakR = 0.0f; // only when taken with peaks: the maximum since the last read
         bool isMidi = false;
+        TrackKind kind = TrackKind::Audio;
+        int outputTrack = -1;
+        std::vector<AuxSend> sends;
         std::vector<Clip> clips;
         std::vector<MidiClip> midiClips;
         bool showAutomation = false;
@@ -138,9 +141,18 @@ static bool sameArrangeVisual (const ArrangeSnapshot& a, const ArrangeSnapshot& 
     {
         const auto& ta = a.tracks[i];
         const auto& tb = b.tracks[i];
-        if (ta.mute != tb.mute || ta.isMidi != tb.isMidi || ta.showAutomation != tb.showAutomation || ta.activeAutoTarget != tb.activeAutoTarget
+        if (ta.name != tb.name || ta.mute != tb.mute || ta.isMidi != tb.isMidi || ta.kind != tb.kind || ta.outputTrack != tb.outputTrack
+            || ta.sends.size() != tb.sends.size() || ta.showAutomation != tb.showAutomation || ta.activeAutoTarget != tb.activeAutoTarget
             || ta.clips.size() != tb.clips.size() || ta.midiClips.size() != tb.midiClips.size() || ta.automation.size() != tb.automation.size())
             return false;
+        for (size_t si = 0; si < ta.sends.size(); ++si)
+        {
+            const auto& sa = ta.sends[si];
+            const auto& sb = tb.sends[si];
+            if (sa.targetTrack != sb.targetTrack || ! juce::exactlyEqual (sa.levelDb, sb.levelDb)
+                || sa.preFader != sb.preFader || sa.mute != sb.mute)
+                return false;
+        }
         for (size_t mc = 0; mc < ta.midiClips.size(); ++mc)
         {
             const auto& ma = ta.midiClips[mc];
@@ -351,8 +363,13 @@ public:
     }
 
     void setState (const juce::String& title, float gainDb, float panValue, bool isMuted, bool isSoloed, bool isArmed, const juce::String& input,
-                   bool showAuto, const juce::String& targetLabel, bool autoLaneEnabled)
+                   bool showAuto, const juce::String& targetLabel, bool autoLaneEnabled, bool busTrack)
     {
+        if (isBus != busTrack)
+        {
+            isBus = busTrack;
+            repaint();
+        }
         if (! editingName && nameLabel.getText() != title)
             nameLabel.setText (title, juce::dontSendNotification);
         if (! faderSlider.isMouseButtonDown())
@@ -372,6 +389,23 @@ public:
         muteButton.setToggleState (isMuted, juce::dontSendNotification);
         soloButton.setToggleState (isSoloed, juce::dontSendNotification);
         armButton.setToggleState (isArmed, juce::dontSendNotification);
+        armButton.setEnabled (! isBus);
+        armButton.setVisible (! isBus);
+        inputButton.setEnabled (! isBus);
+        inputButton.setVisible (! isBus);
+        if (isBus)
+        {
+            const juce::String busTip ("Bus track receives routed tracks/sends");
+            if (armButton.getTooltip() != busTip) armButton.setTooltip (busTip);
+            if (inputButton.getTooltip() != busTip) inputButton.setTooltip (busTip);
+        }
+        else
+        {
+            const juce::String armTip ("Arm the track to record it (REC). Its input is beside it; the meter shows that input while the transport is stopped.");
+            const juce::String inTip ("The device input this track records. Click to choose it.");
+            if (armButton.getTooltip() != armTip) armButton.setTooltip (armTip);
+            if (inputButton.getTooltip() != inTip) inputButton.setTooltip (inTip);
+        }
         if (inputButton.getButtonText() != input) inputButton.setButtonText (input);
         autoButton.setToggleState (showAuto, juce::dontSendNotification);
         if (autoTargetButton.isVisible() != showAuto) autoTargetButton.setVisible (showAuto);
@@ -412,9 +446,21 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto area = getLocalBounds().toFloat();
-        ui::hw::fillMetal (g, area, colours::panel);
+        const auto base = isBus ? colours::panel.interpolatedWith (colours::accent, 0.08f) : colours::panel;
+        ui::hw::fillMetal (g, area, base);
         g.setColour (juce::Colours::black.withAlpha (0.6f));
         g.fillRect (area.removeFromBottom (1.0f));
+        if (isBus)
+        {
+            const juce::Rectangle<float> badge (8.0f, 64.0f, 52.0f, 18.0f);
+            g.setColour (colours::accent.withAlpha (0.16f));
+            g.fillRoundedRectangle (badge, 3.0f);
+            g.setColour (colours::accent.withAlpha (0.65f));
+            g.drawRoundedRectangle (badge, 3.0f, 1.0f);
+            g.setFont (ui::labelFont (9.5f));
+            g.setColour (colours::accent);
+            g.drawText ("[BUS]", badge, juce::Justification::centred, false);
+        }
         if (getHeight() > ArrangeView::kLaneHeight)
         {
             g.setColour (colours::panelEdge);
@@ -437,6 +483,7 @@ public:
 
 private:
     bool editingName = false;
+    bool isBus = false;
     float lastTooltipGain = std::numeric_limits<float>::quiet_NaN();
     MeterBallistics meter;
     juce::Label nameLabel;
@@ -515,6 +562,100 @@ bool ArrangeView::isInteracting() const
     return false;
 }
 
+std::vector<ClipRef> ArrangeView::effectiveSelection() const
+{
+    if (selectedClips.size() > 1)
+        return selectedClips;
+    if (selectedClips.size() == 1)
+    {
+        const auto& c = selectedClips[0];
+        const bool matches = c.isMidi ? (! selected.valid() && selectedMidi.track == c.track && selectedMidi.clip == c.clip)
+                                      : (! selectedMidi.valid() && selected == c);
+        if (matches)
+            return selectedClips;
+    }
+    std::vector<ClipRef> out;
+    if (selected.valid())
+        out.push_back ({ selected.track, selected.clip, false });
+    if (selectedMidi.valid())
+        out.push_back ({ selectedMidi.track, selectedMidi.clip, true });
+    return out;
+}
+
+bool ArrangeView::isSelected (int track, int index, bool isMidi) const
+{
+    for (const auto& r : effectiveSelection())
+        if (r.track == track && r.clip == index && r.isMidi == isMidi)
+            return true;
+    return false;
+}
+
+int ArrangeView::selectedCount() const
+{
+    return (int) effectiveSelection().size();
+}
+
+void ArrangeView::syncPrimaryFromSelection()
+{
+    selected = {};
+    selectedMidi = {};
+    for (const auto& r : selectedClips)
+    {
+        if (! r.valid()) continue;
+        if (! r.isMidi && ! selected.valid())
+            selected = r;
+        else if (r.isMidi && ! selectedMidi.valid())
+            selectedMidi = { r.track, r.clip };
+    }
+}
+
+void ArrangeView::clearSelection()
+{
+    selectedClips.clear();
+    selected = {};
+    selectedMidi = {};
+    marqueeRect = {};
+    marqueeBaseSelection.clear();
+    repaint();
+}
+
+void ArrangeView::selectSingleClip (ClipRef ref)
+{
+    if (ref.valid())
+        selectedClips = { ref };
+    else
+        selectedClips.clear();
+    syncPrimaryFromSelection();
+}
+
+void ArrangeView::toggleClipSelection (ClipRef ref)
+{
+    if (! ref.valid()) return;
+    if (selectedClips.empty() && (selected.valid() || selectedMidi.valid()))
+        selectedClips = effectiveSelection();
+    auto it = std::find (selectedClips.begin(), selectedClips.end(), ref);
+    if (it != selectedClips.end())
+        selectedClips.erase (it);
+    else
+        selectedClips.push_back (ref);
+    syncPrimaryFromSelection();
+}
+
+void ArrangeView::selectAll()
+{
+    const auto s = snapshot();
+    selectedClips.clear();
+    for (int t = 0; t < (int) s.tracks.size(); ++t)
+    {
+        for (int c = 0; c < (int) s.tracks[(size_t) t].clips.size(); ++c)
+            selectedClips.push_back ({ t, c, false });
+        for (int mc = 0; mc < (int) s.tracks[(size_t) t].midiClips.size(); ++mc)
+            selectedClips.push_back ({ t, mc, true });
+    }
+    syncPrimaryFromSelection();
+    repaint();
+}
+
 std::shared_ptr<const ArrangeSnapshot> ArrangeView::snapshotPtr (bool takePeaks) const
 {
     // Fast path when the session's revision has not changed since lastSnapshot was built:
@@ -587,6 +728,9 @@ std::shared_ptr<const ArrangeSnapshot> ArrangeView::snapshotPtr (bool takePeaks)
             v.inputLeft = t->inputLeft;
             v.inputRight = t->inputRight;
             v.isMidi = t->isMidi;
+            v.kind = t->kind;
+            v.outputTrack = t->outputTrack;
+            v.sends = t->sends;
             v.clips = t->clips;
             v.midiClips = t->midiClips;
             v.showAutomation = t->showAutomation;
@@ -909,7 +1053,7 @@ void ArrangeView::syncHeaders (const ArrangeSnapshot& s, bool readMeters)
         for (const auto& lane : t.automation)
             if (lane.targetId == t.activeAutoTarget) { laneEnabled = lane.enabled; break; }
         h.setState (t.name, t.gainDb, t.pan, t.mute, t.solo, t.armed, inputText (t.inputLeft, t.inputRight),
-                    t.showAutomation, targetLabel, laneEnabled);
+                    t.showAutomation, targetLabel, laneEnabled, t.kind == TrackKind::Bus);
         if (! readMeters) continue;
         if (t.armed && showInputLevels && inputLevel)
         {
@@ -921,6 +1065,19 @@ void ArrangeView::syncHeaders (const ArrangeSnapshot& s, bool readMeters)
     }
 
     // a selection the model no longer has is dropped
+    if (! selectedClips.empty())
+    {
+        const auto oldSize = selectedClips.size();
+        selectedClips.erase (std::remove_if (selectedClips.begin(), selectedClips.end(), [&] (const ClipRef& r)
+        {
+            if (! r.valid() || r.track >= n) return true;
+            const int count = r.isMidi ? (int) s.tracks[(size_t) r.track].midiClips.size()
+                                       : (int) s.tracks[(size_t) r.track].clips.size();
+            return r.clip >= count;
+        }), selectedClips.end());
+        if (selectedClips.size() != oldSize)
+            syncPrimaryFromSelection();
+    }
     if (selected.valid())
     {
         const bool ok = selected.track < n && selected.clip < (int) s.tracks[(size_t) selected.track].clips.size();
@@ -968,8 +1125,11 @@ void ArrangeView::refresh()
         || ! juce::exactlyEqual (zoom, lastRefreshZoom)
         || selected.track != lastRefreshSelected.track
         || selected.clip != lastRefreshSelected.clip
+        || selected.isMidi != lastRefreshSelected.isMidi
         || selectedMidi.track != lastRefreshSelectedMidi.track
         || selectedMidi.clip != lastRefreshSelectedMidi.clip
+        || selectedClips != lastRefreshSelectedClips
+        || marqueeRect != lastRefreshMarqueeRect
         || ! juce::exactlyEqual (recordingFrom, lastRefreshRecFrom)
         || ! juce::exactlyEqual (recordingTo, lastRefreshRecTo)
         || recordingTracks != lastRefreshRecTracks;
@@ -999,6 +1159,8 @@ void ArrangeView::refresh()
     lastRefreshZoom = zoom;
     lastRefreshSelected = selected;
     lastRefreshSelectedMidi = selectedMidi;
+    lastRefreshSelectedClips = selectedClips;
+    lastRefreshMarqueeRect = marqueeRect;
     lastRefreshRecFrom = recordingFrom;
     lastRefreshRecTo = recordingTo;
     lastRefreshRecTracks = recordingTracks;
@@ -1427,8 +1589,58 @@ void ArrangeView::paint (juce::Graphics& g)
         const int y = trackTop (s, i);
         const int h = trackHeight (s, i);
         if (y + h < top || y > height) continue;
+        const auto& tr = s.tracks[(size_t) i];
         const auto lane = juce::Rectangle<float> ((float) kHeaderWidth, (float) (y + 1), (float) (width - kHeaderWidth), (float) (kLaneHeight - 2)).reduced (2.0f, 0.0f);
-        ui::hw::drawGlass (g, lane, 3.0f, colours::accent);
+        if (tr.kind == TrackKind::Bus)
+        {
+            ui::hw::drawGlass (g, lane, 3.0f, colours::amber);
+            g.setColour (colours::accent.withAlpha (0.04f));
+            g.fillRoundedRectangle (lane, 3.0f);
+
+            juce::StringArray sources;
+            for (int j = 0; j < count; ++j)
+            {
+                if (j == i) continue;
+                const auto& src = s.tracks[(size_t) j];
+                bool feeds = (src.outputTrack == i);
+                if (! feeds)
+                {
+                    for (const auto& snd : src.sends)
+                        if (snd.targetTrack == i) { feeds = true; break; }
+                }
+                if (feeds)
+                    sources.add (src.name);
+            }
+            juce::String label = sources.isEmpty() ? juce::String ("Bus (route tracks or sends here)")
+                                                   : ("Bus <- " + sources.joinIntoString (", "));
+            if (juce::isPositiveAndBelow (tr.outputTrack, count))
+                label += "  -> " + s.tracks[(size_t) tr.outputTrack].name;
+            g.setFont (ui::labelFont (10.0f));
+            g.setColour (colours::dim.withAlpha (0.75f));
+            g.drawText (label, lane.reduced (10.0f, 4.0f), juce::Justification::centredLeft, true);
+        }
+        else
+        {
+            ui::hw::drawGlass (g, lane, 3.0f, colours::accent);
+            juce::StringArray parts;
+            if (juce::isPositiveAndBelow (tr.outputTrack, count))
+                parts.add ("-> " + s.tracks[(size_t) tr.outputTrack].name);
+            if (! tr.sends.empty())
+            {
+                juce::StringArray sendNames;
+                for (const auto& snd : tr.sends)
+                    if (juce::isPositiveAndBelow (snd.targetTrack, count))
+                        sendNames.add (s.tracks[(size_t) snd.targetTrack].name);
+                if (! sendNames.isEmpty())
+                    parts.add ("Send: " + sendNames.joinIntoString (", "));
+            }
+            if (! parts.isEmpty())
+            {
+                g.setFont (ui::labelFont (9.5f));
+                g.setColour (colours::dim.withAlpha (0.7f));
+                g.drawText (parts.joinIntoString ("  |  "), lane.reduced (8.0f, 3.0f), juce::Justification::topRight, true);
+            }
+        }
     }
 
     // empty state prompt when there are no tracks
@@ -1499,14 +1711,14 @@ void ArrangeView::paint (juce::Graphics& g)
         {
             const auto rect = clipRect (s, i, clips[(size_t) c].start, clips[(size_t) c].length, pps);
             if (rect.getRight() < kHeaderWidth || rect.getX() > width) continue;
-            paintClip (g, s, pps, i, clips[(size_t) c], selected.track == i && selected.clip == c);
+            paintClip (g, s, pps, i, clips[(size_t) c], isSelected (i, c, false));
         }
         const auto& midiClips = s.tracks[(size_t) i].midiClips;
         for (int mc = 0; mc < (int) midiClips.size(); ++mc)
         {
             const auto rect = clipRect (s, i, midiClips[(size_t) mc].start, midiClips[(size_t) mc].length, pps);
             if (rect.getRight() < kHeaderWidth || rect.getX() > width) continue;
-            paintMidiClip (g, s, pps, i, midiClips[(size_t) mc], selectedMidi.track == i && selectedMidi.clip == mc);
+            paintMidiClip (g, s, pps, i, midiClips[(size_t) mc], isSelected (i, mc, true));
         }
         if (s.tracks[(size_t) i].showAutomation)
             paintAutomationLane (g, s, pps, i);
@@ -1539,6 +1751,16 @@ void ArrangeView::paint (juce::Graphics& g)
     const int px = sampleToX (playhead, pps);
     g.setColour (colours::amber);
     g.fillRect (px - 1, kRulerHeight, 2, height - kRulerHeight);
+
+    // marquee selection rectangle
+    if (mode == Mode::marquee && ! marqueeRect.isEmpty())
+    {
+        const auto mr = marqueeRect.toFloat();
+        g.setColour (colours::amber.withAlpha (0.14f));
+        g.fillRect (mr);
+        g.setColour (colours::amber.withAlpha (0.75f));
+        g.drawRect (mr, 1.0f);
+    }
     g.restoreState();
 
     // the ruler
@@ -1746,6 +1968,13 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
     pressX = p.x;
     pressY = p.y;
     mode = Mode::none;
+    dragClips.clear();
+    dragMinOrigStart = 0;
+    pendingSingleSelect = {};
+    didDragMove = false;
+    marqueeRect = {};
+    marqueeAdditive = false;
+    marqueeBaseSelection.clear();
 
     if (p.x < kHeaderWidth)
     {
@@ -1859,14 +2088,67 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
     }
 
     // the lanes
+    auto beginGroupMove = [&] (ClipRef primaryRef, juce::int64 primaryStart)
+    {
+        dragClips.clear();
+        dragMinOrigStart = std::numeric_limits<juce::int64>::max();
+        for (const auto& r : effectiveSelection())
+        {
+            if (! r.valid() || ! juce::isPositiveAndBelow (r.track, (int) s.tracks.size())) continue;
+            if (r.isMidi)
+            {
+                if (! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].midiClips.size())) continue;
+                const auto st = s.tracks[(size_t) r.track].midiClips[(size_t) r.clip].start;
+                dragClips.push_back ({ r, st });
+                dragMinOrigStart = juce::jmin (dragMinOrigStart, st);
+            }
+            else
+            {
+                if (! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].clips.size())) continue;
+                const auto st = s.tracks[(size_t) r.track].clips[(size_t) r.clip].start;
+                dragClips.push_back ({ r, st });
+                dragMinOrigStart = juce::jmin (dragMinOrigStart, st);
+            }
+        }
+        if (dragClips.empty())
+        {
+            dragMinOrigStart = primaryStart;
+            dragClips.push_back ({ primaryRef, primaryStart });
+        }
+        dragClip = primaryRef;
+        origStart = primaryStart;
+        mode = Mode::move;
+        beginGesture ("Move clips");
+    };
+
     const auto midiHit = midiClipAt (p);
     if (midiHit.valid())
     {
-        selected = {};
-        selectedMidi = midiHit;
-        repaint();
-        if (e.mods.isPopupMenu()) { midiClipMenu (midiHit); return; }
+        const ClipRef midiRef { midiHit.track, midiHit.clip, true };
+        if (e.mods.isPopupMenu())
+        {
+            if (! isSelected (midiHit.track, midiHit.clip, true))
+                selectSingleClip (midiRef);
+            repaint();
+            midiClipMenu (midiHit);
+            return;
+        }
+        if (e.mods.isShiftDown())
+        {
+            toggleClipSelection (midiRef);
+            repaint();
+            return;
+        }
         const auto& mc = s.tracks[(size_t) midiHit.track].midiClips[(size_t) midiHit.clip];
+        if (isSelected (midiHit.track, midiHit.clip, true) && effectiveSelection().size() > 1)
+        {
+            pendingSingleSelect = midiRef;
+            repaint();
+            beginGroupMove (midiRef, mc.start);
+            return;
+        }
+        selectSingleClip (midiRef);
+        repaint();
         dragMidiClip = midiHit;
         origStart = mc.start;
         mode = Mode::moveMidi;
@@ -1884,8 +2166,13 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
                 seekTo (editor.snap ((juce::int64) juce::jmax (0.0, xToSample (p.x, pps))));
                 return;
             }
-            selected = {};
-            selectedMidi = {};
+            marqueeAdditive = e.mods.isShiftDown();
+            if (marqueeAdditive)
+                marqueeBaseSelection = effectiveSelection();
+            else
+                clearSelection();
+            mode = Mode::marquee;
+            marqueeRect = { p.x, p.y, 0, 0 };
         }
         else
         {
@@ -1895,23 +2182,50 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
         repaint();
         return;
     }
-    selectedMidi = {};
-    selected = hit;
-    repaint();
-    if (e.mods.isPopupMenu()) { clipMenu (hit); return; }
+
+    const ClipRef hitRef { hit.track, hit.clip, false };
+    if (e.mods.isPopupMenu())
+    {
+        if (! isSelected (hit.track, hit.clip, false))
+            selectSingleClip (hitRef);
+        repaint();
+        clipMenu (hit);
+        return;
+    }
+    if (e.mods.isShiftDown())
+    {
+        toggleClipSelection (hitRef);
+        repaint();
+        return;
+    }
 
     const auto& c = s.tracks[(size_t) hit.track].clips[(size_t) hit.clip];
     const auto r = clipBounds (hit);
+    const bool edgeStart = p.x - r.getX() <= kEdgeGrab;
+    const bool edgeEnd = r.getRight() - p.x <= kEdgeGrab;
+    const bool fadeInHit = c.fadeIn > 0 && hitFadeIn (s, hit, p, pps);
+    const bool fadeOutHit = c.fadeOut > 0 && hitFadeOut (s, hit, p, pps);
+    const bool edgeOrFade = fadeInHit || fadeOutHit || edgeStart || edgeEnd || hitFadeIn (s, hit, p, pps) || hitFadeOut (s, hit, p, pps);
+
+    if (! edgeOrFade && isSelected (hit.track, hit.clip, false) && effectiveSelection().size() > 1)
+    {
+        pendingSingleSelect = hitRef;
+        repaint();
+        beginGroupMove (hitRef, c.start);
+        return;
+    }
+
+    selectSingleClip (hitRef);
+    repaint();
+
     dragClip = hit;
     origStart = c.start;
     origEnd = c.end();
     origFadeIn = c.fadeIn;
     origFadeOut = c.fadeOut;
 
-    const bool edgeStart = p.x - r.getX() <= kEdgeGrab;
-    const bool edgeEnd = r.getRight() - p.x <= kEdgeGrab;
-    if (c.fadeIn > 0 && hitFadeIn (s, hit, p, pps)) mode = Mode::fadeIn;
-    else if (c.fadeOut > 0 && hitFadeOut (s, hit, p, pps)) mode = Mode::fadeOut;
+    if (fadeInHit) mode = Mode::fadeIn;
+    else if (fadeOutHit) mode = Mode::fadeOut;
     else if (edgeStart) mode = Mode::trimStart;
     else if (edgeEnd) mode = Mode::trimEnd;
     else if (hitFadeIn (s, hit, p, pps)) mode = Mode::fadeIn;
@@ -1933,8 +2247,7 @@ void ArrangeView::mouseDoubleClick (const juce::MouseEvent& e)
     if (e.mods.isPopupMenu()) return;
     const auto midiHit = midiClipAt (e.getPosition());
     if (! midiHit.valid()) return;
-    selected = {};
-    selectedMidi = midiHit;
+    selectSingleClip ({ midiHit.track, midiHit.clip, true });
     repaint();
     if (onOpenMidiClip) onOpenMidiClip (midiHit);
 }
@@ -1992,14 +2305,77 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
             break;
         }
 
+        case Mode::marquee:
+        {
+            marqueeRect = juce::Rectangle<int>::leftTopRightBottom (std::min (pressX, p.x), std::min (pressY, p.y),
+                                                                    std::max (pressX, p.x), std::max (pressY, p.y));
+            selectedClips = marqueeBaseSelection;
+            if (p.x != pressX || p.y != pressY)
+            {
+                const juce::Rectangle<int> hitRect (marqueeRect.getX(), marqueeRect.getY(),
+                                                    juce::jmax (1, marqueeRect.getWidth()),
+                                                    juce::jmax (1, marqueeRect.getHeight()));
+                for (int t = 0; t < (int) s.tracks.size(); ++t)
+                {
+                    const auto& clips = s.tracks[(size_t) t].clips;
+                    for (int c = 0; c < (int) clips.size(); ++c)
+                    {
+                        if (clipRect (s, t, clips[(size_t) c].start, clips[(size_t) c].length, pps).intersects (hitRect))
+                        {
+                            const ClipRef r { t, c, false };
+                            if (std::find (selectedClips.begin(), selectedClips.end(), r) == selectedClips.end())
+                                selectedClips.push_back (r);
+                        }
+                    }
+                    const auto& midiClips = s.tracks[(size_t) t].midiClips;
+                    for (int mc = 0; mc < (int) midiClips.size(); ++mc)
+                    {
+                        if (clipRect (s, t, midiClips[(size_t) mc].start, midiClips[(size_t) mc].length, pps).intersects (hitRect))
+                        {
+                            const ClipRef r { t, mc, true };
+                            if (std::find (selectedClips.begin(), selectedClips.end(), r) == selectedClips.end())
+                                selectedClips.push_back (r);
+                        }
+                    }
+                }
+            }
+            syncPrimaryFromSelection();
+            repaint();
+            return;
+        }
+
         case Mode::move:
         {
+            if (dragClips.size() > 1)
+            {
+                const auto snappedPrimary = editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + (double) std::llround (deltaSamples)));
+                juce::int64 delta = snappedPrimary - origStart;
+                if (dragMinOrigStart + delta < 0)
+                    delta = -dragMinOrigStart;
+                if (std::abs (p.x - pressX) > 2 || std::abs (p.y - pressY) > 2 || delta != 0)
+                    didDragMove = true;
+                for (const auto& item : dragClips)
+                {
+                    const juce::int64 target = juce::jmax ((juce::int64) 0, item.origStart + delta);
+                    if (item.ref.isMidi)
+                    {
+                        if (! editor.moveMidiClip (item.ref.track, item.ref.clip, target, error))
+                            report (error);
+                    }
+                    else
+                    {
+                        if (! editor.moveClip (item.ref.track, item.ref.clip, target, error))
+                            report (error);
+                    }
+                }
+                break;
+            }
             const int lane = trackAt (s, p.y);
             const auto newStart = editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + std::llround (deltaSamples)));
             if (lane >= 0 && lane != dragClip.track)
             {
                 const auto moved = editor.moveClipToTrack (dragClip.track, dragClip.clip, lane, newStart, error);
-                if (moved.valid()) { dragClip = moved; selected = moved; }
+                if (moved.valid()) { dragClip = moved; selectSingleClip (moved); }
                 else report (error);
             }
             else if (! editor.moveClip (dragClip.track, dragClip.clip, newStart, error))
@@ -2072,6 +2448,29 @@ void ArrangeView::mouseUp (const juce::MouseEvent& e)
 {
     if (e.source.getIndex() != dragSourceIndex) return; // another pointer's release does not end this drag
     dragSourceIndex = -1;
+    if (mode == Mode::marquee)
+    {
+        mode = Mode::none;
+        marqueeRect = {};
+        marqueeAdditive = false;
+        marqueeBaseSelection.clear();
+        repaint();
+        return;
+    }
+    if (mode == Mode::move && pendingSingleSelect.valid() && ! didDragMove)
+    {
+        selectSingleClip (pendingSingleSelect);
+        pendingSingleSelect = {};
+        dragClips.clear();
+        didDragMove = false;
+        mode = Mode::none;
+        endGesture();
+        repaint();
+        return;
+    }
+    pendingSingleSelect = {};
+    dragClips.clear();
+    didDragMove = false;
     const bool wasEdit = mode != Mode::none && mode != Mode::ruler && mode != Mode::scrollX;
     mode = Mode::none;
     endGesture();
@@ -2118,7 +2517,7 @@ bool ArrangeView::keyPressed (const juce::KeyPress& key)
     // The clip keys (Delete, Cmd+D, S) and the transport keys belong to the window, which calls the methods above; the view takes only
     // the selection and the nudges, so a key is never handled twice.
     if (mods.isCommandDown()) return false;
-    if (code == juce::KeyPress::escapeKey) { selected = {}; selectedMidi = {}; repaint(); return true; }
+    if (code == juce::KeyPress::escapeKey) { clearSelection(); return true; }
     if (code == juce::KeyPress::leftKey) { nudgeSelected (-1, 0, mods.isShiftDown()); return true; }
     if (code == juce::KeyPress::rightKey) { nudgeSelected (1, 0, mods.isShiftDown()); return true; }
     if (code == juce::KeyPress::upKey) { nudgeSelected (0, -1, false); return true; }
@@ -2135,51 +2534,109 @@ void ArrangeView::nudgeSelected (int dx, int dy, bool bar)
     const double stepSamples = s.tempo.beatsToSamples (beats) - s.tempo.beatsToSamples (0.0);
     juce::String error;
 
-    if (! selected.valid())
+    const auto sel = effectiveSelection();
+    if (sel.empty())
     {
-        if (selectedMidi.valid())
+        if (dx != 0) seekTo ((juce::int64) juce::jmax (0.0, (double) playhead + dx * stepSamples));
+        return;
+    }
+
+    if (sel.size() == 1)
+    {
+        const auto r = sel[0];
+        if (! juce::isPositiveAndBelow (r.track, (int) s.tracks.size()))
         {
-            if (! juce::isPositiveAndBelow (selectedMidi.track, (int) s.tracks.size())
-                || ! juce::isPositiveAndBelow (selectedMidi.clip, (int) s.tracks[(size_t) selectedMidi.track].midiClips.size()))
+            clearSelection();
+            return;
+        }
+        if (r.isMidi)
+        {
+            if (! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].midiClips.size()))
             {
-                selectedMidi = {};
+                clearSelection();
                 return;
             }
             if (dx != 0)
             {
-                const auto& mc = s.tracks[(size_t) selectedMidi.track].midiClips[(size_t) selectedMidi.clip];
+                const auto& mc = s.tracks[(size_t) r.track].midiClips[(size_t) r.clip];
                 const auto target = editor.snap ((juce::int64) juce::jmax (0.0, (double) mc.start + dx * stepSamples));
-                if (! editor.moveMidiClip (selectedMidi.track, selectedMidi.clip, target, error)) report (error);
+                if (! editor.moveMidiClip (r.track, r.clip, target, error)) report (error);
                 edited();
             }
             return;
         }
-        if (dx != 0) seekTo ((juce::int64) juce::jmax (0.0, (double) playhead + dx * stepSamples));
+        if (! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].clips.size()))
+        {
+            clearSelection();
+            return;
+        }
+        const auto& c = s.tracks[(size_t) r.track].clips[(size_t) r.clip];
+        if (dx != 0)
+        {
+            const auto target = editor.snap ((juce::int64) juce::jmax (0.0, (double) c.start + dx * stepSamples));
+            if (! editor.moveClip (r.track, r.clip, target, error)) report (error);
+        }
+        else if (dy != 0)
+        {
+            const int to = r.track + dy;
+            if (juce::isPositiveAndBelow (to, (int) s.tracks.size()))
+            {
+                const auto moved = editor.moveClipToTrack (r.track, r.clip, to, c.start, error);
+                if (moved.valid()) selectSingleClip (moved);
+                else report (error);
+            }
+        }
+        edited();
         return;
     }
-    if (! juce::isPositiveAndBelow (selected.track, (int) s.tracks.size())
-        || ! juce::isPositiveAndBelow (selected.clip, (int) s.tracks[(size_t) selected.track].clips.size()))
-    {
-        selected = {};
-        return;
-    }
-    const auto& c = s.tracks[(size_t) selected.track].clips[(size_t) selected.clip];
+
     if (dx != 0)
     {
-        const auto target = editor.snap ((juce::int64) juce::jmax (0.0, (double) c.start + dx * stepSamples));
-        if (! editor.moveClip (selected.track, selected.clip, target, error)) report (error);
-    }
-    else if (dy != 0)
-    {
-        const int to = selected.track + dy;
-        if (juce::isPositiveAndBelow (to, (int) s.tracks.size()))
+        std::vector<DragClipOrigin> items;
+        juce::int64 minStart = std::numeric_limits<juce::int64>::max();
+        for (const auto& r : sel)
         {
-            const auto moved = editor.moveClipToTrack (selected.track, selected.clip, to, c.start, error);
-            if (moved.valid()) selected = moved;
-            else report (error);
+            if (! r.valid() || ! juce::isPositiveAndBelow (r.track, (int) s.tracks.size())) continue;
+            if (r.isMidi)
+            {
+                if (! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].midiClips.size())) continue;
+                const auto st = s.tracks[(size_t) r.track].midiClips[(size_t) r.clip].start;
+                items.push_back ({ r, st });
+                minStart = juce::jmin (minStart, st);
+            }
+            else
+            {
+                if (! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].clips.size())) continue;
+                const auto st = s.tracks[(size_t) r.track].clips[(size_t) r.clip].start;
+                items.push_back ({ r, st });
+                minStart = juce::jmin (minStart, st);
+            }
         }
+        if (items.empty())
+        {
+            clearSelection();
+            return;
+        }
+        const auto primaryStart = items.front().origStart;
+        const auto target0 = editor.snap ((juce::int64) juce::jmax (0.0, (double) primaryStart + dx * stepSamples));
+        juce::int64 delta = target0 - primaryStart;
+        if (minStart + delta < 0) delta = -minStart;
+        beginGesture ("Move clips");
+        for (const auto& item : items)
+        {
+            const juce::int64 target = juce::jmax ((juce::int64) 0, item.origStart + delta);
+            if (item.ref.isMidi)
+            {
+                if (! editor.moveMidiClip (item.ref.track, item.ref.clip, target, error)) report (error);
+            }
+            else
+            {
+                if (! editor.moveClip (item.ref.track, item.ref.clip, target, error)) report (error);
+            }
+        }
+        endGesture();
+        edited();
     }
-    edited();
 }
 
 void ArrangeView::splitAtPlayhead()
@@ -2190,7 +2647,7 @@ void ArrangeView::splitAtPlayhead()
 
     const auto inside = [&] (ClipRef r)
     {
-        if (! r.valid() || ! juce::isPositiveAndBelow (r.track, (int) s.tracks.size())
+        if (r.isMidi || ! r.valid() || ! juce::isPositiveAndBelow (r.track, (int) s.tracks.size())
             || ! juce::isPositiveAndBelow (r.clip, (int) s.tracks[(size_t) r.track].clips.size()))
             return false;
         const auto& c = s.tracks[(size_t) r.track].clips[(size_t) r.clip];
@@ -2200,7 +2657,7 @@ void ArrangeView::splitAtPlayhead()
     if (selected.valid() && inside (selected))
     {
         const auto right = editor.splitClip (selected.track, selected.clip, at, error);
-        if (right.valid()) selected = right;
+        if (right.valid()) selectSingleClip (right);
         else report (error);
         edited();
         return;
@@ -2213,49 +2670,88 @@ void ArrangeView::splitAtPlayhead()
             if (inside ({ t, c })) { editor.splitClip (t, c, at, error); any = true; }
     endGesture();
     if (! any) report ("No clip is under the playhead.");
-    selected = {};
+    clearSelection();
     edited();
 }
 
 void ArrangeView::deleteSelected()
 {
-    if (selectedMidi.valid())
+    const auto sel = effectiveSelection();
+    if (sel.empty()) return;
+    juce::String error;
+    if (sel.size() == 1)
     {
-        juce::String error;
-        if (editor.deleteMidiClip (selectedMidi.track, selectedMidi.clip, error)) selectedMidi = {};
+        const auto r = sel[0];
+        const bool ok = r.isMidi ? editor.deleteMidiClip (r.track, r.clip, error)
+                                 : editor.deleteClip (r.track, r.clip, error);
+        if (ok) clearSelection();
         else report (error);
         edited();
         return;
     }
-    if (! selected.valid()) return;
-    juce::String error;
-    if (editor.deleteClip (selected.track, selected.clip, error)) selected = {};
+    if (editor.deleteClips (sel, error)) clearSelection();
     else report (error);
     edited();
 }
 
 void ArrangeView::duplicateSelected()
 {
-    if (! selected.valid()) return;
+    const auto sel = effectiveSelection();
+    if (sel.empty()) return;
     juce::String error;
-    const auto copy = editor.duplicateClip (selected.track, selected.clip, error);
-    if (copy.valid()) selected = copy;
-    else report (error);
+    if (sel.size() == 1)
+    {
+        if (sel[0].isMidi) return;
+        const auto copy = editor.duplicateClip (sel[0].track, sel[0].clip, error);
+        if (copy.valid()) selectSingleClip (copy);
+        else report (error);
+        edited();
+        return;
+    }
+    std::vector<ClipRef> copies;
+    beginGesture ("Duplicate clips");
+    for (const auto& r : sel)
+    {
+        if (r.isMidi) continue;
+        const auto copy = editor.duplicateClip (r.track, r.clip, error);
+        if (copy.valid()) copies.push_back (copy);
+        else { report (error); break; }
+    }
+    endGesture();
+    if (! copies.empty())
+    {
+        selectedClips = std::move (copies);
+        syncPrimaryFromSelection();
+    }
     edited();
 }
 
 void ArrangeView::copySelected()
 {
-    if (! selected.valid()) return;
+    const auto sel = effectiveSelection();
+    if (sel.empty()) return;
     juce::String error;
-    if (! editor.copyClip (selected, error)) report (error);
+    if (sel.size() == 1)
+    {
+        if (! editor.copyClip (sel[0], error)) report (error);
+        return;
+    }
+    if (! editor.copyClips (sel, error)) report (error);
 }
 
 void ArrangeView::cutSelected()
 {
-    if (! selected.valid()) return;
+    const auto sel = effectiveSelection();
+    if (sel.empty()) return;
     juce::String error;
-    if (editor.cutClip (selected, error)) selected = {};
+    if (sel.size() == 1)
+    {
+        if (editor.cutClip (sel[0], error)) clearSelection();
+        else report (error);
+        edited();
+        return;
+    }
+    if (editor.cutClips (sel, error)) clearSelection();
     else report (error);
     edited();
 }
@@ -2263,16 +2759,19 @@ void ArrangeView::cutSelected()
 void ArrangeView::pasteAtPlayhead()
 {
     if (! editor.hasClipboard()) { report ("The clipboard is empty: copy or cut a clip first."); return; }
-    pasteAt (selected.valid() ? selected.track : editor.clipboardTrack(), (juce::int64) playhead);
+    const auto sel = effectiveSelection();
+    const int targetTrack = (sel.size() == 1) ? sel[0].track : editor.clipboardTrack();
+    pasteAt (targetTrack, (juce::int64) playhead);
 }
 
 void ArrangeView::pasteAt (int track, juce::int64 at)
 {
     if (recordingFrom >= 0.0) { report ("Stop the recording before you paste."); return; }
     juce::String error;
-    const auto made = editor.pasteClip (track, at, error);
-    if (! made.valid()) { report (error); return; }
-    selected = made;
+    const auto made = editor.pasteClips (track, at, error);
+    if (made.empty()) { report (error); return; }
+    selectedClips = made;
+    syncPrimaryFromSelection();
     edited();
 }
 
@@ -2353,8 +2852,7 @@ void ArrangeView::createMidiClipAt (int track, juce::int64 at)
     juce::String error;
     const auto made = editor.addMidiClip (track, start, len, {}, error);
     if (! made.valid()) { report (error); return; }
-    selected = {};
-    selectedMidi = made;
+    selectSingleClip ({ made.track, made.clip, true });
     edited();
 }
 
@@ -2397,8 +2895,8 @@ void ArrangeView::midiClipAction (MidiClipRef ref, int action)
         case 3:
             if (editor.deleteMidiClip (ref.track, ref.clip, error))
             {
-                if (selectedMidi.track == ref.track && selectedMidi.clip == ref.clip)
-                    selectedMidi = {};
+                if (isSelected (ref.track, ref.clip, true))
+                    clearSelection();
             }
             else report (error);
             edited();
@@ -2420,20 +2918,20 @@ void ArrangeView::clipAction (ClipRef ref, int action)
         case 1:
             if (playhead > (double) c.start && playhead < (double) c.end())
             {
-                selected = ref;
+                selectSingleClip (ref);
                 splitAtPlayhead();
             }
             else report ("The playhead is not inside that clip.");
             return;
         case 2:
-            if (auto copy = editor.duplicateClip (ref.track, ref.clip, error); copy.valid()) selected = copy;
+            if (auto copy = editor.duplicateClip (ref.track, ref.clip, error); copy.valid()) selectSingleClip (copy);
             else report (error);
             break;
         case 3:
             if (! editor.copyClip (ref, error)) report (error);
             return;
         case 4:
-            if (editor.cutClip (ref, error)) selected = {};
+            if (editor.cutClip (ref, error)) clearSelection();
             else report (error);
             break;
         case 5:
@@ -2485,7 +2983,7 @@ void ArrangeView::clipAction (ClipRef ref, int action)
             return;
         }
         case 8:
-            if (editor.deleteClip (ref.track, ref.clip, error)) selected = {};
+            if (editor.deleteClip (ref.track, ref.clip, error)) clearSelection();
             else report (error);
             break;
         case 9:
