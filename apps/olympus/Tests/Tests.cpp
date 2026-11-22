@@ -414,7 +414,7 @@ void mcpChecks()
     juce::var list;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}", list);
     const auto tools = server.handle (list)["result"]["tools"];
-    test::check (tools.size() == 37 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
+    test::check (tools.size() == 38 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
 
     juce::var note;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", note);
@@ -494,10 +494,10 @@ juce::String toolText (const juce::var& result) { return result["content"][0]["t
 juce::var toolJson (const juce::var& result) { juce::var v; juce::JSON::parse (toolText (result), v); return v; }
 
 // [40] The MCP server's undo and redo: the same history as the window's (Editor). An edit is undone and redone by name; an empty history is an
-// error result with the reason; adding a plugin clears the history, as the window does.
+// error result with the reason; adding a plugin is undoable and preserves earlier steps.
 void mcpUndoChecks()
 {
-    std::printf ("[40] MCP undo and redo: an edit is undone and redone through the Editor; an empty history is an error result; a plugin change clears it\n");
+    std::printf ("[40] MCP undo and redo: an edit is undone and redone through the Editor; an empty history is an error result; a plugin change is undoable\n");
     tempFolder().getChildFile ("mcp-undo").createDirectory();
     juce::String err;
     const auto wav = makeWav ("mcp-undo/a.wav", 48000.0, 2, 48000, 0.5f, 440.0);
@@ -520,8 +520,18 @@ void mcpUndoChecks()
     test::check (! failed (redone) && s.tracks[0]->clips.size() == 2 && toolJson (redone)["redone"].toString() == "Add clip", "redo brings the clip back and names it");
     test::check (failed (call ("redo", "{}")) && said (call ("redo", "{}"), "Nothing to redo"), "redo with nothing undone is an error result with the reason");
 
-    test::check (! failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\"}")), "add_plugin puts a plugin on the track");
-    test::check (failed (call ("undo", "{}")) && said (call ("undo", "{}"), "Nothing to undo"), "adding a plugin clears the history: the clip is not undone");
+    test::check (! failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Gain\"}")) && s.tracks[0]->chain.size() == 1, "add_plugin puts a plugin on the track");
+    const auto undonePlugin = call ("undo", "{}");
+    test::check (! failed (undonePlugin) && s.tracks[0]->chain.empty()
+                 && toolJson (undonePlugin)["undone"].toString() == "Add plugin"
+                 && (bool) toolJson (undonePlugin)["can_undo"],
+                 "adding a plugin is undone and preserves the prior clip edit");
+    const auto undoneClip2 = call ("undo", "{}");
+    test::check (! failed (undoneClip2) && s.tracks[0]->clips.size() == 1 && toolJson (undoneClip2)["undone"].toString() == "Add clip",
+                 "the prior clip edit is still undone after undoing add_plugin");
+    test::check (! failed (call ("redo", "{}")) && s.tracks[0]->clips.size() == 2
+                 && ! failed (call ("redo", "{}")) && s.tracks[0]->chain.size() == 1,
+                 "redo restores both the clip and the plugin");
     tempFolder().getChildFile ("mcp-undo").deleteRecursively();
 }
 
@@ -550,7 +560,7 @@ void mcpTimelineChecks()
                            "add_marker", "remove_marker", "set_loop", "set_master" })
         for (auto& t : *tools.getArray())
             if (t["name"].toString() == n) ++known;
-    test::check (tools.size() == 37 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
+    test::check (tools.size() == 38 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
 
     // clips
     test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1}")) && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 48000,
@@ -1227,8 +1237,12 @@ void undoChecks()
     t.addTrack (wav, "T", err);
     Editor ted (t);
     ted.moveClip (0, 0, 100, err);
-    t.addEmptyTrack ("New");
-    test::check (! ted.undo() && ! ted.canUndo(), "after a track is added, undo refuses and the stacks are cleared");
+    ted.addEmptyTrack ("New");
+    test::check (t.tracks.size() == 2 && ted.canUndo() && ted.undo(), "adding a track through Editor is undoable");
+    test::check (t.tracks.size() == 1 && ted.canUndo(), "undoing the track restores the previous track count and keeps the prior edit");
+    test::check (ted.undo() && t.tracks[0]->clips[0].start == 0, "and undoing again reverts the clip move made before the track was added");
+    test::check (ted.redo() && t.tracks[0]->clips[0].start == 100 && ted.redo() && t.tracks.size() == 2,
+                 "redo replays both the clip move and adding the track");
 }
 
 void fixChecks()
@@ -1796,7 +1810,7 @@ void deviceRateChecks()
 
 void busChecks()
 {
-    std::printf ("[36] Bus layouts: a sidechain is switched off and the plugin runs stereo; a mono plugin is refused with the reason; a project with one keeps it unusable; no plugin is handed more channels than it has\n");
+    std::printf ("[36] Bus layouts: an optional stereo sidechain is kept enabled and the plugin runs stereo; a mono plugin is refused with the reason; a project with one keeps it unusable; no plugin is handed more channels than it has\n");
     juce::String err;
     const auto wav = makeWav ("bus-src.wav", 48000.0, 2, 48000, 0.3f, 300.0);
     Session s;
@@ -1805,7 +1819,7 @@ void busChecks()
     test::check (s.addTrack (wav, "Bus", err), "a track with audio");
     test::check (s.addPlugin (0, "test aux", -1, err) && s.tracks[0]->chain.size() == 1 && s.tracks[0]->chain[0]->instance != nullptr, "a plugin with a sidechain is added");
     auto* aux = dynamic_cast<test::PassPlugin*> (s.tracks[0]->chain[0]->instance.get());
-    test::check (aux != nullptr && aux->getTotalNumInputChannels() == 2 && aux->getChannelCountOfBus (true, 1) == 0, "its sidechain is switched off, and its main pair is stereo");
+    test::check (aux != nullptr && aux->getTotalNumInputChannels() == 4 && aux->getChannelCountOfBus (true, 1) == 2, "its optional stereo sidechain is kept enabled, and its main pair is stereo");
     test::check (aux != nullptr && std::abs (aux->preparedRate - 48000.0) < 0.5, "it is set up at the session's rate");
 
     juce::AudioBuffer<float> out (2, kBlockSize);
@@ -4674,6 +4688,922 @@ void automationCurvesChecks()
     dir.deleteRecursively();
 }
 
+static void offlineScopePrePreparedChecks()
+{
+    std::printf ("[61] OfflineScope respects pre-prepared offline state (message-thread prep)\n");
+    const auto dir = tempFolder().getChildFile ("offline_scope");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = dir.getChildFile ("tone.wav");
+    {
+        juce::AudioBuffer<float> b (2, 4800);
+        b.clear();
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 4800; ++i)
+                b.setSample (ch, i, 0.25f);
+        juce::WavAudioFormat wavFmt;
+        std::unique_ptr<juce::OutputStream> stream (wav.createOutputStream());
+        auto writer = wavFmt.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+        writer->writeFromAudioSampleBuffer (b, 0, 4800);
+    }
+
+    Session s;
+    test::addTestPlugins (s.catalog);
+    juce::String err;
+    test::check (s.addTrack (wav, "T1", err), "add track");
+    test::check (s.addPlugin (0, "Test Gain", -1, err), "add plugin");
+    test::check (! s.isOffline(), "session starts non-offline");
+
+    s.prepare (true);
+    test::check (s.isOffline(), "prepare(true) sets offline=true");
+
+    RenderOptions opts;
+    opts.folder = dir.getChildFile ("out");
+    opts.writeStems = true;
+    opts.writeMix = true;
+    RenderResult res;
+    test::check (s.renderStems (opts, res, err), "renderStems succeeds when pre-prepared");
+    test::check (s.isOffline(), "OfflineScope preserves pre-prepared offline=true after renderStems");
+
+    s.prepare (false);
+    test::check (! s.isOffline(), "prepare(false) restores offline=false");
+
+    dir.deleteRecursively();
+}
+
+static void masterBusFxChainChecks()
+{
+    std::printf ("[62] Master Bus FX Chain\n");
+    const auto dir = tempFolder().getChildFile ("master_fx");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto impWav = makeWav ("master_fx/imp.wav", 48000.0, 2, 4800, 0.25f, 0.0, 100, 32);
+
+    // 1. CRUD + latency + bypass + move
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String err;
+        test::check (s.addMasterPlugin ("Test Gain", -1, err), "addMasterPlugin Test Gain: " + err);
+        test::check (s.addMasterPlugin ("Test Delay", 0, err), "addMasterPlugin Test Delay at 0: " + err);
+        test::check (s.masterChain.size() == 2 && s.masterSlot (0)->plugin == "Test Delay" && s.masterSlot (1)->plugin == "Test Gain",
+                     "masterChain insertion order respected");
+        test::check (s.masterLatency() == 64 && s.masterSlot (2) == nullptr, "masterLatency is 64 and out-of-range masterSlot is null");
+        test::check (s.moveMasterPlugin (0, 1, err) && s.masterSlot (0)->plugin == "Test Gain" && s.masterSlot (1)->plugin == "Test Delay",
+                     "moveMasterPlugin swaps order");
+        test::check (s.bypassMasterPlugin (1, true, err) && s.masterLatency() == 0, "bypassMasterPlugin clears latency");
+        test::check (s.bypassMasterPlugin (1, false, err) && s.masterLatency() == 64, "unbypass restores latency");
+        test::check (s.removeMasterPlugin (1, err) && s.masterChain.size() == 1 && s.masterLatency() == 0, "removeMasterPlugin removes slot");
+        test::check (! s.removeMasterPlugin (5, err), "removeMasterPlugin rejects invalid index");
+    }
+
+    // 2. processBlock applies masterChain before masterDb
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String err;
+        test::check (s.addTrack (impWav, "Imp", err), "addTrack for processBlock");
+        test::check (s.addMasterPlugin ("Test Gain", -1, err), "addMasterPlugin Test Gain");
+        auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.masterSlot (0)->instance->getParameters()[0]);
+        p->setValue (p->convertTo0to1 (6.0f));
+        juce::AudioBuffer<float> buf (2, 1024);
+        s.processBlock (buf, 0);
+        const float expected = 0.25f * juce::Decibels::decibelsToGain (6.0f);
+        test::check (std::abs (buf.getSample (0, 100) - expected) < 1e-4f,
+                     test::fmt ("processBlock applies masterChain gain (got %.5f, expected %.5f)", buf.getSample (0, 100), expected));
+        test::check (s.bypassMasterPlugin (0, true, err), "bypass master Test Gain");
+        s.processBlock (buf, 0);
+        test::check (std::abs (buf.getSample (0, 100) - 0.25f) < 1e-4f, "bypassed masterChain passes unity");
+    }
+
+    // 3. renderStems applies masterChain (Gain + 64-sample Delay) to mix.wav aligned at sample 0, while 01-Imp.wav is unaffected
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String err;
+        test::check (s.addTrack (impWav, "Imp", err), "addTrack for renderStems");
+        test::check (s.addMasterPlugin ("Test Gain", -1, err), "addMasterPlugin Test Gain");
+        test::check (s.addMasterPlugin ("Test Delay", -1, err), "addMasterPlugin Test Delay");
+        auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.masterSlot (0)->instance->getParameters()[0]);
+        p->setValue (p->convertTo0to1 (6.0f));
+
+        RenderOptions opts;
+        opts.folder = dir.getChildFile ("out");
+        opts.writeStems = true;
+        opts.writeMix = true;
+        opts.bits = 32;
+        RenderResult res;
+        test::check (s.renderStems (opts, res, err), "renderStems with masterChain: " + err);
+
+        const auto stem = readWav (opts.folder.getChildFile ("01-Imp.wav"));
+        const auto mix = readWav (opts.folder.getChildFile ("mix.wav"));
+        test::check (stem.getNumSamples() == 4800 && peakIndex (stem) == 100 && std::abs (stem.getSample (0, 100) - 0.25f) < 1e-4f,
+                     "01-Imp.wav is unaffected by masterChain");
+        const float expectedMix = 0.25f * juce::Decibels::decibelsToGain (6.0f);
+        test::check (mix.getNumSamples() == 4800 && peakIndex (mix) == 100 && std::abs (mix.getSample (0, 100) - expectedMix) < 1e-4f,
+                     test::fmt ("mix.wav has exact stemLength (%d), aligned impulse at %d (val %.5f vs %.5f)",
+                                mix.getNumSamples(), peakIndex (mix), mix.getSample (0, 100), expectedMix));
+    }
+
+    // 4. Project XML round-trip preserves masterChain & plugin state, missing plugin warns, newProject clears
+    {
+        const auto projFile = dir.getChildFile ("master.olympus");
+        {
+            Session s;
+            test::addTestPlugins (s.catalog);
+            juce::String err;
+            test::check (s.addTrack (impWav, "Imp", err), "addTrack for XML");
+            test::check (s.addMasterPlugin ("Test Gain", -1, err), "addMasterPlugin Gain");
+            test::check (s.addMasterPlugin ("Test Delay", -1, err), "addMasterPlugin Delay");
+            auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.masterSlot (0)->instance->getParameters()[0]);
+            p->setValue (p->convertTo0to1 (6.0f));
+            test::check (s.bypassMasterPlugin (1, true, err), "bypass Delay before save");
+            const auto xml = s.toXml (projFile);
+            auto* mc = xml != nullptr ? xml->getChildByName ("MasterChain") : nullptr;
+            test::check (mc != nullptr && mc->getNumChildElements() == 2 && mc->getChildElement (0)->hasTagName ("Plugin"),
+                         "toXml writes <MasterChain> with <Plugin> children");
+            test::check (s.save (projFile, err), "save project with masterChain: " + err);
+        }
+        {
+            Session loaded;
+            test::addTestPlugins (loaded.catalog);
+            juce::String err;
+            test::check (loaded.load (projFile, err), "load project with masterChain: " + err);
+            test::check (loaded.masterChain.size() == 2 && loaded.masterSlot (0)->plugin == "Test Gain"
+                         && ! loaded.masterSlot (0)->bypass && loaded.masterSlot (1)->plugin == "Test Delay" && loaded.masterSlot (1)->bypass,
+                         "loaded masterChain preserves slots and bypass flags");
+            auto* p = dynamic_cast<juce::RangedAudioParameter*> (loaded.masterSlot (0)->instance->getParameters()[0]);
+            const float loadedDb = p->convertFrom0to1 (p->getValue());
+            test::check (std::abs (loadedDb - 6.0f) < 1e-3f, test::fmt ("loaded master plugin state preserves +6 dB (got %.3f)", loadedDb));
+            loaded.newProject ("Fresh");
+            test::check (loaded.masterChain.empty(), "newProject clears masterChain");
+        }
+        {
+            Session missing;
+            juce::String err;
+            test::check (missing.load (projFile, err), "load project with missing master plugin succeeds with warnings");
+            test::check (missing.masterChain.size() == 2 && missing.masterSlot (0)->instance == nullptr
+                         && missing.masterSlot (0)->savedState.getSize() > 0 && ! missing.warnings.isEmpty(),
+                         "missing master plugin stays as unusable slot with savedState and warning");
+        }
+    }
+
+    // 5. MCP tools with "track": "master" (case-insensitive) + describe() "masterChain"
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        McpServer server (s);
+        const auto parsed = [] (const juce::var& r) { juce::var v; juce::JSON::parse (r["content"][0]["text"].toString(), v); return v; };
+
+        const auto rAdd = toolCall (server, "add_plugin", "{\"track\":\"master\",\"plugin\":\"Test Gain\"}");
+        test::check (! (bool) rAdd["isError"], "MCP add_plugin on master succeeds");
+        const auto d1 = parsed (rAdd);
+        test::check (d1["masterChain"].size() == 1 && (int) d1["masterChain"][0]["index"] == 0
+                     && d1["masterChain"][0]["name"].toString() == "Test Gain"
+                     && (bool) d1["masterChain"][0]["loaded"] && ! (bool) d1["masterChain"][0]["bypass"]
+                     && (int) d1["masterChain"][0]["latencySamples"] == 0 && d1["masterChain"][0].hasProperty ("maker"),
+                     "describe() masterChain object has expected fields");
+
+        const auto rSet = toolCall (server, "set_parameter", "{\"track\":\"MASTER\",\"slot\":0,\"parameter\":\"gain\",\"text\":\"-6\"}");
+        test::check (! (bool) rSet["isError"], "MCP set_parameter on MASTER succeeds");
+        auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.masterSlot (0)->instance->getParameters()[0]);
+        test::check (std::abs (p->convertFrom0to1 (p->getValue()) + 6.0f) < 0.2f, "MCP set_parameter updated master plugin gain");
+
+        const auto rByp = toolCall (server, "bypass_plugin", "{\"track\":\"Master\",\"slot\":0,\"bypass\":true}");
+        test::check (! (bool) rByp["isError"] && (bool) parsed (rByp)["masterChain"][0]["bypass"], "MCP bypass_plugin on Master works");
+
+        const auto rChain = toolCall (server, "set_chain", "{\"track\":\"master\",\"plugins\":[\"Test Gain\",\"Test Delay\"]}");
+        test::check (! (bool) rChain["isError"] && parsed (rChain)["masterChain"].size() == 2 && s.masterLatency() == 64,
+                     "MCP set_chain on master replaces chain");
+        const auto rMove = toolCall (server, "move_plugin", "{\"track\":\"master\",\"from\":0,\"to\":1}");
+        test::check (! (bool) rMove["isError"] && parsed (rMove)["masterChain"][0]["name"].toString() == "Test Delay",
+                     "MCP move_plugin on master works");
+        const auto rRem = toolCall (server, "remove_plugin", "{\"track\":\"master\",\"slot\":0}");
+        test::check (! (bool) rRem["isError"] && parsed (rRem)["masterChain"].size() == 1 && s.masterLatency() == 0,
+                     "MCP remove_plugin on master works");
+    }
+
+    dir.deleteRecursively();
+}
+
+static void perSlotWetDryChecks()
+{
+    std::printf ("[63] Per-slot Wet/Dry\n");
+    const auto dir = tempFolder().getChildFile ("wet_dry");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto impWav = makeWav ("wet_dry/imp.wav", 48000.0, 2, 4800, 0.25f, 0.0, 100, 32);
+    const float gain6Db = juce::Decibels::decibelsToGain (6.0f);
+
+    // 1. Track chain wet = 0.0, 0.5, 1.0 + setPluginWet validation + clamp
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String err;
+        test::check (s.addTrack (impWav, "Imp", err), "addTrack for wet/dry: " + err);
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "addPlugin Test Gain: " + err);
+        auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.tracks[0]->chain[0]->instance->getParameters()[0]);
+        p->setValue (p->convertTo0to1 (6.0f));
+
+        juce::AudioBuffer<float> buf (2, 1024);
+
+        test::check (s.setPluginWet (0, 0, 0.0f, err), "setPluginWet 0.0 on track: " + err);
+        s.processBlock (buf, 0);
+        test::check (std::abs (buf.getSample (0, 100) - 0.25f) < 1e-4f,
+                     test::fmt ("wet=0.0 passes dry signal (got %.5f, expected 0.25)", buf.getSample (0, 100)));
+
+        test::check (s.setPluginWet (0, 0, 0.5f, err), "setPluginWet 0.5 on track: " + err);
+        s.processBlock (buf, 0);
+        const float expectedHalf = 0.25f * 0.5f + (0.25f * gain6Db) * 0.5f;
+        test::check (std::abs (buf.getSample (0, 100) - expectedHalf) < 1e-4f,
+                     test::fmt ("wet=0.5 blends 50/50 (got %.5f, expected %.5f)", buf.getSample (0, 100), expectedHalf));
+
+        test::check (s.setPluginWet (0, 0, 1.0f, err), "setPluginWet 1.0 on track: " + err);
+        s.processBlock (buf, 0);
+        const float expectedWet = 0.25f * gain6Db;
+        test::check (std::abs (buf.getSample (0, 100) - expectedWet) < 1e-4f,
+                     test::fmt ("wet=1.0 passes full wet (got %.5f, expected %.5f)", buf.getSample (0, 100), expectedWet));
+
+        // Clamping and validation
+        test::check (s.setPluginWet (0, 0, -0.5f, err) && s.tracks[0]->chain[0]->wet == 0.0f, "setPluginWet clamps <0 to 0");
+        test::check (s.setPluginWet (0, 0, 2.5f, err) && s.tracks[0]->chain[0]->wet == 1.0f, "setPluginWet clamps >1 to 1");
+        test::check (! s.setPluginWet (0, 0, std::numeric_limits<float>::quiet_NaN(), err), "setPluginWet rejects NaN");
+        test::check (! s.setPluginWet (0, 0, std::numeric_limits<float>::infinity(), err), "setPluginWet rejects +Inf");
+        test::check (! s.setPluginWet (0, 0, -std::numeric_limits<float>::infinity(), err), "setPluginWet rejects -Inf");
+        test::check (! s.setPluginWet (0, 5, 0.5f, err), "setPluginWet rejects invalid track slot");
+        test::check (! s.setPluginWet (5, 0, 0.5f, err), "setPluginWet rejects invalid track index");
+        test::check (! s.setPluginWet (-3, 0, 0.5f, err), "setPluginWet rejects track < -2");
+    }
+
+    // 2. Monitor (-1) and Master (-2) + processMonitor + masterChain processBlock & renderStems
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String err;
+        test::check (s.addTrack (impWav, "Imp", err), "addTrack for monitor/master wet: " + err);
+        test::check (s.addMasterPlugin ("Test Gain", -1, err), "addMasterPlugin Test Gain");
+        auto* mp = dynamic_cast<juce::RangedAudioParameter*> (s.masterSlot (0)->instance->getParameters()[0]);
+        mp->setValue (mp->convertTo0to1 (6.0f));
+        s.dirty = false;
+        test::check (s.setPluginWet (-2, 0, 0.5f, err) && s.dirty && std::abs (s.masterSlot (0)->wet - 0.5f) < 1e-6f,
+                     "setPluginWet(-2, ...) updates master slot and marks dirty");
+        test::check (! s.setPluginWet (-2, 5, 0.5f, err), "setPluginWet(-2, invalid) fails");
+
+        juce::AudioBuffer<float> buf (2, 1024);
+        s.processBlock (buf, 0);
+        const float expectedMasterHalf = 0.25f * 0.5f + (0.25f * gain6Db) * 0.5f;
+        test::check (std::abs (buf.getSample (0, 100) - expectedMasterHalf) < 1e-4f,
+                     test::fmt ("masterChain processBlock applies wet=0.5 (got %.5f, expected %.5f)", buf.getSample (0, 100), expectedMasterHalf));
+
+        // renderStems applies master wet=0.5 to mix.wav while stem remains unaffected
+        RenderOptions opts;
+        opts.folder = dir.getChildFile ("out");
+        opts.writeStems = true;
+        opts.writeMix = true;
+        opts.bits = 32;
+        RenderResult res;
+        test::check (s.renderStems (opts, res, err), "renderStems with master wet=0.5: " + err);
+        const auto mix = readWav (opts.folder.getChildFile ("mix.wav"));
+        test::check (std::abs (mix.getSample (0, 100) - expectedMasterHalf) < 1e-4f,
+                     test::fmt ("mix.wav applies master wet=0.5 (got %.5f, expected %.5f)", mix.getSample (0, 100), expectedMasterHalf));
+
+        // Monitor chain wet (-1) does not mark dirty and blends in processMonitor
+        test::check (s.addMonitorPlugin ("Test Gain", -1, err), "addMonitorPlugin Test Gain");
+        auto* monp = dynamic_cast<juce::RangedAudioParameter*> (s.monitorSlotAt (0, err)->instance->getParameters()[0]);
+        monp->setValue (monp->convertTo0to1 (6.0f));
+        s.dirty = false;
+        test::check (s.setPluginWet (-1, 0, 0.5f, err) && ! s.dirty && std::abs (s.monitorSlotAt (0, err)->wet - 0.5f) < 1e-6f,
+                     "setPluginWet(-1, ...) updates monitor slot without dirtying project");
+        test::check (! s.setPluginWet (-1, 5, 0.5f, err), "setPluginWet(-1, invalid) fails");
+
+        juce::AudioBuffer<float> monBuf (2, 128);
+        monBuf.clear();
+        monBuf.setSample (0, 10, 0.25f);
+        monBuf.setSample (1, 10, 0.25f);
+        s.processMonitor (monBuf);
+        test::check (std::abs (monBuf.getSample (0, 10) - expectedMasterHalf) < 1e-4f,
+                     test::fmt ("processMonitor applies wet=0.5 (got %.5f, expected %.5f)", monBuf.getSample (0, 10), expectedMasterHalf));
+    }
+
+    // 3. XML toXml/fromXml and saveMonitor/loadMonitor preserve wet
+    {
+        const auto projFile = dir.getChildFile ("wet.olympus");
+        const auto monFile = dir.getChildFile ("monitor.xml");
+        {
+            Session s;
+            test::addTestPlugins (s.catalog);
+            juce::String err;
+            test::check (s.addTrack (impWav, "Imp", err), "addTrack for XML wet");
+            test::check (s.addPlugin (0, "Test Gain", -1, err), "addPlugin track 0");
+            test::check (s.addPlugin (0, "Test Delay", -1, err), "addPlugin track 1");
+            test::check (s.addMasterPlugin ("Test Gain", -1, err), "addMasterPlugin");
+            test::check (s.addMonitorPlugin ("Test Gain", -1, err), "addMonitorPlugin");
+            test::check (s.setPluginWet (0, 0, 0.25f, err), "set track slot 0 wet");
+            test::check (s.setPluginWet (-2, 0, 0.6f, err), "set master slot 0 wet");
+            test::check (s.setPluginWet (-1, 0, 0.4f, err), "set monitor slot 0 wet");
+
+            const auto xml = s.toXml (projFile);
+            auto* trkXml = xml != nullptr ? xml->getChildByName ("Track") : nullptr;
+            auto* slot0Xml = trkXml != nullptr ? trkXml->getChildByName ("Slot") : nullptr;
+            auto* slot1Xml = slot0Xml != nullptr ? slot0Xml->getNextElementWithTagName ("Slot") : nullptr;
+            test::check (slot0Xml != nullptr && slot0Xml->hasAttribute ("wet")
+                         && slot1Xml != nullptr && ! slot1Xml->hasAttribute ("wet"),
+                         "toXml writes wet attribute only when < 0.9999f");
+            test::check (s.save (projFile, err), "save project with wet: " + err);
+            test::check (s.saveMonitor (monFile, err), "saveMonitor with wet: " + err);
+        }
+        {
+            Session loaded;
+            test::addTestPlugins (loaded.catalog);
+            juce::String err;
+            test::check (loaded.load (projFile, err), "load project with wet: " + err);
+            test::check (std::abs (loaded.tracks[0]->chain[0]->wet - 0.25f) < 1e-4f
+                         && std::abs (loaded.tracks[0]->chain[1]->wet - 1.0f) < 1e-4f
+                         && std::abs (loaded.masterSlot (0)->wet - 0.6f) < 1e-4f,
+                         "fromXml/load restores track and master wet");
+            juce::StringArray probs;
+            test::check (loaded.loadMonitor (monFile, probs) && probs.isEmpty(), "loadMonitor with wet");
+            test::check (std::abs (loaded.monitorSlotAt (0, err)->wet - 0.4f) < 1e-4f, "loadMonitor restores monitor wet");
+        }
+    }
+
+    // 4. MCP set_plugin_wet on track & master + describe() includes "wet"
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String err;
+        test::check (s.addTrack (impWav, "Imp", err), "addTrack for MCP wet");
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "addPlugin for MCP wet");
+        test::check (s.addMasterPlugin ("Test Gain", -1, err), "addMasterPlugin for MCP wet");
+        test::check (s.addMonitorPlugin ("Test Gain", -1, err), "addMonitorPlugin for MCP wet");
+
+        McpServer server (s);
+        const auto parsed = [] (const juce::var& r) { juce::var v; juce::JSON::parse (r["content"][0]["text"].toString(), v); return v; };
+
+        const auto d0 = s.describe();
+        test::check (d0["tracks"][0]["chain"][0].hasProperty ("wet")
+                     && std::abs ((double) d0["tracks"][0]["chain"][0]["wet"] - 1.0) < 1e-6
+                     && d0["masterChain"][0].hasProperty ("wet")
+                     && std::abs ((double) d0["masterChain"][0]["wet"] - 1.0) < 1e-6
+                     && d0["monitor"][0].hasProperty ("wet")
+                     && std::abs ((double) d0["monitor"][0]["wet"] - 1.0) < 1e-6,
+                     "describe() includes wet on track, master, and monitor slots");
+
+        const auto rTrk = toolCall (server, "set_plugin_wet", "{\"track\":0,\"slot\":0,\"wet\":0.3}");
+        test::check (! (bool) rTrk["isError"]
+                     && std::abs ((double) parsed (rTrk)["tracks"][0]["chain"][0]["wet"] - 0.3) < 1e-4,
+                     "MCP set_plugin_wet on track updates wet");
+
+        const auto rMaster = toolCall (server, "set_plugin_wet", "{\"track\":\"master\",\"slot\":0,\"wet\":0.75}");
+        test::check (! (bool) rMaster["isError"]
+                     && std::abs ((double) parsed (rMaster)["masterChain"][0]["wet"] - 0.75) < 1e-4,
+                     "MCP set_plugin_wet on master updates wet");
+
+        const auto rBad = toolCall (server, "set_plugin_wet", "{\"track\":0,\"slot\":0,\"wet\":\"bad\"}");
+        test::check ((bool) rBad["isError"], "MCP set_plugin_wet rejects non-number wet");
+    }
+
+    dir.deleteRecursively();
+}
+
+void structuralUndoChecks()
+{
+    std::printf ("[61] Structural undo/redo: addTrack, addPlugin, parameter state, removePlugin, removeTrack, chain ops and masterChain\n");
+    const auto dir = tempFolder().getChildFile ("struct-undo");
+    dir.createDirectory();
+    const auto wav = makeWav ("struct-undo/a.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+    const auto wavPath = wav.getFullPathName().replace ("\\", "\\\\");
+    juce::String err;
+
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        s.addMonitorPlugin ("Test Gain", -1, err);
+        const auto dummyProj = dir.getChildFile ("proj.olympus");
+        s.projectFile = dummyProj;
+        Editor ed (s);
+        int beforeStructureCalls = 0;
+        ed.onBeforeStructureChange = [&beforeStructureCalls] { ++beforeStructureCalls; };
+
+        // addTrack -> addPlugin -> setParameter -> removePlugin -> removeTrack round-trip
+        test::check (ed.addTrack (wav, "Lead", err) && s.tracks.size() == 1, "Editor::addTrack adds track");
+        test::check (ed.addPlugin (0, "Test Gain", -1, err) && s.tracks[0]->chain.size() == 1, "Editor::addPlugin adds plugin");
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.tracks[0]->chain[0]->instance->getParameters()[0]))
+            p->setValueNotifyingHost (p->convertTo0to1 (6.0f));
+        test::check (std::abs (gainOf (s, 0, 0) - 6.0) < 0.05, "plugin parameter set to +6 dB");
+        test::check (ed.removePlugin (0, 0, err) && s.tracks[0]->chain.empty(), "Editor::removePlugin removes plugin");
+        test::check (ed.removeTrack (0, err) && s.tracks.empty(), "Editor::removeTrack removes track");
+
+        // Undo removeTrack -> track 0 and its clip return
+        test::check (ed.undo() && s.tracks.size() == 1 && s.tracks[0]->name == "Lead" && s.tracks[0]->clips.size() == 1,
+                     "undo removeTrack restores track and its clip");
+        // Undo removePlugin -> Test Gain returns WITH its +6 dB parameter state
+        test::check (ed.undo() && s.tracks[0]->chain.size() == 1 && std::abs (gainOf (s, 0, 0) - 6.0) < 0.05,
+                     "undo removePlugin restores plugin and its +6 dB parameter state");
+        // Undo addPlugin -> chain empty
+        test::check (ed.undo() && s.tracks[0]->chain.empty(), "undo addPlugin removes plugin");
+        // Undo addTrack -> 0 tracks
+        test::check (ed.undo() && s.tracks.empty(), "undo addTrack removes track");
+        test::check (! ed.canUndo() && s.projectFile == dummyProj && s.monitor.size() == 1,
+                     "restoreEditXml preserves projectFile and monitor chain");
+        test::check (beforeStructureCalls == 4, "onBeforeStructureChange fired for all 4 structural undos");
+
+        // Redo all the way back to 0 tracks
+        test::check (ed.redo() && s.tracks.size() == 1, "redo addTrack restores track");
+        test::check (ed.redo() && s.tracks[0]->chain.size() == 1, "redo addPlugin restores plugin");
+        test::check (ed.redo() && s.tracks[0]->chain.empty(), "redo removePlugin removes plugin");
+        test::check (ed.redo() && s.tracks.empty(), "redo removeTrack removes track");
+        test::check (beforeStructureCalls == 8, "onBeforeStructureChange fired for all 4 structural redos");
+    }
+
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        McpServer server (s);
+        const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+        const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+
+        test::check (! failed (call ("add_track", "{\"file\":\"" + wavPath + "\",\"name\":\"One\"}")), "MCP add_track");
+        test::check (! failed (call ("add_track", "{\"file\":\"" + wavPath + "\",\"name\":\"Two\"}")), "MCP add_track 2");
+        test::check (! failed (call ("set_chain", "{\"track\":0,\"plugins\":[\"Test Gain\",\"Test Delay\"]}")), "MCP set_chain");
+        test::check (! failed (call ("set_parameter", "{\"track\":0,\"slot\":0,\"parameter\":\"gain\",\"text\":\"-6\"}")), "MCP set_parameter");
+        test::check (! failed (call ("move_plugin", "{\"track\":0,\"from\":0,\"to\":1}"))
+                     && s.tracks[0]->chain[1]->plugin == "Test Gain", "MCP move_plugin");
+        test::check (! failed (call ("bypass_plugin", "{\"track\":0,\"slot\":1,\"bypass\":true}"))
+                     && s.tracks[0]->chain[1]->bypass, "MCP bypass_plugin");
+        test::check (! failed (call ("copy_chain", "{\"from_track\":0,\"to_tracks\":[1]}"))
+                     && s.tracks[1]->chain.size() == 2, "MCP copy_chain");
+
+        // Master chain structural undo/redo
+        test::check (! failed (call ("add_plugin", "{\"track\":\"master\",\"plugin\":\"Test Gain\"}"))
+                     && s.masterChain.size() == 1, "MCP add_plugin on master");
+        test::check (! failed (call ("bypass_plugin", "{\"track\":\"master\",\"slot\":0,\"bypass\":true}"))
+                     && s.masterChain[0]->bypass, "MCP bypass_plugin on master");
+        test::check (! failed (call ("remove_plugin", "{\"track\":\"master\",\"slot\":0}"))
+                     && s.masterChain.empty(), "MCP remove_plugin on master");
+
+        test::check (! failed (call ("undo", "{}")) && s.masterChain.size() == 1 && s.masterChain[0]->bypass,
+                     "undo master remove_plugin restores bypassed master plugin");
+        test::check (! failed (call ("undo", "{}")) && s.masterChain.size() == 1 && ! s.masterChain[0]->bypass,
+                     "undo master bypass_plugin clears bypass");
+        test::check (! failed (call ("undo", "{}")) && s.masterChain.empty(),
+                     "undo master add_plugin removes master plugin");
+        test::check (! failed (call ("undo", "{}")) && s.tracks[1]->chain.empty(),
+                     "undo copy_chain clears target chain");
+        test::check (! failed (call ("undo", "{}")) && ! s.tracks[0]->chain[1]->bypass,
+                     "undo bypass_plugin restores enabled state");
+        test::check (! failed (call ("undo", "{}")) && s.tracks[0]->chain[0]->plugin == "Test Gain"
+                     && std::abs (gainOf (s, 0, 0) + 6.0) < 0.2,
+                     "undo move_plugin restores order and -6 dB parameter state");
+        test::check (! failed (call ("undo", "{}")) && s.tracks[0]->chain.empty(),
+                     "undo set_chain clears track 0 chain");
+    }
+
+    dir.deleteRecursively();
+}
+
+void trackFreezeChecks()
+{
+    std::printf ("[64] Track Freeze / Bounce-in-Place\n");
+    const auto dir = tempFolder().getChildFile ("freeze");
+    dir.createDirectory();
+    const auto impWav = makeWav ("freeze/imp.wav", 48000.0, 2, 4800, 0.25f, 0.0, 100, 32);
+    juce::String err;
+
+    // 1. freezeTrack bakes Test Gain (+6 dB) and compensates Test Delay (64 samples) -> latency becomes 0
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (impWav, "Lead", err), "freeze: addTrack");
+        test::check (ed.addPlugin (0, "Test Gain", -1, err), "freeze: add Test Gain");
+        test::check (ed.addPlugin (0, "Test Delay", -1, err), "freeze: add Test Delay");
+        setGain (s, 0, 0, 6.0);
+        test::check (s.tracks[0]->latency() == 64, "freeze: initial latency is 64");
+
+        const auto frozenWav = dir.getChildFile ("lead-frozen.wav");
+        test::check (ed.freezeTrack (0, frozenWav, err) && err.isEmpty(), "freeze: freezeTrack succeeds");
+        test::check (s.tracks[0]->frozen && s.tracks[0]->frozenFile == frozenWav && s.tracks[0]->frozenAudio != nullptr,
+                     "freeze: track marked frozen with pooled audio");
+        test::check (s.tracks[0]->latency() == 0, "freeze: frozen track latency() becomes 0");
+        test::check (frozenWav.existsAsFile(), "freeze: frozen WAV exists on disk");
+
+        // Refuses already frozen, recording, and plugin edits while frozen
+        juce::String e2;
+        test::check (! s.freezeTrack (0, dir.getChildFile ("again.wav"), e2) && e2.isNotEmpty(),
+                     "freeze: already frozen track is refused");
+        test::check (! ed.addPlugin (0, "Test Gain", -1, e2) && e2.isNotEmpty(),
+                     "freeze: editing plugins on frozen track is refused");
+
+        // 2. processBlock and renderStems produce identical audio while frozen (+6 dB at sample 100)
+        juce::AudioBuffer<float> live (2, 4800);
+        s.processBlock (live, 0);
+        const float expectedAmp = 0.25f * juce::Decibels::decibelsToGain (6.0f);
+        test::check (peakIndex (live, 0) == 100
+                     && std::abs (live.getSample (0, 100) - expectedAmp) < 1e-4f,
+                     "freeze: processBlock plays baked +6 dB impulse aligned at sample 100 (delay compensated)");
+
+        RenderOptions opts;
+        opts.folder = dir.getChildFile ("stems");
+        opts.writeMix = true;
+        opts.writeStems = true;
+        opts.bits = 32;
+        RenderResult res;
+        test::check (s.renderStems (opts, res, err) && res.stems.size() == 1, "freeze: renderStems succeeds while frozen");
+        const auto stemBuf = readWav (opts.folder.getChildFile (res.stems[0].file));
+        test::check (stemBuf.getNumSamples() == 4800, "freeze: rendered stem has expected length");
+        float maxDiff = 0.0f;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 4800; ++i)
+                maxDiff = juce::jmax (maxDiff, std::abs (live.getSample (ch, i) - stemBuf.getSample (ch, i)));
+        test::check (maxDiff < 1e-6f, "freeze: processBlock and renderStems produce identical audio while frozen");
+
+        // 3. toXml / fromXml (save / load) round-trip preserves frozen state
+        const auto projFile = dir.getChildFile ("proj.olympus");
+        test::check (s.save (projFile, err), "freeze: save project");
+        Session sLoaded;
+        test::addTestPlugins (sLoaded.catalog);
+        test::check (sLoaded.load (projFile, err) && sLoaded.warnings.isEmpty(), "freeze: load project with no warnings");
+        test::check (sLoaded.tracks.size() == 1 && sLoaded.tracks[0]->frozen
+                     && sLoaded.tracks[0]->frozenAudio != nullptr && sLoaded.tracks[0]->latency() == 0,
+                     "freeze: save/load round-trip preserves frozen state and 0 latency");
+
+        // Missing frozenFile falls back to frozen = false with warning
+        frozenWav.deleteFile();
+        Session sMissing;
+        test::addTestPlugins (sMissing.catalog);
+        test::check (sMissing.load (projFile, err) && ! sMissing.warnings.isEmpty(),
+                     "freeze: missing frozen WAV produces warning on load");
+        test::check (sMissing.tracks.size() == 1 && ! sMissing.tracks[0]->frozen
+                     && sMissing.tracks[0]->frozenAudio == nullptr && sMissing.tracks[0]->latency() == 64,
+                     "freeze: missing frozen WAV falls back to unfrozen with 64-sample latency");
+
+        // 4. unfreezeTrack restores original clips, chain, and latency
+        test::check (ed.unfreezeTrack (0, err) && ! s.tracks[0]->frozen
+                     && s.tracks[0]->frozenAudio == nullptr && s.tracks[0]->frozenFile == juce::File(),
+                     "freeze: unfreezeTrack clears frozen state");
+        test::check (s.tracks[0]->clips.size() == 1 && s.tracks[0]->chain.size() == 2 && s.tracks[0]->latency() == 64,
+                     "freeze: unfreezeTrack keeps original clips, chain, and restores 64-sample latency");
+
+        // 5. Editor undo/redo of freeze and unfreeze works
+        // Undo unfreeze -> frozen again
+        test::check (ed.undo() && s.tracks[0]->frozen && s.tracks[0]->frozenAudio != nullptr && s.tracks[0]->latency() == 0,
+                     "freeze: undo unfreeze restores frozen state");
+        // Undo freeze -> unfrozen with 64-sample latency
+        test::check (ed.undo() && ! s.tracks[0]->frozen && s.tracks[0]->latency() == 64,
+                     "freeze: undo freeze restores unfrozen state");
+        // Redo freeze -> frozen again
+        test::check (ed.redo() && s.tracks[0]->frozen && s.tracks[0]->frozenAudio != nullptr && s.tracks[0]->latency() == 0,
+                     "freeze: redo freeze restores frozen state");
+        // Redo unfreeze -> unfrozen again
+        test::check (ed.redo() && ! s.tracks[0]->frozen && s.tracks[0]->latency() == 64,
+                     "freeze: redo unfreeze restores unfrozen state");
+
+        // Refusing freeze while recording
+        s.recording = true;
+        juce::String recErr;
+        test::check (! s.freezeTrack (0, dir.getChildFile ("rec-freeze.wav"), recErr) && recErr.isNotEmpty(),
+                     "freeze: freezeTrack refused while recording");
+        s.recording = false;
+    }
+
+    // 6. describe() and MCP set_track frozen
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        McpServer server (s);
+        const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+        const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+        const auto wavPath = impWav.getFullPathName().replace ("\\", "\\\\");
+
+        test::check (! failed (call ("add_track", "{\"file\":\"" + wavPath + "\",\"name\":\"Synth\"}")), "freeze MCP: add_track");
+        test::check (! failed (call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Delay\"}")), "freeze MCP: add Test Delay");
+        const auto d0 = s.describe();
+        test::check (d0["tracks"][0].hasProperty ("frozen") && ! (bool) d0["tracks"][0]["frozen"],
+                     "freeze: describe() includes frozen: false");
+        const auto rFreeze = call ("set_track", "{\"track\":0,\"frozen\":true}");
+        const auto jFreeze = toolJson (rFreeze);
+        test::check (! failed (rFreeze) && (bool) jFreeze["tracks"][0]["frozen"] && (int) jFreeze["tracks"][0]["latency_samples"] == 0,
+                     "freeze MCP: set_track frozen: true freezes track and sets latency_samples to 0");
+        const auto frozenDiskFile = s.tracks[0]->frozenFile;
+        const auto rUnfreeze = call ("set_track", "{\"track\":0,\"frozen\":false}");
+        const auto jUnfreeze = toolJson (rUnfreeze);
+        test::check (! failed (rUnfreeze) && ! (bool) jUnfreeze["tracks"][0]["frozen"] && (int) jUnfreeze["tracks"][0]["latency_samples"] == 64,
+                     "freeze MCP: set_track frozen: false unfreezes track and restores latency_samples");
+        frozenDiskFile.deleteFile();
+    }
+
+    dir.deleteRecursively();
+}
+
+void busSendSidechainChecks()
+{
+    std::printf ("[65] Group / Submix Buses, Aux Sends & Sidechain\n");
+    const auto dir = tempFolder().getChildFile ("routing");
+    dir.createDirectory();
+    const auto dcA = makeWav ("routing/dcA.wav", 48000.0, 2, 1024, 0.4f, 0.0, 0, 32);
+    const auto dcB = makeWav ("routing/dcB.wav", 48000.0, 2, 1024, 0.5f, 0.0, 0, 32);
+    // Make dcA and dcB constant DC buffers across all 1024 samples
+    {
+        auto writeDc = [] (const juce::File& f, float amp)
+        {
+            f.deleteFile();
+            juce::AudioBuffer<float> buf (2, 1024);
+            for (int ch = 0; ch < 2; ++ch)
+                juce::FloatVectorOperations::fill (buf.getWritePointer (ch), amp, 1024);
+            std::unique_ptr<juce::OutputStream> os (f.createOutputStream());
+            juce::WavAudioFormat wav;
+            auto writer = wav.createWriterFor (os, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+            writer->writeFromAudioSampleBuffer (buf, 0, 1024);
+        };
+        writeDc (dcA, 0.4f);
+        writeDc (dcB, 0.5f);
+    }
+    juce::String err;
+
+    // 1. addBusTrack, setTrackOutput, cycle / invalid target rejection
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (dcA, "Lead", err), "routing: add Audio track");
+        const int bus1 = ed.addBusTrack ("Submix", err);
+        const int bus2 = ed.addBusTrack ("MasterBus", err);
+        test::check (bus1 == 1 && s.tracks[1]->isBus() && s.tracks[1]->kind == TrackKind::Bus && ! s.tracks[1]->isMidi,
+                     "addBusTrack creates TrackKind::Bus");
+        test::check (bus2 == 2 && s.tracks[2]->isBus(), "second bus created");
+
+        // Invalid targets refused
+        juce::String e;
+        test::check (! ed.setTrackOutput (0, 0, e) && e.isNotEmpty(), "setTrackOutput rejects self-route");
+        e.clear();
+        test::check (! ed.setTrackOutput (1, 0, e) && e.isNotEmpty(), "setTrackOutput rejects non-Bus target");
+        e.clear();
+        test::check (! ed.setTrackOutput (0, 99, e) && e.isNotEmpty(), "setTrackOutput rejects out-of-range target");
+        e.clear();
+        test::check (! ed.setTrackSend (0, 0, 0.0f, false, false, e) && e.isNotEmpty(), "setTrackSend rejects self-send");
+        e.clear();
+        test::check (! ed.setTrackSend (1, 0, 0.0f, false, false, e) && e.isNotEmpty(), "setTrackSend rejects non-Bus target");
+
+        // Valid Bus -> Bus and cycle rejection
+        test::check (ed.setTrackOutput (bus1, bus2, err), "Bus 1 -> Bus 2 succeeds");
+        e.clear();
+        test::check (! ed.setTrackOutput (bus2, bus1, e) && e.containsIgnoreCase ("cycle"), "Bus 2 -> Bus 1 cycle rejected");
+        e.clear();
+        test::check (! ed.setTrackSend (bus2, bus1, 0.0f, false, false, e) && e.containsIgnoreCase ("cycle"), "Bus 2 send -> Bus 1 cycle rejected");
+    }
+
+    // 2. Audio track routed to Bus (no double-routing to Master; Bus chain + fader applied; Solo propagation)
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (dcA, "TrackA", err), "bus mix: add TrackA");
+        const int bus = ed.addBusTrack ("Group", err);
+        test::check (ed.addTrack (dcB, "TrackB", err), "bus mix: add TrackB");
+        test::check (ed.addPlugin (bus, "Test Gain", -1, err), "bus mix: add Test Gain on Bus");
+        setGain (s, bus, 0, -6.0);
+        test::check (ed.setTrackGain (bus, -6.0f, err), "bus mix: set Bus fader -6 dB");
+        test::check (ed.setTrackOutput (0, bus, err), "bus mix: route TrackA -> Group");
+
+        // Mute TrackB so we isolate TrackA -> Group -> Master
+        test::check (ed.setTrackMute (2, true, err), "bus mix: mute TrackB");
+        juce::AudioBuffer<float> block (2, 512);
+        s.processBlock (block, 0);
+        const float expected = 0.4f * juce::Decibels::decibelsToGain (-6.0f) * juce::Decibels::decibelsToGain (-6.0f);
+        test::check (std::abs (block.getSample (0, 100) - expected) < 1e-4f
+                         && std::abs (block.getSample (1, 100) - expected) < 1e-4f,
+                     "Track routed to Bus: Bus chain + fader applied, NO double-routing to Master");
+
+        // Solo TrackA (Bus not soloed) -> TrackA still heard through Bus, TrackB (unmuted) silenced
+        test::check (ed.setTrackMute (2, false, err), "unmute TrackB");
+        test::check (ed.setTrackSolo (0, true, err), "solo TrackA");
+        s.processBlock (block, 0);
+        test::check (std::abs (block.getSample (0, 100) - expected) < 1e-4f,
+                     "Soloing TrackA keeps downstream Group Bus audible and silences TrackB");
+
+        // Solo Group Bus (TrackA not soloed) -> TrackA heard through Group Bus, TrackB silenced
+        test::check (ed.setTrackSolo (0, false, err), "unsolo TrackA");
+        test::check (ed.setTrackSolo (bus, true, err), "solo Group Bus");
+        s.processBlock (block, 0);
+        test::check (std::abs (block.getSample (0, 100) - expected) < 1e-4f,
+                     "Soloing Group Bus keeps upstream TrackA audible and silences TrackB");
+    }
+
+    // 3. Pre-fader vs Post-fader Aux Sends (levelDb scaling & mute)
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (dcA, "Dry", err), "sends: add Dry");
+        const int aux = ed.addBusTrack ("Aux", err);
+        test::check (ed.setTrackGain (0, -100.0f, err), "sends: Dry fader at -100 dB (silent post-fader)");
+        test::check (ed.setTrackSend (0, aux, -6.0f, true, false, err), "sends: add pre-fader send at -6 dB");
+
+        juce::AudioBuffer<float> block (2, 512);
+        s.processBlock (block, 0);
+        const float expectedPre = 0.4f * juce::Decibels::decibelsToGain (-6.0f);
+        test::check (std::abs (block.getSample (0, 100) - expectedPre) < 1e-4f,
+                     "Pre-fader send ignores track fader (-100 dB) and scales by send levelDb (-6 dB)");
+
+        // Switch to post-fader while Dry fader is -100 dB -> silence
+        test::check (ed.setTrackSend (0, aux, -6.0f, false, false, err), "sends: switch to post-fader");
+        s.processBlock (block, 0);
+        test::check (block.getMagnitude (0, 0, 512) < 1e-6f,
+                     "Post-fader send is silent when track fader is -100 dB");
+
+        // Raise Dry fader to -6 dB -> Master gets Dry (-6 dB) + Aux (-6 dB * -6 dB)
+        test::check (ed.setTrackGain (0, -6.0f, err), "sends: Dry fader to -6 dB");
+        s.processBlock (block, 0);
+        const float dryOut = 0.4f * juce::Decibels::decibelsToGain (-6.0f);
+        const float auxOut = dryOut * juce::Decibels::decibelsToGain (-6.0f);
+        test::check (std::abs (block.getSample (0, 100) - (dryOut + auxOut)) < 1e-4f,
+                     "Post-fader send scales by both track fader and send levelDb");
+
+        // Muted send produces no aux signal
+        test::check (ed.setTrackSend (0, aux, -6.0f, false, true, err), "sends: mute send");
+        s.processBlock (block, 0);
+        test::check (std::abs (block.getSample (0, 100) - dryOut) < 1e-4f,
+                     "Muted send contributes 0 to aux bus");
+    }
+
+    // 4. Sidechain routing (setSlotSidechain) + renderStems + XML round-trip
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        test::addSidechainPlugin (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (dcA, "Pad", err), "sc: add Pad (0.4)");
+        test::check (ed.addTrack (dcB, "Kick", err), "sc: add Kick (0.5)");
+        const int muteBus = ed.addBusTrack ("DummyBus", err);
+        test::check (ed.addPlugin (0, "Test Sidechain", -1, err), "sc: add Test Sidechain on Pad");
+        auto* scInst = s.tracks[0]->chain[0]->instance.get();
+        test::check (scInst != nullptr && scInst->getTotalNumInputChannels() == 4 && scInst->getChannelCountOfBus (true, 1) == 2,
+                     "Test Sidechain keeps 4 inputs (stereo main + stereo sidechain)");
+
+        test::check (ed.setSlotSidechain (0, 0, 1, err), "sc: Pad slot 0 sidechains from Kick");
+        juce::String e;
+        test::check (! ed.setSlotSidechain (1, 0, 0, e) && e.isNotEmpty(), "sc: invalid slot / cycle refused");
+        test::check (ed.setTrackOutput (1, muteBus, err), "sc: route Kick to DummyBus");
+        test::check (ed.setTrackMute (muteBus, true, err), "sc: mute DummyBus so Master only hears ducked Pad");
+
+        const float expectedDucked = 0.4f / (1.0f + 0.5f * 10.0f);
+        juce::AudioBuffer<float> block (2, 512);
+        s.processBlock (block, 0);
+        test::check (std::abs (block.getSample (0, 100) - expectedDucked) < 1e-4f,
+                     "processBlock: Pad is ducked by Kick sidechain (0.4 -> 0.4/6)");
+
+        // renderStems: verify Pad stem is ducked, DummyBus muted (no stem), mix matches ducked Pad
+        RenderOptions opts;
+        opts.folder = dir.getChildFile ("stems");
+        opts.writeMix = true;
+        opts.writeStems = true;
+        opts.bits = 32;
+        RenderResult res;
+        test::check (s.renderStems (opts, res, err), "renderStems with sidechain & bus succeeds");
+        const auto padStem = readWav (opts.folder.getChildFile ("01-Pad.wav"));
+        const auto mixWav = readWav (juce::File (res.mixFile));
+        test::check (padStem.getNumSamples() == 1024 && std::abs (padStem.getSample (0, 100) - expectedDucked) < 1e-4f,
+                     "renderStems: Pad stem has ducked sidechain output");
+        test::check (mixWav.getNumSamples() == 1024 && std::abs (mixWav.getSample (0, 100) - expectedDucked) < 1e-4f,
+                     "renderStems: mix.wav has ducked Pad without muted DummyBus or double-routed Kick");
+
+        // Unmute DummyBus and add a pre-fader send from Pad to DummyBus, then save & reload XML
+        test::check (ed.setTrackMute (muteBus, false, err), "unmute DummyBus");
+        test::check (ed.setTrackSend (0, muteBus, -6.0f, true, false, err), "add pre-fader send Pad -> DummyBus");
+        const auto projFile = dir.getChildFile ("routing.olympus");
+        test::check (s.save (projFile, err), "save routing project XML");
+
+        Session loaded;
+        test::addTestPlugins (loaded.catalog);
+        test::addSidechainPlugin (loaded.catalog);
+        test::check (loaded.load (projFile, err) && loaded.warnings.isEmpty(), "load routing project XML without warnings");
+        test::check (loaded.tracks.size() == 3
+                         && loaded.tracks[0]->kind == TrackKind::Audio && loaded.tracks[0]->outputTrack == -1
+                         && loaded.tracks[0]->sends.size() == 1 && loaded.tracks[0]->sends[0].targetTrack == 2
+                         && loaded.tracks[0]->sends[0].preFader && std::abs (loaded.tracks[0]->sends[0].levelDb + 6.0f) < 1e-4f
+                         && loaded.tracks[0]->chain[0]->sidechainTrack == 1
+                         && loaded.tracks[1]->outputTrack == 2
+                         && loaded.tracks[2]->isBus(),
+                     "XML round-trip preserves kind, outputTrack, sends, and sidechainTrack");
+
+        juce::AudioBuffer<float> liveA (2, 512), liveB (2, 512);
+        s.processBlock (liveA, 0);
+        loaded.processBlock (liveB, 0);
+        float maxDiff = 0.0f;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 512; ++i)
+                maxDiff = juce::jmax (maxDiff, std::abs (liveA.getSample (ch, i) - liveB.getSample (ch, i)));
+        test::check (maxDiff < 1e-5f, "XML round-trip produces identical processBlock audio");
+
+        // Clearing sidechain restores unducked Pad amplitude
+        test::check (ed.setSlotSidechain (0, 0, -1, err), "clear sidechain");
+        test::check (ed.setTrackMute (muteBus, true, err), "mute DummyBus again");
+        s.processBlock (block, 0);
+        test::check (std::abs (block.getSample (0, 100) - 0.4f) < 1e-4f,
+                     "clearing sidechain restores unducked Pad output (0.4)");
+
+        // Undo / Redo via Editor
+        test::check (ed.undo() && ! s.tracks[muteBus]->mute, "undo mute");
+        test::check (ed.undo() && s.tracks[0]->chain[0]->sidechainTrack == 1, "undo clear sidechain restores sidechainTrack == 1");
+        test::check (ed.redo() && s.tracks[0]->chain[0]->sidechainTrack == -1, "redo clear sidechain");
+    }
+
+    // 5. removeTrack index remapping + Editor undo/redo of routing & bus creation
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        test::addSidechainPlugin (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (dcA, "A", err), "remap: add A");       // 0
+        test::check (ed.addTrack (dcB, "B", err), "remap: add B");       // 1
+        const int b1 = ed.addBusTrack ("Bus1", err);                      // 2
+        const int b2 = ed.addBusTrack ("Bus2", err);                      // 3
+        test::check (ed.addPlugin (0, "Test Sidechain", -1, err), "remap: add Test Sidechain on A");
+        test::check (ed.setSlotSidechain (0, 0, 1, err), "remap: A sidechains from B (1)");
+        test::check (ed.setTrackOutput (0, b2, err), "remap: A -> Bus2 (3)");
+        test::check (ed.setTrackSend (0, b1, -3.0f, false, false, err), "remap: A sends to Bus1 (2)");
+        test::check (ed.setTrackOutput (b1, b2, err), "remap: Bus1 (2) -> Bus2 (3)");
+
+        // Remove track 1 (B): indices > 1 shift down by 1; sidechain referencing 1 clears to -1
+        test::check (ed.removeTrack (1, err), "remap: remove B (1)");
+        test::check (s.tracks.size() == 3
+                         && s.tracks[0]->chain[0]->sidechainTrack == -1
+                         && s.tracks[0]->outputTrack == 2
+                         && s.tracks[0]->sends.size() == 1 && s.tracks[0]->sends[0].targetTrack == 1
+                         && s.tracks[1]->outputTrack == 2,
+                     "removeTrack clears removed sidechain and shifts outputTrack/sends indices > removed down by 1");
+
+        // Undo removeTrack restores B and original indices
+        test::check (ed.undo() && s.tracks.size() == 4
+                         && s.tracks[0]->chain[0]->sidechainTrack == 1
+                         && s.tracks[0]->outputTrack == 3
+                         && s.tracks[0]->sends[0].targetTrack == 2,
+                     "Editor undo removeTrack restores original track & routing indices");
+        test::check (ed.redo() && s.tracks.size() == 3 && s.tracks[0]->outputTrack == 2,
+                     "Editor redo removeTrack reapplies index remapping");
+
+        // Remove Bus1 (now index 1): A's send to Bus1 is removed, A's outputTrack shifts from 2 -> 1
+        test::check (ed.removeTrack (1, err), "remap: remove Bus1 (1)");
+        test::check (s.tracks.size() == 2 && s.tracks[0]->sends.empty() && s.tracks[0]->outputTrack == 1,
+                     "removeTrack removes sends targeting deleted bus and shifts outputTrack down");
+    }
+
+    // 6. MCP add_track(kind="bus"), set_track(outputTrack, sends), add_plugin / set_plugin_wet(sidechainTrack), describe()
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        test::addSidechainPlugin (s.catalog);
+        McpServer server (s);
+        const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+        const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+        const auto wavPathA = dcA.getFullPathName().replace ("\\", "\\\\");
+        const auto wavPathB = dcB.getFullPathName().replace ("\\", "\\\\");
+
+        // Tool count stays at 38
+        juce::var listReq;
+        juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", listReq);
+        const auto tools = server.handle (listReq)["result"]["tools"];
+        test::check (tools.size() == 38, test::fmt ("MCP tool count stays 38 (got %d)", (int) tools.size()));
+
+        test::check (! failed (call ("add_track", "{\"file\":\"" + wavPathA + "\",\"name\":\"Pad\"}")), "MCP add_track audio");
+        test::check (! failed (call ("add_track", "{\"file\":\"" + wavPathB + "\",\"name\":\"Kick\"}")), "MCP add_track kick");
+        const auto rBus = call ("add_track", "{\"kind\":\"bus\",\"name\":\"ReverbBus\"}");
+        const auto jBus = toolJson (rBus);
+        test::check (! failed (rBus)
+                         && jBus["tracks"].size() == 3
+                         && jBus["tracks"][2]["kind"].toString() == "bus"
+                         && (int) jBus["tracks"][0]["outputTrack"] == -1,
+                     "MCP add_track(kind='bus') creates bus and describe() includes kind & outputTrack");
+
+        const auto rSet = call ("set_track", "{\"track\":0,\"outputTrack\":2,\"sends\":[{\"targetTrack\":2,\"levelDb\":-6.0,\"preFader\":true,\"mute\":false}]}");
+        const auto jSet = toolJson (rSet);
+        test::check (! failed (rSet)
+                         && (int) jSet["tracks"][0]["outputTrack"] == 2
+                         && jSet["tracks"][0]["sends"].size() == 1
+                         && (int) jSet["tracks"][0]["sends"][0]["targetTrack"] == 2
+                         && (bool) jSet["tracks"][0]["sends"][0]["preFader"]
+                         && std::abs ((double) jSet["tracks"][0]["sends"][0]["levelDb"] + 6.0) < 1e-4,
+                     "MCP set_track sets outputTrack and sends, reflected in describe()");
+
+        const auto rPlg = call ("add_plugin", "{\"track\":0,\"plugin\":\"Test Sidechain\",\"sidechainTrack\":1}");
+        const auto jPlg = toolJson (rPlg);
+        test::check (! failed (rPlg) && (int) jPlg["tracks"][0]["chain"][0]["sidechainTrack"] == 1,
+                     "MCP add_plugin sets sidechainTrack");
+
+        const auto rWet = call ("set_plugin_wet", "{\"track\":0,\"slot\":0,\"sidechainTrack\":-1}");
+        const auto jWet = toolJson (rWet);
+        test::check (! failed (rWet) && (int) jWet["tracks"][0]["chain"][0]["sidechainTrack"] == -1,
+                     "MCP set_plugin_wet clears sidechainTrack");
+
+        // Invalid outputTrack rejected atomically
+        test::check (failed (call ("set_track", "{\"track\":0,\"outputTrack\":1}")),
+                     "MCP set_track rejects routing to non-bus track");
+    }
+
+    dir.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -4738,6 +5668,12 @@ int main()
     batch2FixesChecks();
     midiAndSnapshotChecks();
     automationCurvesChecks();
+    offlineScopePrePreparedChecks();
+    masterBusFxChainChecks();
+    perSlotWetDryChecks();
+    structuralUndoChecks();
+    trackFreezeChecks();
+    busSendSidechainChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

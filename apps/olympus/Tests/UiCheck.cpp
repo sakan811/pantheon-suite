@@ -218,10 +218,10 @@ struct DummyAudioDevice : juce::AudioIODevice
 // Every control of the window inside it, below the arrangement's top, and no two of them (or the position read-out) over each other.
 void layoutCheck (MainComponent& w, const char* label)
 {
-    std::vector<juce::Component*> controls { &w.newButton, &w.openButton, &w.saveButton, &w.saveAsButton, &w.addTrackButton, &w.addMidiButton, &w.importButton,
+    std::vector<juce::Component*> controls { &w.newButton, &w.openButton, &w.saveButton, &w.saveAsButton, &w.addTrackButton, &w.addMidiButton, &w.addBusButton, &w.importButton,
                                              &w.pluginsButton, &w.renderButton, &w.exportButton, &w.guideButton, &w.rewindButton, &w.playButton, &w.loopButton,
                                              &w.metronomeButton, &w.bpmField, &w.signatureBox, &w.snapButton, &w.gridBox, &w.undoButton, &w.redoButton,
-                                             &w.zoomOutButton, &w.zoomInButton, &w.zoomFitButton, &w.audioButton, &w.recordButton, &w.deviceLabel };
+                                             &w.zoomOutButton, &w.zoomInButton, &w.zoomFitButton, &w.mixerButton, &w.audioButton, &w.recordButton, &w.deviceLabel };
     bool ok = inside (w.arrange, w) && w.arrange.getBounds().getWidth() > 0;
     for (size_t i = 0; i < controls.size(); ++i)
     {
@@ -232,10 +232,13 @@ void layoutCheck (MainComponent& w, const char* label)
     }
     ok = ok && w.positionBox.getRight() <= w.getWidth() - 16 && w.positionBox.getY() >= 0;
     // the master section (row C, left of the device line): its controls and its meter inside the window, over no other control
-    const std::vector<juce::Component*> master { &w.masterFader, &w.masterPeakLabel, &w.masterClipLamp };
-    for (auto* m : master)
+    const std::vector<juce::Component*> master { &w.masterFader, &w.masterPeakLabel, &w.masterClipLamp, &w.masterFxButton };
+    for (size_t i = 0; i < master.size(); ++i)
     {
+        auto* m = master[i];
         ok = ok && inside (*m, w) && m->getBottom() <= w.arrange.getY() && ! m->getBounds().intersects (w.deviceLabel.getBounds());
+        for (size_t j = i + 1; j < master.size(); ++j)
+            ok = ok && ! m->getBounds().intersects (master[j]->getBounds());
         for (auto* c : controls)
             ok = ok && ! m->getBounds().intersects (c->getBounds());
     }
@@ -319,7 +322,7 @@ int main()
         test::check (w->session.tracks[0]->name == "vocal" && w->session.tracks[0]->clips.size() == 1, "a track is named after its file, with one clip");
         test::check (w->session.tracks[0]->clips[0].start == 0 && w->session.tracks[0]->clips[0].length == 24000, "addTracks puts the clip at 0, the whole file");
         test::check (w->windowTitle().endsWith ("*"), "a change puts a star in the title");
-        test::check (w->editor.undoLabel() == "Add clip", "the clip of an import is an undo step (the track is not)");
+        test::check (w->editor.undoLabel() == "Add clip", "the clip of an import is an undo step");
 
         // IMPORT AUDIO: at the playhead, a new track
         w->seek (12000);
@@ -343,11 +346,16 @@ int main()
         w->addTracks ({ tempFolder().getChildFile ("missing.wav").getFullPathName() });
         test::check (gErrors.size() == 1 && (int) w->session.tracks.size() == before, "a file that is not audio is told, not silently skipped, and leaves no empty track");
 
-        // ADD TRACK: an empty track, and no undo step for it
+        // ADD TRACK: an empty track, undoable, preserving prior undo steps
         const int tracksNow = (int) w->session.tracks.size();
         press (w->addTrackButton);
         test::check ((int) w->session.tracks.size() == tracksNow + 1 && w->session.tracks.back()->clips.empty(), "ADD TRACK makes an empty track");
-        test::check (! w->editor.canUndo(), "adding a track clears the undo history (it is not undone)");
+        test::check (w->editor.canUndo() && w->editor.undoLabel() == "Add track", "adding a track is an undo step");
+        w->undoEdit();
+        test::check ((int) w->session.tracks.size() == tracksNow && w->editor.canUndo() && w->editor.undoLabel() == "Add clip",
+                     "undoing ADD TRACK removes the track and preserves prior undo steps");
+        w->redoEdit();
+        test::check ((int) w->session.tracks.size() == tracksNow + 1, "redoing ADD TRACK brings the empty track back");
         w->filesDropped ({ makeWav ("dropped2.wav").getFullPathName() }, 0, 0);
         test::check ((int) w->session.tracks.size() == tracksNow + 2, "a file dropped on the window becomes a track, at the playhead");
     }
@@ -357,8 +365,8 @@ int main()
         auto w = makeWindow();
         w->addTracks ({ makeWav ("chain.wav").getFullPathName(), makeWav ("chain2.wav").getFullPathName() });
         juce::String error;
-        w->session.addPlugin (0, "test gain", -1, error);
-        w->session.addPlugin (0, "test delay", -1, error);
+        w->editor.addPlugin (0, "test gain", -1, error);
+        w->editor.addPlugin (0, "test delay", -1, error);
         w->refreshNow();
         test::check (w->session.tracks[0]->chain.size() == 2 && w->session.tracks[1]->chain.empty(), "a chain holds the plugins of its track");
         test::check (noteMentions (*w, "delay it by 64 samples", ui::Severity::info), "a latency is mentioned, with the alignment promise");
@@ -370,11 +378,14 @@ int main()
         w->closeEditors();
         test::check (w->openEditors() == 0, "closing the windows");
 
-        // removing a track closes its plugin windows first
+        // removing a track closes its plugin windows first, and is undoable
         w->openEditor (0, 0);
         w->removeTrack (0);
         test::check (w->openEditors() == 0 && w->session.tracks.size() == 1, "removing a track closes its plugin windows first");
-        test::check (! w->editor.canUndo(), "and it is not an undo step");
+        test::check (w->editor.canUndo() && w->editor.undoLabel() == "Remove track", "removing a track is an undo step");
+        w->undoEdit();
+        test::check (w->session.tracks.size() == 2 && w->session.tracks[0]->chain.size() == 2,
+                     "undoing removeTrack restores the track and its plugins");
     }
 
     std::printf ("[5] Transport\n");
@@ -3598,6 +3609,623 @@ int main()
         press (w->pianoRoll.closeButton);
         test::check (! w->pianoRoll.isVisible() && w->arrange.getHeight() == fullArrangeH,
                      "Close button hides PianoRollView and restores ArrangeView height");
+    }
+
+    // [50] Master bus FX chain UI: layout, button state, add/bypass/move/remove, openEditor(-2, 0), dirty tracking, and closeTrackEditors / NEW
+    {
+        const auto dir50 = tempFolder().getChildFile ("master-fx-ui");
+        dir50.deleteRecursively();
+        dir50.createDirectory();
+        auto w = makeWindow (true, dir50.getChildFile ("settings.xml"));
+        layoutCheck (*w, "with masterFxButton");
+
+        test::check (w->masterFxButton.isVisible()
+                     && inside (w->masterFxButton, *w)
+                     && ! w->masterFxButton.getBounds().intersects (w->masterClipLamp.getBounds())
+                     && ! w->masterFxButton.getBounds().intersects (w->deviceLabel.getBounds()),
+                     "masterFxButton sits cleanly between masterClipLamp and deviceLabel inside the window");
+        test::check (w->masterFxButton.getButtonText() == "FX"
+                     && ! w->masterFxButton.getToggleState()
+                     && w->masterFxButton.getTooltip() == "Master bus FX chain",
+                     "masterFxButton starts unlit as FX when masterChain is empty");
+
+        juce::String err;
+        test::check (w->session.addMasterPlugin ("Test Gain", -1, err), "add Test Gain to masterChain");
+        w->refreshNow();
+        test::check (w->masterFxButton.getButtonText() == "FX (1)"
+                     && w->masterFxButton.getToggleState()
+                     && w->masterFxButton.getTooltip().contains ("Test Gain"),
+                     "masterFxButton updates to FX (1), lights up, and lists Test Gain in tooltip");
+
+        test::check (w->session.addMasterPlugin ("Test Delay", -1, err), "add Test Delay to masterChain");
+        w->refreshNow();
+        test::check (w->masterFxButton.getButtonText() == "FX (2)"
+                     && w->masterFxButton.getTooltip().contains ("Test Gain")
+                     && w->masterFxButton.getTooltip().contains ("Test Delay"),
+                     "masterFxButton updates to FX (2) and lists both plugins in tooltip");
+
+        test::check (w->session.bypassMasterPlugin (0, true, err), "bypass slot 0 on masterChain");
+        w->refreshNow();
+        test::check (w->session.masterChain[0]->bypass && w->masterFxButton.getTooltip().contains ("(bypassed)"),
+                     "bypassed master plugin is reflected in tooltip");
+        test::check (w->session.bypassMasterPlugin (0, false, err), "unbypass slot 0 on masterChain");
+
+        test::check (w->session.moveMasterPlugin (0, 1, err)
+                     && w->session.masterChain[0]->plugin == "Test Delay"
+                     && w->session.masterChain[1]->plugin == "Test Gain",
+                     "moveMasterPlugin reorders masterChain slots");
+
+        w->openEditor (-2, 0);
+        test::check (w->openEditors() == 1, "openEditor(-2, 0) opens master plugin editor");
+        w->openEditor (-2, 0);
+        test::check (w->openEditors() == 1, "openEditor(-2, 0) brings existing window to front without duplicating");
+
+        // Parameter edit in open master plugin editor is detected by trackPluginStateHash()
+        w->session.dirty = false;
+        w->session.masterChain[0]->instance->getParameters()[0]->setValueNotifyingHost (0.75f);
+        for (int i = 0; i < 16; ++i)
+            w->runTimerForChecks();
+        test::check (w->session.dirty, "trackPluginStateHash() detects parameter edit in open master plugin editor");
+
+        w->closeTrackEditors();
+        test::check (w->openEditors() == 0, "closeTrackEditors() closes master plugin editor");
+
+        // Closing master plugin editor after an edit also marks session dirty on the next timer tick
+        w->openEditor (-2, 1);
+        test::check (w->openEditors() == 1 && ! gClosers.empty(), "openEditor(-2, 1) opens second master plugin editor");
+        w->session.dirty = false;
+        w->session.masterChain[1]->instance->getParameters()[0]->setValueNotifyingHost (0.25f);
+        gClosers.back()();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (60);
+        test::check (w->openEditors() == 0, "closing master plugin editor via close callback removes window");
+        w->runTimerForChecks();
+        test::check (w->session.dirty, "dirty-on-editor-close detects master plugin edit made just before close");
+
+        // NEW closes open master plugin editor and resets masterFxButton
+        w->openEditor (-2, 0);
+        test::check (w->openEditors() == 1, "master plugin editor open before NEW");
+        w->newProject();
+        test::check (w->openEditors() == 0
+                     && w->session.masterChain.empty()
+                     && w->masterFxButton.getButtonText() == "FX"
+                     && ! w->masterFxButton.getToggleState(),
+                     "newProject() closes master editor, clears masterChain, and resets masterFxButton");
+
+        test::check (w->session.addMasterPlugin ("Test Gain", -1, err), "re-add Test Gain to masterChain");
+        w->refreshNow();
+        test::check (w->masterFxButton.getButtonText() == "FX (1)", "masterFxButton shows FX (1)");
+        test::check (w->session.removeMasterPlugin (0, err), "remove Test Gain from masterChain");
+        w->refreshNow();
+        test::check (w->session.masterChain.empty()
+                     && w->masterFxButton.getButtonText() == "FX"
+                     && ! w->masterFxButton.getToggleState(),
+                     "removing master plugin clears masterChain and resets masterFxButton to FX");
+    }
+
+    // [51] PluginPicker searchable browser and per-slot Wet/Dry UI state (track, master, monitor)
+    {
+        std::vector<PluginPicker::Entry> entries {
+            { "Apollo Curve", "Pantheon" },
+            { "Glue Compressor", "Acme Audio" },
+            { "Optical Comp", "Beta DSP" },
+            { "Tape Echo", "acme audio" }
+        };
+        juce::String picked;
+        PluginPicker picker (entries, [&] (const juce::String& name) { picked = name; });
+        picker.setBounds (0, 0, 340, 380);
+
+        test::check (picker.filteredCount() == 4
+                     && picker.filteredNameAt (0) == "Apollo Curve"
+                     && picker.filteredNameAt (3) == "Tape Echo",
+                     "PluginPicker empty query shows all entries");
+
+        picker.setFilter ("COMP");
+        test::check (picker.filteredCount() == 2
+                     && picker.filteredNameAt (0) == "Glue Compressor"
+                     && picker.filteredNameAt (1) == "Optical Comp",
+                     "PluginPicker filters case-insensitively by plugin name substring");
+
+        picker.setFilter ("aCmE");
+        test::check (picker.filteredCount() == 2
+                     && picker.filteredNameAt (0) == "Glue Compressor"
+                     && picker.filteredNameAt (1) == "Tape Echo",
+                     "PluginPicker filters case-insensitively by maker substring");
+
+        picker.pickRow (1);
+        test::check (picked == "Tape Echo", "PluginPicker pickRow(1) invokes onPick with filtered entry name");
+
+        picker.setFilter ("curve");
+        test::check (picker.filteredCount() == 1 && picker.filteredNameAt (0) == "Apollo Curve",
+                     "PluginPicker narrows to single matching plugin");
+        picker.pickRow (0);
+        test::check (picked == "Apollo Curve", "PluginPicker pickRow(0) invokes onPick with filtered plugin name");
+
+        picked.clear();
+        picker.setFilter ("no-such-plugin");
+        test::check (picker.filteredCount() == 0 && picker.filteredNameAt (0).isEmpty(),
+                     "PluginPicker empty filter result reports 0 rows");
+        picker.pickRow (0);
+        test::check (picked.isEmpty(), "PluginPicker pickRow on empty filter does not invoke onPick");
+
+        picker.setFilter ({});
+        test::check (picker.filteredCount() == 4, "PluginPicker clearing filter restores all entries");
+
+        const auto dir51 = tempFolder().getChildFile ("picker-wet-ui");
+        dir51.deleteRecursively();
+        dir51.createDirectory();
+        auto w = makeWindow (true, dir51.getChildFile ("settings.xml"));
+
+        juce::String catalogPicked;
+        PluginPicker catPicker (w->session.catalog, [&] (const juce::String& name) { catalogPicked = name; });
+        test::check (catPicker.filteredCount() == 2, "PluginPicker from Catalog lists Test Delay and Test Gain");
+        catPicker.setFilter ("del");
+        test::check (catPicker.filteredCount() == 1 && catPicker.filteredNameAt (0) == "Test Delay",
+                     "PluginPicker from Catalog filters Test Delay");
+        catPicker.pickRow (0);
+        test::check (catalogPicked == "Test Delay", "PluginPicker from Catalog picks filtered plugin");
+
+        // Launch CallOutBox via openPluginPicker and verify clean dismissal when MainComponent exits
+        w->openPluginPicker (w->monitorAddButton.getBounds(), [] (const juce::String&) {});
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+
+        juce::String err;
+        w->session.addEmptyTrack ("Lead");
+        test::check (w->session.addPlugin (0, "Test Gain", -1, err),
+                     "add track plugin for wet/dry UI check");
+        test::check (w->session.addMasterPlugin ("Test Gain", -1, err),
+                     "add master plugin for wet/dry UI check");
+        test::check (w->addMonitorPlugin ("Test Gain"),
+                     "add monitor plugin for wet/dry UI check");
+
+        test::check (std::abs (w->session.tracks[0]->chain[0]->wet - 1.0f) < 1e-4f
+                     && std::abs (w->session.masterChain[0]->wet - 1.0f) < 1e-4f
+                     && std::abs (w->session.monitor[0]->wet - 1.0f) < 1e-4f,
+                     "track, master, and monitor slots default to 100% wet");
+
+        w->session.dirty = false;
+        test::check (w->session.setPluginWet (0, 0, 0.5f, err)
+                     && std::abs (w->session.tracks[0]->chain[0]->wet - 0.5f) < 1e-4f
+                     && w->session.dirty,
+                     "setPluginWet updates track slot wet and marks session dirty");
+
+        w->session.dirty = false;
+        test::check (w->session.setPluginWet (-2, 0, 0.25f, err)
+                     && std::abs (w->session.masterChain[0]->wet - 0.25f) < 1e-4f
+                     && w->session.dirty,
+                     "setPluginWet updates master slot wet and marks session dirty");
+        w->refreshNow();
+        test::check (w->masterFxButton.getTooltip().contains ("25% wet"),
+                     "masterFxButton tooltip reflects non-100% wet mix");
+
+        w->session.dirty = false;
+        test::check (w->session.setPluginWet (-1, 0, 0.75f, err)
+                     && std::abs (w->session.monitor[0]->wet - 0.75f) < 1e-4f
+                     && ! w->session.dirty,
+                     "setPluginWet updates monitor slot wet without dirtying project");
+        w->refreshMonitorStrip();
+        test::check (w->monitorButtons.size() == 1 && w->monitorButtons[0]->getButtonText() == "Test Gain",
+                     "monitor strip button remains intact after monitor wet change");
+
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    // [52] MixerView: toggle button, split layout, track/master strips, undoable Editor edits, meters, non-blocking renderBusy, PianoRoll interaction
+    {
+        const auto dir52 = tempFolder().getChildFile ("mixer-view-ui");
+        dir52.deleteRecursively();
+        dir52.createDirectory();
+        auto w = makeWindow (true, dir52.getChildFile ("settings.xml"));
+        layoutCheck (*w, "with mixerButton");
+
+        const int fullArrangeH = w->arrange.getHeight();
+        test::check (! w->mixer.isVisible() && ! w->mixerButton.getToggleState(),
+                     "MixerView is initially hidden and mixerButton is off");
+
+        press (w->mixerButton);
+        test::check (w->mixer.isVisible() && w->mixerButton.getToggleState(),
+                     "clicking mixerButton opens MixerView and lights mixerButton");
+        test::check (w->arrange.getHeight() < fullArrangeH
+                     && w->mixer.getHeight() > 100
+                     && w->mixer.getY() > w->arrange.getBottom()
+                     && w->mixer.getWidth() == w->arrange.getWidth(),
+                     "MixerView splits bodyArea cleanly below ArrangeView");
+
+        // Add tracks (one MIDI, one empty), track plugins, and master plugin
+        press (w->addMidiButton);
+        w->arrange.openLaneActionForTest (0, 0, 2); // Create MIDI clip on track 0
+        w->editor.addEmptyTrack ("Vocals");
+        juce::String err;
+        test::check (w->editor.addPlugin (0, "Test Gain", -1, err)
+                     && w->editor.addPlugin (1, "Test Delay", -1, err)
+                     && w->editor.addMasterPlugin ("Test Gain", -1, err),
+                     "track and master plugins added for MixerView checks");
+        w->refreshNow();
+
+        test::check (w->mixer.trackStripCount() == 2
+                     && w->mixer.trackNameText (0) == "MIDI 1"
+                     && w->mixer.trackNameText (1) == "Vocals",
+                     "MixerView track strips match session.tracks names and count");
+        test::check (w->mixer.trackPluginCount (0) == 1
+                     && w->mixer.trackPluginButton (0, 0)->getButtonText() == "Test Gain"
+                     && w->mixer.trackPluginCount (1) == 1
+                     && w->mixer.trackPluginButton (1, 0)->getButtonText() == "Test Delay"
+                     && w->mixer.masterPluginCount() == 1
+                     && w->mixer.masterPluginButton (0)->getButtonText() == "Test Gain",
+                     "MixerView track and master plugin insert buttons reflect chains");
+
+        // Double-click return values on faders/pan
+        auto* fader0 = w->mixer.trackFader (0);
+        auto* pan0 = w->mixer.trackPan (0);
+        auto* masterFader = w->mixer.masterFaderControl();
+        test::check (fader0 != nullptr && fader0->isDoubleClickReturnEnabled() && std::abs (fader0->getDoubleClickReturnValue()) < 1e-9
+                     && pan0 != nullptr && pan0->isDoubleClickReturnEnabled() && std::abs (pan0->getDoubleClickReturnValue()) < 1e-9
+                     && masterFader != nullptr && masterFader->isDoubleClickReturnEnabled() && std::abs (masterFader->getDoubleClickReturnValue()) < 1e-9,
+                     "MixerView faders and pan reset to 0 on double-click");
+
+        // Track fader edit via Gesture (undoable)
+        fader0->onDragStart();
+        fader0->setValue (-6.5, juce::sendNotificationSync);
+        fader0->setValue (-9.0, juce::sendNotificationSync);
+        fader0->onDragEnd();
+        test::check (std::abs (w->session.tracks[0]->gainDb - (-9.0f)) < 0.05f
+                     && w->mixer.trackDbText (0) == "-9.0 dB",
+                     "MixerView track fader updates session track gainDb and dB readout");
+        test::check (w->editor.undo()
+                     && std::abs (w->session.tracks[0]->gainDb - 0.0f) < 0.05f,
+                     "undo restores track gainDb edited from MixerView");
+        w->refreshNow();
+        test::check (std::abs (fader0->getValue() - 0.0) < 0.05,
+                     "MixerView track fader follows undone gainDb");
+
+        // Track pan edit via Gesture (undoable)
+        pan0->onDragStart();
+        pan0->setValue (0.5, juce::sendNotificationSync);
+        pan0->onDragEnd();
+        test::check (std::abs (w->session.tracks[0]->pan - 0.5f) < 0.02f,
+                     "MixerView pan slider updates session track pan");
+        test::check (w->editor.undo()
+                     && std::abs (w->session.tracks[0]->pan - 0.0f) < 0.02f,
+                     "undo restores track pan edited from MixerView");
+
+        // Track Mute / Solo / Arm toggles
+        auto* mute1 = w->mixer.trackMuteButton (1);
+        auto* solo1 = w->mixer.trackSoloButton (1);
+        auto* arm1 = w->mixer.trackArmButton (1);
+        test::check (mute1 != nullptr && solo1 != nullptr && arm1 != nullptr, "MixerView M/S/R buttons present");
+        press (*mute1);
+        test::check (w->session.tracks[1]->mute, "MixerView M button mutes track through Editor");
+        test::check (w->editor.undo() && ! w->session.tracks[1]->mute, "undo unmutes track muted from MixerView");
+        press (*solo1);
+        test::check (w->session.tracks[1]->solo, "MixerView S button solos track through Editor");
+        test::check (w->editor.undo() && ! w->session.tracks[1]->solo, "undo unsolos track soloed from MixerView");
+        press (*arm1);
+        test::check (w->session.tracks[1]->armed, "MixerView R button arms track");
+
+        // Master fader edit via Gesture (undoable)
+        masterFader->onDragStart();
+        masterFader->setValue (-4.0, juce::sendNotificationSync);
+        masterFader->onDragEnd();
+        test::check (std::abs (w->session.masterDb - (-4.0f)) < 0.05f
+                     && std::abs (w->masterFader.getValue() - (-4.0)) < 0.05,
+                     "MixerView master fader updates session.masterDb and header masterFader");
+        test::check (w->editor.undo() && std::abs (w->session.masterDb - 0.0f) < 0.05f,
+                     "undo restores masterDb edited from MixerView");
+
+        // Plugin button click opens editor; Shift+click bypasses
+        press (*w->mixer.trackPluginButton (0, 0));
+        test::check (w->openEditors() == 1, "clicking MixerView track plugin button opens its editor");
+        w->closeTrackEditors();
+
+        // Meter updates and CLIP lamp (driven through timerCallback -> mixer.tickMeters)
+        w->session.tracks[0]->peakL = 0.5f;
+        w->session.tracks[0]->peakR = 0.25f;
+        w->session.masterPeakL = 1.1f;
+        w->session.masterPeakR = 0.5f;
+        w->runTimerForChecks();
+        test::check (w->mixer.trackMeterLevelForTest (0) > -10.0f
+                     && w->mixer.masterMeterLevelLForTest() > 0.0f
+                     && w->mixer.masterMeterLevelRForTest() > -10.0f
+                     && w->mixer.isMasterClipLatched(),
+                     "MixerView tickMeters updates track and master meters and latches CLIP");
+        press (*w->mixer.masterClipButton());
+        test::check (! w->mixer.isMasterClipLatched(), "clicking MixerView CLIP lamp clears latch");
+
+        // Clean painting and non-blocking refresh/tickMeters while renderRunning() is true
+        const auto mixerImg = w->mixer.createComponentSnapshot (w->mixer.getLocalBounds());
+        test::check (mixerImg.isValid() && mixerImg.getWidth() == w->mixer.getWidth(),
+                     "MixerView paints cleanly");
+        {
+            w->session.renderBusy = true;
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            w->mixer.refresh();
+            w->mixer.tickMeters();
+            const double took = juce::Time::getMillisecondCounterHiRes() - t0;
+            w->session.renderBusy = false;
+            test::check (took < 200.0, "MixerView refresh and tickMeters are non-blocking when renderRunning() is true");
+        }
+
+        // Opening PianoRollView hides MixerView; toggling mixerButton back on hides PianoRollView; toggling off restores full ArrangeView
+        const auto mcBounds = w->arrange.midiClipBounds ({ 0, 0 });
+        w->arrange.mouseDoubleClick (mouseAt (w->arrange, mcBounds.getCentre()));
+        test::check (w->pianoRoll.isVisible() && ! w->mixer.isVisible() && ! w->mixerButton.getToggleState(),
+                     "opening PianoRollView hides MixerView and unlights mixerButton");
+
+        press (w->mixerButton);
+        test::check (w->mixer.isVisible() && ! w->pianoRoll.isVisible() && w->mixerButton.getToggleState(),
+                     "opening MixerView hides PianoRollView");
+
+        press (w->mixerButton);
+        test::check (! w->mixer.isVisible() && ! w->mixerButton.getToggleState() && w->arrange.getHeight() == fullArrangeH,
+                     "toggling mixerButton off hides MixerView and restores full ArrangeView height");
+
+        // [53] Track Freeze / Unfreeze through Editor updates session.tracks[0]->frozen and latency()
+        {
+            juce::String freezeErr;
+            const auto freezeWav = dir52.getChildFile ("ui-freeze.wav");
+            test::check (w->session.tracks[0]->latency() == 0, "UiCheck freeze: initial track 0 latency is 0 (Test Gain)");
+            test::check (w->editor.addPlugin (0, "Test Delay", -1, freezeErr) && w->session.tracks[0]->latency() == 64,
+                         "UiCheck freeze: adding Test Delay sets track 0 latency to 64");
+            test::check (w->editor.freezeTrack (0, freezeWav, freezeErr)
+                         && w->session.tracks[0]->frozen
+                         && w->session.tracks[0]->latency() == 0,
+                         "UiCheck freeze: editor.freezeTrack sets frozen=true and latency()=0");
+            w->refreshNow();
+            test::check (w->editor.unfreezeTrack (0, freezeErr)
+                         && ! w->session.tracks[0]->frozen
+                         && w->session.tracks[0]->latency() == 64,
+                         "UiCheck freeze: editor.unfreezeTrack clears frozen and restores latency()=64");
+            w->refreshNow();
+        }
+
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    std::printf ("[53] Multi-select clips\n");
+    {
+        auto w = makeWindow();
+        const auto wavA = makeWav ("ms-a.wav", 24000);
+        const auto wavB = makeWav ("ms-b.wav", 24000);
+        w->addTracks ({ wavA.getFullPathName(), wavB.getFullPathName() });
+        juce::String err;
+        // Track 0: clip 0 at 0 (len 24000), clip 1 at 48000 (len 24000)
+        // Track 1: clip 0 at 24000 (len 24000)
+        test::check (w->editor.addClip (0, wavA, 48000, 0, 24000, err).valid(), "second clip added on track 0");
+        test::check (w->editor.moveClip (1, 0, 24000, err), "track 1 clip placed at 24000");
+        w->editor.clearUndo();
+        w->editor.setSnap (false);
+        w->arrange.zoomToFit();
+        w->refreshNow();
+
+        const auto b00 = w->arrange.clipBounds ({ 0, 0 });
+        const auto b01 = w->arrange.clipBounds ({ 0, 1 });
+        const auto b10 = w->arrange.clipBounds ({ 1, 0 });
+        test::check (! b00.isEmpty() && ! b01.isEmpty() && ! b10.isEmpty(), "all three clips have visible bounds");
+
+        // 1) Shift+click selects and deselects multiple clips
+        w->arrange.mouseDown (mouseAtComp (w->arrange, b00.getCentre()));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, b00.getCentre()));
+        test::check (w->arrange.selectedCount() == 1 && w->arrange.isSelected (0, 0, false),
+                     "plain click selects clip (0, 0)");
+
+        w->arrange.mouseDown (mouseAtComp (w->arrange, b01.getCentre(), juce::ModifierKeys::shiftModifier));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, b01.getCentre(), juce::ModifierKeys::shiftModifier));
+        w->arrange.mouseDown (mouseAtComp (w->arrange, b10.getCentre(), juce::ModifierKeys::shiftModifier));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, b10.getCentre(), juce::ModifierKeys::shiftModifier));
+        test::check (w->arrange.selectedCount() == 3
+                     && w->arrange.isSelected (0, 0, false)
+                     && w->arrange.isSelected (0, 1, false)
+                     && w->arrange.isSelected (1, 0, false),
+                     "Shift+click adds multiple clips across tracks to selectedClips");
+
+        w->arrange.mouseDown (mouseAtComp (w->arrange, b01.getCentre(), juce::ModifierKeys::shiftModifier));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, b01.getCentre(), juce::ModifierKeys::shiftModifier));
+        test::check (w->arrange.selectedCount() == 2
+                     && w->arrange.isSelected (0, 0, false)
+                     && ! w->arrange.isSelected (0, 1, false)
+                     && w->arrange.isSelected (1, 0, false),
+                     "Shift+click on an already-selected clip toggles it off");
+
+        // Plain click on already-selected clip without drag narrows to that single clip
+        w->arrange.mouseDown (mouseAtComp (w->arrange, b10.getCentre()));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, b10.getCentre()));
+        test::check (w->arrange.selectedCount() == 1 && w->arrange.isSelected (1, 0, false),
+                     "plain click on selected clip without drag narrows selection to that clip");
+
+        // 2) Marquee drag on empty lane space selects all intersecting clips
+        const juce::Point<int> mStart { b00.getRight() + 6, b00.getY() + 2 };
+        const juce::Point<int> mEnd { b01.getX() + 10, b10.getBottom() - 2 };
+        w->arrange.mouseDown (mouseAtComp (w->arrange, mStart));
+        w->arrange.mouseDrag (mouseAtComp (w->arrange, mEnd));
+        const auto marqueeImg = w->arrange.createComponentSnapshot (w->arrange.getLocalBounds());
+        test::check (marqueeImg.isValid(), "ArrangeView paints cleanly with active marquee box");
+        w->arrange.mouseUp (mouseAtComp (w->arrange, mEnd));
+        test::check (w->arrange.selectedCount() == 2
+                     && ! w->arrange.isSelected (0, 0, false)
+                     && w->arrange.isSelected (0, 1, false)
+                     && w->arrange.isSelected (1, 0, false),
+                     "marquee drag selects intersecting clips (0,1) and (1,0)");
+
+        // 3) Group move shifts all selected clips in one undo step, and undo() restores all
+        w->arrange.mouseDown (mouseAtComp (w->arrange, b00.getCentre()));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, b00.getCentre()));
+        w->arrange.mouseDown (mouseAtComp (w->arrange, b10.getCentre(), juce::ModifierKeys::shiftModifier));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, b10.getCentre(), juce::ModifierKeys::shiftModifier));
+        test::check (w->arrange.selectedCount() == 2, "two clips selected for group move");
+
+        const auto dragStartPt = w->arrange.clipBounds ({ 0, 0 }).getCentre();
+        const int dxPx = 40;
+        const auto dragEndPt = dragStartPt + juce::Point<int> (dxPx, 0);
+        w->arrange.mouseDown (mouseAtComp (w->arrange, dragStartPt));
+        w->arrange.mouseDrag (mouseAtComp (w->arrange, dragEndPt));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, dragEndPt));
+
+        const juce::int64 moved0 = w->session.tracks[0]->clips[0].start;
+        const juce::int64 moved1 = w->session.tracks[1]->clips[0].start;
+        test::check (moved0 > 0 && moved1 - moved0 == 24000,
+                     "group drag shifts all selected clips by the same delta preserving offset");
+        test::check (w->editor.canUndo() && w->editor.undo()
+                     && w->session.tracks[0]->clips[0].start == 0
+                     && w->session.tracks[1]->clips[0].start == 24000,
+                     "undo restores all group-moved clips in one undo step");
+
+        // 4) Multi-clip copy & paste preserves relative sample & track offsets in one undo step
+        w->refreshNow();
+        w->arrange.clearSelection();
+        w->arrange.mouseDown (mouseAtComp (w->arrange, w->arrange.clipBounds ({ 1, 0 }).getCentre()));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, w->arrange.clipBounds ({ 1, 0 }).getCentre()));
+        w->arrange.mouseDown (mouseAtComp (w->arrange, w->arrange.clipBounds ({ 0, 1 }).getCentre(), juce::ModifierKeys::shiftModifier));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, w->arrange.clipBounds ({ 0, 1 }).getCentre(), juce::ModifierKeys::shiftModifier));
+        test::check (w->arrange.selectedCount() == 2, "selected (1,0) at 24000 and (0,1) at 48000");
+
+        w->keyPressed (juce::KeyPress ('c', cmd(), 'c'));
+        test::check (w->editor.hasClipboard() && w->editor.clipboardCount() == 2 && w->editor.clipboardTrack() == 0,
+                     "Cmd+C copies multiple clips with lowest track index 0");
+        w->seek (96000);
+        w->arrange.playhead = 96000.0;
+        w->keyPressed (juce::KeyPress ('v', cmd(), 'v'));
+        test::check (w->session.tracks[0]->clips.size() == 3
+                     && w->session.tracks[1]->clips.size() == 2
+                     && w->session.tracks[1]->clips[1].start == 96000
+                     && w->session.tracks[0]->clips[2].start == 120000
+                     && w->arrange.selectedCount() == 2,
+                     "Cmd+V pastes multiple clips preserving relative sampleOffset (24000) and trackOffset");
+        test::check (w->editor.undo()
+                     && w->session.tracks[0]->clips.size() == 2
+                     && w->session.tracks[1]->clips.size() == 1,
+                     "undo removes all pasted clips in one undo step");
+
+        // 5) Cmd+A selects all clips; Delete removes all selected clips in one undo step, and undo() restores all
+        w->keyPressed (juce::KeyPress ('a', cmd(), 'a'));
+        test::check (w->arrange.selectedCount() == 3, "Cmd+A selects all clips in ArrangeView");
+        w->keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+        test::check (w->session.tracks[0]->clips.empty()
+                     && w->session.tracks[1]->clips.empty()
+                     && w->arrange.selectedCount() == 0,
+                     "Delete removes all selected clips and clears selection");
+        test::check (w->editor.undo()
+                     && w->session.tracks[0]->clips.size() == 2
+                     && w->session.tracks[1]->clips.size() == 1,
+                     "undo restores all multi-deleted clips in one undo step");
+
+        // Multi-clip cut also works in one undo step
+        w->keyPressed (juce::KeyPress ('a', cmd(), 'a'));
+        w->keyPressed (juce::KeyPress ('x', cmd(), 'x'));
+        test::check (w->session.tracks[0]->clips.empty()
+                     && w->session.tracks[1]->clips.empty()
+                     && w->editor.clipboardCount() == 3,
+                     "Cmd+X cuts all selected clips");
+        test::check (w->editor.undo()
+                     && w->session.tracks[0]->clips.size() == 2
+                     && w->session.tracks[1]->clips.size() == 1,
+                     "undo restores all multi-cut clips in one undo step");
+
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    std::printf ("[54] Buses, Aux Sends & Sidechain UI\n");
+    {
+        const auto dir54 = tempFolder().getChildFile ("bus-sends-sidechain-ui");
+        dir54.deleteRecursively();
+        dir54.createDirectory();
+        auto w = makeWindow (true, dir54.getChildFile ("settings.xml"));
+        test::addSidechainPlugin (w->session.catalog);
+        layoutCheck (*w, "with + Bus button");
+
+        test::check (w->addBusButton.isVisible() && inside (w->addBusButton, *w)
+                         && w->addBusButton.getButtonText() == "+ Bus"
+                         && w->addMidiButton.getBounds().getRight() <= w->addBusButton.getX()
+                         && w->addBusButton.getBounds().getRight() <= w->importButton.getX()
+                         && w->audioButton.getBounds().getRight() <= w->guideButton.getX(),
+                     "addBusButton sits cleanly between addMidiButton and importButton without pushing audioButton into guideButton");
+
+        w->addTracks ({ makeWav ("bus-src0.wav", 24000).getFullPathName() });
+        w->editor.addEmptyTrack ("Keys");
+        w->refreshNow();
+
+        // Clicking addBusButton creates a Bus track and is undoable
+        press (w->addBusButton);
+        test::check (w->session.tracks.size() == 3
+                         && w->session.tracks[2]->kind == TrackKind::Bus
+                         && w->session.tracks[2]->isBus(),
+                     "clicking addBusButton creates a TrackKind::Bus track");
+        test::check (w->editor.undo() && w->session.tracks.size() == 2,
+                     "undo removes Bus track created via addBusButton");
+        test::check (w->editor.redo() && w->session.tracks.size() == 3 && w->session.tracks[2]->isBus(),
+                     "redo restores Bus track");
+        w->refreshNow();
+
+        // ArrangeView hides/disables R and IN on Bus tracks while keeping them on audio tracks
+        test::check (w->arrange.armButton (0)->isVisible() && w->arrange.armButton (0)->isEnabled()
+                         && w->arrange.inputButton (0)->isVisible() && w->arrange.inputButton (0)->isEnabled(),
+                     "ArrangeView keeps R and IN enabled on audio tracks");
+        test::check (! w->arrange.armButton (2)->isVisible() && ! w->arrange.armButton (2)->isEnabled()
+                         && ! w->arrange.inputButton (2)->isVisible() && ! w->arrange.inputButton (2)->isEnabled(),
+                     "ArrangeView hides and disables R and IN on Bus tracks");
+
+        // MixerView displays Bus strip, hides/disables R on Bus strip, and shows OUT/SEND buttons
+        press (w->mixerButton);
+        test::check (w->mixer.isVisible() && w->mixer.trackStripCount() == 3,
+                     "MixerView displays all 3 strips including Bus strip");
+        auto* out0 = w->mixer.trackOutButton (0);
+        auto* send0 = w->mixer.trackSendButton (0);
+        auto* send1 = w->mixer.trackSendButton (1);
+        auto* armBus = w->mixer.trackArmButton (2);
+        test::check (out0 != nullptr && send0 != nullptr && send1 != nullptr && armBus != nullptr,
+                     "MixerView exposes outButton and sendButton on strips");
+        test::check (out0->getButtonText() == "Master" && send0->getButtonText() == "SEND"
+                         && ! armBus->isVisible() && ! armBus->isEnabled(),
+                     "MixerView strip shows Master/SEND defaults and hides/disables R on Bus strip");
+
+        // Routing track 0 to Bus updates MixerView outButton text
+        juce::String err;
+        test::check (w->editor.setTrackOutput (0, 2, err), "editor.setTrackOutput routes track 0 to Bus 3");
+        w->refreshNow();
+        test::check (out0->getButtonText() == w->session.tracks[2]->name,
+                     "MixerView outButton text updates to target Bus name");
+        test::check (w->editor.undo(), "undo reverts track 0 output routing");
+        w->refreshNow();
+        test::check (out0->getButtonText() == "Master", "MixerView outButton reverts to Master after undo");
+        test::check (w->editor.redo(), "redo restores track 0 output routing");
+        w->refreshNow();
+        test::check (out0->getButtonText() == w->session.tracks[2]->name,
+                     "MixerView outButton restores Bus name after redo");
+
+        // Adding an aux send via editor.setTrackSend updates sendButton text
+        test::check (w->editor.setTrackSend (1, 2, -6.0f, true, false, err),
+                     "editor.setTrackSend adds pre-fader send from track 1 to Bus 3");
+        w->refreshNow();
+        test::check (send1->getButtonText() == "SEND (1)",
+                     "MixerView sendButton text updates to SEND (1)");
+        test::check (w->editor.removeTrackSend (1, 0, err), "removeTrackSend removes send");
+        w->refreshNow();
+        test::check (send1->getButtonText() == "SEND",
+                     "MixerView sendButton text returns to SEND after removal");
+        test::check (w->editor.undo(), "undo restores removed aux send");
+        w->refreshNow();
+        test::check (send1->getButtonText() == "SEND (1)",
+                     "MixerView sendButton restores SEND (1) after undo");
+
+        // Sidechain plugin on Bus receiving sidechain from track 1
+        test::check (w->editor.addPlugin (2, "Test Sidechain", -1, err)
+                         && w->session.tracks[2]->chain[0]->instance != nullptr
+                         && w->session.tracks[2]->chain[0]->instance->getTotalNumInputChannels() > 2
+                         && w->session.canSidechainTrack (2, 1, err)
+                         && w->editor.setSlotSidechain (2, 0, 1, err)
+                         && w->session.tracks[2]->chain[0]->sidechainTrack == 1,
+                     "Sidechain plugin on Bus accepts sidechain routing from track 1");
+        w->refreshNow();
+
+        // ArrangeView and MixerView paint cleanly with Bus + routed tracks + sends + sidechain slot
+        const auto arrangeBusImg = w->arrange.createComponentSnapshot (w->arrange.getLocalBounds());
+        const auto mixerBusImg = w->mixer.createComponentSnapshot (w->mixer.getLocalBounds());
+        test::check (arrangeBusImg.isValid() && mixerBusImg.isValid(),
+                     "ArrangeView and MixerView paint cleanly with Bus, routed tracks, sends, and sidechain slot");
+
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
     }
 
     tempFolder().deleteRecursively();
