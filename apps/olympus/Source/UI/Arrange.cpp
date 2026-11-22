@@ -91,13 +91,20 @@ struct ArrangeSnapshot
 {
     struct TrackView
     {
+        struct PluginParamInfo { int slot = 0; int param = 0; juce::String name; };
         juce::String name;
         float gainDb = 0.0f, pan = 0.0f;
         bool mute = false, solo = false;
         bool armed = false;
         int inputLeft = 0, inputRight = -1;
         float peakL = 0.0f, peakR = 0.0f; // only when taken with peaks: the maximum since the last read
+        bool isMidi = false;
         std::vector<Clip> clips;
+        std::vector<MidiClip> midiClips;
+        bool showAutomation = false;
+        juce::String activeAutoTarget { "volume" };
+        std::vector<AutomationLane> automation;
+        std::vector<PluginParamInfo> pluginParams;
     };
 
     double rate = kFallbackRate;
@@ -131,8 +138,37 @@ static bool sameArrangeVisual (const ArrangeSnapshot& a, const ArrangeSnapshot& 
     {
         const auto& ta = a.tracks[i];
         const auto& tb = b.tracks[i];
-        if (ta.mute != tb.mute || ta.clips.size() != tb.clips.size())
+        if (ta.mute != tb.mute || ta.isMidi != tb.isMidi || ta.showAutomation != tb.showAutomation || ta.activeAutoTarget != tb.activeAutoTarget
+            || ta.clips.size() != tb.clips.size() || ta.midiClips.size() != tb.midiClips.size() || ta.automation.size() != tb.automation.size())
             return false;
+        for (size_t mc = 0; mc < ta.midiClips.size(); ++mc)
+        {
+            const auto& ma = ta.midiClips[mc];
+            const auto& mb = tb.midiClips[mc];
+            if (ma.start != mb.start || ma.length != mb.length || ma.mute != mb.mute || ma.name != mb.name
+                || ma.notes.size() != mb.notes.size())
+                return false;
+            for (size_t ni = 0; ni < ma.notes.size(); ++ni)
+            {
+                const auto& na = ma.notes[ni];
+                const auto& nb = mb.notes[ni];
+                if (! juce::exactlyEqual (na.startBeat, nb.startBeat) || ! juce::exactlyEqual (na.durationBeats, nb.durationBeats)
+                    || na.pitch != nb.pitch || na.velocity != nb.velocity || na.channel != nb.channel)
+                    return false;
+            }
+        }
+        for (size_t l = 0; l < ta.automation.size(); ++l)
+        {
+            const auto& la = ta.automation[l];
+            const auto& lb = tb.automation[l];
+            if (la.targetId != lb.targetId || la.enabled != lb.enabled || la.points.size() != lb.points.size())
+                return false;
+            for (size_t p = 0; p < la.points.size(); ++p)
+                if (la.points[p].sample != lb.points[p].sample
+                    || ! juce::exactlyEqual (la.points[p].value, lb.points[p].value)
+                    || la.points[p].curve != lb.points[p].curve)
+                    return false;
+        }
         for (size_t c = 0; c < ta.clips.size(); ++c)
         {
             const auto& ca = ta.clips[c];
@@ -212,9 +248,35 @@ public:
         muteButton.setClickingTogglesState (true);
         muteButton.lamp = colours::bad;
         // a header switch never takes the keyboard: Space and the other transport keys reach the window
-        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &fxButton, &removeButton, &armButton, &inputButton }) b->setWantsKeyboardFocus (false);
+        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &autoButton, &autoTargetButton, &autoEnableButton, &fxButton, &removeButton, &armButton, &inputButton }) b->setWantsKeyboardFocus (false);
         faderSlider.setWantsKeyboardFocus (false);
         panKnob.setWantsKeyboardFocus (false);
+        autoButton.setClickingTogglesState (true);
+        autoButton.lamp = colours::accent;
+        autoButton.setTooltip ("Show or hide the automation lane");
+        autoButton.onClick = [this]
+        {
+            juce::String error;
+            if (! view.editor.setTrackShowAutomation (index, autoButton.getToggleState(), error)) view.report (error);
+            view.edited();
+        };
+        autoTargetButton.setTooltip ("Choose the parameter to automate");
+        autoTargetButton.onClick = [this] { view.autoTargetMenu (index); };
+        autoEnableButton.setClickingTogglesState (true);
+        autoEnableButton.lamp = colours::good;
+        autoEnableButton.setTooltip ("Enable or bypass this automation lane");
+        autoEnableButton.onClick = [this]
+        {
+            const auto snap = view.snapshot();
+            if (juce::isPositiveAndBelow (index, (int) snap.tracks.size()))
+            {
+                juce::String error;
+                if (! view.editor.setAutomationLaneEnabled (index, snap.tracks[(size_t) index].activeAutoTarget,
+                                                            autoEnableButton.getToggleState(), error))
+                    view.report (error);
+                view.edited();
+            }
+        };
         muteButton.setTooltip ("Mute the track");
         muteButton.onClick = [this]
         {
@@ -248,7 +310,9 @@ public:
         };
         inputButton.setTooltip ("The device input this track records. Click to choose it.");
         inputButton.onClick = [this] { if (view.onInputMenu) view.onInputMenu (index); };
-        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &fxButton, &removeButton, &armButton, &inputButton }) addAndMakeVisible (*b);
+        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &autoButton, &fxButton, &removeButton, &armButton, &inputButton }) addAndMakeVisible (*b);
+        addChildComponent (autoTargetButton);
+        addChildComponent (autoEnableButton);
 
         panKnob.setup ("Pan", -1.0, 1.0, 0.0, 0.0, [] (double v) { return panText (v); }, [] (const juce::String& t) { return panFromText (t); },
                        "Balance: drag, or click the number and type L30, C or R30.");
@@ -286,7 +350,8 @@ public:
         faderSlider.setLookAndFeel (nullptr);
     }
 
-    void setState (const juce::String& title, float gainDb, float panValue, bool isMuted, bool isSoloed, bool isArmed, const juce::String& input)
+    void setState (const juce::String& title, float gainDb, float panValue, bool isMuted, bool isSoloed, bool isArmed, const juce::String& input,
+                   bool showAuto, const juce::String& targetLabel, bool autoLaneEnabled)
     {
         if (! editingName && nameLabel.getText() != title)
             nameLabel.setText (title, juce::dontSendNotification);
@@ -308,6 +373,11 @@ public:
         soloButton.setToggleState (isSoloed, juce::dontSendNotification);
         armButton.setToggleState (isArmed, juce::dontSendNotification);
         if (inputButton.getButtonText() != input) inputButton.setButtonText (input);
+        autoButton.setToggleState (showAuto, juce::dontSendNotification);
+        if (autoTargetButton.isVisible() != showAuto) autoTargetButton.setVisible (showAuto);
+        if (autoEnableButton.isVisible() != showAuto) autoEnableButton.setVisible (showAuto);
+        if (autoTargetButton.getButtonText() != targetLabel) autoTargetButton.setButtonText (targetLabel);
+        autoEnableButton.setToggleState (autoLaneEnabled, juce::dontSendNotification);
     }
 
     // The meter: the level falls back by a few dB between reads, the held mark more slowly (MeterBallistics, shared with the master).
@@ -322,7 +392,8 @@ public:
     void resized() override
     {
         const int w = getWidth();
-        nameLabel.setBounds (8, 5, w - 74, 20);
+        nameLabel.setBounds (8, 5, w - 114, 20);
+        autoButton.setBounds (w - 102, 5, 36, 20);
         fxButton.setBounds (w - 62, 5, 32, 20);
         removeButton.setBounds (w - 26, 5, 20, 20);
         muteButton.setBounds (8, 30, 26, 22);
@@ -331,6 +402,11 @@ public:
         armButton.setBounds (8, 62, 26, 22);
         inputButton.setBounds (38, 62, 58, 22);
         faderSlider.setBounds (102, 66, w - 110, 16);
+        if (getHeight() > ArrangeView::kLaneHeight)
+        {
+            autoTargetButton.setBounds (8, ArrangeView::kLaneHeight + 12, w - 58, 24);
+            autoEnableButton.setBounds (w - 46, ArrangeView::kLaneHeight + 12, 38, 24);
+        }
     }
 
     void paint (juce::Graphics& g) override
@@ -339,6 +415,11 @@ public:
         ui::hw::fillMetal (g, area, colours::panel);
         g.setColour (juce::Colours::black.withAlpha (0.6f));
         g.fillRect (area.removeFromBottom (1.0f));
+        if (getHeight() > ArrangeView::kLaneHeight)
+        {
+            g.setColour (colours::panelEdge);
+            g.fillRect (0, ArrangeView::kLaneHeight, getWidth(), 1);
+        }
 
         ui::MeterCell cell;
         cell.area = juce::Rectangle<float> (172.0f, 17.0f, 80.0f, ui::MeterCell::kTitleHeight + ui::MeterCell::kWindowHeight);
@@ -349,6 +430,8 @@ public:
     int index;
     ArrangeLamp armButton { "R" };
     juce::TextButton inputButton { "IN" };
+    ArrangeLamp autoButton { "AUTO" };
+    juce::TextButton autoTargetButton { "VOL" };
     juce::Slider& fader() { return faderSlider; }
     bool isInteracting() const { return editingName || faderSlider.isMouseButtonDown() || panGesture != nullptr || gainGesture != nullptr; }
 
@@ -357,7 +440,7 @@ private:
     float lastTooltipGain = std::numeric_limits<float>::quiet_NaN();
     MeterBallistics meter;
     juce::Label nameLabel;
-    ArrangeLamp muteButton { "M" }, soloButton { "S" }, fxButton { "FX" }, removeButton { "X" };
+    ArrangeLamp muteButton { "M" }, soloButton { "S" }, fxButton { "FX" }, removeButton { "X" }, autoEnableButton { "ON" };
     ui::ValueKnob panKnob;
     juce::Slider faderSlider;
     std::unique_ptr<Gesture> panGesture, gainGesture;
@@ -402,9 +485,24 @@ juce::Button* ArrangeView::inputButton (int track)
     return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->inputButton : nullptr;
 }
 
+juce::Button* ArrangeView::automationButton (int track)
+{
+    return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->autoButton : nullptr;
+}
+
+juce::Button* ArrangeView::autoTargetButton (int track)
+{
+    return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->autoTargetButton : nullptr;
+}
+
 juce::Slider* ArrangeView::faderSlider (int track)
 {
     return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->fader() : nullptr;
+}
+
+juce::Rectangle<int> ArrangeView::autoLaneBounds (int track) const
+{
+    return autoLaneRect (snapshot(), track);
 }
 
 bool ArrangeView::isInteracting() const
@@ -488,7 +586,23 @@ std::shared_ptr<const ArrangeSnapshot> ArrangeView::snapshotPtr (bool takePeaks)
             v.armed = t->armed;
             v.inputLeft = t->inputLeft;
             v.inputRight = t->inputRight;
+            v.isMidi = t->isMidi;
             v.clips = t->clips;
+            v.midiClips = t->midiClips;
+            v.showAutomation = t->showAutomation;
+            v.activeAutoTarget = t->activeAutoTarget;
+            v.automation = t->automation;
+            for (int si = 0; si < (int) t->chain.size(); ++si)
+            {
+                const auto* inst = t->chain[(size_t) si]->instance.get();
+                if (inst == nullptr) continue;
+                const auto& params = inst->getParameters();
+                for (int pi = 0; pi < params.size(); ++pi)
+                {
+                    if (params[pi] != nullptr)
+                        v.pluginParams.push_back ({ si, pi, "FX" + juce::String (si + 1) + ":" + params[pi]->getName (24) });
+                }
+            }
             if (takePeaks)
             {
                 const float pL = t->peakL.exchange (0.0f);
@@ -556,24 +670,84 @@ int ArrangeView::laneTop() const
     return kRulerHeight + kLoopHeight + kMarkerHeight;
 }
 
-int ArrangeView::trackTop (int index) const
+int ArrangeView::trackHeight (const ArrangeSnapshot& s, int index) const
 {
-    return laneTop() + index * kLaneHeight - scrollY;
+    if (! juce::isPositiveAndBelow (index, (int) s.tracks.size()))
+        return kLaneHeight;
+    return kLaneHeight + (s.tracks[(size_t) index].showAutomation ? kAutoLaneHeight : 0);
 }
 
-int ArrangeView::trackAt (int y, int trackCount) const
+int ArrangeView::trackTop (const ArrangeSnapshot& s, int index) const
+{
+    int y = laneTop() - scrollY;
+    const int n = juce::jmin (index, (int) s.tracks.size());
+    for (int i = 0; i < n; ++i)
+        y += trackHeight (s, i);
+    return y;
+}
+
+int ArrangeView::trackAt (const ArrangeSnapshot& s, int y) const
 {
     if (y < laneTop() || y >= getHeight() - kScrollStripHeight) return -1;
-    const int i = (y - laneTop() + scrollY) / kLaneHeight;
-    return i < trackCount ? i : -1;
+    int top = laneTop() - scrollY;
+    for (int i = 0; i < (int) s.tracks.size(); ++i)
+    {
+        const int h = trackHeight (s, i);
+        if (y >= top && y < top + h)
+            return i;
+        top += h;
+    }
+    return -1;
 }
 
-juce::Rectangle<int> ArrangeView::clipRect (int track, juce::int64 start, juce::int64 length, double pps) const
+juce::Rectangle<int> ArrangeView::clipRect (const ArrangeSnapshot& s, int track, juce::int64 start, juce::int64 length, double pps) const
 {
     const int x0 = sampleToX ((double) start, pps);
     const int x1 = sampleToX ((double) (start + length), pps);
-    const int top = trackTop (track);
+    const int top = trackTop (s, track);
     return { x0, top + kClipPad, juce::jmax (2, x1 - x0), kLaneHeight - 2 * kClipPad };
+}
+
+juce::Rectangle<int> ArrangeView::autoLaneRect (const ArrangeSnapshot& s, int track) const
+{
+    if (! juce::isPositiveAndBelow (track, (int) s.tracks.size()) || ! s.tracks[(size_t) track].showAutomation)
+        return {};
+    const int y = trackTop (s, track) + kLaneHeight;
+    return { kHeaderWidth, y, juce::jmax (0, getWidth() - kHeaderWidth), kAutoLaneHeight };
+}
+
+float ArrangeView::valueToAutoY (float val, const juce::Rectangle<int>& r) const
+{
+    const float usableH = (float) juce::jmax (1, r.getHeight() - 8);
+    return (float) (r.getBottom() - 4) - juce::jlimit (0.0f, 1.0f, val) * usableH;
+}
+
+float ArrangeView::autoYToValue (int y, const juce::Rectangle<int>& r) const
+{
+    const float usableH = (float) juce::jmax (1, r.getHeight() - 8);
+    return juce::jlimit (0.0f, 1.0f, ((float) (r.getBottom() - 4) - (float) y) / usableH);
+}
+
+int ArrangeView::hitAutoPoint (const ArrangeSnapshot& s, int track, juce::Point<int> p, double pps) const
+{
+    const auto r = autoLaneRect (s, track);
+    if (r.isEmpty() || ! r.contains (p))
+        return -1;
+    const auto& t = s.tracks[(size_t) track];
+    for (const auto& lane : t.automation)
+    {
+        if (lane.targetId != t.activeAutoTarget)
+            continue;
+        for (int i = 0; i < (int) lane.points.size(); ++i)
+        {
+            const float px = (float) sampleToX ((double) lane.points[(size_t) i].sample, pps);
+            const float py = valueToAutoY (lane.points[(size_t) i].value, r);
+            if (std::abs ((float) p.x - px) <= 7.0f && std::abs ((float) p.y - py) <= 7.0f)
+                return i;
+        }
+        break;
+    }
+    return -1;
 }
 
 int ArrangeView::markerAtForTest (juce::Point<int> p) const
@@ -596,9 +770,12 @@ int ArrangeView::markerAt (const ArrangeSnapshot& s, juce::Point<int> p, double 
     return -1;
 }
 
-int ArrangeView::maxScrollY (int trackCount) const
+int ArrangeView::maxScrollY (const ArrangeSnapshot& s) const
 {
-    return juce::jmax (0, trackCount * kLaneHeight - (getHeight() - laneTop() - kScrollStripHeight));
+    int total = 0;
+    for (int i = 0; i < (int) s.tracks.size(); ++i)
+        total += trackHeight (s, i);
+    return juce::jmax (0, total - (getHeight() - laneTop() - kScrollStripHeight));
 }
 
 juce::Rectangle<int> ArrangeView::scrollStripBounds() const
@@ -628,7 +805,7 @@ bool ArrangeView::hitFadeIn (const ArrangeSnapshot& s, ClipRef ref, juce::Point<
     const auto& clips = s.tracks[(size_t) ref.track].clips;
     if (! juce::isPositiveAndBelow (ref.clip, (int) clips.size())) return false;
     const auto& c = clips[(size_t) ref.clip];
-    const auto r = clipRect (ref.track, c.start, c.length, pps);
+    const auto r = clipRect (s, ref.track, c.start, c.length, pps);
     if (r.getWidth() < 28 || p.y < r.getY() || p.y - r.getY() >= kFadeZone) return false;
     if (c.fadeIn > 0)
     {
@@ -644,7 +821,7 @@ bool ArrangeView::hitFadeOut (const ArrangeSnapshot& s, ClipRef ref, juce::Point
     const auto& clips = s.tracks[(size_t) ref.track].clips;
     if (! juce::isPositiveAndBelow (ref.clip, (int) clips.size())) return false;
     const auto& c = clips[(size_t) ref.clip];
-    const auto r = clipRect (ref.track, c.start, c.length, pps);
+    const auto r = clipRect (s, ref.track, c.start, c.length, pps);
     if (r.getWidth() < 28 || p.y < r.getY() || p.y - r.getY() >= kFadeZone) return false;
     if (c.fadeOut > 0)
     {
@@ -683,11 +860,10 @@ void ArrangeView::layoutHeaders()
 
 void ArrangeView::layoutHeaders (const ArrangeSnapshot& s)
 {
-    const int count = (int) s.tracks.size();
-    scrollY = juce::jlimit (0, maxScrollY (count), scrollY);
+    scrollY = juce::jlimit (0, maxScrollY (s), scrollY);
     headerPort.setBounds (0, laneTop(), kHeaderWidth, juce::jmax (0, getHeight() - laneTop() - kScrollStripHeight));
     for (int i = 0; i < (int) headers.size(); ++i)
-        headers[(size_t) i]->setBounds (0, trackTop (i) - laneTop(), kHeaderWidth, kLaneHeight);
+        headers[(size_t) i]->setBounds (0, trackTop (s, i) - laneTop(), kHeaderWidth, trackHeight (s, i));
 }
 
 void ArrangeView::syncHeaders (bool readMeters)
@@ -713,7 +889,27 @@ void ArrangeView::syncHeaders (const ArrangeSnapshot& s, bool readMeters)
         auto& h = *headers[(size_t) i];
         const auto& t = s.tracks[(size_t) i];
         h.index = i;
-        h.setState (t.name, t.gainDb, t.pan, t.mute, t.solo, t.armed, inputText (t.inputLeft, t.inputRight));
+        juce::String targetLabel = "VOL";
+        if (t.activeAutoTarget == "pan")
+            targetLabel = "PAN";
+        else if (t.activeAutoTarget.startsWith ("plugin:"))
+        {
+            targetLabel = t.activeAutoTarget.fromFirstOccurrenceOf ("plugin:", false, false);
+            const auto rest = targetLabel;
+            const int colon = rest.indexOfChar (':');
+            if (colon > 0)
+            {
+                const int sIdx = rest.substring (0, colon).getIntValue();
+                const int pIdx = rest.substring (colon + 1).getIntValue();
+                for (const auto& info : t.pluginParams)
+                    if (info.slot == sIdx && info.param == pIdx) { targetLabel = info.name; break; }
+            }
+        }
+        bool laneEnabled = true;
+        for (const auto& lane : t.automation)
+            if (lane.targetId == t.activeAutoTarget) { laneEnabled = lane.enabled; break; }
+        h.setState (t.name, t.gainDb, t.pan, t.mute, t.solo, t.armed, inputText (t.inputLeft, t.inputRight),
+                    t.showAutomation, targetLabel, laneEnabled);
         if (! readMeters) continue;
         if (t.armed && showInputLevels && inputLevel)
         {
@@ -729,6 +925,11 @@ void ArrangeView::syncHeaders (const ArrangeSnapshot& s, bool readMeters)
     {
         const bool ok = selected.track < n && selected.clip < (int) s.tracks[(size_t) selected.track].clips.size();
         if (! ok) selected = {};
+    }
+    if (selectedMidi.valid())
+    {
+        const bool ok = selectedMidi.track < n && selectedMidi.clip < (int) s.tracks[(size_t) selectedMidi.track].midiClips.size();
+        if (! ok) selectedMidi = {};
     }
     layoutHeaders (s);
 }
@@ -767,6 +968,8 @@ void ArrangeView::refresh()
         || ! juce::exactlyEqual (zoom, lastRefreshZoom)
         || selected.track != lastRefreshSelected.track
         || selected.clip != lastRefreshSelected.clip
+        || selectedMidi.track != lastRefreshSelectedMidi.track
+        || selectedMidi.clip != lastRefreshSelectedMidi.clip
         || ! juce::exactlyEqual (recordingFrom, lastRefreshRecFrom)
         || ! juce::exactlyEqual (recordingTo, lastRefreshRecTo)
         || recordingTracks != lastRefreshRecTracks;
@@ -795,6 +998,7 @@ void ArrangeView::refresh()
     lastRefreshScrollY = scrollY;
     lastRefreshZoom = zoom;
     lastRefreshSelected = selected;
+    lastRefreshSelectedMidi = selectedMidi;
     lastRefreshRecFrom = recordingFrom;
     lastRefreshRecTo = recordingTo;
     lastRefreshRecTracks = recordingTracks;
@@ -906,7 +1110,7 @@ void ArrangeView::drawWave (juce::Graphics& g, const Clip& clip, juce::Rectangle
 
 void ArrangeView::paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const Clip& clip, bool selectedNow)
 {
-    const auto rect = clipRect (track, clip.start, clip.length, pps);
+    const auto rect = clipRect (s, track, clip.start, clip.length, pps);
     const auto r = rect.toFloat();
     const bool dimmed = clip.mute || s.tracks[(size_t) track].mute;
 
@@ -1001,6 +1205,195 @@ void ArrangeView::paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double
     g.restoreState();
 }
 
+void ArrangeView::paintMidiClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const MidiClip& clip, bool selectedNow)
+{
+    const auto rect = clipRect (s, track, clip.start, clip.length, pps);
+    const auto r = rect.toFloat();
+    const bool dimmed = clip.mute || s.tracks[(size_t) track].mute;
+
+    g.saveState();
+    g.reduceClipRegion (rect.getIntersection (getLocalBounds().withTrimmedLeft (kHeaderWidth)));
+    g.setColour (colours::panel.brighter (0.08f).withAlpha (0.94f));
+    g.fillRoundedRectangle (r, 3.0f);
+
+    // Header tag ("MIDI") + clip name
+    const auto headerArea = r.reduced (4.0f, 2.0f).withHeight (13.0f);
+    g.setFont (ui::labelFont (8.5f));
+    g.setColour ((dimmed ? colours::dim : colours::accent).withAlpha (0.9f));
+    g.drawText ("MIDI", headerArea.withWidth (28.0f), juce::Justification::centredLeft, false);
+    g.setFont (ui::labelFont (9.5f));
+    g.setColour (dimmed ? colours::dim : colours::text);
+    g.drawText (clip.name + (clip.mute ? "  (muted)" : ""), headerArea.withTrimmedLeft (30.0f), juce::Justification::centredLeft, true);
+
+    // Miniature piano-roll note preview
+    const auto noteArea = r.reduced (3.0f, 3.0f).withTrimmedTop (14.0f);
+    if (! clip.notes.empty() && noteArea.getWidth() >= 4.0f && noteArea.getHeight() >= 6.0f)
+    {
+        int minP = 127, maxP = 0;
+        for (const auto& n : clip.notes)
+        {
+            minP = juce::jmin (minP, n.pitch);
+            maxP = juce::jmax (maxP, n.pitch);
+        }
+        if (maxP - minP < 12)
+        {
+            const int mid = (minP + maxP) / 2;
+            minP = juce::jmax (0, mid - 6);
+            maxP = juce::jmin (127, minP + 12);
+        }
+        const int span = juce::jmax (1, maxP - minP + 1);
+        const float noteH = juce::jlimit (2.0f, 6.0f, noteArea.getHeight() / (float) span);
+        const double clipStartBeats = s.tempo.samplesToBeats ((double) clip.start);
+        const auto barColour = (dimmed ? colours::dim : colours::accent).withAlpha (0.85f);
+        g.setColour (barColour);
+        for (const auto& n : clip.notes)
+        {
+            const float nx0 = (float) sampleToX (s.tempo.beatsToSamples (clipStartBeats + n.startBeat), pps);
+            const float nx1 = (float) sampleToX (s.tempo.beatsToSamples (clipStartBeats + n.startBeat + n.durationBeats), pps);
+            const float frac = (float) (n.pitch - minP) / (float) span;
+            const float ny = noteArea.getBottom() - noteH - frac * juce::jmax (1.0f, noteArea.getHeight() - noteH);
+            g.fillRoundedRectangle (nx0, ny, juce::jmax (2.0f, nx1 - nx0), noteH, 1.0f);
+        }
+    }
+
+    if (clip.mute)
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.4f));
+        g.fillRoundedRectangle (r, 3.0f);
+    }
+
+    g.setColour (selectedNow ? colours::amber : colours::accent.withAlpha (0.55f));
+    g.drawRoundedRectangle (r.reduced (0.5f), 3.0f, selectedNow ? 2.0f : 1.0f);
+    g.restoreState();
+}
+
+void ArrangeView::paintAutomationLane (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track)
+{
+    const auto r = autoLaneRect (s, track);
+    if (r.isEmpty())
+        return;
+
+    const auto& t = s.tracks[(size_t) track];
+    const auto laneBounds = r.toFloat().reduced (2.0f, 1.0f);
+    g.setColour (colours::glass.withAlpha (0.9f));
+    g.fillRoundedRectangle (laneBounds, 3.0f);
+    g.setColour (colours::panelEdge.withAlpha (0.8f));
+    g.drawRoundedRectangle (laneBounds.reduced (0.5f), 3.0f, 1.0f);
+
+    // Reference guide line (0 dB for volume, centre for pan/plugin)
+    const float refVal = t.activeAutoTarget == "volume" ? dbToAutoNorm (0.0f) : 0.5f;
+    const float refY = valueToAutoY (refVal, r);
+    g.setColour (colours::dim.withAlpha (0.22f));
+    g.drawHorizontalLine (juce::roundToInt (refY), laneBounds.getX() + 2.0f, laneBounds.getRight() - 2.0f);
+
+    const AutomationLane* activeLane = nullptr;
+    for (const auto& lane : t.automation)
+    {
+        if (lane.targetId == t.activeAutoTarget)
+        {
+            activeLane = &lane;
+            break;
+        }
+    }
+
+    juce::Colour curveColour = colours::amber;
+    if (t.activeAutoTarget == "pan")
+        curveColour = colours::accent;
+    else if (t.activeAutoTarget.startsWith ("plugin:"))
+        curveColour = colours::good;
+    if (activeLane != nullptr && ! activeLane->enabled)
+        curveColour = curveColour.withAlpha (0.35f);
+
+    if (activeLane == nullptr || activeLane->points.empty())
+    {
+        g.setFont (ui::labelFont (9.0f));
+        g.setColour (colours::dim.withAlpha (0.55f));
+        g.drawText ("Click to add automation point", r.reduced (8, 2), juce::Justification::centredLeft, false);
+        return;
+    }
+
+    g.saveState();
+    g.reduceClipRegion (r);
+
+    const float xLeft = (float) r.getX();
+    const float xRight = (float) r.getRight();
+    const double leftSample = juce::jmax (0.0, xToSample (xLeft, pps));
+    const auto& pts = activeLane->points;
+
+    juce::Path path;
+    const float startY = valueToAutoY (activeLane->evaluateAt ((juce::int64) std::llround (leftSample)), r);
+    path.startNewSubPath (xLeft, startY);
+
+    const float firstX = (float) sampleToX ((double) pts.front().sample, pps);
+    const float firstY = valueToAutoY (pts.front().value, r);
+    if (firstX > xLeft)
+        path.lineTo (firstX, firstY);
+    else
+        path.startNewSubPath (firstX, firstY);
+
+    for (size_t i = 0; i + 1 < pts.size(); ++i)
+    {
+        const auto& p0 = pts[i];
+        const auto& p1 = pts[i + 1];
+        const float x0 = (float) sampleToX ((double) p0.sample, pps);
+        const float y0 = valueToAutoY (p0.value, r);
+        const float x1 = (float) sampleToX ((double) p1.sample, pps);
+        const float y1 = valueToAutoY (p1.value, r);
+
+        if (p0.curve == AutoCurveType::Step)
+        {
+            path.lineTo (x1, y0);
+            path.lineTo (x1, y1);
+        }
+        else if (p0.curve == AutoCurveType::Smooth && x1 > x0 + 2.0f)
+        {
+            const int steps = juce::jlimit (4, 32, (int) ((x1 - x0) / 4.0f));
+            for (int k = 1; k <= steps; ++k)
+            {
+                const float frac = (float) k / (float) steps;
+                const float mu = frac * frac * (3.0f - 2.0f * frac);
+                const float xx = x0 + (x1 - x0) * frac;
+                const float yy = y0 + (y1 - y0) * mu;
+                path.lineTo (xx, yy);
+            }
+        }
+        else
+        {
+            path.lineTo (x1, y1);
+        }
+    }
+
+    const float lastX = (float) sampleToX ((double) pts.back().sample, pps);
+    const float lastY = valueToAutoY (pts.back().value, r);
+    if (xRight > lastX)
+        path.lineTo (xRight, lastY);
+
+    juce::Path fillPath (path);
+    fillPath.lineTo (xRight, (float) r.getBottom() - 2.0f);
+    fillPath.lineTo (xLeft, (float) r.getBottom() - 2.0f);
+    fillPath.closeSubPath();
+    g.setColour (curveColour.withAlpha (0.12f));
+    g.fillPath (fillPath);
+
+    g.setColour (curveColour);
+    g.strokePath (path, juce::PathStrokeType (1.75f));
+
+    for (int i = 0; i < (int) pts.size(); ++i)
+    {
+        const float px = (float) sampleToX ((double) pts[(size_t) i].sample, pps);
+        if (px < xLeft - 8.0f || px > xRight + 8.0f) continue;
+        const float py = valueToAutoY (pts[(size_t) i].value, r);
+        const bool isDragged = (mode == Mode::autoPoint && dragAutoTrack == track && dragAutoPoint == i);
+        const float rad = isDragged ? 5.0f : 3.75f;
+        g.setColour (colours::glass);
+        g.fillEllipse (px - rad - 1.0f, py - rad - 1.0f, (rad + 1.0f) * 2.0f, (rad + 1.0f) * 2.0f);
+        g.setColour (isDragged ? colours::text : curveColour);
+        g.fillEllipse (px - rad, py - rad, rad * 2.0f, rad * 2.0f);
+    }
+
+    g.restoreState();
+}
+
 void ArrangeView::paint (juce::Graphics& g)
 {
     g.fillAll (colours::background);
@@ -1031,8 +1424,9 @@ void ArrangeView::paint (juce::Graphics& g)
     // lanes
     for (int i = 0; i < count; ++i)
     {
-        const int y = trackTop (i);
-        if (y + kLaneHeight < top || y > height) continue;
+        const int y = trackTop (s, i);
+        const int h = trackHeight (s, i);
+        if (y + h < top || y > height) continue;
         const auto lane = juce::Rectangle<float> ((float) kHeaderWidth, (float) (y + 1), (float) (width - kHeaderWidth), (float) (kLaneHeight - 2)).reduced (2.0f, 0.0f);
         ui::hw::drawGlass (g, lane, 3.0f, colours::accent);
     }
@@ -1052,7 +1446,7 @@ void ArrangeView::paint (juce::Graphics& g)
     {
         if (dragHoverTrack >= 0 && dragHoverTrack < count)
         {
-            const int y = trackTop (dragHoverTrack);
+            const int y = trackTop (s, dragHoverTrack);
             const auto lane = juce::Rectangle<float> ((float) kHeaderWidth, (float) (y + 1), (float) (width - kHeaderWidth), (float) (kLaneHeight - 2)).reduced (2.0f, 0.0f);
             g.setColour (colours::amber.withAlpha (0.12f));
             g.fillRoundedRectangle (lane, 3.0f);
@@ -1094,18 +1488,28 @@ void ArrangeView::paint (juce::Graphics& g)
         }
     }
 
-    // clips
+    // clips and automation lanes
     for (int i = 0; i < count; ++i)
     {
-        const int y = trackTop (i);
-        if (y + kLaneHeight < top || y > height) continue;
+        const int y = trackTop (s, i);
+        const int h = trackHeight (s, i);
+        if (y + h < top || y > height) continue;
         const auto& clips = s.tracks[(size_t) i].clips;
         for (int c = 0; c < (int) clips.size(); ++c)
         {
-            const auto rect = clipRect (i, clips[(size_t) c].start, clips[(size_t) c].length, pps);
+            const auto rect = clipRect (s, i, clips[(size_t) c].start, clips[(size_t) c].length, pps);
             if (rect.getRight() < kHeaderWidth || rect.getX() > width) continue;
             paintClip (g, s, pps, i, clips[(size_t) c], selected.track == i && selected.clip == c);
         }
+        const auto& midiClips = s.tracks[(size_t) i].midiClips;
+        for (int mc = 0; mc < (int) midiClips.size(); ++mc)
+        {
+            const auto rect = clipRect (s, i, midiClips[(size_t) mc].start, midiClips[(size_t) mc].length, pps);
+            if (rect.getRight() < kHeaderWidth || rect.getX() > width) continue;
+            paintMidiClip (g, s, pps, i, midiClips[(size_t) mc], selectedMidi.track == i && selectedMidi.clip == mc);
+        }
+        if (s.tracks[(size_t) i].showAutomation)
+            paintAutomationLane (g, s, pps, i);
     }
 
     // a take in progress: a red strip across each armed lane, from where the recording began to the playhead
@@ -1115,7 +1519,7 @@ void ArrangeView::paint (juce::Graphics& g)
         for (int track : recordingTracks)
         {
             if (track < 0 || track >= count) continue;
-            const int y = trackTop (track);
+            const int y = trackTop (s, track);
             g.setColour (colours::bad.withAlpha (0.22f));
             g.fillRect (x0, y + 1, juce::jmax (0, x1 - x0), kLaneHeight - 2);
             g.setColour (colours::bad);
@@ -1229,11 +1633,11 @@ ClipRef ArrangeView::clipAt (juce::Point<int> p) const
     if (p.x < kHeaderWidth || scrollStripBounds().contains (p)) return {};
     const auto s = snapshot();
     const double pps = pxPerSample (s.rate);
-    const int track = trackAt (p.y, (int) s.tracks.size());
+    const int track = trackAt (s, p.y);
     if (track < 0) return {};
     const auto& clips = s.tracks[(size_t) track].clips;
     for (int c = (int) clips.size() - 1; c >= 0; --c)
-        if (clipRect (track, clips[(size_t) c].start, clips[(size_t) c].length, pps).contains (p))
+        if (clipRect (s, track, clips[(size_t) c].start, clips[(size_t) c].length, pps).contains (p))
             return { track, c };
     return {};
 }
@@ -1245,7 +1649,31 @@ juce::Rectangle<int> ArrangeView::clipBounds (ClipRef ref) const
     const auto& clips = s.tracks[(size_t) ref.track].clips;
     if (ref.clip >= (int) clips.size()) return {};
     const auto& c = clips[(size_t) ref.clip];
-    return clipRect (ref.track, c.start, c.length, pxPerSample (s.rate));
+    return clipRect (s, ref.track, c.start, c.length, pxPerSample (s.rate));
+}
+
+MidiClipRef ArrangeView::midiClipAt (juce::Point<int> p) const
+{
+    if (p.x < kHeaderWidth || scrollStripBounds().contains (p)) return {};
+    const auto s = snapshot();
+    const double pps = pxPerSample (s.rate);
+    const int track = trackAt (s, p.y);
+    if (track < 0) return {};
+    const auto& clips = s.tracks[(size_t) track].midiClips;
+    for (int c = (int) clips.size() - 1; c >= 0; --c)
+        if (clipRect (s, track, clips[(size_t) c].start, clips[(size_t) c].length, pps).contains (p))
+            return { track, c };
+    return {};
+}
+
+juce::Rectangle<int> ArrangeView::midiClipBounds (MidiClipRef ref) const
+{
+    const auto s = snapshot();
+    if (! ref.valid() || ref.track >= (int) s.tracks.size()) return {};
+    const auto& clips = s.tracks[(size_t) ref.track].midiClips;
+    if (ref.clip >= (int) clips.size()) return {};
+    const auto& c = clips[(size_t) ref.clip];
+    return clipRect (s, ref.track, c.start, c.length, pxPerSample (s.rate));
 }
 
 // ---- mouse -------------------------------------------------------------------------------------------------------------------------
@@ -1263,7 +1691,7 @@ juce::MouseCursor ArrangeView::getMouseCursor()
 {
     if (mode == Mode::trimStart || mode == Mode::trimEnd || mode == Mode::fadeIn || mode == Mode::fadeOut)
         return juce::MouseCursor::LeftRightResizeCursor;
-    if (mode == Mode::marker)
+    if (mode == Mode::marker || mode == Mode::autoPoint)
         return juce::MouseCursor::PointingHandCursor;
     if (hoverPos.x < kHeaderWidth || hoverPos.y < 0 || scrollStripBounds().contains (hoverPos))
         return juce::MouseCursor::NormalCursor;
@@ -1279,13 +1707,19 @@ juce::MouseCursor ArrangeView::getMouseCursor()
     if (hoverPos.y < laneTop())
         return juce::MouseCursor::NormalCursor;
 
-    const int track = trackAt (hoverPos.y, (int) s.tracks.size());
+    const int track = trackAt (s, hoverPos.y);
     if (track < 0)
         return juce::MouseCursor::NormalCursor;
+    if (s.tracks[(size_t) track].showAutomation && autoLaneRect (s, track).contains (hoverPos))
+    {
+        if (hitAutoPoint (s, track, hoverPos, pps) >= 0)
+            return juce::MouseCursor::PointingHandCursor;
+        return juce::MouseCursor::NormalCursor;
+    }
     const auto& clips = s.tracks[(size_t) track].clips;
     for (int c = (int) clips.size() - 1; c >= 0; --c)
     {
-        const auto r = clipRect (track, clips[(size_t) c].start, clips[(size_t) c].length, pps);
+        const auto r = clipRect (s, track, clips[(size_t) c].start, clips[(size_t) c].length, pps);
         if (! r.contains (hoverPos)) continue;
         const ClipRef hit { track, c };
         const auto& clip = clips[(size_t) c];
@@ -1378,7 +1812,68 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    // automation lanes
+    const int hoverTrack = trackAt (s, p.y);
+    if (hoverTrack >= 0 && s.tracks[(size_t) hoverTrack].showAutomation)
+    {
+        const auto autoR = autoLaneRect (s, hoverTrack);
+        if (autoR.contains (p))
+        {
+            const auto& targetId = s.tracks[(size_t) hoverTrack].activeAutoTarget;
+            const int hitPt = hitAutoPoint (s, hoverTrack, p, pps);
+            if (e.mods.isPopupMenu())
+            {
+                if (hitPt >= 0)
+                    autoPointMenu (hoverTrack, targetId, hitPt);
+                return;
+            }
+            if (hitPt >= 0)
+            {
+                mode = Mode::autoPoint;
+                dragAutoTrack = hoverTrack;
+                dragAutoTarget = targetId;
+                dragAutoPoint = hitPt;
+                beginGesture ("Move automation point");
+                return;
+            }
+            const juce::int64 sample = editor.snap ((juce::int64) juce::jmax (0.0, xToSample (p.x, pps)));
+            const float val = autoYToValue (p.y, autoR);
+            beginGesture ("Add automation point");
+            juce::String error;
+            const int added = editor.addAutomationPoint (hoverTrack, targetId, sample, val, AutoCurveType::Linear, error);
+            if (added >= 0)
+            {
+                mode = Mode::autoPoint;
+                dragAutoTrack = hoverTrack;
+                dragAutoTarget = targetId;
+                dragAutoPoint = added;
+                changed();
+            }
+            else
+            {
+                endGesture();
+                report (error);
+            }
+            return;
+        }
+    }
+
     // the lanes
+    const auto midiHit = midiClipAt (p);
+    if (midiHit.valid())
+    {
+        selected = {};
+        selectedMidi = midiHit;
+        repaint();
+        if (e.mods.isPopupMenu()) { midiClipMenu (midiHit); return; }
+        const auto& mc = s.tracks[(size_t) midiHit.track].midiClips[(size_t) midiHit.clip];
+        dragMidiClip = midiHit;
+        origStart = mc.start;
+        mode = Mode::moveMidi;
+        beginGesture ("Move MIDI clip");
+        return;
+    }
+
     const auto hit = clipAt (p);
     if (! hit.valid())
     {
@@ -1390,15 +1885,17 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
                 return;
             }
             selected = {};
+            selectedMidi = {};
         }
-        else if (editor.hasClipboard())
+        else
         {
-            const int track = trackAt (p.y, (int) s.tracks.size());
+            const int track = trackAt (s, p.y);
             if (track >= 0) laneMenu (track, (juce::int64) juce::jmax (0.0, xToSample (p.x, pps)));
         }
         repaint();
         return;
     }
+    selectedMidi = {};
     selected = hit;
     repaint();
     if (e.mods.isPopupMenu()) { clipMenu (hit); return; }
@@ -1429,6 +1926,17 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
         case Mode::trimEnd: beginGesture ("Trim clip end"); break;
         default: beginGesture ("Move clip"); break;
     }
+}
+
+void ArrangeView::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) return;
+    const auto midiHit = midiClipAt (e.getPosition());
+    if (! midiHit.valid()) return;
+    selected = {};
+    selectedMidi = midiHit;
+    repaint();
+    if (onOpenMidiClip) onOpenMidiClip (midiHit);
 }
 
 void ArrangeView::mouseDrag (const juce::MouseEvent& e)
@@ -1486,7 +1994,7 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
 
         case Mode::move:
         {
-            const int lane = trackAt (p.y, (int) s.tracks.size());
+            const int lane = trackAt (s, p.y);
             const auto newStart = editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + std::llround (deltaSamples)));
             if (lane >= 0 && lane != dragClip.track)
             {
@@ -1495,6 +2003,14 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
                 else report (error);
             }
             else if (! editor.moveClip (dragClip.track, dragClip.clip, newStart, error))
+                report (error);
+            break;
+        }
+
+        case Mode::moveMidi:
+        {
+            const auto newStart = editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + (double) std::llround (deltaSamples)));
+            if (! editor.moveMidiClip (dragMidiClip.track, dragMidiClip.clip, newStart, error))
                 report (error);
             break;
         }
@@ -1528,6 +2044,23 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
             if (! editor.setClipFades (dragClip.track, dragClip.clip, origFadeIn, origFadeOut - std::llround (deltaSamples), error))
                 report (error);
             break;
+
+        case Mode::autoPoint:
+        {
+            if (! juce::isPositiveAndBelow (dragAutoTrack, (int) s.tracks.size())) break;
+            const auto autoR = autoLaneRect (s, dragAutoTrack);
+            if (autoR.isEmpty()) break;
+            const juce::int64 targetSample = editor.snap ((juce::int64) juce::jmax (0.0, xToSample (p.x, pps)));
+            const float targetVal = autoYToValue (p.y, autoR);
+            int newIndex = dragAutoPoint;
+            if (! editor.moveAutomationPoint (dragAutoTrack, dragAutoTarget, dragAutoPoint, targetSample, targetVal, error, &newIndex))
+            {
+                report (error);
+                break;
+            }
+            dragAutoPoint = newIndex;
+            break;
+        }
 
         case Mode::none:
             break;
@@ -1570,7 +2103,7 @@ void ArrangeView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWh
     }
     else
     {
-        scrollY = juce::jlimit (0, maxScrollY ((int) s.tracks.size()), scrollY - juce::roundToInt (wheel.deltaY * 300.0));
+        scrollY = juce::jlimit (0, maxScrollY (s), scrollY - juce::roundToInt (wheel.deltaY * 300.0));
     }
     layoutHeaders();
     repaint();
@@ -1585,7 +2118,7 @@ bool ArrangeView::keyPressed (const juce::KeyPress& key)
     // The clip keys (Delete, Cmd+D, S) and the transport keys belong to the window, which calls the methods above; the view takes only
     // the selection and the nudges, so a key is never handled twice.
     if (mods.isCommandDown()) return false;
-    if (code == juce::KeyPress::escapeKey) { selected = {}; repaint(); return true; }
+    if (code == juce::KeyPress::escapeKey) { selected = {}; selectedMidi = {}; repaint(); return true; }
     if (code == juce::KeyPress::leftKey) { nudgeSelected (-1, 0, mods.isShiftDown()); return true; }
     if (code == juce::KeyPress::rightKey) { nudgeSelected (1, 0, mods.isShiftDown()); return true; }
     if (code == juce::KeyPress::upKey) { nudgeSelected (0, -1, false); return true; }
@@ -1604,6 +2137,23 @@ void ArrangeView::nudgeSelected (int dx, int dy, bool bar)
 
     if (! selected.valid())
     {
+        if (selectedMidi.valid())
+        {
+            if (! juce::isPositiveAndBelow (selectedMidi.track, (int) s.tracks.size())
+                || ! juce::isPositiveAndBelow (selectedMidi.clip, (int) s.tracks[(size_t) selectedMidi.track].midiClips.size()))
+            {
+                selectedMidi = {};
+                return;
+            }
+            if (dx != 0)
+            {
+                const auto& mc = s.tracks[(size_t) selectedMidi.track].midiClips[(size_t) selectedMidi.clip];
+                const auto target = editor.snap ((juce::int64) juce::jmax (0.0, (double) mc.start + dx * stepSamples));
+                if (! editor.moveMidiClip (selectedMidi.track, selectedMidi.clip, target, error)) report (error);
+                edited();
+            }
+            return;
+        }
         if (dx != 0) seekTo ((juce::int64) juce::jmax (0.0, (double) playhead + dx * stepSamples));
         return;
     }
@@ -1669,6 +2219,14 @@ void ArrangeView::splitAtPlayhead()
 
 void ArrangeView::deleteSelected()
 {
+    if (selectedMidi.valid())
+    {
+        juce::String error;
+        if (editor.deleteMidiClip (selectedMidi.track, selectedMidi.clip, error)) selectedMidi = {};
+        else report (error);
+        edited();
+        return;
+    }
     if (! selected.valid()) return;
     juce::String error;
     if (editor.deleteClip (selected.track, selected.clip, error)) selected = {};
@@ -1756,11 +2314,13 @@ void ArrangeView::clipMenu (ClipRef ref)
     });
 }
 
-// The empty lane's menu: Paste here, at the clicked track and sample (only when the clipboard holds a clip).
+// The empty lane's menu: Paste here (when clipboard holds a clip) and Create MIDI clip.
 void ArrangeView::laneMenu (int track, juce::int64 at)
 {
     juce::PopupMenu menu;
-    menu.addItem (1, "Paste here");
+    if (editor.hasClipboard())
+        menu.addItem (1, "Paste here");
+    menu.addItem (2, "Create MIDI clip");
     if (dialogFlag()) return;
     dialogFlag() = true;
     juce::Component::SafePointer<ArrangeView> safe (this);
@@ -1768,8 +2328,84 @@ void ArrangeView::laneMenu (int track, juce::int64 at)
     {
         if (safe == nullptr) return;
         safe->dialogFlag() = false;
-        if (result > 0) safe->pasteAt (track, at);
+        if (result > 0) safe->laneAction (track, at, result);
     });
+}
+
+void ArrangeView::laneAction (int track, juce::int64 at, int action)
+{
+    if (action == 1)
+        pasteAt (track, at);
+    else if (action == 2)
+        createMidiClipAt (track, at);
+}
+
+void ArrangeView::createMidiClipAt (int track, juce::int64 at)
+{
+    const auto s = snapshot();
+    if (! juce::isPositiveAndBelow (track, (int) s.tracks.size())) return;
+    const juce::int64 start = editor.snap (juce::jmax ((juce::int64) 0, at));
+    const double startBeats = s.tempo.sampleRate > 0.0 ? s.tempo.samplesToBeats ((double) start) : 0.0;
+    const double barBeats = juce::jmax (1.0, s.tempo.beatsPerBar());
+    const juce::int64 len = s.tempo.sampleRate > 0.0
+        ? juce::jmax ((juce::int64) 1, (juce::int64) std::llround (s.tempo.beatsToSamples (startBeats + barBeats) - (double) start))
+        : (juce::int64) (s.rate * 2.0);
+    juce::String error;
+    const auto made = editor.addMidiClip (track, start, len, {}, error);
+    if (! made.valid()) { report (error); return; }
+    selected = {};
+    selectedMidi = made;
+    edited();
+}
+
+void ArrangeView::midiClipMenu (MidiClipRef ref)
+{
+    const auto s = snapshot();
+    if (! ref.valid() || ref.track >= (int) s.tracks.size()
+        || ref.clip >= (int) s.tracks[(size_t) ref.track].midiClips.size()) return;
+    juce::PopupMenu menu;
+    menu.addItem (1, "Edit in Piano Roll");
+    menu.addItem (2, "Quantize");
+    menu.addSeparator();
+    menu.addItem (3, "Delete");
+    if (dialogFlag()) return;
+    dialogFlag() = true;
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    menu.showMenuAsync ({}, [safe, ref] (int result)
+    {
+        if (safe == nullptr) return;
+        safe->dialogFlag() = false;
+        if (result > 0) safe->midiClipAction (ref, result);
+    });
+}
+
+void ArrangeView::midiClipAction (MidiClipRef ref, int action)
+{
+    const auto s = snapshot();
+    if (! ref.valid() || ref.track >= (int) s.tracks.size()
+        || ref.clip >= (int) s.tracks[(size_t) ref.track].midiClips.size()) return;
+    juce::String error;
+    switch (action)
+    {
+        case 1:
+            if (onOpenMidiClip) onOpenMidiClip (ref);
+            return;
+        case 2:
+            if (! editor.quantizeMidiClip (ref.track, ref.clip, s.grid, error)) report (error);
+            edited();
+            return;
+        case 3:
+            if (editor.deleteMidiClip (ref.track, ref.clip, error))
+            {
+                if (selectedMidi.track == ref.track && selectedMidi.clip == ref.clip)
+                    selectedMidi = {};
+            }
+            else report (error);
+            edited();
+            return;
+        default:
+            return;
+    }
 }
 
 void ArrangeView::clipAction (ClipRef ref, int action)
@@ -1953,6 +2589,93 @@ void ArrangeView::finishOpenDialogForTest (bool accept, const juce::String& text
     done (accept, text);
 }
 
+void ArrangeView::autoTargetMenu (int track)
+{
+    const auto s = snapshot();
+    if (! juce::isPositiveAndBelow (track, (int) s.tracks.size())) return;
+    const auto& t = s.tracks[(size_t) track];
+
+    juce::PopupMenu menu;
+    std::vector<juce::String> targets;
+    auto addItem = [&] (const juce::String& targetId, const juce::String& label)
+    {
+        targets.push_back (targetId);
+        menu.addItem ((int) targets.size(), label, true, t.activeAutoTarget == targetId);
+    };
+    addItem ("volume", "Volume");
+    addItem ("pan", "Pan");
+    if (! t.pluginParams.empty())
+    {
+        menu.addSeparator();
+        for (const auto& pp : t.pluginParams)
+            addItem ("plugin:" + juce::String (pp.slot) + ":" + juce::String (pp.param), pp.name);
+    }
+
+    if (dialogFlag()) return;
+    dialogFlag() = true;
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    menu.showMenuAsync ({}, [safe, track, menuTargets = std::move (targets)] (int result)
+    {
+        if (safe == nullptr) return;
+        safe->dialogFlag() = false;
+        if (result > 0 && result <= (int) menuTargets.size())
+        {
+            juce::String error;
+            if (! safe->editor.setTrackActiveAutoTarget (track, menuTargets[(size_t) (result - 1)], error))
+                safe->report (error);
+            safe->edited();
+        }
+    });
+}
+
+void ArrangeView::autoPointMenu (int track, const juce::String& targetId, int pointIndex)
+{
+    const auto s = snapshot();
+    if (! juce::isPositiveAndBelow (track, (int) s.tracks.size())) return;
+    AutoCurveType cur = AutoCurveType::Linear;
+    for (const auto& lane : s.tracks[(size_t) track].automation)
+    {
+        if (lane.targetId == targetId)
+        {
+            if (! juce::isPositiveAndBelow (pointIndex, (int) lane.points.size())) return;
+            cur = lane.points[(size_t) pointIndex].curve;
+            break;
+        }
+    }
+
+    juce::PopupMenu menu;
+    menu.addItem (1, "Curve: Linear", true, cur == AutoCurveType::Linear);
+    menu.addItem (2, "Curve: Step", true, cur == AutoCurveType::Step);
+    menu.addItem (3, "Curve: Smooth", true, cur == AutoCurveType::Smooth);
+    menu.addSeparator();
+    menu.addItem (4, "Delete point");
+
+    if (dialogFlag()) return;
+    dialogFlag() = true;
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    menu.showMenuAsync ({}, [safe, track, targetId, pointIndex] (int result)
+    {
+        if (safe == nullptr) return;
+        safe->dialogFlag() = false;
+        if (result > 0) safe->autoPointAction (track, targetId, pointIndex, result);
+    });
+}
+
+void ArrangeView::autoPointAction (int track, const juce::String& targetId, int pointIndex, int action)
+{
+    juce::String error;
+    switch (action)
+    {
+        case 1: editor.setAutomationPointCurve (track, targetId, pointIndex, AutoCurveType::Linear, error); break;
+        case 2: editor.setAutomationPointCurve (track, targetId, pointIndex, AutoCurveType::Step, error); break;
+        case 3: editor.setAutomationPointCurve (track, targetId, pointIndex, AutoCurveType::Smooth, error); break;
+        case 4: editor.deleteAutomationPoint (track, targetId, pointIndex, error); break;
+        default: return;
+    }
+    report (error);
+    edited();
+}
+
 // ---- files ---------------------------------------------------------------------------------------------------------------------------
 bool ArrangeView::isInterestedInFileDrag (const juce::StringArray& files)
 {
@@ -1966,7 +2689,7 @@ bool ArrangeView::isInterestedInFileDrag (const juce::StringArray& files)
 void ArrangeView::updateDropHover (const juce::StringArray& files, int x, int y)
 {
     const bool isProject = files.size() == 1 && juce::File (files[0]).hasFileExtension ("olympus");
-    const int newTrack = (isProject || y < laneTop() || x < kHeaderWidth) ? -1 : trackAt (y, (int) snapshot().tracks.size());
+    const int newTrack = (isProject || y < laneTop() || x < kHeaderWidth) ? -1 : trackAt (snapshot(), y);
     if (! draggingFiles || dragHoverTrack != newTrack)
     {
         draggingFiles = true;
@@ -2008,7 +2731,7 @@ void ArrangeView::filesDropped (const juce::StringArray& files, int x, int y)
     if (y < laneTop() || ! onFilesDropped) return;
     const auto s = snapshot();
     const double pps = pxPerSample (s.rate);
-    const int track = trackAt (y, (int) s.tracks.size());
+    const int track = trackAt (s, y);
     const auto at = x < kHeaderWidth ? juce::int64 (0) : editor.snap ((juce::int64) juce::jmax (0.0, xToSample (x, pps)));
     juce::StringArray audio;
     for (auto& f : files)

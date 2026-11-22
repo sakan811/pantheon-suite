@@ -484,7 +484,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     // the arrangement reports what the user did; the window owns the transport, the files, the menus and the plugin windows
     arrange.dialogOpen = &dialogOpen;
     arrange.onSeek = [this] (juce::int64 s) { seek (s); };
-    arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); repaint (noteStrip); };
+    arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); if (pianoRoll.isVisible()) pianoRoll.refresh(); repaint (noteStrip); };
     arrange.onTrackMenu = [this] (int track) { showTrackMenu (track); };
     arrange.onRemoveTrack = [this] (int track) { removeTrack (track); };
     arrange.onFilesDropped = [this] (const juce::StringArray& files, int track, juce::int64 at)
@@ -494,6 +494,13 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.onProjectDropped = [this] (const juce::File& file) { openProjectRequested (file); };
     arrange.reportError = [this] (const juce::String& message) { showError (message); };
     arrange.onInputMenu = [this] (int track) { showInputMenu (track); };
+    arrange.onOpenMidiClip = [this] (MidiClipRef ref)
+    {
+        pianoRoll.setTarget (ref);
+        pianoRoll.setVisible (true);
+        resized();
+        pianoRoll.grabKeyboardFocus();
+    };
     // an armed track's meter shows its input: the larger of its one or two device inputs, since the last read
     arrange.inputLevel = [this] (int track)
     {
@@ -507,7 +514,24 @@ MainComponent::MainComponent (Options options) : opts (options)
     };
     addAndMakeVisible (arrange);
 
-    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton, &renderButton, &exportButton, &audioButton,
+    pianoRoll.onClose = [this]
+    {
+        pianoRoll.clearTarget();
+        pianoRoll.setVisible (false);
+        resized();
+    };
+    pianoRoll.onStructure = [this]
+    {
+        syncTransport();
+        updateTitle();
+        updateTransport();
+        arrange.refresh();
+        repaint (noteStrip);
+    };
+    pianoRoll.reportError = [this] (const juce::String& message) { showError (message); };
+    addChildComponent (pianoRoll);
+
+    for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &importButton, &pluginsButton, &renderButton, &exportButton, &audioButton,
                      &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton })
         addAndMakeVisible (*b);
     for (auto* b : { &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton })
@@ -547,7 +571,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     masterClipLamp.setTooltip ("CLIP: lit once the master reaches 0 dBFS (the device's output is held at full scale). Click to clear it.");
     masterClipLamp.onClick = [this] { clearMasterClip(); };
     // a focused button would take Space and Return for itself: the keys stay with the window
-    for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &importButton, &pluginsButton,
+    for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &importButton, &pluginsButton,
                                                              &renderButton, &exportButton, &audioButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton,
                                                              &zoomFitButton, &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &guideButton,
                                                              &signatureBox, &gridBox })
@@ -558,6 +582,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     saveButton.onClick = [this] { saveProject(); };
     saveAsButton.onClick = [this] { saveProjectAs(); };
     addTrackButton.onClick = [this] { addEmptyTrack(); };
+    addMidiButton.onClick = [this] { addMidiTrack(); };
     importButton.onClick = [this] { chooseAndImport(); };
     pluginsButton.onClick = [this] { showPluginsMenu(); };
     renderButton.onClick = [this] { chooseAndRender(); };
@@ -568,7 +593,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     recordButton.onClick = [this] { toggleRecord(); };
     loopButton.onClick = [this] { toggleLoop(); };
     metronomeButton.onClick = [this] { toggleMetronome(); };
-    snapButton.onClick = [this] { editor.setSnap (! session.snapOn); updateTransport(); };
+    snapButton.onClick = [this] { editor.setSnap (! session.snapOn); updateTransport(); if (pianoRoll.isVisible()) pianoRoll.refresh(); };
     undoButton.onClick = [this] { undoEdit(); };
     redoButton.onClick = [this] { redoEdit(); };
     zoomOutButton.onClick = [this] { zoomBy (1.0 / 1.5); };
@@ -579,6 +604,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     openButton.setTooltip ("Open a saved project (.olympus).");
     saveButton.setTooltip ("Save the project: the tracks, clips, chains, tempo, markers and loop, and every plugin's settings. Cmd+S.");
     addTrackButton.setTooltip ("Add an empty track.");
+    addMidiButton.setTooltip ("Add a MIDI track with the built-in synth.");
     importButton.setTooltip ("Audio files: each one becomes a track with its clip at the playhead. You can also drop them on the window or a lane.");
     pluginsButton.setTooltip ("Where plugins (VST3, and Audio Units on macOS) are looked for, which were found, and a rescan.");
     renderButton.setTooltip ("Write one WAV per audible track, after its clips, chain, fader and pan, and the mix.");
@@ -623,6 +649,7 @@ MainComponent::MainComponent (Options options) : opts (options)
         if (index >= 0) editor.setGrid ((Grid) index);
         updateTransport();
         arrange.repaint();
+        if (pianoRoll.isVisible()) pianoRoll.refresh();
     };
 
     if (opts.audioDevice)
@@ -901,6 +928,8 @@ void MainComponent::refreshNow()
     cancelPendingUpdate();
     syncTransport();
     arrange.refresh();
+    if (pianoRoll.isVisible())
+        pianoRoll.refresh();
     updateTransport();
     repaint();
 }
@@ -1339,6 +1368,13 @@ void MainComponent::newProject()
     adoptDeviceRate();
     seek (0);
     arrange.selected = {};
+    arrange.selectedMidi = {};
+    if (pianoRoll.isVisible())
+    {
+        pianoRoll.clearTarget();
+        pianoRoll.setVisible (false);
+        resized();
+    }
     arrange.zoom = ArrangeView::kDefaultZoom;
     arrange.scrollTo (0);
     refreshNow();
@@ -1368,6 +1404,13 @@ bool MainComponent::openProject (const juce::File& file)
     clearMasterClip(); // a project opened starts with no CLIP latched, as NEW does
     adoptDeviceRate(); // a project at another rate is converted to the device's
     arrange.selected = {};
+    arrange.selectedMidi = {};
+    if (pianoRoll.isVisible())
+    {
+        pianoRoll.clearTarget();
+        pianoRoll.setVisible (false);
+        resized();
+    }
     seek (0);
     settings.lastProject = file.getFullPathName();
     settings.save (opts.settingsFile);
@@ -1472,6 +1515,13 @@ void MainComponent::addEmptyTrack()
     refreshNow();
 }
 
+void MainComponent::addMidiTrack()
+{
+    session.addMidiTrack ({});
+    editor.clearUndo();
+    refreshNow();
+}
+
 void MainComponent::undoEdit()
 {
     editor.undo();
@@ -1527,6 +1577,13 @@ void MainComponent::removeTrack (int index)
         editor.clearUndo();
         editor.clearClipboard();   // it remembers the copy's track by number: the tracks after the removed one have moved up
         arrange.selected = {};
+        arrange.selectedMidi = {};
+        if (pianoRoll.isVisible())
+        {
+            pianoRoll.clearTarget();
+            pianoRoll.setVisible (false);
+            resized();
+        }
     }
     else showError (error);
     requestRefresh();
@@ -2485,6 +2542,13 @@ void MainComponent::recoverFrom (const juce::File& autosave, const juce::File& p
     clearMasterClip();
     adoptDeviceRate();
     arrange.selected = {};
+    arrange.selectedMidi = {};
+    if (pianoRoll.isVisible())
+    {
+        pianoRoll.clearTarget();
+        pianoRoll.setVisible (false);
+        resized();
+    }
     seek (0);
     refreshNow();
     arrange.zoomToFit();
@@ -2598,6 +2662,8 @@ void MainComponent::timerCallback()
     arrange.refresh();
     if (rendering)
         return;
+    if (pianoRoll.isVisible())
+        pianoRoll.refresh();
     updateTransport();
     // the autosave: every kAutosaveInterval seconds, the project is written beside its file if it has changes (autosaveNow); deferred
     // during playback or recording so disk IO and Session::lock never contend with the audio callback.
@@ -2684,21 +2750,23 @@ void MainComponent::resized()
     int x = 290;
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton })
     {
-        b->setBounds (x, rowA, 70, h);
-        x += 76;
+        b->setBounds (x, rowA, 64, h);
+        x += 69;
     }
     x += 6;
-    addTrackButton.setBounds (x, rowA, 92, h);
-    x += 98;
-    importButton.setBounds (x, rowA, 104, h);
-    x += 110;
-    pluginsButton.setBounds (x, rowA, 80, h);
-    x += 86;
-    renderButton.setBounds (x, rowA, 104, h);
-    x += 110;
-    exportButton.setBounds (x, rowA, 76, h);
-    x += 82;
-    audioButton.setBounds (x, rowA, 76, h);
+    addTrackButton.setBounds (x, rowA, 82, h);
+    x += 87;
+    addMidiButton.setBounds (x, rowA, 66, h);
+    x += 71;
+    importButton.setBounds (x, rowA, 96, h);
+    x += 101;
+    pluginsButton.setBounds (x, rowA, 74, h);
+    x += 79;
+    renderButton.setBounds (x, rowA, 98, h);
+    x += 103;
+    exportButton.setBounds (x, rowA, 72, h);
+    x += 77;
+    audioButton.setBounds (x, rowA, 72, h);
     guideButton.setBounds (w - kMargin - 70, rowA, 70, h);
 
     // row B: the transport, then the zoom
@@ -2731,7 +2799,19 @@ void MainComponent::resized()
 
     noteStrip = { kMargin, r.getHeight() - kMargin - ui::kNoteStripHeight, w - 2 * kMargin, ui::kNoteStripHeight };
     bodyArea = { kMargin, kBodyTop, w - 2 * kMargin, noteStrip.getY() - 10 - kBodyTop };
-    arrange.setBounds (bodyArea);
+    if (pianoRoll.isVisible())
+    {
+        const int gap = 6;
+        const int avail = juce::jmax (0, bodyArea.getHeight() - gap);
+        const int arrangeH = juce::roundToInt (avail * 0.58);
+        arrange.setBounds (bodyArea.withHeight (arrangeH));
+        pianoRoll.setBounds (bodyArea.getX(), arrange.getBottom() + gap, bodyArea.getWidth(),
+                             juce::jmax (0, bodyArea.getBottom() - (arrange.getBottom() + gap)));
+    }
+    else
+    {
+        arrange.setBounds (bodyArea);
+    }
 
     // the MONITOR strip: the label on the left, the chain's plugins, '+', the chain's latency and the CORRECTION switch on the right
     monitorStrip = { kMargin, kMonitorTop, w - 2 * kMargin, kMonitorHeight };

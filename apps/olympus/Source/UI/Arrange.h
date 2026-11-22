@@ -35,6 +35,7 @@ public:
     static constexpr int kLoopHeight = 22;     // the LOOP strip
     static constexpr int kMarkerHeight = 26;   // the marker lane
     static constexpr int kLaneHeight = 92;     // one track
+    static constexpr int kAutoLaneHeight = 48; // expanded automation lane below a track
     static constexpr int kScrollStripHeight = 8; // slim horizontal overview/scrollbar strip
     static constexpr int kDesignWidth = 1280, kDesignHeight = ui::editorHeightFor (kDesignWidth);
     static constexpr double kDefaultZoom = 80.0; // pixels per second
@@ -45,6 +46,7 @@ public:
     // ---- what the window sets and reads ---------------------------------------------------------------------------------------
     double playhead = 0.0;          // samples; the window sets it from the transport (a seek here also moves it)
     ClipRef selected;               // the clip the keys and the menu act on; invalid when none
+    MidiClipRef selectedMidi;       // the MIDI clip selected; invalid when none
     double zoom = kDefaultZoom;     // pixels per second, kept within 0.05 .. 4000
     bool followPlayhead = true;     // refresh() scrolls when the playhead moves out of view
 
@@ -53,6 +55,7 @@ public:
     std::function<void()> onStructure;                                         // after every change made here (an edit, the mix, markers, loop, tempo)
     std::function<void (int)> onTrackMenu;                                     // the FX button of a track, or right-click on its header
     std::function<void (int)> onRemoveTrack;                                   // the X of a track: the window removes it (closes its plugin windows first)
+    std::function<void (MidiClipRef)> onOpenMidiClip;                          // double-click or menu "Edit in Piano Roll" on a MIDI clip
     std::function<void (const juce::String&)> reportError;                     // an edit the Editor refused, with its reason
     // Audio files dropped on the lanes: the track under the drop, or -1 when it is below the last track, and the sample it lands on.
     std::function<void (const juce::StringArray& files, int track, juce::int64 at)> onFilesDropped;
@@ -93,10 +96,13 @@ public:
     // The label of a track's input: "IN 1" for a mono input, "IN 1+2" for a pair (inputs are numbered from 1 here).
     static juce::String inputText (int left, int right);
 
-    // The header's ARM and IN buttons and fader (the checks press and read them; nullptr when there is no such track).
+    // The header's ARM, IN, AUTO, and target buttons and fader (the checks press and read them; nullptr when there is no such track).
     juce::Button* armButton (int track);
     juce::Button* inputButton (int track);
+    juce::Button* automationButton (int track);
+    juce::Button* autoTargetButton (int track);
     juce::Slider* faderSlider (int track);
+    juce::Rectangle<int> autoLaneBounds (int track) const;
     bool isInteracting() const;
 
     // Checks only: drive an open askText box (clip gain, rename clip, rename marker) without clicking its native modal buttons.
@@ -105,6 +111,8 @@ public:
     bool headlessDialogs = false;
     bool hasOpenDialog() const { return activeDialog != nullptr || (bool) pendingDialogEnd; }
     void openClipActionForTest (ClipRef ref, int action) { clipAction (ref, action); }
+    void openMidiClipActionForTest (MidiClipRef ref, int action) { midiClipAction (ref, action); }
+    void openLaneActionForTest (int track, juce::int64 at, int action) { laneAction (track, at, action); }
     void openMarkerActionForTest (int index, int action) { markerAction (index, action); }
     double scrollSamplesForTest() const { return scrollSamples; }
     int markerAtForTest (juce::Point<int> p) const;
@@ -114,6 +122,8 @@ public:
     // ---- geometry (view coordinates, for the checks and the window) -------------------------------------------------------------
     ClipRef clipAt (juce::Point<int> point) const;       // the clip under the point, invalid when none
     juce::Rectangle<int> clipBounds (ClipRef ref) const; // where the clip is drawn; empty when the reference is not a clip
+    MidiClipRef midiClipAt (juce::Point<int> point) const;
+    juce::Rectangle<int> midiClipBounds (MidiClipRef ref) const;
     bool hitFadeIn (ClipRef ref, juce::Point<int> point) const;
     bool hitFadeOut (ClipRef ref, juce::Point<int> point) const;
 
@@ -124,6 +134,7 @@ public:
     void mouseExit (const juce::MouseEvent& e) override;
     juce::MouseCursor getMouseCursor() override;
     void mouseDown (const juce::MouseEvent& e) override;
+    void mouseDoubleClick (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
@@ -135,7 +146,7 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum class Mode { none, ruler, loop, marker, scrollX, move, trimStart, trimEnd, fadeIn, fadeOut };
+    enum class Mode { none, ruler, loop, marker, scrollX, move, moveMidi, trimStart, trimEnd, fadeIn, fadeOut, autoPoint };
     friend class ArrangeTrackHeader; // the header column reads and edits through the view's Editor and callbacks
 
     Session& session;
@@ -150,9 +161,13 @@ private:
     int pressX = 0, pressY = 0;
     juce::int64 anchor = 0;                             // a loop drag: where it began (snapped)
     ClipRef dragClip;
+    MidiClipRef dragMidiClip;
     juce::int64 origStart = 0, origEnd = 0, origFadeIn = 0, origFadeOut = 0;
     juce::int64 origMarker = 0;
     int dragMarker = -1;
+    int dragAutoTrack = -1;
+    juce::String dragAutoTarget;
+    int dragAutoPoint = -1;
     double scrollSamples = 0.0;                         // the timeline's left edge, in samples
     int scrollY = 0;                                    // the lanes' top, in pixels
     double lastPlayhead = 0.0;
@@ -162,6 +177,7 @@ private:
     int lastRefreshScrollY = 0;
     double lastRefreshZoom = kDefaultZoom;
     ClipRef lastRefreshSelected;
+    MidiClipRef lastRefreshSelectedMidi;
     double lastRefreshRecFrom = -1.0, lastRefreshRecTo = -1.0;
     std::vector<int> lastRefreshRecTracks;
 
@@ -176,11 +192,16 @@ private:
     int sampleToX (double sample, double pps) const;
     double xToSample (double x, double pps) const;
     int laneTop() const;
-    int trackTop (int index) const;
-    int trackAt (int y, int trackCount) const;
-    juce::Rectangle<int> clipRect (int track, juce::int64 start, juce::int64 length, double pps) const;
+    int trackHeight (const ArrangeSnapshot& s, int index) const;
+    int trackTop (const ArrangeSnapshot& s, int index) const;
+    int trackAt (const ArrangeSnapshot& s, int y) const;
+    juce::Rectangle<int> clipRect (const ArrangeSnapshot& s, int track, juce::int64 start, juce::int64 length, double pps) const;
+    juce::Rectangle<int> autoLaneRect (const ArrangeSnapshot& s, int track) const;
+    float valueToAutoY (float val, const juce::Rectangle<int>& r) const;
+    float autoYToValue (int y, const juce::Rectangle<int>& r) const;
+    int hitAutoPoint (const ArrangeSnapshot& s, int track, juce::Point<int> p, double pps) const;
     int markerAt (const ArrangeSnapshot& s, juce::Point<int> p, double pps) const;
-    int maxScrollY (int trackCount) const;
+    int maxScrollY (const ArrangeSnapshot& s) const;
     bool hitFadeIn (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
     bool hitFadeOut (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
     juce::Rectangle<int> scrollStripBounds() const;
@@ -197,9 +218,18 @@ private:
     void report (const juce::String& error) { if (reportError && error.isNotEmpty()) reportError (error); }
     void drawWave (juce::Graphics& g, const Clip& clip, juce::Rectangle<int> area, double pps, juce::Colour colour);
     void paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const Clip& clip, bool selectedNow);
+    void paintMidiClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const MidiClip& clip, bool selectedNow);
+    void paintAutomationLane (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track);
+    void autoTargetMenu (int track);
+    void autoPointMenu (int track, const juce::String& targetId, int pointIndex);
+    void autoPointAction (int track, const juce::String& targetId, int pointIndex, int action);
     void clipMenu (ClipRef ref);
     void clipAction (ClipRef ref, int action);
+    void midiClipMenu (MidiClipRef ref);
+    void midiClipAction (MidiClipRef ref, int action);
     void laneMenu (int track, juce::int64 at);
+    void laneAction (int track, juce::int64 at, int action);
+    void createMidiClipAt (int track, juce::int64 at);
     void markerMenu (int index);
     void markerAction (int index, int action);
     void nudgeSelected (int dx, int dy, bool bar);
