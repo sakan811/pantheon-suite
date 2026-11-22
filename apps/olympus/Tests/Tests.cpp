@@ -834,7 +834,7 @@ void legacyChecks()
     test::check (clip.start == 0 && clip.offset == 0 && clip.length == 24000 && clip.audio != nullptr && clip.file == wav,
                  "the clip covers the whole file, from sample 0");
     test::check (close (s.tracks[0]->gainDb, -2.0) && s.tracks[0]->chain.size() == 1 && s.warnings.isEmpty(), "the fader and the chain are read as before");
-    test::check (s.save (dir.getChildFile ("new.olympus"), err), "and it is saved as version 2");
+    test::check (s.save (dir.getChildFile ("new.olympus"), err), "and it is saved as version 3");
 }
 
 void missingAudioChecks()
@@ -4091,6 +4091,589 @@ void batch2FixesChecks()
     dir.deleteRecursively();
 }
 
+void midiAndSnapshotChecks()
+{
+    std::printf ("[59] MIDI: BasicSynth, MidiFifo, Editor MIDI CRUD + undo, processBlock/renderStems, XML v3 round-trip, and lock-free snapshot fallback\n");
+    juce::String err;
+    const auto dir = tempFolder().getChildFile ("midi");
+    dir.deleteRecursively();
+    dir.createDirectory();
+
+    // 1. BasicSynth: polyphony, velocity scaling, ADSR release, sample-rate awareness, reset/allNotesOff
+    {
+        BasicSynth synth;
+        synth.prepare (48000.0);
+        juce::AudioBuffer<float> lo (2, 512), hi (2, 512);
+        lo.clear();
+        hi.clear();
+        juce::MidiBuffer mLo, mHi;
+        mLo.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 32), 0);
+        mHi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127), 0);
+        synth.process (lo, mLo);
+        const float magLo = lo.getMagnitude (0, 0, 512);
+        synth.reset();
+        test::check (synth.activeVoiceCount() == 0, "reset() clears all synth voices");
+        synth.process (hi, mHi);
+        const float magHi = hi.getMagnitude (0, 0, 512);
+        test::check (magLo > 0.001f && magHi > magLo * 2.5f, "BasicSynth velocity scales output amplitude");
+        test::check (synth.activeVoiceCount() == 1, "one active voice after NoteOn");
+
+        // Polyphony & voice stealing past 16 voices
+        juce::MidiBuffer chord;
+        for (int n = 48; n < 66; ++n)
+            chord.addEvent (juce::MidiMessage::noteOn (1, n, (juce::uint8) 100), 0);
+        juce::AudioBuffer<float> chBuf (2, 256);
+        chBuf.clear();
+        synth.reset();
+        synth.process (chBuf, chord);
+        test::check (synth.activeVoiceCount() == BasicSynth::kMaxVoices, "BasicSynth caps active voices at 16 with voice stealing");
+
+        // NoteOff and release decay to 0 voices
+        synth.allNotesOff();
+        juce::AudioBuffer<float> tail (2, 4096);
+        juce::MidiBuffer empty;
+        for (int i = 0; i < 4; ++i)
+        {
+            tail.clear();
+            synth.process (tail, empty);
+        }
+        test::check (synth.activeVoiceCount() == 0, "allNotesOff lets voices decay cleanly to 0");
+
+        // Sample-rate awareness: 96 kHz has half the phase increment per sample of 48 kHz
+        BasicSynth s48, s96;
+        s48.prepare (48000.0);
+        s96.prepare (96000.0);
+        juce::AudioBuffer<float> b48 (2, 4800), b96 (2, 4800);
+        b48.clear();
+        b96.clear();
+        s48.process (b48, mHi);
+        s96.process (b96, mHi);
+        auto countZeroCrossings = [] (const juce::AudioBuffer<float>& b)
+        {
+            int zc = 0;
+            const float* d = b.getReadPointer (0);
+            for (int i = 1; i < b.getNumSamples(); ++i)
+                if (d[i - 1] <= 0.0f && d[i] > 0.0f) ++zc;
+            return zc;
+        };
+        const int z48 = countZeroCrossings (b48), z96 = countZeroCrossings (b96);
+        test::check (z48 >= 20 && std::abs (z48 - 2 * z96) <= 2,
+                     test::fmt ("BasicSynth is sample-rate aware (48k=%d cycles, 96k=%d cycles in 4800 samples)", z48, z96));
+    }
+
+    // 2. MidiFifo: push/pop/drain/capacity & live MIDI input into Session::processBlock
+    {
+        MidiFifo fifo;
+        test::check (fifo.push (0x90, 64, 110, 12), "MidiFifo push succeeds");
+        MidiFifo::MidiEvent ev;
+        test::check (fifo.pop (ev) && ev.status == 0x90 && ev.data1 == 64 && ev.data2 == 110 && ev.sampleOffset == 12,
+                     "MidiFifo pop returns exact event");
+        test::check (! fifo.pop (ev), "empty MidiFifo pop returns false");
+
+        for (int i = 0; i < MidiFifo::kCapacity - 1; ++i)
+            fifo.push (0x90, (std::uint8_t) (i & 0x7F), 100, i);
+        test::check (! fifo.push (0x90, 60, 100, 0), "full MidiFifo refuses extra event without corrupting ring");
+        juce::MidiBuffer drained;
+        const int got = fifo.drain (drained, 512);
+        test::check (got == MidiFifo::kCapacity - 1 && ! drained.isEmpty(), "MidiFifo drain reads all queued events");
+
+        Session s;
+        const int t = s.addMidiTrack ("Live");
+        test::check (s.setTrackArm (t, true, err), "arm MIDI track");
+        s.liveMidiFifo.push (0x90, 60, 120, 4);
+        juce::AudioBuffer<float> liveOut (2, 512);
+        s.processBlock (liveOut, 0);
+        test::check (liveOut.getMagnitude (0, 0, 512) > 0.001f, "liveMidiFifo triggers armed MIDI track in processBlock");
+    }
+
+    // 3. Editor MIDI clip/note CRUD + undo/redo + quantize + bounds validation
+    {
+        Session s;
+        Editor ed (s);
+        const int t = s.addMidiTrack ("Lead");
+        test::check (t == 0 && s.tracks[0]->isMidi && std::abs (s.sampleRate - 44100.0) < 0.5
+                     && std::abs (s.tempo.sampleRate - 44100.0) < 0.5 && s.tracks[0]->synth != nullptr,
+                     "addMidiTrack sets isMidi, default 44100 Hz rate, tempo.sampleRate, and prepares synth");
+
+        test::check (! ed.addMidiClip (0, 0, 0, "bad", err).valid(), "addMidiClip rejects zero length");
+        err.clear();
+        const auto ref = ed.addMidiClip (0, 0, 88200, "Melody", err);
+        test::check (ref.valid() && s.tracks[0]->midiClips.size() == 1, "addMidiClip creates clip");
+        test::check (ed.moveMidiClip (0, 0, 4410, err) && s.tracks[0]->midiClips[0].start == 4410, "moveMidiClip updates start");
+        test::check (ed.resizeMidiClip (0, 0, 44100, err) && s.tracks[0]->midiClips[0].length == 44100, "resizeMidiClip updates length");
+
+        test::check (ed.addMidiNote (0, 0, 0.0, 1.0, 128, 100, err) < 0, "addMidiNote rejects pitch > 127");
+        err.clear();
+        test::check (ed.addMidiNote (0, 0, 0.0, 1.0, 60, 0, err) < 0, "addMidiNote rejects velocity < 1");
+        err.clear();
+        const int n0 = ed.addMidiNote (0, 0, 0.12, 0.5, 60, 100, err);
+        const int n1 = ed.addMidiNote (0, 0, 0.88, 0.5, 64, 90, err);
+        test::check (n0 == 0 && n1 == 1 && s.tracks[0]->midiClips[0].notes.size() == 2, "addMidiNote adds notes");
+        test::check (ed.moveMidiNote (0, 0, 0, 0.14, 62, err) && s.tracks[0]->midiClips[0].notes[0].pitch == 62, "moveMidiNote updates beat and pitch");
+        test::check (ed.resizeMidiNote (0, 0, 0, 0.75, err) && close (s.tracks[0]->midiClips[0].notes[0].durationBeats, 0.75), "resizeMidiNote updates duration");
+        test::check (ed.setMidiNoteVelocity (0, 0, 0, 110, err) && s.tracks[0]->midiClips[0].notes[0].velocity == 110, "setMidiNoteVelocity updates velocity");
+        test::check (ed.quantizeMidiClip (0, 0, Grid::Quarter, err), "quantizeMidiClip snaps notes to quarter grid");
+        test::check (close (s.tracks[0]->midiClips[0].notes[0].startBeat, 0.0)
+                     && close (s.tracks[0]->midiClips[0].notes[1].startBeat, 0.8),
+                     "quantizeMidiClip moved 0.14->0.0 and 0.88->0.8 (timeline beat 1.0 from clip start 0.2)");
+        test::check (ed.undo() && close (s.tracks[0]->midiClips[0].notes[0].startBeat, 0.14), "undo restores pre-quantize note position");
+        test::check (ed.redo() && close (s.tracks[0]->midiClips[0].notes[0].startBeat, 0.0), "redo re-applies quantize");
+        test::check (ed.deleteMidiNote (0, 0, 1, err) && s.tracks[0]->midiClips[0].notes.size() == 1, "deleteMidiNote removes note");
+        test::check (ed.deleteMidiClip (0, 0, err) && s.tracks[0]->midiClips.empty(), "deleteMidiClip removes clip");
+        test::check (ed.undo() && s.tracks[0]->midiClips.size() == 1, "undo restores deleted MIDI clip");
+    }
+
+    // 4. processBlock + chain plugin + instrument plugin override + renderStems on MIDI track
+    {
+        struct MidiInstrumentPlugin : test::PassPlugin
+        {
+            MidiInstrumentPlugin() : test::PassPlugin ("Test Synth", juce::AudioChannelSet::stereo()) {}
+            bool acceptsMidi() const override { return true; }
+            void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer& m) override
+            {
+                test::PassPlugin::processBlock (b, m);
+                sawEvents += m.getNumEvents();
+                for (const auto meta : m)
+                    if (meta.numBytes >= 1 && (meta.data[0] & 0xF0) == 0x90)
+                        sawNoteOn = true;
+                for (int ch = 0; ch < b.getNumChannels(); ++ch)
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                        b.setSample (ch, i, b.getSample (ch, i) + 0.25f);
+            }
+            using test::PassPlugin::processBlock;
+            int sawEvents = 0;
+            bool sawNoteOn = false;
+        };
+
+        Session s;
+        test::addTestPlugins (s.catalog);
+        s.catalog.addInternal (test::GainPlugin::description ("Test Synth"),
+                               [] (double, int) { return std::make_unique<MidiInstrumentPlugin>(); });
+        Editor ed (s);
+        s.addMidiTrack ("Keys");
+        s.adoptRate (48000.0, err);
+        ed.addMidiClip (0, 0, 24000, "Chord", err);
+        ed.addMidiNote (0, 0, 0.0, 1.0, 60, 100, err);
+
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "add non-MIDI effect plugin to MIDI track");
+        juce::AudioBuffer<float> block (2, 512);
+        s.processBlock (block, 0);
+        test::check (block.getMagnitude (0, 0, 512) > 0.01f, "MIDI track runs BasicSynth through non-MIDI effect plugin");
+
+        RenderOptions opts;
+        opts.folder = dir.getChildFile ("stems");
+        RenderResult res;
+        test::check (s.renderStems (opts, res, err) && res.stems.size() == 1, "renderStems renders MIDI-only session: " + err);
+        const auto stem = readWav (opts.folder.getChildFile ("01-Keys.wav"));
+        test::check (stem.getNumSamples() == 24000 && stem.getMagnitude (0, 0, 24000) > 0.01f,
+                     "rendered MIDI stem has expected length and non-zero audio");
+
+        // Replace with MIDI-accepting instrument plugin: BasicSynth is skipped and plugin receives MIDI events
+        s.removePlugin (0, 0, err);
+        test::check (s.addPlugin (0, "Test Synth", -1, err), "add MIDI-accepting plugin to MIDI track");
+        auto* inst = dynamic_cast<MidiInstrumentPlugin*> (s.tracks[0]->chain[0]->instance.get());
+        s.processBlock (block, 0);
+        test::check (inst != nullptr && inst->sawNoteOn && close (block.getSample (0, 0), 0.25f),
+                     "MIDI-accepting plugin receives midiScratch and skips BasicSynth");
+    }
+
+    // 5. XML v3 save/load round-trip
+    {
+        const auto projFile = dir.getChildFile ("midi.olympus");
+        {
+            Session s;
+            Editor ed (s);
+            s.addMidiTrack ("Bass");
+            ed.addMidiClip (0, 1000, 44100, "Line", err);
+            ed.addMidiNote (0, 0, 0.25, 0.75, 45, 115, 2, err);
+            s.tracks[0]->midiClips[0].mute = true;
+            test::check (s.save (projFile, err), "save project v3: " + err);
+        }
+        const auto xml = juce::parseXML (projFile);
+        test::check (xml != nullptr && xml->getIntAttribute ("version") == 3, "saved XML has version=3");
+
+        Session loaded;
+        test::check (loaded.load (projFile, err), "load project v3: " + err);
+        test::check (loaded.tracks.size() == 1 && loaded.tracks[0]->isMidi && loaded.tracks[0]->synth != nullptr
+                     && loaded.tracks[0]->midiClips.size() == 1 && loaded.tracks[0]->midiClips[0].mute
+                     && loaded.tracks[0]->midiClips[0].start == 1000 && loaded.tracks[0]->midiClips[0].length == 44100
+                     && loaded.tracks[0]->midiClips[0].notes.size() == 1,
+                     "loaded v3 project restores MIDI track, clip, and note count");
+        const auto& note = loaded.tracks[0]->midiClips[0].notes[0];
+        test::check (close (note.startBeat, 0.25) && close (note.durationBeats, 0.75)
+                     && note.pitch == 45 && note.velocity == 115 && note.channel == 2,
+                     "loaded note attributes match saved values");
+    }
+
+    // 6. Lock-free PlaybackSnapshot fallback when Session::lock is held
+    {
+        Session s;
+        const auto wav = makeWav ("midi/audio.wav", 48000.0, 2, 48000, 0.4f, 440.0);
+        test::check (s.addTrack (wav, "Audio", err), "add audio track");
+        const int midiTrack = s.addMidiTrack ("Synth");
+        Editor ed (s);
+        ed.addMidiClip (midiTrack, 0, 48000, "Pad", err);
+        ed.addMidiNote (midiTrack, 0, 0.0, 2.0, 60, 120, err);
+        test::check (s.snapshotValid.load(), "snapshotValid is true after edits");
+
+        std::atomic<bool> held { false }, release { false };
+        std::thread holder ([&s, &held, &release]
+        {
+            const juce::ScopedLock sl (s.lock);
+            held = true;
+            while (! release.load())
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        });
+        while (! held.load())
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+        juce::AudioBuffer<float> snapBlock0 (2, 512), snapBlock1 (2, 512);
+        s.processBlock (snapBlock0, 0);
+        s.processBlock (snapBlock1, 1024);
+        release = true;
+        holder.join();
+
+        test::check (snapBlock0.getMagnitude (0, 0, 512) > 0.05f && snapBlock1.getMagnitude (0, 0, 512) > 0.05f,
+                     "processBlock renders from PlaybackSnapshot instead of silence when Session::lock is held");
+
+        // Also verify MIDI-only snapshot fallback renders non-zero audio mid-note
+        test::check (ed.setTrackMute (0, true, err), "mute audio track to isolate MIDI in snapshot");
+        held = false;
+        release = false;
+        std::thread holder2 ([&s, &held, &release]
+        {
+            const juce::ScopedLock sl (s.lock);
+            held = true;
+            while (! release.load())
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        });
+        while (! held.load())
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+        juce::AudioBuffer<float> midiSnap (2, 512);
+        s.processBlock (midiSnap, 2048);
+        release = true;
+        holder2.join();
+        test::check (midiSnap.getMagnitude (0, 0, 512) > 0.005f,
+                     "snapshot fallback renders BasicSynth MIDI mid-note while Session::lock is held");
+    }
+
+    // 7. Muting a sounding MIDI track & processBlock discontinuity reset synth cleanly (no stuck notes)
+    {
+        Session s;
+        Editor ed (s);
+        const int t = s.addMidiTrack ("Synth");
+        ed.addMidiClip (t, 0, 88200, "Long", err);
+        ed.addMidiNote (t, 0, 0.0, 4.0, 60, 120, err);
+
+        juce::AudioBuffer<float> blk (2, 512);
+        s.processBlock (blk, 0);
+        test::check (blk.getMagnitude (0, 0, 512) > 0.01f && s.tracks[0]->synth->activeVoiceCount() == 1,
+                     "sounding MIDI track has active synth voice");
+
+        test::check (ed.setTrackMute (t, true, err), "mute sounding MIDI track");
+        s.processBlock (blk, 512);
+        test::check (blk.getMagnitude (0, 0, 512) == 0.0f && s.tracks[0]->synth->activeVoiceCount() == 0,
+                     "muting sounding MIDI track silences and resets its synth");
+
+        test::check (ed.setTrackMute (t, false, err), "unmute MIDI track");
+        s.processBlock (blk, 1024);
+        test::check (blk.getMagnitude (0, 0, 512) < 1e-6f && s.tracks[0]->synth->activeVoiceCount() == 0,
+                     "unmuting mid-note does not leave stuck voice");
+
+        // Discontinuity (seek / loop wrap) resets synth voices so notes don't hang
+        s.processBlock (blk, 0);
+        test::check (s.tracks[0]->synth->activeVoiceCount() == 1, "retrigger note at sample 0");
+        s.processBlock (blk, 10000);
+        test::check (blk.getMagnitude (0, 0, 512) < 1e-6f && s.tracks[0]->synth->activeVoiceCount() == 0,
+                     "processBlock discontinuity resets synth cleanly without stuck notes");
+    }
+
+    dir.deleteRecursively();
+}
+
+void automationCurvesChecks()
+{
+    std::printf ("[60] Automation curves\n");
+    const auto dir = tempFolder().getChildFile ("automation-60");
+    dir.deleteRecursively();
+    dir.createDirectory();
+
+    // 1. AutoNorm <-> dB conversion and AutomationLane::evaluateAt (Linear, Step, Smooth)
+    test::check (std::abs (autoNormToDb (dbToAutoNorm (-100.0f)) - (-100.0f)) < 1e-4f
+                 && std::abs (autoNormToDb (dbToAutoNorm (0.0f)) - 0.0f) < 1e-4f
+                 && std::abs (autoNormToDb (dbToAutoNorm (12.0f)) - 12.0f) < 1e-4f,
+                 "autoNormToDb / dbToAutoNorm round-trip at -100, 0, +12 dB");
+
+    {
+        AutomationLane emptyLane;
+        test::check (emptyLane.evaluateAt (0) == 0.0f, "empty lane evaluates to 0");
+
+        AutomationLane single;
+        single.points = { { 500, 0.7f, AutoCurveType::Linear } };
+        test::check (std::abs (single.evaluateAt (0) - 0.7f) < 1e-6f
+                     && std::abs (single.evaluateAt (1000) - 0.7f) < 1e-6f,
+                     "single-point lane clamps constant before and after");
+
+        AutomationLane lin;
+        lin.points = { { 0, 0.2f, AutoCurveType::Linear }, { 100, 0.8f, AutoCurveType::Linear } };
+        test::check (std::abs (lin.evaluateAt (-10) - 0.2f) < 1e-6f
+                     && std::abs (lin.evaluateAt (50) - 0.5f) < 1e-6f
+                     && std::abs (lin.evaluateAt (200) - 0.8f) < 1e-6f,
+                     "Linear curve interpolates linearly and clamps endpoints");
+
+        AutomationLane step;
+        step.points = { { 0, 0.2f, AutoCurveType::Step }, { 100, 0.8f, AutoCurveType::Linear } };
+        test::check (std::abs (step.evaluateAt (0) - 0.2f) < 1e-6f
+                     && std::abs (step.evaluateAt (99) - 0.2f) < 1e-6f
+                     && std::abs (step.evaluateAt (100) - 0.8f) < 1e-6f,
+                     "Step curve holds p0 value until p1");
+
+        AutomationLane smooth;
+        smooth.points = { { 0, 0.0f, AutoCurveType::Smooth }, { 100, 1.0f, AutoCurveType::Linear } };
+        test::check (std::abs (smooth.evaluateAt (25) - 0.15625f) < 1e-5f
+                     && std::abs (smooth.evaluateAt (50) - 0.5f) < 1e-5f
+                     && std::abs (smooth.evaluateAt (75) - 0.84375f) < 1e-5f,
+                     "Smooth curve follows hermite t*t*(3-2*t)");
+    }
+
+    // 2. Per-sample volume & pan ramping in processBlock + plugin parameter automation in runChain
+    {
+        auto dcWav = dir.getChildFile ("dc.wav");
+        {
+            juce::AudioBuffer<float> b (2, 2048);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 2048; ++i)
+                    b.setSample (ch, i, 0.5f);
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> stream (dcWav.createOutputStream());
+            auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+            writer->writeFromAudioSampleBuffer (b, 0, 2048);
+        }
+
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (dcWav, "Auto", err), "add track for automation audio test");
+
+        // Volume ramp from -20 dB at 0 to 0 dB at 511
+        test::check (ed.addAutomationPoint (0, "volume", 0, dbToAutoNorm (-20.0f), AutoCurveType::Linear, err) == 0, "add vol start");
+        test::check (ed.addAutomationPoint (0, "volume", 511, dbToAutoNorm (0.0f), AutoCurveType::Linear, err) == 1, "add vol end");
+
+        juce::AudioBuffer<float> out (2, 512);
+        s.processBlock (out, 0);
+        const float s0 = out.getSample (0, 0);
+        const float sMid = out.getSample (0, 255);
+        const float sEnd = out.getSample (0, 511);
+        bool monotonic = true;
+        for (int i = 1; i < 512; ++i)
+            if (out.getSample (0, i) <= out.getSample (0, i - 1)) { monotonic = false; break; }
+        test::check (std::abs (s0 - 0.05f) < 0.002f && std::abs (sEnd - 0.5f) < 0.002f && sMid > s0 && sMid < sEnd && monotonic,
+                     "per-sample volume ramping across 512 samples is smooth and monotonic");
+
+        // Pan ramp from hard left (0.0) at 0 to hard right (1.0) at 511
+        test::check (ed.addAutomationPoint (0, "pan", 0, 0.0f, AutoCurveType::Linear, err) == 0, "add pan left");
+        test::check (ed.addAutomationPoint (0, "pan", 511, 1.0f, AutoCurveType::Linear, err) == 1, "add pan right");
+        s.processBlock (out, 0);
+        test::check (out.getSample (0, 0) > 0.04f && std::abs (out.getSample (1, 0)) < 1e-6f
+                     && std::abs (out.getSample (0, 511)) < 1e-6f && out.getSample (1, 511) > 0.45f,
+                     "per-sample pan ramping sweeps hard left to hard right");
+
+        // Plugin parameter automation
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "add Test Gain for plugin automation");
+        test::check (ed.addAutomationPoint (0, "plugin:0:0", 0, 0.25f, AutoCurveType::Linear, err) == 0, "add plugin start");
+        test::check (ed.addAutomationPoint (0, "plugin:0:0", 512, 0.75f, AutoCurveType::Linear, err) == 1, "add plugin end");
+        s.processBlock (out, 512);
+        const float pVal = s.tracks[0]->chain[0]->instance->getParameters()[0]->getValue();
+        test::check (std::abs (pVal - 0.75f) < 1e-4f, "runChain applies plugin parameter automation at block start");
+    }
+
+    // 3. Editor CRUD, validation, Gesture undo/redo, XML v3 round-trip, and adoptRate scaling
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        const auto wav = makeWav ("auto-crud.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+        test::check (s.addTrack (wav, "Lead", err), "add track");
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "add plugin");
+
+        // Validation guards
+        test::check (ed.addAutomationPoint (0, "bad_target", 0, 0.5f, AutoCurveType::Linear, err) < 0, "reject invalid targetId");
+        test::check (ed.addAutomationPoint (0, "volume", 0, std::numeric_limits<float>::quiet_NaN(), AutoCurveType::Linear, err) < 0, "reject NaN value");
+        test::check (! ed.moveAutomationPoint (0, "volume", 0, 100, 0.5f, err), "reject move on missing lane/point");
+        test::check (! ed.deleteAutomationPoint (9, "volume", 0, err), "reject invalid track");
+
+        // CRUD + Gesture undo/redo
+        test::check (ed.addAutomationPoint (0, "volume", 0, 0.5f, AutoCurveType::Linear, err) == 0, "add point 0");
+        test::check (ed.addAutomationPoint (0, "volume", 1000, 0.9f, AutoCurveType::Linear, err) == 1, "add point 1");
+        {
+            Editor::Gesture g (ed, "Drag point");
+            test::check (ed.moveAutomationPoint (0, "volume", 1, 1500, 0.7f, err), "move step 1 in gesture");
+            test::check (ed.moveAutomationPoint (0, "volume", 1, 2000, 0.3f, err), "move step 2 in gesture");
+        }
+        test::check (s.tracks[0]->automation[0].points[1].sample == 2000
+                     && std::abs (s.tracks[0]->automation[0].points[1].value - 0.3f) < 1e-5f,
+                     "gesture applied final point position");
+        test::check (ed.undo() && s.tracks[0]->automation[0].points[1].sample == 1000
+                     && std::abs (s.tracks[0]->automation[0].points[1].value - 0.9f) < 1e-5f,
+                     "one undo reverts entire gesture");
+        test::check (ed.redo() && s.tracks[0]->automation[0].points[1].sample == 2000,
+                     "redo restores gesture");
+
+        test::check (ed.setAutomationPointCurve (0, "volume", 0, AutoCurveType::Smooth, err)
+                     && s.tracks[0]->automation[0].points[0].curve == AutoCurveType::Smooth,
+                     "setAutomationPointCurve updates curve type");
+        test::check (ed.setAutomationLaneEnabled (0, "volume", false, err)
+                     && ! s.tracks[0]->automation[0].enabled,
+                     "setAutomationLaneEnabled toggles lane enabled");
+        test::check (ed.setTrackShowAutomation (0, true, err) && s.tracks[0]->showAutomation, "setTrackShowAutomation");
+        test::check (ed.setTrackActiveAutoTarget (0, "pan", err) && s.tracks[0]->activeAutoTarget == "pan", "setTrackActiveAutoTarget");
+        test::check (ed.addAutomationPoint (0, "plugin:0:0", 24000, 0.6f, AutoCurveType::Step, err) == 0, "add plugin point");
+
+        // XML v3 round-trip
+        const auto projFile = dir.getChildFile ("auto.olympus");
+        test::check (s.save (projFile, err), "save v3 project with automation");
+        Session loaded;
+        test::addTestPlugins (loaded.catalog);
+        test::check (loaded.load (projFile, err), "load v3 project with automation");
+        const auto& lt = *loaded.tracks[0];
+        test::check (lt.showAutomation && lt.activeAutoTarget == "pan" && lt.automation.size() == 2,
+                     "XML round-trip preserves showAutomation, activeAutoTarget, and lanes");
+        test::check (lt.automation[0].targetId == "volume" && ! lt.automation[0].enabled
+                     && lt.automation[0].points.size() == 2
+                     && lt.automation[0].points[0].curve == AutoCurveType::Smooth
+                     && lt.automation[0].points[1].sample == 2000,
+                     "XML round-trip preserves volume lane points, curves, and enabled flag");
+        test::check (lt.automation[1].targetId == "plugin:0:0" && lt.automation[1].slotIndex == 0
+                     && lt.automation[1].paramIndex == 0 && lt.automation[1].points[0].sample == 24000
+                     && lt.automation[1].points[0].curve == AutoCurveType::Step,
+                     "XML round-trip preserves plugin lane metadata and points");
+
+        // adoptRate scaling
+        test::check (loaded.adoptRate (96000.0, err), "adoptRate 48k -> 96k");
+        test::check (loaded.tracks[0]->automation[0].points[1].sample == 4000
+                     && loaded.tracks[0]->automation[1].points[0].sample == 48000,
+                     "adoptRate scales automation point samples proportionally");
+
+        // deleteAutomationPoint
+        test::check (ed.deleteAutomationPoint (0, "volume", 1, err) && s.tracks[0]->automation[0].points.size() == 1,
+                     "deleteAutomationPoint removes point");
+        test::check (ed.undo() && s.tracks[0]->automation[0].points.size() == 2,
+                     "undo restores deleted automation point");
+
+        // NaN / Inf safety in autoNormToDb, dbToAutoNorm, and evaluateAt
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        test::check (autoNormToDb (nan) == -100.0f && autoNormToDb (inf) == -100.0f
+                     && dbToAutoNorm (nan) == 0.0f && dbToAutoNorm (inf) == 0.0f,
+                     "autoNormToDb / dbToAutoNorm guard non-finite inputs");
+        AutomationLane nanLane;
+        nanLane.points = { { 0, nan, AutoCurveType::Linear }, { 100, 0.5f, AutoCurveType::Linear } };
+        test::check (nanLane.evaluateAt (-10) == 0.0f && nanLane.evaluateAt (50) == 0.0f
+                     && std::abs (nanLane.evaluateAt (200) - 0.5f) < 1e-6f,
+                     "evaluateAt returns 0.0f instead of propagating NaN");
+
+        // moveAutomationPoint outNewIndex tracking across reorder and tie
+        test::check (ed.addAutomationPoint (0, "pan", 100, 0.2f, AutoCurveType::Linear, err) == 0, "add pan pt 0");
+        test::check (ed.addAutomationPoint (0, "pan", 200, 0.8f, AutoCurveType::Linear, err) == 1, "add pan pt 1");
+        int movedIdx = -1;
+        test::check (ed.moveAutomationPoint (0, "pan", 0, 300, 0.8f, err, &movedIdx) && movedIdx == 1,
+                     "moveAutomationPoint outNewIndex tracks point moved past another");
+        test::check (ed.moveAutomationPoint (0, "pan", 1, 200, 0.8f, err, &movedIdx) && movedIdx == 1,
+                     "moveAutomationPoint outNewIndex distinguishes tied sample/value points");
+    }
+
+    // 4. Chain edits remap/prune plugin:<slot>:<param> lanes & activeAutoTarget
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        const auto wav = makeWav ("auto-chain.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+        test::check (s.addTrack (wav, "Ch", err), "add track for chain remap");
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "add slot 0");
+        test::check (s.addPlugin (0, "Test Delay", -1, err), "add slot 1");
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "add slot 2");
+
+        test::check (ed.addAutomationPoint (0, "plugin:0:0", 0, 0.2f, AutoCurveType::Linear, err) == 0, "add lane 0");
+        test::check (ed.addAutomationPoint (0, "plugin:1:0", 0, 0.4f, AutoCurveType::Linear, err) == 0, "add lane 1");
+        test::check (ed.addAutomationPoint (0, "plugin:2:0", 0, 0.6f, AutoCurveType::Linear, err) == 0, "add lane 2");
+        test::check (ed.setTrackActiveAutoTarget (0, "plugin:2:0", err), "set active target plugin:2:0");
+
+        // movePlugin 0 -> 2: [0,1,2] -> [1,2,0], so slot 0->2, 1->0, 2->1
+        test::check (s.movePlugin (0, 0, 2, err), "movePlugin 0 -> 2");
+        const auto& autos = s.tracks[0]->automation;
+        test::check (autos.size() == 3
+                     && autos[0].slotIndex == 2 && autos[0].targetId == "plugin:2:0"
+                     && autos[1].slotIndex == 0 && autos[1].targetId == "plugin:0:0"
+                     && autos[2].slotIndex == 1 && autos[2].targetId == "plugin:1:0"
+                     && s.tracks[0]->activeAutoTarget == "plugin:1:0",
+                     "movePlugin 0 -> 2 remaps plugin lanes and activeAutoTarget");
+
+        // movePlugin 2 -> 0: restores [0,1,2]
+        test::check (s.movePlugin (0, 2, 0, err), "movePlugin 2 -> 0");
+        test::check (autos[0].slotIndex == 0 && autos[0].targetId == "plugin:0:0"
+                     && autos[1].slotIndex == 1 && autos[1].targetId == "plugin:1:0"
+                     && autos[2].slotIndex == 2 && autos[2].targetId == "plugin:2:0"
+                     && s.tracks[0]->activeAutoTarget == "plugin:2:0",
+                     "movePlugin 2 -> 0 remaps plugin lanes back");
+
+        // removePlugin 1: removes slot 1, shifts slot 2 -> 1 and updates activeAutoTarget
+        test::check (s.removePlugin (0, 1, err), "removePlugin slot 1");
+        test::check (autos.size() == 2
+                     && autos[0].slotIndex == 0 && autos[0].targetId == "plugin:0:0"
+                     && autos[1].slotIndex == 1 && autos[1].targetId == "plugin:1:0"
+                     && s.tracks[0]->activeAutoTarget == "plugin:1:0",
+                     "removePlugin prunes deleted slot and shifts higher slots");
+
+        // removePlugin 1 (activeAutoTarget): resets activeAutoTarget to "volume"
+        test::check (s.removePlugin (0, 1, err), "removePlugin active slot 1");
+        test::check (autos.size() == 1 && s.tracks[0]->activeAutoTarget == "volume",
+                     "removing active plugin slot resets activeAutoTarget to volume");
+
+        // setChain clears remaining plugin lanes and resets activeAutoTarget
+        test::check (ed.setTrackActiveAutoTarget (0, "plugin:0:0", err), "set active target plugin:0:0");
+        test::check (s.setChain (0, { "Test Gain" }, err), "setChain replaces chain");
+        test::check (s.tracks[0]->automation.empty() && s.tracks[0]->activeAutoTarget == "volume",
+                     "setChain prunes plugin lanes and resets activeAutoTarget");
+    }
+
+    // 5. processBlock volume automation alignment with plugin latency matches renderStems
+    {
+        auto dcWav = dir.getChildFile ("dc-lat.wav");
+        {
+            juce::AudioBuffer<float> b (2, 2048);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 2048; ++i)
+                    b.setSample (ch, i, 0.5f);
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> stream (dcWav.createOutputStream());
+            auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+            writer->writeFromAudioSampleBuffer (b, 0, 2048);
+        }
+
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (dcWav, "Lat", err), "add track for latency automation alignment");
+        test::check (s.addPlugin (0, "Test Delay", -1, err), "add Test Delay (64 samples latency)");
+        test::check (ed.addAutomationPoint (0, "volume", 0, dbToAutoNorm (-20.0f), AutoCurveType::Step, err) == 0, "add step vol 0");
+        test::check (ed.addAutomationPoint (0, "volume", 128, dbToAutoNorm (0.0f), AutoCurveType::Step, err) == 1, "add step vol 128");
+
+        juce::AudioBuffer<float> out (2, 512);
+        s.processBlock (out, 0);
+        // Test Delay delays audio by 64 samples: sample 128 of source exits at index 192
+        test::check (std::abs (out.getSample (0, 191) - 0.05f) < 0.002f
+                     && std::abs (out.getSample (0, 192) - 0.5f) < 0.002f,
+                     "processBlock aligns volume automation with plugin latency (jump at 128 + 64 = 192)");
+    }
+
+    dir.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -4153,6 +4736,8 @@ int main()
     takeStartAndLimitChecks();
     mcpGuardsChecks();
     batch2FixesChecks();
+    midiAndSnapshotChecks();
+    automationCurvesChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }
