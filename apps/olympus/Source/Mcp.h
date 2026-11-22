@@ -147,6 +147,7 @@ private:
     static juce::var tools()
     {
         const auto trackRef = prop ("string", "Track number (from 0) or name");
+        const auto chainTargetRef = prop ("string", "Track number (from 0), track name, or 'master' for the master bus");
         const auto slotRef = prop ("string", "Position in the chain (from 0) or the plugin's name");
         juce::Array<juce::var> list;
         list.add (tool ("list_plugins", "The plugins that are installed (VST3, and Audio Units on macOS) and can be put on a track.", {}));
@@ -154,30 +155,44 @@ private:
         list.add (tool ("new_project", "Empties the session.", { { "name", prop ("string", "Project name") } }));
         list.add (tool ("open_project", "Opens a saved .olympus project.", { { "path", prop ("string", "Absolute path of the project file") } }, { "path" }));
         list.add (tool ("save_project", "Saves the project (to `path`, or where it was opened from).", { { "path", prop ("string", "Absolute path ending in .olympus") } }));
-        list.add (tool ("add_track", "Adds a track from an audio file (every track becomes stereo at the session's sample rate).",
-                        { { "file", prop ("string", "Absolute path of the audio file") }, { "name", prop ("string", "Track name (default: the file's name)") } }, { "file" }));
+        list.add (tool ("add_track", "Adds an audio track (from 'file'), a MIDI track (kind='midi'), or a bus/group track (kind='bus').",
+                        { { "file", prop ("string", "Absolute path of the audio file (required for kind='audio')") },
+                          { "name", prop ("string", "Track name (default: the file's name or track kind)") },
+                          { "kind", prop ("string", "Track kind: 'audio' (default), 'midi', or 'bus'") } }));
         list.add (tool ("remove_track", "Removes a track.", { { "track", trackRef } }, { "track" }));
-        list.add (tool ("set_track", "Fader (dB), pan, mute, solo or name of a track.",
+        list.add (tool ("set_track", "Fader (dB), pan, mute, solo, name, frozen state, output bus routing, or aux sends of a track.",
                         { { "track", trackRef }, { "gain_db", prop ("number", "Fader in dB") }, { "pan", prop ("number", "-1 (left) .. 1 (right)") },
-                          { "mute", prop ("boolean", "") }, { "solo", prop ("boolean", "") }, { "name", prop ("string", "") } }, { "track" }));
-        list.add (tool ("add_plugin", "Puts a plugin (at its defaults) in a track's chain.",
-                        { { "track", trackRef }, { "plugin", prop ("string", "Plugin name or the start of it") }, { "position", prop ("integer", "Place in the chain (default: the end)") } }, { "track", "plugin" }));
-        list.add (tool ("remove_plugin", "Takes a plugin out of a chain.", { { "track", trackRef }, { "slot", slotRef } }, { "track", "slot" }));
-        list.add (tool ("move_plugin", "Moves a plugin to another place in the same chain.", { { "track", trackRef }, { "from", prop ("integer", "") }, { "to", prop ("integer", "") } }, { "track", "from", "to" }));
-        list.add (tool ("bypass_plugin", "Switches a plugin of a chain off or on.", { { "track", trackRef }, { "slot", slotRef }, { "bypass", prop ("boolean", "") } }, { "track", "slot", "bypass" }));
-        list.add (tool ("set_chain", "Replaces a track's chain with these plugins (at their defaults), in order.",
-                        { { "track", trackRef }, { "plugins", object ({ { "type", "array" }, { "items", object ({ { "type", "string" } }) } }) } }, { "track", "plugins" }));
+                          { "mute", prop ("boolean", "") }, { "solo", prop ("boolean", "") }, { "name", prop ("string", "") },
+                          { "frozen", prop ("boolean", "Freeze (true) or unfreeze (false) the track") },
+                          { "outputTrack", prop ("integer", "Target bus track index (-1 = Master)") },
+                          { "sends", object ({ { "type", "array" },
+                                               { "description", "Array of {targetTrack, levelDb, preFader, mute} sends (replaces track sends)" },
+                                               { "items", object ({ { "type", "object" } }) } }) } }, { "track" }));
+        list.add (tool ("add_plugin", "Puts a plugin (at its defaults) in a track's or master bus's chain.",
+                        { { "track", chainTargetRef }, { "plugin", prop ("string", "Plugin name or the start of it") },
+                          { "position", prop ("integer", "Place in the chain (default: the end)") },
+                          { "sidechainTrack", prop ("integer", "Optional sidechain source track index (-1 = none)") } }, { "track", "plugin" }));
+        list.add (tool ("remove_plugin", "Takes a plugin out of a chain.", { { "track", chainTargetRef }, { "slot", slotRef } }, { "track", "slot" }));
+        list.add (tool ("move_plugin", "Moves a plugin to another place in the same chain.", { { "track", chainTargetRef }, { "from", prop ("integer", "") }, { "to", prop ("integer", "") } }, { "track", "from", "to" }));
+        list.add (tool ("bypass_plugin", "Switches a plugin of a chain off or on.", { { "track", chainTargetRef }, { "slot", slotRef }, { "bypass", prop ("boolean", "") } }, { "track", "slot", "bypass" }));
+        list.add (tool ("set_plugin_wet", "Sets the wet/dry mix (0.0 = dry, 1.0 = wet) and/or sidechain source of a plugin in a chain.",
+                        { { "track", chainTargetRef }, { "slot", slotRef },
+                          { "wet", prop ("number", "0.0 (dry) .. 1.0 (wet)") },
+                          { "sidechainTrack", prop ("integer", "Optional sidechain source track index (-1 = none)") } },
+                        { "track", "slot" }));
+        list.add (tool ("set_chain", "Replaces a track's or master bus's chain with these plugins (at their defaults), in order.",
+                        { { "track", chainTargetRef }, { "plugins", object ({ { "type", "array" }, { "items", object ({ { "type", "string" } }) } }) } }, { "track", "plugins" }));
         list.add (tool ("copy_chain", "Gives other tracks the same chain, with the same settings, as one track.",
                         { { "from_track", trackRef }, { "to_tracks", object ({ { "type", "array" }, { "items", object ({ { "type", "string" } }) } }) } }, { "from_track", "to_tracks" }));
-        list.add (tool ("list_parameters", "The settings of a plugin: id, name, value (0..1) and the text the plugin shows.", { { "track", trackRef }, { "slot", slotRef } }, { "track", "slot" }));
+        list.add (tool ("list_parameters", "The settings of a plugin: id, name, value (0..1) and the text the plugin shows.", { { "track", chainTargetRef }, { "slot", slotRef } }, { "track", "slot" }));
         list.add (tool ("set_parameter", "Sets one setting, by its value (0..1) or by text.",
-                        { { "track", trackRef }, { "slot", slotRef }, { "parameter", prop ("string", "id, name or number from list_parameters") },
+                        { { "track", chainTargetRef }, { "slot", slotRef }, { "parameter", prop ("string", "id, name or number from list_parameters") },
                           { "value", prop ("number", "0..1") }, { "text", prop ("string", "As the plugin shows it, e.g. '-3.0 dB'") } }, { "track", "slot", "parameter" }));
-        list.add (tool ("list_presets", "The factory presets of a plugin, where it has any.", { { "track", trackRef }, { "slot", slotRef } }, { "track", "slot" }));
-        list.add (tool ("load_preset", "Loads a preset into a plugin (it replaces the plugin's settings).", { { "track", trackRef }, { "slot", slotRef }, { "preset", prop ("string", "Name or number") } }, { "track", "slot", "preset" }));
-        list.add (tool ("get_plugin_state", "A plugin's complete state (every setting, and what the plugin keeps besides) as base64 text, to keep or to hand to set_plugin_state.", { { "track", trackRef }, { "slot", slotRef } }, { "track", "slot" }));
+        list.add (tool ("list_presets", "The factory presets of a plugin, where it has any.", { { "track", chainTargetRef }, { "slot", slotRef } }, { "track", "slot" }));
+        list.add (tool ("load_preset", "Loads a preset into a plugin (it replaces the plugin's settings).", { { "track", chainTargetRef }, { "slot", slotRef }, { "preset", prop ("string", "Name or number") } }, { "track", "slot", "preset" }));
+        list.add (tool ("get_plugin_state", "A plugin's complete state (every setting, and what the plugin keeps besides) as base64 text, to keep or to hand to set_plugin_state.", { { "track", chainTargetRef }, { "slot", slotRef } }, { "track", "slot" }));
         list.add (tool ("set_plugin_state", "Restores a state from get_plugin_state into a plugin of the same kind (it replaces all the plugin's settings).",
-                        { { "track", trackRef }, { "slot", slotRef }, { "state", prop ("string", "Base64 text from get_plugin_state") } }, { "track", "slot", "state" }));
+                        { { "track", chainTargetRef }, { "slot", slotRef }, { "state", prop ("string", "Base64 text from get_plugin_state") } }, { "track", "slot", "state" }));
         list.add (tool ("plugin_notes", "What Olympus is for and not for (the GUIDE text), and the notes it gives about this session (warnings first).", {}));
         list.add (tool ("render_stems", "Writes one WAV per audible track (after its chain and fader, aligned to the audio) and mix.wav, into a folder.",
                         { { "folder", prop ("string", "Absolute path of the folder (made if needed)") }, { "tail_seconds", prop ("number", "Extra time at the end for tails; default 0") },
@@ -225,7 +240,7 @@ private:
                           { "end_seconds", pos ("in seconds") }, { "end_beats", pos ("in quarter notes") }, { "on", prop ("boolean", "Default true") } }, {}));
         list.add (tool ("set_master", "The master gain: applied to the playback and to mix.wav, never to the stems.",
                         { { "master_db", prop ("number", "-100 to +12 dB") } }, { "master_db" }));
-        list.add (tool ("undo", "Undoes the last timeline edit (a clip, the mix, the master, the tempo, a marker, the loop...). Tracks and plugins are not undone, and adding or removing one clears the history.", {}));
+        list.add (tool ("undo", "Undoes the last timeline edit (a clip, the mix, the master, the tempo, a marker, the loop, tracks, or plugins).", {}));
         list.add (tool ("redo", "Redoes the edit that undo took back.", {}));
         return list;
     }
@@ -275,13 +290,31 @@ private:
         }
         if (name == "add_track")
         {
+            juce::String kind = "audio";
+            if (a.hasProperty ("kind") && ! a["kind"].isVoid())
+            {
+                if (! a["kind"].isString())
+                { error = "'kind' must be 'audio', 'midi', or 'bus'."; return {}; }
+                kind = a["kind"].toString().trim().toLowerCase();
+                if (kind != "audio" && kind != "midi" && kind != "bus")
+                { error = "Unknown track kind '" + a["kind"].toString() + "'. Use 'audio', 'midi', or 'bus'."; return {}; }
+            }
+            if (kind == "bus")
+            {
+                if (editor.addBusTrack (a["name"].toString(), error) < 0) return {};
+                return session.describe();
+            }
+            if (kind == "midi")
+            {
+                editor.addMidiTrack (a["name"].toString());
+                return session.describe();
+            }
             // the file is named before anything reads it: a missing or a non-string 'file' is the caller's mistake, not " contains no audio."
             if (! a.hasProperty ("file") || a["file"].isVoid())
             { error = "Give 'file' (an audio file path)."; return {}; }
             if (! a["file"].isString() || a["file"].toString().trim().isEmpty())
             { error = "'file' must be the path of an audio file (a string)."; return {}; }
-            if (! session.addTrack (resolvePath (a["file"].toString()), a["name"].toString(), error)) return {};
-            editor.clearUndo(); // tracks are not undone (see Edit.h)
+            if (! editor.addTrack (resolvePath (a["file"].toString()), a["name"].toString(), error)) return {};
             return session.describe();
         }
 
@@ -355,7 +388,7 @@ private:
             const auto label = undoing ? editor.undoLabel() : editor.redoLabel();
             if (undoing ? ! editor.canUndo() : ! editor.canRedo())
             {
-                error = undoing ? "Nothing to undo: no edit is in the history (tracks and plugins are not undone)."
+                error = undoing ? "Nothing to undo: no edit is in the history."
                                 : "Nothing to redo: no edit has been undone.";
                 return {};
             }
@@ -646,14 +679,15 @@ private:
 
         // everything below names a track: verify tool name before resolving track
         const bool isCopyChain = (name == "copy_chain");
-        const bool isTrackTool = isCopyChain || name == "remove_track" || name == "set_track"
-                                 || name == "add_clip" || name == "move_clip" || name == "split_clip"
-                                 || name == "trim_clip" || name == "delete_clip" || name == "set_clip"
-                                 || name == "add_plugin" || name == "set_chain" || name == "move_plugin"
-                                 || name == "remove_plugin" || name == "bypass_plugin"
+        const bool isChainTool = name == "add_plugin" || name == "set_chain" || name == "move_plugin"
+                                 || name == "remove_plugin" || name == "bypass_plugin" || name == "set_plugin_wet"
                                  || name == "list_parameters" || name == "set_parameter"
                                  || name == "get_plugin_state" || name == "set_plugin_state"
                                  || name == "list_presets" || name == "load_preset";
+        const bool isTrackTool = isCopyChain || isChainTool
+                                 || name == "remove_track" || name == "set_track"
+                                 || name == "add_clip" || name == "move_clip" || name == "split_clip"
+                                 || name == "trim_clip" || name == "delete_clip" || name == "set_clip";
         if (! isTrackTool)
         {
             error = "Unknown tool '" + name + "'.";
@@ -664,7 +698,8 @@ private:
         if (trackArg.isVoid())
         {
             error = isCopyChain ? "Give 'from_track' (a track number from 0, or a track name)."
-                                : "Give 'track' (a track number from 0, or a track name).";
+                                : (isChainTool ? "Give 'track' (a track number from 0, a track name, or 'master')."
+                                               : "Give 'track' (a track number from 0, or a track name).");
             return {};
         }
         if (isCopyChain)
@@ -683,17 +718,16 @@ private:
                 if (i < 0) return {};
                 to.push_back (i);
             }
-            if (! session.copyChain (from, to, error)) return {};
-            editor.clearUndo(); // a chain is not undone (see Edit.h)
+            if (! editor.copyChain (from, to, error)) return {};
             return session.describe();
         }
-        const int track = session.findTrack (trackArg, error);
-        if (track < 0) return {};
+        const bool isMaster = isChainTool && trackArg.isString() && trackArg.toString().trim().equalsIgnoreCase ("master");
+        const int track = isMaster ? -1 : session.findTrack (trackArg, error);
+        if (! isMaster && track < 0) return {};
 
         if (name == "remove_track")
         {
-            if (! session.removeTrack (track, error)) return {};
-            editor.clearUndo(); // tracks are not undone (see Edit.h)
+            if (! editor.removeTrack (track, error)) return {};
             editor.clearClipboard(); // as the window does: the clipboard remembers the copy's track by number, and the tracks after this one have moved up
             return session.describe();
         }
@@ -709,15 +743,128 @@ private:
             { error = "'mute' must be true or false."; return {}; }
             if (a.hasProperty ("solo") && ! a["solo"].isBool())
             { error = "'solo' must be true or false."; return {}; }
+            if (a.hasProperty ("frozen") && ! a["frozen"].isBool())
+            { error = "'frozen' must be true or false."; return {}; }
             const bool renaming = a.hasProperty ("name") && a["name"].toString().isNotEmpty();
             if (renaming && a["name"].toString().trim().isEmpty()) { error = "The name is empty."; return {}; }
-            // one gesture: the settings given are one undo step
-            Gesture g (editor, "Track settings");
-            if (a.hasProperty ("gain_db") && ! editor.setTrackGain (track, (float) gainDb, error)) return {};
-            if (a.hasProperty ("pan") && ! editor.setTrackPan (track, (float) pan, error)) return {};
-            if (a.hasProperty ("mute") && ! editor.setTrackMute (track, (bool) a["mute"], error)) return {};
-            if (a.hasProperty ("solo") && ! editor.setTrackSolo (track, (bool) a["solo"], error)) return {};
-            if (renaming && ! editor.renameTrack (track, a["name"].toString(), error)) return {};
+
+            std::optional<int> nextOutputTrack;
+            if (a.hasProperty ("outputTrack"))
+            {
+                const auto& ov = a["outputTrack"];
+                int outIdx = -1;
+                if (wholeNumber (ov, outIdx))
+                {
+                    if (outIdx < -1) { error = "'outputTrack' must be -1 (Master) or a bus track index."; return {}; }
+                    if (outIdx >= 0)
+                    {
+                        const juce::ScopedLock sl (session.lock);
+                        if (! juce::isPositiveAndBelow (outIdx, (int) session.tracks.size()))
+                        { error = "No bus track " + juce::String (outIdx); return {}; }
+                        if (! session.tracks[(size_t) outIdx]->isBus())
+                        { error = "Target track '" + session.tracks[(size_t) outIdx]->name + "' is not a bus."; return {}; }
+                    }
+                    nextOutputTrack = outIdx;
+                }
+                else if (ov.isString())
+                {
+                    const auto s = ov.toString().trim();
+                    if (s == "-1" || s.equalsIgnoreCase ("master"))
+                        nextOutputTrack = -1;
+                    else
+                    {
+                        const int resolved = session.findTrack (ov, error);
+                        if (resolved < 0) return {};
+                        nextOutputTrack = resolved;
+                    }
+                }
+                else
+                {
+                    error = "'outputTrack' must be -1 (Master) or a bus track index/name.";
+                    return {};
+                }
+            }
+
+            std::optional<std::vector<AuxSend>> nextSends;
+            if (a.hasProperty ("sends"))
+            {
+                const auto* arr = a["sends"].getArray();
+                if (arr == nullptr)
+                { error = "'sends' must be an array of {targetTrack, levelDb, preFader, mute}."; return {}; }
+                std::vector<AuxSend> parsed;
+                parsed.reserve ((size_t) arr->size());
+                for (const auto& item : *arr)
+                {
+                    if (! item.isObject())
+                    { error = "Each entry in 'sends' must be an object."; return {}; }
+                    if (! item.hasProperty ("targetTrack"))
+                    { error = "Each send must specify 'targetTrack'."; return {}; }
+                    const int targetIdx = session.findTrack (item["targetTrack"], error);
+                    if (targetIdx < 0) return {};
+                    {
+                        const juce::ScopedLock sl (session.lock);
+                        if (targetIdx == track) { error = "A track cannot send to itself."; return {}; }
+                        if (! session.tracks[(size_t) targetIdx]->isBus())
+                        { error = "Target track '" + session.tracks[(size_t) targetIdx]->name + "' is not a bus."; return {}; }
+                    }
+                    double lvl = 0.0;
+                    if (item.hasProperty ("levelDb") && (! finiteNumber (item["levelDb"], lvl) || ! std::isfinite ((float) lvl)))
+                    { error = "Send 'levelDb' must be a finite number."; return {}; }
+                    if (item.hasProperty ("preFader") && ! item["preFader"].isBool())
+                    { error = "Send 'preFader' must be true or false."; return {}; }
+                    if (item.hasProperty ("mute") && ! item["mute"].isBool())
+                    { error = "Send 'mute' must be true or false."; return {}; }
+                    AuxSend snd;
+                    snd.targetTrack = targetIdx;
+                    snd.levelDb = juce::jlimit (-100.0f, 12.0f, (float) lvl);
+                    snd.preFader = item.hasProperty ("preFader") ? (bool) item["preFader"] : false;
+                    snd.mute = item.hasProperty ("mute") ? (bool) item["mute"] : false;
+                    parsed.push_back (snd);
+                }
+                nextSends = std::move (parsed);
+            }
+
+            if (nextOutputTrack && ! editor.setTrackOutput (track, *nextOutputTrack, error))
+                return {};
+            if (nextSends && ! editor.setTrackSends (track, *nextSends, error))
+                return {};
+
+            if (a.hasProperty ("frozen"))
+            {
+                if ((bool) a["frozen"])
+                {
+                    juce::File folder;
+                    juce::String trackName;
+                    {
+                        const juce::ScopedLock sl (session.lock);
+                        const auto projName = juce::File::createLegalFileName (session.name.isNotEmpty() ? session.name : "Untitled");
+                        folder = session.projectFile != juce::File()
+                                     ? session.projectFile.getParentDirectory().getChildFile (projName + " Frozen")
+                                     : juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("Olympus Frozen");
+                        if (juce::isPositiveAndBelow (track, (int) session.tracks.size()))
+                            trackName = session.tracks[(size_t) track]->name;
+                    }
+                    const auto trackLegal = juce::File::createLegalFileName (trackName.isNotEmpty() ? trackName : ("Track " + juce::String (track + 1)));
+                    const auto targetWav = folder.getNonexistentChildFile (juce::String (track + 1).paddedLeft ('0', 2) + "-" + trackLegal + "-frozen", ".wav", false);
+                    if (! editor.freezeTrack (track, targetWav, error))
+                        return {};
+                }
+                else
+                {
+                    if (! editor.unfreezeTrack (track, error))
+                        return {};
+                }
+            }
+            if (a.hasProperty ("gain_db") || a.hasProperty ("pan") || a.hasProperty ("mute") || a.hasProperty ("solo") || renaming)
+            {
+                // one gesture: the settings given are one undo step
+                Gesture g (editor, "Track settings");
+                if (a.hasProperty ("gain_db") && ! editor.setTrackGain (track, (float) gainDb, error)) return {};
+                if (a.hasProperty ("pan") && ! editor.setTrackPan (track, (float) pan, error)) return {};
+                if (a.hasProperty ("mute") && ! editor.setTrackMute (track, (bool) a["mute"], error)) return {};
+                if (a.hasProperty ("solo") && ! editor.setTrackSolo (track, (bool) a["solo"], error)) return {};
+                if (renaming && ! editor.renameTrack (track, a["name"].toString(), error)) return {};
+            }
             return session.describe();
         }
 
@@ -878,8 +1025,48 @@ private:
                 pos = indexArg (a, "position", error);
                 if (pos < 0) return {};
             }
-            if (! session.addPlugin (track, a["plugin"].toString(), pos, error)) return {};
-            editor.clearUndo(); // plugins are not undone (see Edit.h)
+            std::optional<int> scTrack;
+            if (a.hasProperty ("sidechainTrack") && ! a["sidechainTrack"].isVoid())
+            {
+                int sc = -1;
+                if (wholeNumber (a["sidechainTrack"], sc))
+                {
+                    if (sc < -1) { error = "'sidechainTrack' must be -1 or a valid track index."; return {}; }
+                    scTrack = sc;
+                }
+                else if (a["sidechainTrack"].isString() && (a["sidechainTrack"].toString().trim() == "-1" || a["sidechainTrack"].toString().trim().equalsIgnoreCase ("none")))
+                {
+                    scTrack = -1;
+                }
+                else
+                {
+                    sc = session.findTrack (a["sidechainTrack"], error);
+                    if (sc < 0) return {};
+                    scTrack = sc;
+                }
+                if (isMaster && *scTrack >= 0)
+                { error = "Master bus plugins cannot have a sidechain track."; return {}; }
+                if (! isMaster && ! session.canSidechainTrack (track, *scTrack, error))
+                    return {};
+            }
+            int insertedSlot = -1;
+            if (! isMaster)
+            {
+                const juce::ScopedLock sl (session.lock);
+                if (juce::isPositiveAndBelow (track, (int) session.tracks.size()))
+                {
+                    const int chainSize = (int) session.tracks[(size_t) track]->chain.size();
+                    insertedSlot = (pos < 0 || pos > chainSize) ? chainSize : pos;
+                }
+            }
+            const bool ok = isMaster ? editor.addMasterPlugin (a["plugin"].toString(), pos, error)
+                                     : editor.addPlugin (track, a["plugin"].toString(), pos, error);
+            if (! ok) return {};
+            if (scTrack && ! isMaster && insertedSlot >= 0)
+            {
+                if (! editor.setSlotSidechain (track, insertedSlot, *scTrack, error))
+                    return {};
+            }
             return session.describe();
         }
         if (name == "set_chain")
@@ -894,8 +1081,9 @@ private:
                 if (! p.isString()) { error = "Each entry in 'plugins' must be a plugin name (string)."; return {}; }
                 plugins.add (p.toString());
             }
-            if (! session.setChain (track, plugins, error)) return {};
-            editor.clearUndo(); // plugins are not undone (see Edit.h)
+            const bool ok = isMaster ? editor.setMasterChain (plugins, error)
+                                     : editor.setChain (track, plugins, error);
+            if (! ok) return {};
             return session.describe();
         }
         if (name == "move_plugin")
@@ -904,21 +1092,72 @@ private:
             if (from < 0) return {};
             const int to = indexArg (a, "to", error);
             if (to < 0) return {};
-            return session.movePlugin (track, from, to, error) ? session.describe() : juce::var();
+            const bool ok = isMaster ? editor.moveMasterPlugin (from, to, error)
+                                     : editor.movePlugin (track, from, to, error);
+            return ok ? session.describe() : juce::var();
         }
 
-        const int slot = findSlot (track, a["slot"], error);
+        const int slot = isMaster ? findSlotInChain (session.masterChain, a["slot"], "on the master bus", error)
+                                  : findSlot (track, a["slot"], error);
         if (slot < 0) return {};
         if (name == "remove_plugin")
         {
-            if (! session.removePlugin (track, slot, error)) return {};
-            editor.clearUndo(); // plugins are not undone (see Edit.h)
+            const bool ok = isMaster ? editor.removeMasterPlugin (slot, error)
+                                     : editor.removePlugin (track, slot, error);
+            if (! ok) return {};
             return session.describe();
         }
         if (name == "bypass_plugin")
         {
             if (! a.hasProperty ("bypass") || ! a["bypass"].isBool()) { error = "Give 'bypass' (true or false)."; return {}; }
-            return session.setBypass (track, slot, (bool) a["bypass"], error) ? session.describe() : juce::var();
+            const bool ok = isMaster ? editor.bypassMasterPlugin (slot, (bool) a["bypass"], error)
+                                     : editor.bypassPlugin (track, slot, (bool) a["bypass"], error);
+            return ok ? session.describe() : juce::var();
+        }
+        if (name == "set_plugin_wet")
+        {
+            const bool hasWet = a.hasProperty ("wet");
+            const bool hasSc = a.hasProperty ("sidechainTrack") && ! a["sidechainTrack"].isVoid();
+            if (! hasWet && ! hasSc)
+            {
+                error = "Give 'wet' (a finite number 0.0 .. 1.0) or 'sidechainTrack'.";
+                return {};
+            }
+            double wet = 1.0;
+            if (hasWet && (! finiteNumber (a["wet"], wet) || ! std::isfinite ((float) wet)))
+            {
+                error = "Give 'wet' (a finite number 0.0 .. 1.0).";
+                return {};
+            }
+            std::optional<int> scTrack;
+            if (hasSc)
+            {
+                int sc = -1;
+                if (wholeNumber (a["sidechainTrack"], sc))
+                {
+                    if (sc < -1) { error = "'sidechainTrack' must be -1 or a valid track index."; return {}; }
+                    scTrack = sc;
+                }
+                else if (a["sidechainTrack"].isString() && (a["sidechainTrack"].toString().trim() == "-1" || a["sidechainTrack"].toString().trim().equalsIgnoreCase ("none")))
+                {
+                    scTrack = -1;
+                }
+                else
+                {
+                    sc = session.findTrack (a["sidechainTrack"], error);
+                    if (sc < 0) return {};
+                    scTrack = sc;
+                }
+                if (isMaster && *scTrack >= 0)
+                { error = "Master bus plugins cannot have a sidechain track."; return {}; }
+                if (! isMaster && ! session.canSidechainTrack (track, *scTrack, error))
+                    return {};
+            }
+            if (hasWet && ! session.setPluginWet (isMaster ? -2 : track, slot, (float) wet, error))
+                return {};
+            if (scTrack && ! isMaster && ! editor.setSlotSidechain (track, slot, *scTrack, error))
+                return {};
+            return session.describe();
         }
 
         // What these tools do to the arguments is decoded first, outside the lock below (base64 text and a preset name are the
@@ -941,7 +1180,9 @@ private:
         // other chain change does (one Session, three users). This is the message-thread path JUCE expects a plugin to be touched
         // from; the audio callback only tries the lock and goes silent for a block, so the hold here is a momentary one.
         const juce::ScopedLock sl (session.lock);
-        auto* instance = session.tracks[(size_t) track]->chain[(size_t) slot]->instance.get();
+        const auto& chain = isMaster ? session.masterChain : session.tracks[(size_t) track]->chain;
+        if (! juce::isPositiveAndBelow (slot, (int) chain.size())) { error = "No plugin " + juce::String (slot) + (isMaster ? " on the master bus." : " on that track."); return {}; }
+        auto* instance = chain[(size_t) slot]->instance.get();
         if (instance == nullptr) { error = "That plugin is not installed on this machine, so it has no settings to read or change."; return {}; }
         if (name == "list_parameters")
             return parameters (*instance);
@@ -1138,7 +1379,11 @@ private:
 
     int findSlot (int track, const juce::var& which, juce::String& error) const
     {
-        auto& chain = session.tracks[(size_t) track]->chain;
+        return findSlotInChain (session.tracks[(size_t) track]->chain, which, "on that track", error);
+    }
+
+    int findSlotInChain (const std::vector<std::unique_ptr<Slot>>& chain, const juce::var& which, const juce::String& whereLabel, juce::String& error) const
+    {
         int i = -1;
         if (which.isString())
         {
@@ -1165,17 +1410,17 @@ private:
                 if (prefixCount == 1) return prefixMatch;
                 if (prefixCount > 1)
                 {
-                    error = "Plugin name '" + which.toString() + "' is ambiguous on that track (matches " + juce::String (prefixCount) + " slots); use a slot number.";
+                    error = "Plugin name '" + which.toString() + "' is ambiguous " + whereLabel + " (matches " + juce::String (prefixCount) + " slots); use a slot number.";
                     return -1;
                 }
-                error = "No plugin '" + which.toString() + "' on that track";
+                error = "No plugin '" + which.toString() + "' " + whereLabel;
                 return -1;
             }
             if (const auto parsed = parseNonNegativeInt (s))
                 i = *parsed;
             else
             {
-                error = "No plugin " + s + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
+                error = "No plugin " + s + " " + whereLabel + " (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
                 return -1;
             }
         }
@@ -1188,7 +1433,7 @@ private:
             const juce::int64 n = (juce::int64) which;
             if (n < 0 || n > (juce::int64) std::numeric_limits<int>::max())
             {
-                error = "No plugin " + which.toString() + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
+                error = "No plugin " + which.toString() + " " + whereLabel + " (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
                 return -1;
             }
             i = (int) n;
@@ -1203,7 +1448,7 @@ private:
             }
             if (d < 0.0 || d > (double) std::numeric_limits<int>::max())
             {
-                error = "No plugin " + which.toString() + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
+                error = "No plugin " + which.toString() + " " + whereLabel + " (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
                 return -1;
             }
             i = (int) d;
@@ -1214,7 +1459,7 @@ private:
             return -1;
         }
         if (juce::isPositiveAndBelow (i, (int) chain.size())) return i;
-        error = "No plugin " + juce::String (i) + " on that track (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
+        error = "No plugin " + juce::String (i) + " " + whereLabel + " (it has " + juce::String ((int) chain.size()) + ", numbered from 0)";
         return -1;
     }
 
