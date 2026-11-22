@@ -5,6 +5,8 @@
 
 #include "Advice.h"
 #include "Arrange.h"
+#include "LampButton.h"
+#include "PianoRoll.h"
 #include "../Edit.h"
 #include "../Record.h"
 #include "LevelMeter.h"
@@ -24,22 +26,6 @@
 namespace olympus::gui
 {
 class MainComponent;
-
-// A push switch whose lamp has the colour it is given (the kit's look-and-feel lights every switch in one colour): amber for the transport
-// switches, red for a mute, green for a solo, red for a plugin that is not installed.
-class LampButton : public juce::TextButton
-{
-public:
-    using juce::TextButton::TextButton;
-    juce::Colour lamp = colours::amber;
-    void paintButton (juce::Graphics& g, bool highlighted, bool down) override
-    {
-        ui::hw::drawPushButton (g, getLocalBounds().toFloat(), getToggleState(), lamp, down, highlighted, isEnabled());
-        g.setFont (ui::labelFont (juce::jmin (10.5f, (float) getHeight() * 0.5f)));
-        g.setColour (getToggleState() && lamp.getPerceivedBrightness() > 0.5f ? colours::lampInk : colours::text);
-        g.drawText (getButtonText().toUpperCase(), getLocalBounds().translated (0, down ? 1 : 0), juce::Justification::centred);
-    }
-};
 
 // A plugin switch: click opens it, shift-click bypasses it, right-click (or ctrl-click) for the menu. Kept for the chains' buttons; the
 // window's FX menu lists a track's plugins instead.
@@ -239,6 +225,7 @@ public:
     // Every file starts at `at`, or after the previous clip on the track. Errors are shown together.
     void importFiles (const juce::StringArray& files, int track, juce::int64 at);
     void addEmptyTrack();
+    void addMidiTrack();
     void undoEdit();
     void redoEdit();
     void toggleLoop();
@@ -373,7 +360,7 @@ public:
     // ---- the controls (public so the checks can find and press them) ---------------------------------------------------------------
     ui::GuideButton guideButton { guideTitle(), guideText() };
     juce::TextButton newButton { "New" }, openButton { "Open" }, saveButton { "Save" }, saveAsButton { "Save as" }, addTrackButton { "Add track" },
-        importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, exportButton { "Export" }, audioButton { "Audio" };
+        addMidiButton { "+ MIDI" }, importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, exportButton { "Export" }, audioButton { "Audio" };
     juce::TextButton rewindButton { "|<" }, undoButton { "Undo" }, redoButton { "Redo" }, zoomOutButton { "-" }, zoomInButton { "+" }, zoomFitButton { "Fit" };
     LampButton playButton { "Play" }, recordButton { "Rec" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" };
     juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
@@ -406,6 +393,7 @@ public:
     juce::TextButton monitorAddButton { "+" };
     LampButton monitorBypassButton { "Correction" };
     ArrangeView arrange { session, editor };
+    PianoRollView pianoRoll { session, editor };
 
 private:
     // The audio callback's copy of the transport: the playhead, the loop, the click and the end of the audio. The callback reads and writes

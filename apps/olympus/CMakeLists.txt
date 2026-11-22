@@ -72,7 +72,8 @@ endfunction()
 add_library(OlympusCore STATIC)
 target_sources(OlympusCore PRIVATE
     Source/UI/MainComponent.cpp
-    Source/UI/Arrange.cpp)
+    Source/UI/Arrange.cpp
+    Source/UI/PianoRoll.cpp)
 target_include_directories(OlympusCore PUBLIC Source)
 target_compile_definitions(OlympusCore PUBLIC ${OLYMPUS_DEFINITIONS} JUCE_STANDALONE_APPLICATION=1)
 target_link_libraries(OlympusCore

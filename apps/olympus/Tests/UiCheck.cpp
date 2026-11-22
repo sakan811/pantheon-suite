@@ -79,10 +79,16 @@ std::unique_ptr<MainComponent> makeWindow (bool withPlugins = true, const juce::
     w->makeEditorWindow = [] (const juce::String&, juce::AudioProcessorEditor* editor, std::function<void()> closed) -> std::unique_ptr<juce::Component>
     {
         gClosers.push_back (closed);
-        auto holder = std::make_unique<juce::Component>(); // no native window under test
-        holder->addAndMakeVisible (editor);
-        holder->setSize (editor->getWidth(), editor->getHeight());
-        return holder;
+        struct Holder : juce::Component
+        {
+            explicit Holder (juce::AudioProcessorEditor* e) : ed (e)
+            {
+                addAndMakeVisible (ed.get());
+                setSize (ed->getWidth(), ed->getHeight());
+            }
+            std::unique_ptr<juce::AudioProcessorEditor> ed;
+        };
+        return std::make_unique<Holder> (editor); // no native window under test
     };
     // the questions: Discard when gAnswer, else Cancel (the checks of the unsaved changes); the save chooser returns gSaveTarget
     w->askUnsaved = [] (const juce::String& message)
@@ -212,7 +218,7 @@ struct DummyAudioDevice : juce::AudioIODevice
 // Every control of the window inside it, below the arrangement's top, and no two of them (or the position read-out) over each other.
 void layoutCheck (MainComponent& w, const char* label)
 {
-    std::vector<juce::Component*> controls { &w.newButton, &w.openButton, &w.saveButton, &w.saveAsButton, &w.addTrackButton, &w.importButton,
+    std::vector<juce::Component*> controls { &w.newButton, &w.openButton, &w.saveButton, &w.saveAsButton, &w.addTrackButton, &w.addMidiButton, &w.importButton,
                                              &w.pluginsButton, &w.renderButton, &w.exportButton, &w.guideButton, &w.rewindButton, &w.playButton, &w.loopButton,
                                              &w.metronomeButton, &w.bpmField, &w.signatureBox, &w.snapButton, &w.gridBox, &w.undoButton, &w.redoButton,
                                              &w.zoomOutButton, &w.zoomInButton, &w.zoomFitButton, &w.audioButton, &w.recordButton, &w.deviceLabel };
@@ -264,12 +270,18 @@ void masterBlock (MainComponent& w, double ms, int frames = 4800)
     w.updateMaster (ms);
 }
 
+// The component's own mouse event, at a point of its own coordinates.
+juce::MouseEvent mouseAtComp (juce::Component& comp, juce::Point<int> p, juce::ModifierKeys mods = {})
+{
+    const auto now = juce::Time::getCurrentTime();
+    return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), p.toFloat(), mods, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                             &comp, &comp, now, p.toFloat(), now, 1, false);
+}
+
 // The arrangement's own mouse event, at a point of its own coordinates.
 juce::MouseEvent mouseAt (ArrangeView& view, juce::Point<int> p)
 {
-    const auto now = juce::Time::getCurrentTime();
-    return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), p.toFloat(), juce::ModifierKeys {}, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                             &view, &view, now, p.toFloat(), now, 1, false);
+    return mouseAtComp (view, p);
 }
 } // namespace
 
@@ -3353,6 +3365,235 @@ int main()
         test::check (! w->isPlaying(), "playback stopped for deferred autosave");
         w->runTimerForChecks();
         test::check (w->autosaveFile().existsAsFile(), "deferred autosave runs once stopped");
+    }
+
+    // [48] Automation lane UI: toggle AUTO, add/drag/delete point via ArrangeView & Editor, target switch, undo/redo, paint
+    {
+        const auto dir48 = tempFolder().getChildFile ("automation-ui");
+        dir48.deleteRecursively();
+        dir48.createDirectory();
+        auto w = makeWindow (true, dir48.getChildFile ("settings.xml"));
+        w->addTracks ({ makeWav ("auto-ui.wav", 48000).getFullPathName() });
+        w->refreshNow();
+
+        auto* autoBtn = w->arrange.automationButton (0);
+        auto* targetBtn = w->arrange.autoTargetButton (0);
+        test::check (autoBtn != nullptr && targetBtn != nullptr, "track header exposes AUTO and target buttons");
+        test::check (! w->session.tracks[0]->showAutomation && w->arrange.autoLaneBounds (0).isEmpty(),
+                     "automation lane is hidden by default");
+
+        press (*autoBtn);
+        w->refreshNow();
+        const auto autoRect = w->arrange.autoLaneBounds (0);
+        test::check (w->session.tracks[0]->showAutomation
+                     && autoRect.getHeight() == ArrangeView::kAutoLaneHeight
+                     && targetBtn->isVisible(),
+                     "toggling AUTO expands the track header/lane and shows target selector");
+
+        // Click in the automation lane to add a point, drag it, and release (1 gesture step)
+        w->editor.setSnap (false);
+        const auto clickPos = autoRect.getCentre();
+        w->arrange.mouseDown (mouseAt (w->arrange, clickPos));
+        w->arrange.mouseDrag (mouseAt (w->arrange, clickPos + juce::Point<int> (40, -10)));
+        w->arrange.mouseUp (mouseAt (w->arrange, clickPos + juce::Point<int> (40, -10)));
+        test::check (w->session.tracks[0]->automation.size() == 1
+                     && w->session.tracks[0]->automation[0].points.size() == 1,
+                     "clicking and dragging in the automation lane adds and moves one point");
+        const auto addedPt = w->session.tracks[0]->automation[0].points[0];
+        test::check (addedPt.sample > 0 && addedPt.value > 0.5f,
+                     "dragged automation point reflects new x/y position");
+
+        // Undo removes the added+dragged point in one step; redo brings it back
+        test::check (w->editor.undo() && w->session.tracks[0]->automation[0].points.empty(),
+                     "undo removes the automation point in one step");
+        test::check (w->editor.redo() && w->session.tracks[0]->automation[0].points.size() == 1,
+                     "redo restores the automation point");
+
+        juce::String error;
+        test::check (w->editor.setTrackActiveAutoTarget (0, "pan", error), "switch active automation target to pan");
+        w->refreshNow();
+        test::check (targetBtn->getButtonText() == "PAN", "target button label updates to PAN");
+
+        test::check (w->editor.deleteAutomationPoint (0, "volume", 0, error)
+                     && w->session.tracks[0]->automation[0].points.empty(),
+                     "deleteAutomationPoint removes point");
+        test::check (w->editor.undo() && w->session.tracks[0]->automation[0].points.size() == 1,
+                     "undo restores deleted point");
+
+        const auto img = w->arrange.createComponentSnapshot (w->arrange.getLocalBounds());
+        test::check (img.isValid() && img.getWidth() == w->arrange.getWidth(),
+                     "painting ArrangeView with expanded automation lane succeeds");
+    }
+
+    // [49] MIDI track, MIDI clip in ArrangeView, PianoRollView & Velocity Lane UI, quantize, undo/redo, and split layout
+    {
+        const auto dir49 = tempFolder().getChildFile ("piano-roll-ui");
+        dir49.deleteRecursively();
+        dir49.createDirectory();
+        auto w = makeWindow (true, dir49.getChildFile ("settings.xml"));
+        layoutCheck (*w, "with + MIDI button");
+
+        press (w->addMidiButton);
+        test::check (w->session.tracks.size() == 1
+                     && w->session.tracks[0]->isMidi
+                     && w->session.tracks[0]->synth != nullptr
+                     && w->session.sampleRate == 44100.0,
+                     "+ MIDI adds a MIDI track with BasicSynth and sets sampleRate when unset");
+
+        // Create MIDI clip via ArrangeView lane menu action ("Create MIDI clip" = 2)
+        w->arrange.openLaneActionForTest (0, 0, 2);
+        w->refreshNow();
+        test::check (w->session.tracks[0]->midiClips.size() == 1
+                     && w->arrange.selectedMidi.valid()
+                     && w->arrange.selectedMidi.track == 0
+                     && w->arrange.selectedMidi.clip == 0,
+                     "Create MIDI clip adds a MIDI clip on the track and selects it");
+
+        const auto mcBounds = w->arrange.midiClipBounds ({ 0, 0 });
+        test::check (! mcBounds.isEmpty() && mcBounds.getWidth() > 20, "MIDI clip has valid ArrangeView bounds");
+
+        // Double-click MIDI clip to open PianoRollView
+        const int fullArrangeH = w->arrange.getHeight();
+        test::check (! w->pianoRoll.isVisible(), "PianoRollView is hidden before opening a MIDI clip");
+        w->arrange.mouseDoubleClick (mouseAt (w->arrange, mcBounds.getCentre()));
+        test::check (w->pianoRoll.isVisible()
+                     && w->pianoRoll.target().track == 0
+                     && w->pianoRoll.target().clip == 0,
+                     "double-clicking MIDI clip opens PianoRollView targeting that clip");
+        test::check (w->arrange.getHeight() < fullArrangeH
+                     && w->pianoRoll.getHeight() > 100
+                     && w->pianoRoll.getY() > w->arrange.getBottom()
+                     && inside (w->arrange, *w) && inside (w->pianoRoll, *w),
+                     "MainComponent splits body between ArrangeView (~58%) and PianoRollView (~42%)");
+
+        // Double-click empty grid in PianoRollView to add a note
+        const auto grid = w->pianoRoll.noteGridBoundsForTest();
+        const auto keyC4 = w->pianoRoll.pianoKeyCenterForTest (60);
+        const juce::Point<int> addPt { grid.getX() + 10, keyC4.y };
+        w->pianoRoll.mouseDoubleClick (mouseAtComp (w->pianoRoll, addPt));
+        test::check (w->session.tracks[0]->midiClips[0].notes.size() == 1,
+                     "double-click on empty grid adds a MIDI note");
+        {
+            const auto& n0 = w->session.tracks[0]->midiClips[0].notes[0];
+            test::check (std::abs (n0.startBeat - 0.0) < 1e-6 && n0.pitch == 60 && n0.velocity == 100,
+                         "added note is snapped to beat 0, pitch 60, velocity 100");
+        }
+
+        // Add a second note via helper and test Shift+click multi-select + Escape
+        w->pianoRoll.addNoteForTest (2.0, 1.0, 64, 90);
+        test::check (w->session.tracks[0]->midiClips[0].notes.size() == 2, "second note added");
+        const auto nb0 = w->pianoRoll.noteBoundsForTest (0);
+        const auto nb1 = w->pianoRoll.noteBoundsForTest (1);
+        test::check (! nb0.isEmpty() && ! nb1.isEmpty(), "both notes have visible bounds");
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, nb0.getCentre()));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, nb0.getCentre()));
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, nb1.getCentre(), juce::ModifierKeys::shiftModifier));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, nb1.getCentre(), juce::ModifierKeys::shiftModifier));
+        test::check (w->pianoRoll.selectedNotesCountForTest() == 2, "Shift+click toggles multi-selection");
+
+        // Shift+click on selected note 1 deselects it without moving it
+        const double note1BeatBefore = w->session.tracks[0]->midiClips[0].notes[1].startBeat;
+        const int note1PitchBefore = w->session.tracks[0]->midiClips[0].notes[1].pitch;
+        const auto nb1Center = nb1.getCentre();
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, nb1Center, juce::ModifierKeys::shiftModifier));
+        w->pianoRoll.mouseDrag (mouseAtComp (w->pianoRoll, nb1Center + juce::Point<int> (80, -2 * PianoRollView::kRowHeight), juce::ModifierKeys::shiftModifier));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, nb1Center + juce::Point<int> (80, -2 * PianoRollView::kRowHeight), juce::ModifierKeys::shiftModifier));
+        test::check (w->pianoRoll.selectedNotesCountForTest() == 1
+                     && std::abs (w->session.tracks[0]->midiClips[0].notes[1].startBeat - note1BeatBefore) < 1e-6
+                     && w->session.tracks[0]->midiClips[0].notes[1].pitch == note1PitchBefore,
+                     "Shift+clicking a selected note deselects it without moving it");
+
+        // Drag note 0 body right by 1 beat (+80 px) and up by 2 semitones (-2 * kRowHeight)
+        const auto nb0Center = nb0.getCentre();
+        const auto dragTo = nb0Center + juce::Point<int> (80, -2 * PianoRollView::kRowHeight);
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, nb0Center));
+        w->pianoRoll.mouseDrag (mouseAtComp (w->pianoRoll, dragTo));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, dragTo));
+        test::check (std::abs (w->session.tracks[0]->midiClips[0].notes[0].startBeat - 1.0) < 1e-6
+                     && w->session.tracks[0]->midiClips[0].notes[0].pitch == 62,
+                     "dragging note body moves startBeat and pitch as one gesture");
+        test::check (w->editor.undo()
+                     && std::abs (w->session.tracks[0]->midiClips[0].notes[0].startBeat - 0.0) < 1e-6
+                     && w->session.tracks[0]->midiClips[0].notes[0].pitch == 60,
+                     "undo reverts note move in one step");
+        test::check (w->editor.redo()
+                     && std::abs (w->session.tracks[0]->midiClips[0].notes[0].startBeat - 1.0) < 1e-6
+                     && w->session.tracks[0]->midiClips[0].notes[0].pitch == 62,
+                     "redo restores note move");
+
+        // Resize note 0 right edge (+80 px = +1 beat)
+        const auto nb0AfterMove = w->pianoRoll.noteBoundsForTest (0);
+        const juce::Point<int> rightEdge { nb0AfterMove.getRight() - 2, nb0AfterMove.getCentreY() };
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, rightEdge));
+        w->pianoRoll.mouseDrag (mouseAtComp (w->pianoRoll, rightEdge + juce::Point<int> (80, 0)));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, rightEdge + juce::Point<int> (80, 0)));
+        test::check (std::abs (w->session.tracks[0]->midiClips[0].notes[0].durationBeats - 2.0) < 1e-6,
+                     "dragging note right edge resizes durationBeats");
+
+        // Velocity lane drag: adjust velocity of note 0 near bottom -> low velocity, then undo/redo
+        const auto velBounds = w->pianoRoll.velocityLaneBoundsForTest();
+        const int stemX = w->pianoRoll.noteBoundsForTest (0).getX();
+        const juce::Point<int> velLow { stemX, velBounds.getBottom() - 8 };
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, velLow));
+        w->pianoRoll.mouseDrag (mouseAtComp (w->pianoRoll, velLow));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, velLow));
+        const int newVel = w->session.tracks[0]->midiClips[0].notes[0].velocity;
+        test::check (newVel >= 1 && newVel < 40, "velocity lane click/drag lowers note velocity: " + juce::String (newVel));
+        test::check (w->editor.undo() && w->session.tracks[0]->midiClips[0].notes[0].velocity == 100, "undo restores note velocity");
+        test::check (w->editor.redo() && w->session.tracks[0]->midiClips[0].notes[0].velocity == newVel, "redo restores edited velocity");
+
+        // Grid cycle (1/4 -> 1/8) and Quantize
+        press (w->pianoRoll.gridButton);
+        test::check (w->session.grid == Grid::Eighth && w->pianoRoll.gridButton.getButtonText() == "1/8",
+                     "GRID button cycles from 1/4 to 1/8");
+        w->pianoRoll.addNoteForTest (0.37, 0.5, 67, 110);
+        press (w->pianoRoll.quantizeButton);
+        test::check (std::abs (w->session.tracks[0]->midiClips[0].notes[2].startBeat - 0.5) < 1e-6,
+                     "QUANTIZE snaps off-grid note to 1/8 grid (0.5 beat)");
+        test::check (w->editor.undo() && std::abs (w->session.tracks[0]->midiClips[0].notes[2].startBeat - 0.37) < 1e-6,
+                     "undo reverts quantize");
+
+        // Piano keyboard preview pushes NoteOn/NoteOff to liveMidiFifo
+        w->session.liveMidiFifo.clear();
+        const auto keyPt = w->pianoRoll.pianoKeyCenterForTest (60);
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, keyPt));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, keyPt));
+        test::check (w->session.liveMidiFifo.getNumReady() == 2,
+                     "clicking piano keyboard pushes NoteOn and NoteOff to liveMidiFifo");
+
+        // Delete key removes selected note
+        const auto nb2 = w->pianoRoll.noteBoundsForTest (2);
+        w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, nb2.getCentre()));
+        w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, nb2.getCentre()));
+        test::check (w->pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::deleteKey))
+                     && w->session.tracks[0]->midiClips[0].notes.size() == 2,
+                     "Delete key removes selected note in PianoRollView");
+
+        // Pressing Delete in PianoRollView with empty selection does not delete the open MIDI clip
+        test::check (w->pianoRoll.selectedNotesCountForTest() == 0, "selectedNotes is empty after deleting note");
+        const bool deleteConsumed = w->pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+        if (! deleteConsumed)
+            w->keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+        test::check (deleteConsumed && w->session.tracks[0]->midiClips.size() == 1 && w->pianoRoll.isVisible(),
+                     "Delete key with empty selection in PianoRollView is consumed without deleting the open MIDI clip");
+
+        // Paint ArrangeView (with miniature MIDI note bars) and PianoRollView, plus non-blocking refresh under renderBusy
+        const auto arrangeImg = w->arrange.createComponentSnapshot (w->arrange.getLocalBounds());
+        const auto pianoImg = w->pianoRoll.createComponentSnapshot (w->pianoRoll.getLocalBounds());
+        test::check (arrangeImg.isValid() && pianoImg.isValid(), "ArrangeView and PianoRollView paint cleanly");
+        {
+            w->session.renderBusy = true;
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            w->pianoRoll.refresh();
+            const double took = juce::Time::getMillisecondCounterHiRes() - t0;
+            w->session.renderBusy = false;
+            test::check (took < 200.0, "PianoRollView::refresh is non-blocking when renderRunning() is true");
+        }
+
+        // Close button hides PianoRollView and restores full ArrangeView height
+        press (w->pianoRoll.closeButton);
+        test::check (! w->pianoRoll.isVisible() && w->arrange.getHeight() == fullArrangeH,
+                     "Close button hides PianoRollView and restores ArrangeView height");
     }
 
     tempFolder().deleteRecursively();
