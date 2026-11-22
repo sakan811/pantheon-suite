@@ -3404,9 +3404,13 @@ int main()
                      "dragged automation point reflects new x/y position");
 
         // Undo removes the added+dragged point in one step; redo brings it back
-        test::check (w->editor.undo() && w->session.tracks[0]->automation[0].points.empty(),
+        test::check (w->editor.undo()
+                     && (w->session.tracks[0]->automation.empty()
+                         || w->session.tracks[0]->automation[0].points.empty()),
                      "undo removes the automation point in one step");
-        test::check (w->editor.redo() && w->session.tracks[0]->automation[0].points.size() == 1,
+        test::check (w->editor.redo()
+                     && !w->session.tracks[0]->automation.empty()
+                     && w->session.tracks[0]->automation[0].points.size() == 1,
                      "redo restores the automation point");
 
         juce::String error;
