@@ -217,6 +217,97 @@ public:
     void setStateInformation (const void* data, int size) override { goMono (size > 0 && ((const juce::uint8*) data)[0] != 0); }
 };
 
+// Stereo main input + stereo sidechain input (4 inputs, 2 outputs). Ducks main stereo output based on channels 2-3 amplitude.
+class SidechainPlugin : public juce::AudioPluginInstance
+{
+public:
+    SidechainPlugin()
+        : juce::AudioPluginInstance (BusesProperties()
+                                         .withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                                         .withInput ("Sidechain", juce::AudioChannelSet::stereo(), true)
+                                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
+    {
+        auto param = std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "amount", 1 }, "Amount",
+                                                                  juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f);
+        amount = param.get();
+        addHostedParameter (std::move (param));
+    }
+
+    bool isBusesLayoutSupported (const BusesLayout& layout) const override
+    {
+        if (layout.getMainInputChannelSet() != juce::AudioChannelSet::stereo()
+            || layout.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+            return false;
+        if (layout.inputBuses.size() > 1)
+        {
+            const auto& sc = layout.inputBuses.getReference (1);
+            if (! sc.isDisabled() && sc != juce::AudioChannelSet::stereo())
+                return false;
+        }
+        return layout.outputBuses.size() <= 1;
+    }
+
+    const juce::String getName() const override { return "Test Sidechain"; }
+    void fillInPluginDescription (juce::PluginDescription& d) const override
+    {
+        d = GainPlugin::description ("Test Sidechain");
+        d.numInputChannels = 4;
+        d.numOutputChannels = 2;
+    }
+    void prepareToPlay (double rate, int) override { preparedRate = rate; }
+    void releaseResources() override {}
+    void reset() override {}
+    void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&) override
+    {
+        const int n = b.getNumSamples();
+        if (b.getNumChannels() < 4 || getChannelCountOfBus (true, 1) < 2)
+            return;
+        const float amt = amount != nullptr ? amount->get() : 1.0f;
+        auto* l = b.getWritePointer (0);
+        auto* r = b.getWritePointer (1);
+        const auto* scL = b.getReadPointer (2);
+        const auto* scR = b.getReadPointer (3);
+        for (int i = 0; i < n; ++i)
+        {
+            const float scAmp = 0.5f * (std::abs (scL[i]) + std::abs (scR[i]));
+            const float duck = 1.0f / (1.0f + amt * scAmp * 10.0f);
+            l[i] *= duck;
+            r[i] *= duck;
+        }
+    }
+    using juce::AudioProcessor::processBlock;
+
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram (int) override {}
+    const juce::String getProgramName (int) override { return "Default"; }
+    void changeProgramName (int, const juce::String&) override {}
+    void getStateInformation (juce::MemoryBlock& m) override
+    {
+        m.setSize (0);
+        juce::MemoryOutputStream o (m, false);
+        o.writeFloat (amount != nullptr ? amount->get() : 1.0f);
+    }
+    void setStateInformation (const void* data, int size) override
+    {
+        if (amount != nullptr && size >= (int) sizeof (float))
+        {
+            juce::MemoryInputStream in (data, (size_t) size, false);
+            *amount = juce::jlimit (0.0f, 1.0f, in.readFloat());
+        }
+    }
+
+    double preparedRate = 0.0;
+
+private:
+    juce::AudioParameterFloat* amount = nullptr;
+};
+
 // A plugin of this name that only changes the level (for the snapshot, where the names are the suite's), reporting `latency` samples.
 inline void addStandIn (olympus::Catalog& catalog, const juce::String& name, int latency)
 {
@@ -240,5 +331,14 @@ inline void addBusPlugins (olympus::Catalog& catalog)
 inline void addLayoutPlugin (olympus::Catalog& catalog)
 {
     catalog.addInternal (GainPlugin::description ("Test Layout"), [] (double, int) { return std::make_unique<StateLayoutPlugin>(); });
+}
+
+// Sidechain ducking plugin for sidechain routing tests (kept out of addTestPlugins so existing catalog counts stay unchanged).
+inline void addSidechainPlugin (olympus::Catalog& catalog)
+{
+    juce::PluginDescription d = GainPlugin::description ("Test Sidechain");
+    d.numInputChannels = 4;
+    d.numOutputChannels = 2;
+    catalog.addInternal (d, [] (double, int) { return std::make_unique<SidechainPlugin>(); });
 }
 }
