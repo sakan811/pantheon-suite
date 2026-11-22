@@ -60,6 +60,9 @@ struct Slot
 {
     juce::String plugin;                                 // the plugin's name, as the catalog knows it
     bool bypass = false;
+    float wet = 1.0f;                                    // 0.0 (dry) .. 1.0 (wet)
+    int sidechainTrack = -1;                             // -1 = none, >= 0 = source track index for sidechain input (ch 2-3)
+    juce::AudioBuffer<float> dryScratch;                 // sized to >= 2 x kBlockSize off the audio thread for wet/dry blending
     std::unique_ptr<juce::AudioPluginInstance> instance; // null while the plugin is not installed on this machine
     juce::MemoryBlock savedState;                        // what a missing plugin had, kept so a project that is saved again does not lose it
     LatencyWatch* watch = nullptr;                       // the session's listener on `instance`, removed before the instance goes
@@ -176,9 +179,26 @@ struct AutomationLane
     }
 };
 
+enum class TrackKind { Audio, Midi, Bus };
+
+struct AuxSend
+{
+    int targetTrack = -1;
+    float levelDb = 0.0f;
+    bool preFader = false;
+    bool mute = false;
+};
+
 struct Track
 {
+    using TrackKind = ::olympus::TrackKind;
+    using AuxSend = ::olympus::AuxSend;
+
     juce::String name;
+    TrackKind kind = TrackKind::Audio;
+    bool isBus() const { return kind == TrackKind::Bus; }
+    int outputTrack = -1;                                // -1 = Master, >= 0 = target Bus track index
+    std::vector<AuxSend> sends;
     std::vector<Clip> clips;                             // may be empty: an empty track is valid
     std::vector<MidiClip> midiClips;
     bool isMidi = false;
@@ -194,11 +214,16 @@ struct Track
     std::vector<AutomationLane> automation;
     bool showAutomation = false;
     juce::String activeAutoTarget { "volume" };
+    bool frozen = false;
+    juce::File frozenFile;
+    std::shared_ptr<const juce::AudioBuffer<float>> frozenAudio;
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };   // post fader and pan; the audio thread keeps the max, the display resets them
 
-    // The sum of the chain's reported latencies.
+    // The sum of the chain's reported latencies (0 when frozen, since latency is baked out).
     int latency() const
     {
+        if (frozen)
+            return 0;
         int sum = 0;
         for (auto& s : chain) sum += s->latency();
         return juce::jmax (0, sum);
@@ -209,11 +234,15 @@ struct Track
         juce::int64 n = 0;
         for (auto& c : clips) n = juce::jmax (n, c.end());
         for (auto& mc : midiClips) n = juce::jmax (n, mc.end());
+        if (frozen && frozenAudio != nullptr)
+            n = juce::jmax (n, (juce::int64) frozenAudio->getNumSamples());
         return n;
     }
 
     // for the audio thread, set under the session's lock
     juce::AudioBuffer<float> scratch;
+    juce::AudioBuffer<float> busInput;                   // 2 x kBlockSize, accumulated audio for Bus tracks
+    juce::AudioBuffer<float> postScratch;                // 2 x kBlockSize, post-fader/pan stereo output for sends/buses/sidechains
     juce::AudioBuffer<float> delayRing;
     int delaySamples = 0, delayPos = 0;
     bool delayDirty = false;                             // the ring holds audio from a block that ran (cleared when the track is skipped)
@@ -266,6 +295,9 @@ struct PlaybackSnapshot
         std::vector<Clip> clips;
         std::vector<MidiClip> midiClips;
         std::vector<AutomationLane> automation;
+        TrackKind kind = TrackKind::Audio;
+        int outputTrack = -1;
+        std::vector<AuxSend> sends;
         bool isMidi = false;
         bool hasMidiPlugin = false;
         float gainDb = 0.0f;
@@ -273,8 +305,14 @@ struct PlaybackSnapshot
         bool mute = false;
         bool solo = false;
         bool armed = false;
+        bool frozen = false;
+        std::shared_ptr<const juce::AudioBuffer<float>> frozenAudio;
     };
     std::vector<Track> tracks;
+    std::vector<int> topoOrder;
+    std::vector<juce::AudioBuffer<float>> busInputs;
+    std::vector<juce::AudioBuffer<float>> postScratches;
+    std::vector<bool> audibleScratch;
     float masterDb = 0.0f;
     double sampleRate = 0.0;
     TempoMap tempo;
@@ -291,6 +329,7 @@ public:
     // it: it tries the lock or skips, and reads the plugins only when this is false.
     std::atomic<bool> renderBusy { false };
     bool renderRunning() const { return renderBusy.load(); }
+    std::atomic<bool> recording { false };
     std::atomic<juce::uint64> revision { 1 };
     void bumpRevision() { revision.fetch_add (1, std::memory_order_release); }
     std::vector<std::unique_ptr<Track>> tracks;
@@ -321,6 +360,9 @@ public:
             t.clips = src.clips;
             t.midiClips = src.midiClips;
             t.automation = src.automation;
+            t.kind = src.kind;
+            t.outputTrack = src.outputTrack;
+            t.sends = src.sends;
             t.isMidi = src.isMidi;
             t.hasMidiPlugin = false;
             for (const auto& s : src.chain)
@@ -336,7 +378,19 @@ public:
             t.mute = src.mute;
             t.solo = src.solo;
             t.armed = src.armed;
+            t.frozen = src.frozen;
+            t.frozenAudio = src.frozenAudio;
         }
+        std::vector<int> snapInLat, snapOutLat;
+        computeRoutingLocked (dst.topoOrder, snapInLat, snapOutLat);
+        dst.busInputs.resize (tracks.size());
+        dst.postScratches.resize (tracks.size());
+        for (size_t i = 0; i < tracks.size(); ++i)
+        {
+            dst.busInputs[i].setSize (2, kBlockSize, false, true, false);
+            dst.postScratches[i].setSize (2, kBlockSize, false, true, false);
+        }
+        dst.audibleScratch.assign (tracks.size(), false);
         dst.masterDb = masterDb;
         dst.sampleRate = sampleRate;
         dst.tempo = tempo;
@@ -348,6 +402,7 @@ public:
     // ---- the timeline ---------------------------------------------------------------------------------------------------
     TempoMap tempo;                 // tempo.sampleRate is the session's rate whenever that is set
     float masterDb = 0.0f;          // a gain on the sum of the tracks
+    std::vector<std::unique_ptr<Slot>> masterChain; // master bus FX chain (after tracks sum, before masterDb and metronome)
     std::atomic<float> masterPeakL { 0.0f }, masterPeakR { 0.0f }; // max since the display last read them
     std::vector<Marker> markers;    // sorted by start
     juce::int64 loopStart = 0, loopEnd = 0;
@@ -362,9 +417,12 @@ public:
     std::vector<std::unique_ptr<Slot>> monitor;
     std::atomic<bool> monitorBypass { false };   // read by the audio callback without the lock: atomic
 
+    bool isOffline() const { return offline; }
+
     Session()
     {
         formats.registerBasicFormats();
+        masterScratch.setSize (2, kBlockSize, false, true, false);
         monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
         snapshotScratch.setSize (2, kBlockSize, false, true, false);
         midiScratch.ensureSize (16384);
@@ -376,6 +434,8 @@ public:
         for (auto& t : tracks)
             for (auto& s : t->chain)
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        for (auto& s : masterChain)
+            if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         for (auto& s : monitor)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
     }
@@ -422,6 +482,7 @@ public:
     int addMidiTrack (juce::String trackName)
     {
         auto track = std::make_unique<Track>();
+        track->kind = TrackKind::Midi;
         track->isMidi = true;
         track->synth = std::make_unique<BasicSynth>();
         const juce::ScopedLock sl (lock);
@@ -439,6 +500,209 @@ public:
         publishPlaybackSnapshotLocked();
         dirty = true;
         return (int) tracks.size() - 1;
+    }
+
+    // A Bus / Group track that sums routed tracks and aux sends, runs a plugin chain, and routes to Master or another Bus.
+    int addBusTrack (const juce::String& busName, juce::String& error)
+    {
+        juce::ignoreUnused (error);
+        auto track = std::make_unique<Track>();
+        track->kind = TrackKind::Bus;
+        track->isMidi = false;
+        const juce::ScopedLock sl (lock);
+        track->name = busName.isNotEmpty() ? busName : "Bus " + juce::String ((int) tracks.size() + 1);
+        makeTrackLocked (*track);
+        tracks.push_back (std::move (track));
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return (int) tracks.size() - 1;
+    }
+
+    bool setTrackOutput (int track, int targetBus, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        if (targetBus < -1 || targetBus >= (int) tracks.size()) { error = "No bus track " + juce::String (targetBus); return false; }
+        if (targetBus == track) { error = "A track cannot route to itself."; return false; }
+        if (targetBus >= 0)
+        {
+            if (! tracks[(size_t) targetBus]->isBus())
+            {
+                error = "Target track '" + tracks[(size_t) targetBus]->name + "' is not a bus.";
+                return false;
+            }
+            if (wouldCreateCycleLocked (track, targetBus))
+            {
+                error = "Routing '" + tracks[(size_t) track]->name + "' to '" + tracks[(size_t) targetBus]->name + "' would create a feedback cycle.";
+                return false;
+            }
+        }
+        auto& t = *tracks[(size_t) track];
+        if (t.outputTrack == targetBus)
+            return true;
+        t.outputTrack = targetBus;
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool setTrackSend (int track, int targetBus, float levelDb, bool preFader, bool mute, juce::String& error)
+    {
+        if (! std::isfinite (levelDb))
+        {
+            error = "Send level must be a finite number.";
+            return false;
+        }
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        if (! juce::isPositiveAndBelow (targetBus, (int) tracks.size())) { error = "No bus track " + juce::String (targetBus); return false; }
+        if (targetBus == track) { error = "A track cannot send to itself."; return false; }
+        if (! tracks[(size_t) targetBus]->isBus())
+        {
+            error = "Target track '" + tracks[(size_t) targetBus]->name + "' is not a bus.";
+            return false;
+        }
+        if (wouldCreateCycleLocked (track, targetBus))
+        {
+            error = "Sending from '" + tracks[(size_t) track]->name + "' to '" + tracks[(size_t) targetBus]->name + "' would create a feedback cycle.";
+            return false;
+        }
+        const float clampedDb = juce::jlimit (-100.0f, 12.0f, levelDb);
+        auto& sends = tracks[(size_t) track]->sends;
+        for (auto& s : sends)
+        {
+            if (s.targetTrack == targetBus)
+            {
+                s.levelDb = clampedDb;
+                s.preFader = preFader;
+                s.mute = mute;
+                updateLatenciesLocked();
+                publishPlaybackSnapshotLocked();
+                dirty = true;
+                return true;
+            }
+        }
+        sends.push_back ({ targetBus, clampedDb, preFader, mute });
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool removeTrackSend (int track, int sendIndex, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        auto& sends = tracks[(size_t) track]->sends;
+        if (! juce::isPositiveAndBelow (sendIndex, (int) sends.size()))
+        {
+            error = "No send " + juce::String (sendIndex) + " on track " + juce::String (track);
+            return false;
+        }
+        sends.erase (sends.begin() + sendIndex);
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool setTrackSends (int track, const std::vector<AuxSend>& newSends, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        auto oldSends = tracks[(size_t) track]->sends;
+        tracks[(size_t) track]->sends.clear();
+        for (const auto& snd : newSends)
+        {
+            if (! std::isfinite (snd.levelDb))
+            {
+                tracks[(size_t) track]->sends = std::move (oldSends);
+                error = "Send level must be a finite number.";
+                return false;
+            }
+            if (! juce::isPositiveAndBelow (snd.targetTrack, (int) tracks.size()))
+            {
+                tracks[(size_t) track]->sends = std::move (oldSends);
+                error = "No bus track " + juce::String (snd.targetTrack);
+                return false;
+            }
+            if (snd.targetTrack == track)
+            {
+                tracks[(size_t) track]->sends = std::move (oldSends);
+                error = "A track cannot send to itself.";
+                return false;
+            }
+            if (! tracks[(size_t) snd.targetTrack]->isBus())
+            {
+                tracks[(size_t) track]->sends = std::move (oldSends);
+                error = "Target track '" + tracks[(size_t) snd.targetTrack]->name + "' is not a bus.";
+                return false;
+            }
+            if (wouldCreateCycleLocked (track, snd.targetTrack))
+            {
+                tracks[(size_t) track]->sends = std::move (oldSends);
+                error = "Sending from '" + tracks[(size_t) track]->name + "' to '" + tracks[(size_t) snd.targetTrack]->name + "' would create a feedback cycle.";
+                return false;
+            }
+            const float clampedDb = juce::jlimit (-100.0f, 12.0f, snd.levelDb);
+            auto& sends = tracks[(size_t) track]->sends;
+            bool updated = false;
+            for (auto& existing : sends)
+            {
+                if (existing.targetTrack == snd.targetTrack)
+                {
+                    existing.levelDb = clampedDb;
+                    existing.preFader = snd.preFader;
+                    existing.mute = snd.mute;
+                    updated = true;
+                    break;
+                }
+            }
+            if (! updated)
+                sends.push_back ({ snd.targetTrack, clampedDb, snd.preFader, snd.mute });
+        }
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool canSidechainTrack (int track, int sourceTrack, juce::String& error) const
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        if (tracks[(size_t) track]->frozen) { error = frozenTrackError (*tracks[(size_t) track]); return false; }
+        if (sourceTrack < -1 || sourceTrack >= (int) tracks.size()) { error = "No track " + juce::String (sourceTrack); return false; }
+        if (sourceTrack == track) { error = "A track cannot sidechain from itself."; return false; }
+        if (sourceTrack >= 0 && wouldCreateCycleLocked (sourceTrack, track))
+        {
+            error = "Sidechaining '" + tracks[(size_t) track]->name + "' from '" + tracks[(size_t) sourceTrack]->name + "' would create a feedback cycle.";
+            return false;
+        }
+        return true;
+    }
+
+    bool setSlotSidechain (int track, int slot, int sourceTrack, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        auto* s = slotAt (track, slot, error);
+        if (s == nullptr) return false;
+        if (tracks[(size_t) track]->frozen) { error = frozenTrackError (*tracks[(size_t) track]); return false; }
+        if (sourceTrack < -1 || sourceTrack >= (int) tracks.size()) { error = "No track " + juce::String (sourceTrack); return false; }
+        if (sourceTrack == track) { error = "A track cannot sidechain from itself."; return false; }
+        if (sourceTrack >= 0 && wouldCreateCycleLocked (sourceTrack, track))
+        {
+            error = "Sidechaining '" + tracks[(size_t) track]->name + "' from '" + tracks[(size_t) sourceTrack]->name + "' would create a feedback cycle.";
+            return false;
+        }
+        if (s->sidechainTrack == sourceTrack)
+            return true;
+        s->sidechainTrack = sourceTrack;
+        updateLatenciesLocked();
+        dirty = true;
+        return true;
     }
 
     // Appends a clip of the file to a track, at `startSample` on the timeline: from `offset` in the file, for `length` samples (0 = to the
@@ -510,9 +774,198 @@ public:
         for (auto& s : tracks[(size_t) index]->chain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         tracks.erase (tracks.begin() + index);
+        for (auto& t : tracks)
+        {
+            if (t->outputTrack == index) t->outputTrack = -1;
+            else if (t->outputTrack > index) --t->outputTrack;
+            t->sends.erase (std::remove_if (t->sends.begin(), t->sends.end(),
+                                            [index] (const AuxSend& snd) { return snd.targetTrack == index; }),
+                            t->sends.end());
+            for (auto& snd : t->sends)
+                if (snd.targetTrack > index) --snd.targetTrack;
+            for (auto& slot : t->chain)
+            {
+                if (slot->sidechainTrack == index) slot->sidechainTrack = -1;
+                else if (slot->sidechainTrack > index) --slot->sidechainTrack;
+            }
+        }
         updateLatenciesLocked();
         publishPlaybackSnapshotLocked();
         dirty = true;
+        return true;
+    }
+
+    // Renders `track` through its clips/MIDI/automation/chain with chain latency trimmed from the front into a 32-bit float WAV
+    // at `targetWav`, loads it via the audio pool, and marks the track frozen so playback and renders read the baked audio directly.
+    bool freezeTrack (int track, const juce::File& targetWav, juce::String& error)
+    {
+        if (recording.load())
+        {
+            error = "Stop recording before freezing a track.";
+            return false;
+        }
+        if (renderBusy.load())
+        {
+            error = "A render is running: wait for it or cancel it first.";
+            return false;
+        }
+        if (targetWav == juce::File())
+        {
+            error = "No target file given for frozen audio.";
+            return false;
+        }
+        {
+            const juce::ScopedLock sl (lock);
+            if (! juce::isPositiveAndBelow (track, (int) tracks.size()))
+            {
+                error = "No track " + juce::String (track);
+                return false;
+            }
+            auto& t = *tracks[(size_t) track];
+            if (t.isBus())
+            {
+                error = "Cannot freeze a bus track.";
+                return false;
+            }
+            if (t.frozen)
+            {
+                error = "Track '" + t.name + "' is already frozen.";
+                return false;
+            }
+            if (sampleRate <= 0.0)
+            {
+                error = "Nothing to freeze: no audio has been added.";
+                return false;
+            }
+            const juce::int64 baseLength = t.length();
+            if (baseLength <= 0)
+            {
+                error = "Track '" + t.name + "' has nothing to freeze.";
+                return false;
+            }
+            const juce::int64 maxTail = (juce::int64) std::llround (1.0 * sampleRate);
+            const juce::int64 renderLen = baseLength + maxTail;
+            if (renderLen > (juce::int64) (3.0 * 3600.0 * sampleRate)
+                || renderLen > (juce::int64) std::numeric_limits<int>::max() - kBlockSize)
+            {
+                error = "Track '" + t.name + "' is too long to freeze.";
+                return false;
+            }
+            if (! targetWav.getParentDirectory().createDirectory().wasOk())
+            {
+                error = "Cannot make the folder " + targetWav.getParentDirectory().getFullPathName();
+                return false;
+            }
+
+            const int chainLat = t.latency();
+            const OfflineScope offlineScope (*this);
+            struct HeadStop
+            {
+                Session& session;
+                ~HeadStop() { session.publishHead (0, false); }
+            } headStop { *this };
+
+            juce::AudioBuffer<float> rendered (2, (int) renderLen);
+            rendered.clear();
+            const juce::int64 totalInput = renderLen + (juce::int64) chainLat;
+            juce::int64 lastNonSilent = baseLength - 1;
+            constexpr float kSilenceThreshold = 1.0e-6f;
+
+            for (juce::int64 start = 0; start < totalInput; start += kBlockSize)
+            {
+                const int n = (int) juce::jmin ((juce::int64) kBlockSize, totalInput - start);
+                publishHead (start, true);
+                runChain (t, start, n);
+
+                const juce::int64 first = juce::jmax ((juce::int64) 0, (juce::int64) chainLat - start);
+                const juce::int64 last = juce::jmin ((juce::int64) n, renderLen + (juce::int64) chainLat - start);
+                if (last <= first)
+                    continue;
+                const int count = (int) (last - first);
+                const int dstStart = (int) (start + first - (juce::int64) chainLat);
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    const int srcCh = juce::jmin (ch, t.scratch.getNumChannels() - 1);
+                    const float* src = t.scratch.getReadPointer (srcCh, (int) first);
+                    float* dst = rendered.getWritePointer (ch, dstStart);
+                    for (int i = 0; i < count; ++i)
+                    {
+                        const float v = std::isfinite (src[i]) ? src[i] : 0.0f;
+                        dst[i] = v;
+                        if (std::abs (v) > kSilenceThreshold)
+                            lastNonSilent = juce::jmax (lastNonSilent, (juce::int64) (dstStart + i));
+                    }
+                }
+            }
+
+            const int finalLen = (int) juce::jlimit (baseLength, renderLen, lastNonSilent + 1);
+            auto writer = makeWriter (targetWav, 32, error);
+            if (writer == nullptr)
+            {
+                targetWav.deleteFile();
+                return false;
+            }
+            if (! writer->writeFromAudioSampleBuffer (rendered, 0, finalLen))
+            {
+                writer.reset();
+                targetWav.deleteFile();
+                error = "Writing " + targetWav.getFileName() + " failed.";
+                return false;
+            }
+            writer.reset();
+            pool.erase (targetWav.getFullPathName());
+        }
+
+        auto pooled = loadPooled (targetWav, error);
+        if (pooled == nullptr)
+        {
+            targetWav.deleteFile();
+            return false;
+        }
+
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size()))
+        {
+            error = "No track " + juce::String (track);
+            return false;
+        }
+        auto& t = *tracks[(size_t) track];
+        if (t.frozen)
+        {
+            error = "Track '" + t.name + "' is already frozen.";
+            return false;
+        }
+        t.frozen = true;
+        t.frozenFile = targetWav;
+        t.frozenAudio = std::move (pooled);
+        updateLatenciesLocked();
+        clearDelayRingsLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        bumpRevision();
+        return true;
+    }
+
+    // Restores `track` to live clip/MIDI/plugin processing while keeping its clips, automation and chain intact.
+    bool unfreezeTrack (int track, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size()))
+        {
+            error = "No track " + juce::String (track);
+            return false;
+        }
+        auto& t = *tracks[(size_t) track];
+        if (! t.frozen)
+            return true;
+        t.frozen = false;
+        t.frozenAudio.reset();
+        t.frozenFile = juce::File();
+        updateLatenciesLocked();
+        clearDelayRingsLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        bumpRevision();
         return true;
     }
 
@@ -647,6 +1100,11 @@ public:
         return true;
     }
 
+    static juce::String frozenTrackError (const Track& t)
+    {
+        return "Track '" + t.name + "' is frozen: unfreeze track to edit plugins.";
+    }
+
     // ---- chains ---------------------------------------------------------------------------------------------------------
     // Puts a new plugin (its own defaults) in the chain at `position` (-1 = the end).
     bool addPlugin (int track, const juce::String& query, int position, juce::String& error)
@@ -655,6 +1113,7 @@ public:
         {
             const juce::ScopedLock sl (lock);
             if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+            if (tracks[(size_t) track]->frozen) { error = frozenTrackError (*tracks[(size_t) track]); return false; }
             snapRate = sampleRate;
         }
         const auto exact = catalog.resolve (query, error);
@@ -666,6 +1125,12 @@ public:
         {
             if (slot->instance != nullptr) { slot->instance->releaseResources(); slot->instance->setPlayHead (nullptr); }
             error = "No track " + juce::String (track);
+            return false;
+        }
+        if (tracks[(size_t) track]->frozen)
+        {
+            if (slot->instance != nullptr) { slot->instance->releaseResources(); slot->instance->setPlayHead (nullptr); }
+            error = frozenTrackError (*tracks[(size_t) track]);
             return false;
         }
         auto& chain = tracks[(size_t) track]->chain;
@@ -681,6 +1146,7 @@ public:
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
         auto& trk = *tracks[(size_t) track];
+        if (trk.frozen) { error = frozenTrackError (trk); return false; }
         auto& chain = trk.chain;
         if (! juce::isPositiveAndBelow (slot, (int) chain.size())) { error = "No plugin " + juce::String (slot) + " on that track"; return false; }
         if (chain[(size_t) slot]->instance != nullptr) chain[(size_t) slot]->instance->setPlayHead (nullptr);
@@ -697,6 +1163,7 @@ public:
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
         auto& trk = *tracks[(size_t) track];
+        if (trk.frozen) { error = frozenTrackError (trk); return false; }
         auto& chain = trk.chain;
         if (! juce::isPositiveAndBelow (from, (int) chain.size()) || ! juce::isPositiveAndBelow (to, (int) chain.size())) { error = "No such place in the chain"; return false; }
         auto moved = std::move (chain[(size_t) from]);
@@ -712,7 +1179,57 @@ public:
     bool setBypass (int track, int slot, bool bypass, juce::String& error)
     {
         const juce::ScopedLock sl (lock);
-        if (auto* s = slotAt (track, slot, error)) { s->bypass = bypass; updateLatenciesLocked(); dirty = true; return true; }
+        if (auto* s = slotAt (track, slot, error))
+        {
+            if (tracks[(size_t) track]->frozen) { error = frozenTrackError (*tracks[(size_t) track]); return false; }
+            s->bypass = bypass;
+            updateLatenciesLocked();
+            dirty = true;
+            return true;
+        }
+        return false;
+    }
+
+    // Sets per-slot wet/dry mix (0.0 = dry, 1.0 = wet).
+    // track >= 0: track chain; track == -1: monitor chain (does not dirty project); track == -2: master chain.
+    bool setPluginWet (int track, int slot, float wet, juce::String& error)
+    {
+        if (! std::isfinite (wet))
+        {
+            error = "Wet must be a finite number (0..1).";
+            return false;
+        }
+        wet = juce::jlimit (0.0f, 1.0f, wet);
+        const juce::ScopedLock sl (lock);
+        if (track == -1)
+        {
+            if (auto* s = monitorSlotAt (slot, error))
+            {
+                s->wet = wet;
+                bumpRevision();
+                return true;
+            }
+            return false;
+        }
+        if (track == -2)
+        {
+            if (auto* s = masterSlot (slot, error))
+            {
+                s->wet = wet;
+                dirty = true;
+                bumpRevision();
+                return true;
+            }
+            return false;
+        }
+        if (auto* s = slotAt (track, slot, error))
+        {
+            if (tracks[(size_t) track]->frozen) { error = frozenTrackError (*tracks[(size_t) track]); return false; }
+            s->wet = wet;
+            dirty = true;
+            bumpRevision();
+            return true;
+        }
         return false;
     }
 
@@ -723,6 +1240,7 @@ public:
         {
             const juce::ScopedLock sl (lock);
             if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+            if (tracks[(size_t) track]->frozen) { error = frozenTrackError (*tracks[(size_t) track]); return false; }
             snapRate = sampleRate;
         }
         std::vector<std::unique_ptr<Slot>> fresh;
@@ -746,6 +1264,12 @@ public:
             error = "No track " + juce::String (track);
             return false;
         }
+        if (tracks[(size_t) track]->frozen)
+        {
+            releaseFresh();
+            error = frozenTrackError (*tracks[(size_t) track]);
+            return false;
+        }
         auto& trk = *tracks[(size_t) track];
         auto& chain = trk.chain;
         for (auto& s : chain)
@@ -761,7 +1285,7 @@ public:
     // Gives each of `to` the same chain as `from`, with the same settings (a copy of every plugin's state).
     bool copyChain (int from, const std::vector<int>& to, juce::String& error)
     {
-        struct Snap { juce::String plugin; bool bypass = false; juce::MemoryBlock state; };
+        struct Snap { juce::String plugin; bool bypass = false; float wet = 1.0f; juce::MemoryBlock state; };
         std::vector<Snap> chainSnap;
         std::vector<int> targets;
         double snapRate = 0.0;
@@ -771,13 +1295,14 @@ public:
             for (int t : to)
             {
                 if (! juce::isPositiveAndBelow (t, (int) tracks.size())) { error = "No track " + juce::String (t); return false; }
+                if (t != from && tracks[(size_t) t]->frozen) { error = frozenTrackError (*tracks[(size_t) t]); return false; }
                 if (t != from && std::find (targets.begin(), targets.end(), t) == targets.end())
                     targets.push_back (t);
             }
             snapRate = sampleRate;
             chainSnap.reserve (tracks[(size_t) from]->chain.size());
             for (auto& s : tracks[(size_t) from]->chain)
-                chainSnap.push_back ({ s->plugin, s->bypass, stateOf (*s) });
+                chainSnap.push_back ({ s->plugin, s->bypass, s->wet, stateOf (*s) });
         }
 
         // Every new chain is built outside `lock` so plugin creation does not silence the audio callback:
@@ -803,6 +1328,7 @@ public:
                     return false;
                 }
                 slot->bypass = item.bypass;
+                slot->wet = item.wet;
                 fresh.push_back (std::move (slot));
             }
             built.emplace_back (t, std::move (fresh));
@@ -816,6 +1342,13 @@ public:
                 for (auto& item : built)
                     releaseBuilt (item.second);
                 error = "No track " + juce::String (b.first);
+                return false;
+            }
+            if (tracks[(size_t) b.first]->frozen)
+            {
+                for (auto& item : built)
+                    releaseBuilt (item.second);
+                error = frozenTrackError (*tracks[(size_t) b.first]);
                 return false;
             }
         }
@@ -840,6 +1373,115 @@ public:
         return chain[(size_t) slot].get();
     }
 
+    // ---- master bus FX chain --------------------------------------------------------------------------------------------
+    bool addMasterPlugin (const juce::String& query, int position, juce::String& error)
+    {
+        double snapRate = 0.0;
+        {
+            const juce::ScopedLock sl (lock);
+            snapRate = sampleRate;
+        }
+        const auto exact = catalog.resolve (query, error);
+        if (exact.isEmpty()) return false;
+        auto slot = makeSlot (exact, nullptr, error, snapRate);
+        if (slot == nullptr) return false;
+        const juce::ScopedLock sl (lock);
+        position = position < 0 || position > (int) masterChain.size() ? (int) masterChain.size() : position;
+        masterChain.insert (masterChain.begin() + position, std::move (slot));
+        updateLatenciesLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool removeMasterPlugin (int index, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (index, (int) masterChain.size())) { error = "No master plugin " + juce::String (index); return false; }
+        if (masterChain[(size_t) index]->instance != nullptr) masterChain[(size_t) index]->instance->setPlayHead (nullptr);
+        masterChain.erase (masterChain.begin() + index);
+        updateLatenciesLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool moveMasterPlugin (int from, int to, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (from, (int) masterChain.size()) || ! juce::isPositiveAndBelow (to, (int) masterChain.size()))
+        { error = "No master plugin " + juce::String (juce::isPositiveAndBelow (from, (int) masterChain.size()) ? to : from); return false; }
+        auto slot = std::move (masterChain[(size_t) from]);
+        masterChain.erase (masterChain.begin() + from);
+        masterChain.insert (masterChain.begin() + to, std::move (slot));
+        dirty = true;
+        bumpRevision();
+        return true;
+    }
+
+    bool bypassMasterPlugin (int index, bool bypass, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (index, (int) masterChain.size())) { error = "No master plugin " + juce::String (index); return false; }
+        masterChain[(size_t) index]->bypass = bypass;
+        dirty = true;
+        bumpRevision();
+        return true;
+    }
+
+    bool setMasterChain (const juce::StringArray& plugins, juce::String& error)
+    {
+        double snapRate = 0.0;
+        {
+            const juce::ScopedLock sl (lock);
+            snapRate = sampleRate;
+        }
+        std::vector<std::unique_ptr<Slot>> fresh;
+        auto releaseFresh = [&fresh]
+        {
+            for (auto& s : fresh)
+                if (s->instance != nullptr) { s->instance->releaseResources(); s->instance->setPlayHead (nullptr); }
+        };
+        for (const auto& p : plugins)
+        {
+            const auto exact = catalog.resolve (p, error);
+            if (exact.isEmpty()) { releaseFresh(); return false; }
+            auto slot = makeSlot (exact, nullptr, error, snapRate);
+            if (slot == nullptr) { releaseFresh(); return false; }
+            fresh.push_back (std::move (slot));
+        }
+        const juce::ScopedLock sl (lock);
+        for (auto& s : masterChain)
+            if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        masterChain = std::move (fresh);
+        updateLatenciesLocked();
+        dirty = true;
+        return true;
+    }
+
+    Slot* masterSlot (int index) const
+    {
+        if (! juce::isPositiveAndBelow (index, (int) masterChain.size())) return nullptr;
+        return masterChain[(size_t) index].get();
+    }
+
+    Slot* masterSlot (int index, juce::String& error) const
+    {
+        if (! juce::isPositiveAndBelow (index, (int) masterChain.size())) { error = "No master plugin " + juce::String (index); return nullptr; }
+        return masterChain[(size_t) index].get();
+    }
+
+    int masterLatencyLocked() const
+    {
+        int sum = 0;
+        for (const auto& s : masterChain) sum += s->latency();
+        return juce::jmax (0, sum);
+    }
+
+    int masterLatency() const
+    {
+        const juce::ScopedLock sl (lock);
+        return masterLatencyLocked();
+    }
+
     // ---- time -----------------------------------------------------------------------------------------------------------
     // ---- the monitor chain ----------------------------------------------------------------------------------------------
     // Puts a plugin in the monitor chain at `position` (-1 = the end). Message thread only: the plugin is made here.
@@ -847,7 +1489,7 @@ public:
     {
         const auto exact = catalog.resolve (query, error);
         if (exact.isEmpty()) return false;
-        auto slot = makeSlot (exact, nullptr, error);
+        auto slot = makeSlot (exact, nullptr, error, 0.0, false);
         if (slot == nullptr) return false;
         const juce::ScopedLock sl (lock);
         position = position < 0 || position > (int) monitor.size() ? (int) monitor.size() : position;
@@ -943,8 +1585,7 @@ public:
             juce::AudioBuffer<float> view (monitorScratch.getArrayOfWritePointers(), viewChannels, count);
             midiScratch.clear();
             for (auto& s : monitor)
-                if (s->instance != nullptr && ! s->bypass)
-                    s->instance->processBlock (view, midiScratch);
+                processSlot (*s, view, midiScratch);
             for (int ch = 0; ch < copied; ++ch)
                 out.copyFrom (ch, start, monitorScratch, ch, 0, count);
         }
@@ -965,6 +1606,8 @@ public:
                 auto* e = xml->createNewChildElement ("Plugin");
                 e->setAttribute ("plugin", s->plugin);
                 e->setAttribute ("bypass", s->bypass);
+                if (s->wet < 0.9999f)
+                    e->setAttribute ("wet", (double) s->wet);
                 e->setAttribute ("state", stateOf (*s).toBase64Encoding());
             }
         }
@@ -1002,7 +1645,7 @@ public:
             state.fromBase64Encoding (e->getStringAttribute ("state"));
             const auto pluginName = e->getStringAttribute ("plugin");
             juce::String problem;
-            auto slot = makeSlot (pluginName, &state, problem);
+            auto slot = makeSlot (pluginName, &state, problem, 0.0, false);
             if (slot == nullptr)
             {
                 problems.add ("Monitor '" + pluginName + "': " + problem);
@@ -1011,6 +1654,8 @@ public:
                 slot->savedState = state;
             }
             slot->bypass = e->getBoolAttribute ("bypass");
+            const double rawWet = e->getDoubleAttribute ("wet", 1.0);
+            slot->wet = std::isfinite (rawWet) ? juce::jlimit (0.0f, 1.0f, (float) rawWet) : 1.0f;
             fresh.push_back (std::move (slot));
         }
         const juce::ScopedLock sl (lock);
@@ -1032,8 +1677,10 @@ public:
     juce::int64 endOfAudio() const { return length(); }
     int maxLatency() const
     {
+        std::vector<int> order, inLat, outLat;
+        computeRoutingLocked (order, inLat, outLat);
         int m = 0;
-        for (auto& t : tracks) m = juce::jmax (m, t->latency());
+        for (int lat : outLat) m = juce::jmax (m, lat);
         return m;
     }
 
@@ -1199,6 +1846,7 @@ public:
         // whole session as it was (a buffer kept at the old rate under a new one would be resampled down by the next adoptRate)
         if (old > 0.0)
             for (auto& t : tracks)
+            {
                 for (auto& c : t->clips)
                 {
                     if (c.audio == nullptr)
@@ -1211,11 +1859,23 @@ public:
                         return false;
                     }
                 }
+                if (t->frozen && t->frozenAudio != nullptr)
+                {
+                    const double wanted = std::ceil ((double) t->frozenAudio->getNumSamples() / (old / rate));
+                    if (! std::isfinite (wanted) || wanted > (double) (std::numeric_limits<int>::max() - 16))
+                    {
+                        error = "Frozen audio on track '" + t->name + "' cannot be resampled to " + juce::String (rate)
+                                + " Hz; the rate is unchanged.";
+                        return false;
+                    }
+                }
+            }
 
         // every distinct buffer of the clips, converted once; the old ones are kept alive until the clips are changed
         std::map<const juce::AudioBuffer<float>*, std::shared_ptr<const juce::AudioBuffer<float>>> converted;
         std::vector<std::shared_ptr<const juce::AudioBuffer<float>>> keepAlive;
         for (auto& t : tracks)
+        {
             for (auto& c : t->clips)
             {
                 if (c.audio == nullptr || old <= 0.0)
@@ -1226,6 +1886,15 @@ public:
                     found = converted.emplace (c.audio.get(), std::make_shared<const juce::AudioBuffer<float>> (resampled (*c.audio, old, rate))).first;
                 c.audio = found->second;
             }
+            if (t->frozen && t->frozenAudio != nullptr && old > 0.0)
+            {
+                keepAlive.push_back (t->frozenAudio);
+                auto found = converted.find (t->frozenAudio.get());
+                if (found == converted.end())
+                    found = converted.emplace (t->frozenAudio.get(), std::make_shared<const juce::AudioBuffer<float>> (resampled (*t->frozenAudio, old, rate))).first;
+                t->frozenAudio = found->second;
+            }
+        }
         for (auto it = pool.begin(); it != pool.end();)
         {
             const auto alive = it->second.lock();
@@ -1291,6 +1960,7 @@ public:
     void prepare (bool nonRealtime)
     {
         const juce::ScopedLock sl (lock);
+        offline = nonRealtime;
         prepareLocked (nonRealtime);
     }
 
@@ -1327,39 +1997,106 @@ public:
                 if (t->synth != nullptr)
                     t->synth->reset();
         }
-        bool anySolo = false;
-        for (const auto& t : tracks)
-            if (t->solo) { anySolo = true; break; }
+        computeTrackAudibilityLocked (cachedAudibleScratch);
         const int channels = juce::jmin (2, out.getNumChannels());
         const juce::int64 maxLat = (juce::int64) maxLatency();
+        bool hasMasterPlugin = false;
+        for (const auto& s : masterChain)
+            if (s->instance != nullptr && ! s->bypass) { hasMasterPlugin = true; break; }
         for (int done = 0; done < n; done += kBlockSize)
         {
             const int count = juce::jmin (kBlockSize, n - done);
             const juce::int64 blockStart = start + done;
             publishHead (blockStart, true);
             for (auto& t : tracks)
+                if (t->isBus())
+                    t->busInput.clear (0, count);
+
+            for (int ti : cachedTopoOrder)
             {
-                if (! audible (*t, anySolo) || (t->clips.empty() && t->midiClips.empty() && ! t->isMidi))
+                auto& t = *tracks[(size_t) ti];
+                const bool isAudible = (size_t) ti < cachedAudibleScratch.size() && cachedAudibleScratch[(size_t) ti];
+                if (! isAudible || (! t.isBus() && ! (t.frozen && t.frozenAudio != nullptr) && t.clips.empty() && t.midiClips.empty() && ! t.isMidi))
                 {
-                    if (t->synth != nullptr)
-                        t->synth->reset();
+                    if (t.synth != nullptr)
+                        t.synth->reset();
                     // skipped: its delay must not come back with stale audio when it plays again
-                    if (t->delayDirty)
+                    if (t.delayDirty)
                     {
-                        t->delayRing.clear();
-                        t->delayPos = 0;
-                        t->delayDirty = false;
+                        t.delayRing.clear();
+                        t.delayPos = 0;
+                        t.delayDirty = false;
                     }
+                    t.scratch.clear (0, count);
+                    t.postScratch.clear (0, count);
                     continue;
                 }
-                const juce::MidiBuffer* live = (t->isMidi && t->armed) ? &liveMidiScratch : nullptr;
-                runChain (*t, blockStart, count, live, done);
+                const juce::MidiBuffer* live = (! t.isBus() && t.isMidi && t.armed) ? &liveMidiScratch : nullptr;
+                runChain (t, blockStart, count, live, done);
+
+                for (const auto& snd : t.sends)
+                {
+                    if (! snd.preFader || snd.mute)
+                        continue;
+                    if (juce::isPositiveAndBelow (snd.targetTrack, (int) tracks.size()) && tracks[(size_t) snd.targetTrack]->isBus())
+                    {
+                        const float sg = juce::Decibels::decibelsToGain (snd.levelDb, -100.0f);
+                        auto& dst = tracks[(size_t) snd.targetTrack]->busInput;
+                        for (int ch = 0; ch < 2; ++ch)
+                            dst.addFrom (ch, 0, t.scratch, ch, 0, count, sg);
+                    }
+                }
+
+                t.postScratch.clear (0, count);
                 float pL = 0.0f, pR = 0.0f;
-                mixTrackBlock (t->scratch, out, done, count, blockStart - maxLat, t->gainDb, t->pan,
-                               findActiveLane (t->automation, "volume"), findActiveLane (t->automation, "pan"),
+                const juce::int64 autoOffset = ((size_t) ti < cachedOutLat.size())
+                                                   ? (juce::int64) (cachedOutLat[(size_t) ti] + t.delaySamples)
+                                                   : maxLat;
+                mixTrackBlock (t.scratch, t.postScratch, 0, count, blockStart - autoOffset, t.gainDb, t.pan,
+                               findActiveLane (t.automation, "volume"), findActiveLane (t.automation, "pan"),
                                &pL, &pR);
-                if (std::isfinite (pL)) t->peakL = juce::jmax (t->peakL.load(), pL);
-                if (std::isfinite (pR)) t->peakR = juce::jmax (t->peakR.load(), pR);
+                if (std::isfinite (pL)) t.peakL = juce::jmax (t.peakL.load(), pL);
+                if (std::isfinite (pR)) t.peakR = juce::jmax (t.peakR.load(), pR);
+
+                for (const auto& snd : t.sends)
+                {
+                    if (snd.preFader || snd.mute)
+                        continue;
+                    if (juce::isPositiveAndBelow (snd.targetTrack, (int) tracks.size()) && tracks[(size_t) snd.targetTrack]->isBus())
+                    {
+                        const float sg = juce::Decibels::decibelsToGain (snd.levelDb, -100.0f);
+                        auto& dst = tracks[(size_t) snd.targetTrack]->busInput;
+                        for (int ch = 0; ch < 2; ++ch)
+                            dst.addFrom (ch, 0, t.postScratch, ch, 0, count, sg);
+                    }
+                }
+
+                if (juce::isPositiveAndBelow (t.outputTrack, (int) tracks.size()) && tracks[(size_t) t.outputTrack]->isBus())
+                {
+                    auto& dst = tracks[(size_t) t.outputTrack]->busInput;
+                    for (int ch = 0; ch < 2; ++ch)
+                        dst.addFrom (ch, 0, t.postScratch, ch, 0, count, 1.0f);
+                }
+                else
+                {
+                    for (int ch = 0; ch < channels; ++ch)
+                        out.addFrom (ch, done, t.postScratch, ch, 0, count, 1.0f);
+                }
+            }
+            if (hasMasterPlugin && channels > 0 && masterScratch.getNumChannels() >= 2)
+            {
+                const int viewChannels = masterScratch.getNumChannels();
+                for (int ch = 0; ch < viewChannels; ++ch)
+                {
+                    if (ch < channels) masterScratch.copyFrom (ch, 0, out, ch, done, count);
+                    else masterScratch.clear (ch, 0, count);
+                }
+                juce::AudioBuffer<float> view (masterScratch.getArrayOfWritePointers(), viewChannels, count);
+                midiScratch.clear();
+                for (auto& s : masterChain)
+                    processSlot (*s, view, midiScratch);
+                for (int ch = 0; ch < channels; ++ch)
+                    out.copyFrom (ch, done, masterScratch, ch, 0, count);
             }
         }
         addMetronome (out, start);
@@ -1397,7 +2134,7 @@ public:
         if (! options.folder.createDirectory().wasOk()) { error = "Cannot make the folder " + options.folder.getFullPathName(); return false; }
         const OfflineScope offlineScope (*this); // plugins in render mode for this function; back to real time on every way out
 
-        struct Out { Track* track; std::unique_ptr<juce::AudioFormatWriter> writer; juce::File file; int latency; float left = 1.0f, right = 1.0f; juce::int64 written = 0; float peak = 0.0f; };
+        struct Out { int trackIndex = -1; Track* track = nullptr; std::unique_ptr<juce::AudioFormatWriter> writer; juce::File file; int latency = 0; float left = 1.0f, right = 1.0f; juce::int64 written = 0; float peak = 0.0f; };
         std::vector<Out> outs;
         const auto mixFile = options.folder.getChildFile ("mix.wav");
         std::unique_ptr<juce::AudioFormatWriter> mixWriter;
@@ -1408,24 +2145,27 @@ public:
             mixWriter.reset();
             if (options.writeMix) mixFile.deleteFile();
         };
-        bool anySolo = false;
-        for (const auto& t : tracks)
-            if (t->solo) { anySolo = true; break; }
-        int index = 0;
-        for (auto& t : tracks)
+        std::vector<bool> trackAudible;
+        computeTrackAudibilityLocked (trackAudible);
+        std::vector<int> topoOrder, inLat, outLat;
+        computeRoutingLocked (topoOrder, inLat, outLat);
+        std::vector<int> trackToOut (tracks.size(), -1);
+        for (int ti = 0; ti < (int) tracks.size(); ++ti)
         {
-            ++index;
-            if (! audible (*t, anySolo)) continue;
+            if (! trackAudible[(size_t) ti]) continue;
+            auto& t = tracks[(size_t) ti];
             Out o;
+            o.trackIndex = ti;
             o.track = t.get();
-            o.latency = t->latency();
+            o.latency = outLat[(size_t) ti];
             trackGains (*o.track, o.left, o.right);
-            o.file = options.folder.getChildFile (juce::String (index).paddedLeft ('0', 2) + "-" + juce::File::createLegalFileName (t->name) + ".wav");
+            o.file = options.folder.getChildFile (juce::String (ti + 1).paddedLeft ('0', 2) + "-" + juce::File::createLegalFileName (t->name) + ".wav");
             if (options.writeStems)
             {
                 o.writer = makeWriter (o.file, options.bits, error);
                 if (o.writer == nullptr) { o.file.deleteFile(); discardRun(); return false; }
             }
+            trackToOut[(size_t) ti] = (int) outs.size();
             outs.push_back (std::move (o));
         }
         if (outs.empty()) { error = "No track is audible (all muted, or others soloed)."; return false; }
@@ -1442,16 +2182,89 @@ public:
             }
         }
 
+        struct EdgeDelay
+        {
+            int dstBus = -1;
+            bool preFader = false;
+            float gain = 1.0f;
+            int delaySamples = 0;
+            int pos = 0;
+            juce::AudioBuffer<float> ring;
+            void pushAndAdd (const juce::AudioBuffer<float>& src, int n, juce::AudioBuffer<float>& dst)
+            {
+                if (delaySamples <= 0)
+                {
+                    for (int ch = 0; ch < 2; ++ch)
+                        dst.addFrom (ch, 0, src, ch, 0, n, gain);
+                    return;
+                }
+                for (int i = 0; i < n; ++i)
+                {
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        auto* r = ring.getWritePointer (ch);
+                        const float delayed = r[pos];
+                        r[pos] = src.getSample (ch, i);
+                        dst.addSample (ch, i, delayed * gain);
+                    }
+                    if (++pos >= delaySamples) pos = 0;
+                }
+            }
+        };
+        std::vector<std::vector<EdgeDelay>> edgeDelays (tracks.size());
+        for (int ti = 0; ti < (int) tracks.size(); ++ti)
+        {
+            if (! trackAudible[(size_t) ti]) continue;
+            const auto& t = *tracks[(size_t) ti];
+            auto addEdge = [&] (int targetBus, bool preFader, float gain)
+            {
+                if (! juce::isPositiveAndBelow (targetBus, (int) tracks.size()) || ! tracks[(size_t) targetBus]->isBus())
+                    return;
+                EdgeDelay ed;
+                ed.dstBus = targetBus;
+                ed.preFader = preFader;
+                ed.gain = gain;
+                ed.delaySamples = juce::jmax (0, inLat[(size_t) targetBus] - outLat[(size_t) ti]);
+                if (ed.delaySamples > 0)
+                {
+                    ed.ring.setSize (2, ed.delaySamples, false, true, false);
+                    ed.ring.clear();
+                }
+                edgeDelays[(size_t) ti].push_back (std::move (ed));
+            };
+            for (const auto& snd : t.sends)
+                if (! snd.mute)
+                    addEdge (snd.targetTrack, snd.preFader, juce::Decibels::decibelsToGain (snd.levelDb, -100.0f));
+            if (t.outputTrack >= 0)
+                addEdge (t.outputTrack, false, 1.0f);
+        }
+
         int totalLatency = 0;
         for (auto& o : outs) totalLatency = juce::jmax (totalLatency, o.latency);
+        const int masterLat = options.writeMix ? masterLatencyLocked() : 0;
+        int masterChannels = 2;
+        bool hasMasterPlugin = false;
+        if (options.writeMix)
+        {
+            for (const auto& s : masterChain)
+            {
+                if (s->instance != nullptr && ! s->bypass)
+                {
+                    hasMasterPlugin = true;
+                    masterChannels = juce::jmax (masterChannels, s->instance->getTotalNumInputChannels(), s->instance->getTotalNumOutputChannels());
+                }
+            }
+        }
         const int mixRingSize = totalLatency + kBlockSize;
         juce::AudioBuffer<float> mixRing (2, options.writeMix ? mixRingSize : 0);
         mixRing.clear();
+        juce::AudioBuffer<float> masterBlock (masterChannels, (options.writeMix && hasMasterPlugin) ? kBlockSize : 0);
         const float masterGain = juce::Decibels::decibelsToGain (masterDb, -100.0f);
         float mixPeak = 0.0f;
         juce::int64 mixFlushed = 0;
 
-        const juce::int64 end = stemLength + totalLatency;
+        const juce::int64 mixTotalInput = stemLength + masterLat;
+        const juce::int64 end = stemLength + totalLatency + masterLat;
         juce::AudioBuffer<float> block (2, kBlockSize);
         struct HeadStop
         {
@@ -1465,38 +2278,51 @@ public:
             const int n = (int) juce::jmin ((juce::int64) kBlockSize, end - start);
             headStop.pos = start;
             publishHead (start, true);
-            for (auto& o : outs)
+            for (auto& t : tracks)
+                if (t->isBus())
+                    t->busInput.clear (0, n);
+
+            for (int ti : topoOrder)
             {
-                runChain (*o.track, start, n);
-                // this block holds output samples [start, start + n): sample j of it is stem sample j - latency
-                const juce::int64 first = juce::jmax ((juce::int64) 0, (juce::int64) o.latency - start);
-                const juce::int64 last = juce::jmin ((juce::int64) n, stemLength + o.latency - start);
-                if (last <= first) continue;
-                const int count = (int) (last - first);
-                // the gained samples, sanitised once for both paths: the mix is the sum of the written stems, so a sample the gain pushes
-                // past float (or a plugin's NaN) is zeroed here, not in the sum, where it would take the other tracks' audio with it
-                block.setSize (2, count, false, false, true);
-                const auto* volLane = findActiveLane (o.track->automation, "volume");
-                const auto* panLane = findActiveLane (o.track->automation, "pan");
+                auto& t = *tracks[(size_t) ti];
+                if (! trackAudible[(size_t) ti])
+                {
+                    t.scratch.clear (0, n);
+                    t.postScratch.clear (0, n);
+                    continue;
+                }
+                runChain (t, start, n);
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    auto* sDst = t.scratch.getWritePointer (ch);
+                    for (int i = 0; i < n; ++i)
+                        if (! std::isfinite (sDst[i]))
+                            sDst[i] = 0.0f;
+                }
+                const auto* volLane = findActiveLane (t.automation, "volume");
+                const auto* panLane = findActiveLane (t.automation, "pan");
+                const int trackLat = outLat[(size_t) ti];
                 if (volLane == nullptr && panLane == nullptr)
                 {
+                    float gL = 1.0f, gR = 1.0f;
+                    trackGains (t, gL, gR);
                     for (int ch = 0; ch < 2; ++ch)
                     {
-                        block.copyFrom (ch, 0, o.track->scratch, ch, (int) first, count);
-                        block.applyGain (ch, 0, count, ch == 0 ? o.left : o.right);
+                        t.postScratch.copyFrom (ch, 0, t.scratch, ch, 0, n);
+                        t.postScratch.applyGain (ch, 0, n, ch == 0 ? gL : gR);
                     }
                 }
                 else
                 {
-                    const float* src0 = o.track->scratch.getReadPointer (0, (int) first);
-                    const float* src1 = o.track->scratch.getReadPointer (1, (int) first);
-                    float* dst0 = block.getWritePointer (0);
-                    float* dst1 = block.getWritePointer (1);
-                    for (int i = 0; i < count; ++i)
+                    const float* src0 = t.scratch.getReadPointer (0);
+                    const float* src1 = t.scratch.getReadPointer (1);
+                    float* dst0 = t.postScratch.getWritePointer (0);
+                    float* dst1 = t.postScratch.getWritePointer (1);
+                    for (int i = 0; i < n; ++i)
                     {
-                        const juce::int64 stemPos = start + first + i - o.latency;
-                        const float gainDb = volLane != nullptr ? autoNormToDb (volLane->evaluateAt (stemPos)) : o.track->gainDb;
-                        const float panVal = panLane != nullptr ? juce::jlimit (-1.0f, 1.0f, panLane->evaluateAt (stemPos) * 2.0f - 1.0f) : o.track->pan;
+                        const juce::int64 stemPos = start + i - trackLat;
+                        const float gainDb = volLane != nullptr ? autoNormToDb (volLane->evaluateAt (stemPos)) : t.gainDb;
+                        const float panVal = panLane != nullptr ? juce::jlimit (-1.0f, 1.0f, panLane->evaluateAt (stemPos) * 2.0f - 1.0f) : t.pan;
                         const float g = juce::Decibels::decibelsToGain (gainDb, -100.0f);
                         float pL = 1.0f, pR = 1.0f;
                         panGains (panVal, pL, pR);
@@ -1506,10 +2332,26 @@ public:
                 }
                 for (int ch = 0; ch < 2; ++ch)
                 {
-                    auto* dst = block.getWritePointer (ch);
-                    for (int i = 0; i < count; ++i)
+                    auto* dst = t.postScratch.getWritePointer (ch);
+                    for (int i = 0; i < n; ++i)
                         if (! std::isfinite (dst[i]))
                             dst[i] = 0.0f;
+                }
+                for (auto& ed : edgeDelays[(size_t) ti])
+                    ed.pushAndAdd (ed.preFader ? t.scratch : t.postScratch, n, tracks[(size_t) ed.dstBus]->busInput);
+
+                const int outIdx = trackToOut[(size_t) ti];
+                if (outIdx < 0) continue;
+                auto& o = outs[(size_t) outIdx];
+                // this block holds output samples [start, start + n): sample j of it is stem sample j - latency
+                const juce::int64 first = juce::jmax ((juce::int64) 0, (juce::int64) o.latency - start);
+                const juce::int64 last = juce::jmin ((juce::int64) n, stemLength + o.latency - start);
+                if (last <= first) continue;
+                const int count = (int) (last - first);
+                block.setSize (2, count, false, false, true);
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    block.copyFrom (ch, 0, t.postScratch, ch, (int) first, count);
                     const float mag = block.getMagnitude (ch, 0, count);
                     if (std::isfinite (mag))
                         o.peak = juce::jmax (o.peak, mag);
@@ -1520,7 +2362,7 @@ public:
                     discardRun();
                     return false;
                 }
-                if (options.writeMix)
+                if (options.writeMix && t.outputTrack < 0)
                 {
                     const juce::int64 dest = start + first - o.latency;
                     const int r0 = (int) (dest % mixRingSize);
@@ -1536,29 +2378,76 @@ public:
             }
             if (options.writeMix)
             {
-                const juce::int64 readyEnd = juce::jmin (stemLength, start + n - totalLatency);
+                const juce::int64 readyEnd = juce::jmin (mixTotalInput, start + n - totalLatency);
                 while (mixFlushed < readyEnd)
                 {
                     const int r0 = (int) (mixFlushed % mixRingSize);
-                    const int chunk = (int) juce::jmin (readyEnd - mixFlushed, (juce::int64) (mixRingSize - r0));
-                    for (int ch = 0; ch < 2; ++ch)
+                    const int chunk = (int) juce::jmin (readyEnd - mixFlushed, (juce::int64) (mixRingSize - r0), (juce::int64) kBlockSize);
+                    const juce::int64 outStart = mixFlushed;
+                    const juce::int64 outEnd = mixFlushed + chunk;
+                    const juce::int64 keepFrom = juce::jmax (outStart, (juce::int64) masterLat);
+                    const juce::int64 keepTo = juce::jmin (outEnd, (juce::int64) masterLat + stemLength);
+                    const int keepCount = keepTo > keepFrom ? (int) (keepTo - keepFrom) : 0;
+                    const int keepOffset = keepCount > 0 ? (int) (keepFrom - outStart) : 0;
+
+                    if (hasMasterPlugin)
                     {
-                        mixRing.applyGain (ch, r0, chunk, masterGain);
-                        auto* dst = mixRing.getWritePointer (ch, r0);
-                        for (int i = 0; i < chunk; ++i)
-                            if (! std::isfinite (dst[i]))
-                                dst[i] = 0.0f;
-                        const float mag = mixRing.getMagnitude (ch, r0, chunk);
-                        if (std::isfinite (mag))
-                            mixPeak = juce::jmax (mixPeak, mag);
+                        for (int ch = 0; ch < masterChannels; ++ch)
+                        {
+                            if (ch < 2) masterBlock.copyFrom (ch, 0, mixRing, ch, r0, chunk);
+                            else masterBlock.clear (ch, 0, chunk);
+                        }
+                        mixRing.clear (r0, chunk);
+                        juce::AudioBuffer<float> masterView (masterBlock.getArrayOfWritePointers(), masterChannels, chunk);
+                        midiScratch.clear();
+                        for (auto& s : masterChain)
+                            processSlot (*s, masterView, midiScratch);
+                        if (keepCount > 0)
+                        {
+                            for (int ch = 0; ch < 2; ++ch)
+                            {
+                                masterBlock.applyGain (ch, keepOffset, keepCount, masterGain);
+                                auto* dst = masterBlock.getWritePointer (ch, keepOffset);
+                                for (int i = 0; i < keepCount; ++i)
+                                    if (! std::isfinite (dst[i]))
+                                        dst[i] = 0.0f;
+                                const float mag = masterBlock.getMagnitude (ch, keepOffset, keepCount);
+                                if (std::isfinite (mag))
+                                    mixPeak = juce::jmax (mixPeak, mag);
+                            }
+                            juce::AudioBuffer<float> stereoOut (masterBlock.getArrayOfWritePointers(), 2, keepOffset + keepCount);
+                            if (! mixWriter->writeFromAudioSampleBuffer (stereoOut, keepOffset, keepCount))
+                            {
+                                error = "Writing mix.wav failed.";
+                                discardRun();
+                                return false;
+                            }
+                        }
                     }
-                    if (! mixWriter->writeFromAudioSampleBuffer (mixRing, r0, chunk))
+                    else
                     {
-                        error = "Writing mix.wav failed.";
-                        discardRun();
-                        return false;
+                        if (keepCount > 0)
+                        {
+                            for (int ch = 0; ch < 2; ++ch)
+                            {
+                                mixRing.applyGain (ch, r0 + keepOffset, keepCount, masterGain);
+                                auto* dst = mixRing.getWritePointer (ch, r0 + keepOffset);
+                                for (int i = 0; i < keepCount; ++i)
+                                    if (! std::isfinite (dst[i]))
+                                        dst[i] = 0.0f;
+                                const float mag = mixRing.getMagnitude (ch, r0 + keepOffset, keepCount);
+                                if (std::isfinite (mag))
+                                    mixPeak = juce::jmax (mixPeak, mag);
+                            }
+                            if (! mixWriter->writeFromAudioSampleBuffer (mixRing, r0 + keepOffset, keepCount))
+                            {
+                                error = "Writing mix.wav failed.";
+                                discardRun();
+                                return false;
+                            }
+                        }
+                        mixRing.clear (r0, chunk);
                     }
-                    mixRing.clear (r0, chunk);
                     mixFlushed += chunk;
                 }
             }
@@ -1626,6 +2515,8 @@ public:
         {
             auto* e = xml->createNewChildElement ("Track");
             e->setAttribute ("name", t->name);
+            e->setAttribute ("kind", t->isBus() ? "bus" : (t->kind == TrackKind::Midi ? "midi" : "audio"));
+            e->setAttribute ("outputTrack", t->outputTrack);
             e->setAttribute ("pan", (double) t->pan);
             e->setAttribute ("gainDb", (double) t->gainDb);
             e->setAttribute ("mute", t->mute);
@@ -1636,11 +2527,29 @@ public:
             e->setAttribute ("isMidi", t->isMidi);
             e->setAttribute ("showAutomation", t->showAutomation);
             e->setAttribute ("activeAutoTarget", t->activeAutoTarget);
+            e->setAttribute ("frozen", t->frozen);
+            if (t->frozen && t->frozenFile != juce::File())
+            {
+                e->setAttribute ("frozenFile", relativeTo != juce::File()
+                                                   ? t->frozenFile.getRelativePathFrom (relativeTo.getParentDirectory())
+                                                   : t->frozenFile.getFullPathName());
+                e->setAttribute ("frozenPath", t->frozenFile.getFullPathName());
+            }
+            for (const auto& snd : t->sends)
+            {
+                auto* se = e->createNewChildElement ("Send");
+                se->setAttribute ("targetTrack", snd.targetTrack);
+                se->setAttribute ("levelDb", (double) snd.levelDb);
+                se->setAttribute ("preFader", snd.preFader);
+                se->setAttribute ("mute", snd.mute);
+            }
             for (auto& c : t->clips)
             {
                 auto* k = e->createNewChildElement ("Clip");
                 k->setAttribute ("name", c.name);
-                k->setAttribute ("file", c.file.getRelativePathFrom (relativeTo.getParentDirectory()));
+                k->setAttribute ("file", c.file != juce::File() && relativeTo != juce::File()
+                                              ? c.file.getRelativePathFrom (relativeTo.getParentDirectory())
+                                              : c.file.getFullPathName());
                 k->setAttribute ("path", c.file.getFullPathName());
                 k->setAttribute ("start", juce::String (c.start));
                 k->setAttribute ("offset", juce::String (c.offset));
@@ -1668,12 +2577,7 @@ public:
                 }
             }
             for (auto& s : t->chain)
-            {
-                auto* c = e->createNewChildElement ("Slot");
-                c->setAttribute ("plugin", s->plugin);
-                c->setAttribute ("bypass", s->bypass);
-                c->setAttribute ("state", stateOf (*s).toBase64Encoding());
-            }
+                writeSlotXml (*e, "Slot", *s);
             for (const auto& lane : t->automation)
             {
                 auto* ae = e->createNewChildElement ("AutomationLane");
@@ -1690,6 +2594,9 @@ public:
                 }
             }
         }
+        auto* mc = xml->createNewChildElement ("MasterChain");
+        for (auto& s : masterChain)
+            writeSlotXml (*mc, "Plugin", *s);
         return xml;
     }
 
@@ -1748,7 +2655,6 @@ public:
         if (xml == nullptr || ! xml->hasTagName ("OlympusProject")) { error = file.getFileName() + " is not an Olympus project."; return false; }
         if (xml->getIntAttribute ("version", 1) > kProjectVersion) { error = "This project is from a newer Olympus."; return false; }
 
-        juce::StringArray problems;
         pool.clear(); // the rate of the project may differ from the one the pool was read at
         const auto savedRateText = xml->getStringAttribute ("sampleRate");
         const double savedRate = xml->getDoubleAttribute ("sampleRate", 0.0);
@@ -1756,178 +2662,34 @@ public:
         // else that is not a rate in the band (a NaN, a negative, one no device runs at, or text that is not a number and reads as 0.0)
         // becomes unknown too, and is said with the text as it was saved. An unknown rate is set by the device or by a file.
         const bool rateIsUsable = std::isfinite (savedRate) && savedRate >= kMinValidRate && savedRate <= kMaxValidRate;
-        double rate = rateIsUsable ? savedRate : 0.0;
-        if (! (rate > 0.0) && savedRateText.isNotEmpty() && savedRateText != "0")
-            problems.add ("The saved sample rate '" + savedRateText + "' is not a rate Olympus can use, so it is unknown until the device sets one.");
-        std::vector<double> slotPreparedRates;
-        std::vector<std::unique_ptr<Track>> loaded;
-        for (auto* e : xml->getChildWithTagNameIterator ("Track"))
-        {
-            auto t = std::make_unique<Track>();
-            t->name = e->getStringAttribute ("name");
-            const double trackGain = e->getDoubleAttribute ("gainDb", 0.0);
-            const double trackPan = e->getDoubleAttribute ("pan", 0.0);
-            // the same range as the fader and Editor::setTrackGain (-100 is silence, +12 the top)
-            if (std::isfinite (trackGain) && trackGain > 12.0)
-                problems.add ("Track '" + t->name + "': the gain was above +12 dB and is set to +12 dB.");
-            t->gainDb = std::isfinite (trackGain) ? (float) juce::jlimit (-100.0, 12.0, trackGain) : 0.0f;
-            t->pan = std::isfinite (trackPan) ? (float) juce::jlimit (-1.0, 1.0, trackPan) : 0.0f;
-            t->mute = e->getBoolAttribute ("mute");
-            t->solo = e->getBoolAttribute ("solo");
-            t->armed = e->getBoolAttribute ("armed");
-            t->inputLeft = juce::jmax (0, e->getIntAttribute ("inputLeft", 0));
-            t->inputRight = juce::jmax (-1, e->getIntAttribute ("inputRight", 1));
-            t->isMidi = e->getBoolAttribute ("isMidi", false);
-            t->showAutomation = e->getBoolAttribute ("showAutomation", false);
-            t->activeAutoTarget = e->getStringAttribute ("activeAutoTarget", "volume");
-            if (t->activeAutoTarget.isEmpty()) t->activeAutoTarget = "volume";
-            if (t->isMidi)
-                t->synth = std::make_unique<BasicSynth>();
-            const bool legacy = e->getChildByName ("Clip") == nullptr && (e->hasAttribute ("file") || e->hasAttribute ("path"));
-            if (legacy)
-                t->clips.push_back (readClip (*e, file.getParentDirectory(), rate, true, t->name, problems));
-            else
-                for (auto* c : e->getChildWithTagNameIterator ("Clip"))
-                    t->clips.push_back (readClip (*c, file.getParentDirectory(), rate, false, t->name, problems));
+        const double initialRate = rateIsUsable ? savedRate : 0.0;
+        juce::String initialProblem;
+        if (! (initialRate > 0.0) && savedRateText.isNotEmpty() && savedRateText != "0")
+            initialProblem = "The saved sample rate '" + savedRateText + "' is not a rate Olympus can use, so it is unknown until the device sets one.";
 
-            for (auto* mc : e->getChildWithTagNameIterator ("MidiClip"))
-            {
-                MidiClip m;
-                m.name = mc->getStringAttribute ("name");
-                m.start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, mc->getStringAttribute ("start", "0").getLargeIntValue());
-                m.length = juce::jlimit ((juce::int64) 0, kMaxSafeSample, mc->getStringAttribute ("length", "0").getLargeIntValue());
-                m.mute = mc->getBoolAttribute ("mute");
-                for (auto* ne : mc->getChildWithTagNameIterator ("Note"))
-                {
-                    MidiNote note;
-                    const double sb = ne->getDoubleAttribute ("startBeat", 0.0);
-                    const double db = ne->getDoubleAttribute ("durationBeats", 1.0);
-                    note.startBeat = std::isfinite (sb) ? juce::jlimit (0.0, 1e7, sb) : 0.0;
-                    note.durationBeats = (std::isfinite (db) && db > 0.0) ? juce::jlimit (1.0 / 64.0, 1e6, db) : 1.0;
-                    note.pitch = juce::jlimit (0, 127, ne->getIntAttribute ("pitch", 60));
-                    note.velocity = juce::jlimit (1, 127, ne->getIntAttribute ("velocity", 100));
-                    note.channel = juce::jlimit (1, 16, ne->getIntAttribute ("channel", 1));
-                    m.notes.push_back (note);
-                }
-                t->midiClips.push_back (std::move (m));
-            }
-
-            for (auto* c : e->getChildWithTagNameIterator ("Slot"))
-            {
-                juce::MemoryBlock state;
-                state.fromBase64Encoding (c->getStringAttribute ("state"));
-                juce::String problem2;
-                const double slotRate = rate > 0.0 ? rate : (sampleRate > 0.0 ? sampleRate : 48000.0);
-                auto slot = makeSlot (c->getStringAttribute ("plugin"), &state, problem2, rate);
-                if (slot == nullptr)
-                {
-                    problems.add ("Track '" + t->name + "': " + problem2);
-                    slot = std::make_unique<Slot>();
-                    slot->plugin = c->getStringAttribute ("plugin");
-                    slot->savedState = state;
-                }
-                else
-                {
-                    slotPreparedRates.push_back (slotRate);
-                }
-                slot->bypass = c->getBoolAttribute ("bypass");
-                t->chain.push_back (std::move (slot));
-            }
-            for (auto* ae : e->getChildWithTagNameIterator ("AutomationLane"))
-            {
-                AutomationLane lane;
-                lane.targetId = ae->getStringAttribute ("targetId");
-                if (lane.targetId.isEmpty()) continue;
-                lane.slotIndex = ae->getIntAttribute ("slotIndex", -1);
-                lane.paramIndex = ae->getIntAttribute ("paramIndex", -1);
-                lane.enabled = ae->getBoolAttribute ("enabled", true);
-                for (auto* pe : ae->getChildWithTagNameIterator ("Point"))
-                {
-                    AutoPoint pt;
-                    pt.sample = juce::jlimit ((juce::int64) 0, kMaxSafeSample, pe->getStringAttribute ("sample", "0").getLargeIntValue());
-                    const double rawVal = pe->getDoubleAttribute ("value", 0.0);
-                    pt.value = std::isfinite (rawVal) ? (float) juce::jlimit (0.0, 1.0, rawVal) : 0.0f;
-                    pt.curve = (AutoCurveType) juce::jlimit (0, 2, pe->getIntAttribute ("curve", 0));
-                    lane.points.push_back (pt);
-                }
-                std::stable_sort (lane.points.begin(), lane.points.end(),
-                                  [] (const AutoPoint& a, const AutoPoint& b) { return a.sample < b.sample; });
-                t->automation.push_back (std::move (lane));
-            }
-            loaded.push_back (std::move (t));
-        }
-
-        const double capRate = (std::isfinite (rate) && rate > 0.0) ? rate : 48000.0;
-        const juce::int64 maxMissingSamples = (juce::int64) std::min (capRate * 3600.0 * 2.0, (double) std::numeric_limits<juce::int64>::max() / 2.0);
-        for (auto& t : loaded)
-            for (auto& c : t->clips)
-                if (c.audio == nullptr)
-                {
-                    c.length = juce::jlimit ((juce::int64) 0, maxMissingSamples, c.length);
-                    c.fadeIn = juce::jlimit ((juce::int64) 0, c.length, c.fadeIn);
-                    c.fadeOut = juce::jmin (juce::jlimit ((juce::int64) 0, c.length, c.fadeOut), c.length - c.fadeIn);
-                }
-
-        // the timeline
-        std::vector<TempoPoint> points;
-        for (auto* p : xml->getChildWithTagNameIterator ("Tempo"))
-        {
-            const double rawBeat = p->getDoubleAttribute ("beat", 0.0);
-            const double rawBpm = p->getDoubleAttribute ("bpm", 120.0);
-            if (std::isfinite (rawBeat) && std::isfinite (rawBpm))
-                points.push_back ({ juce::jmax (0.0, rawBeat), juce::jlimit (TempoMap::kMinBpm, TempoMap::kMaxBpm, rawBpm) });
-        }
-        std::stable_sort (points.begin(), points.end(), [] (const TempoPoint& a, const TempoPoint& b) { return a.beat < b.beat; });
-        if (points.empty() || points.front().beat > TempoMap::kBeatEps)
-            points.insert (points.begin(), { 0.0, points.empty() ? 120.0 : points.front().bpm });
-        TempoMap map;
-        map.points.clear();
-        for (const auto& p : points)
-            if (map.points.empty() || p.beat > map.points.back().beat + TempoMap::kBeatEps)
-                map.points.push_back (p);
-        map.setSignature (juce::jlimit (1, 32, xml->getIntAttribute ("tsNum", 4)), xml->getIntAttribute ("tsDen", 4));
-
-        std::vector<Marker> markerList;
-        for (auto* m : xml->getChildWithTagNameIterator ("Marker"))
-            markerList.push_back ({ m->getStringAttribute ("name"),
-                                    juce::jlimit ((juce::int64) 0, kMaxSafeSample, m->getStringAttribute ("sample", "0").getLargeIntValue()) });
-        std::stable_sort (markerList.begin(), markerList.end(), [] (const Marker& a, const Marker& b) { return a.start < b.start; });
+        auto parsed = parseXml (*xml, file.getParentDirectory(), initialRate, initialProblem);
 
         const juce::ScopedLock sl (lock);
-        for (auto& t : tracks)
-            for (auto& s : t->chain)
-                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
-        tracks = std::move (loaded);
-        setSampleRateLocked (rate);
-        for (auto& t : tracks)
-            for (auto& s : t->chain)
-                if (s->instance != nullptr) s->instance->setPlayHead (&head);
-        tempo = map;
+        clearProjectPlayheadsLocked();
+        tracks = std::move (parsed.tracks);
+        masterChain = std::move (parsed.masterChain);
+        setSampleRateLocked (parsed.rate);
+        attachProjectPlayheadsLocked();
+        tempo = parsed.tempo;
         if (sampleRate > 0.0) tempo.sampleRate = sampleRate;
-        markers = std::move (markerList);
-        // the same range as the fader and Editor::setMasterDb (-100 is silence, +12 the top)
-        const double savedMasterDb = xml->getDoubleAttribute ("masterDb", 0.0);
-        if (! std::isfinite (savedMasterDb))
-        {
-            masterDb = 0.0f;
-        }
-        else
-        {
-            if (savedMasterDb > 12.0)
-                problems.add ("The master gain was above +12 dB and is set to +12 dB.");
-            masterDb = (float) juce::jlimit (-100.0, 12.0, savedMasterDb);
-        }
-        loopStart = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml->getStringAttribute ("loopStart", "0").getLargeIntValue());
-        loopEnd = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml->getStringAttribute ("loopEnd", "0").getLargeIntValue());
-        loopOn = xml->getBoolAttribute ("loopOn") && loopEnd > loopStart;
-        metronomeOn = xml->getBoolAttribute ("metronome");
-        snapOn = xml->getBoolAttribute ("snap", true);
-        grid = (Grid) juce::jlimit (0, 5, xml->getIntAttribute ("grid", (int) Grid::Quarter));
+        markers = std::move (parsed.markers);
+        masterDb = parsed.masterDb;
+        loopStart = parsed.loopStart;
+        loopEnd = parsed.loopEnd;
+        loopOn = parsed.loopOn;
+        metronomeOn = parsed.metronomeOn;
+        snapOn = parsed.snapOn;
+        grid = parsed.grid;
         projectFile = file;
         name = xml->getStringAttribute ("name", file.getFileNameWithoutExtension());
-        warnings = problems;
+        warnings = parsed.problems;
         const double finalRate = sampleRate > 0.0 ? sampleRate : 48000.0;
-        const bool needsPrepare = std::any_of (slotPreparedRates.begin(), slotPreparedRates.end(),
+        const bool needsPrepare = std::any_of (parsed.slotPreparedRates.begin(), parsed.slotPreparedRates.end(),
                                                [finalRate] (double r) { return std::abs (r - finalRate) > 0.5; });
         if (needsPrepare)
             prepareLocked (false);
@@ -1941,6 +2703,54 @@ public:
         }
         publishPlaybackSnapshotLocked();
         dirty = false;
+        bumpRevision();
+        return true;
+    }
+
+    // Restores tracks, master chain and timeline state from an XML snapshot (structural undo/redo) without touching projectFile, monitor or undo.
+    bool restoreEditXml (const juce::XmlElement& xml, juce::StringArray* warningsOut = nullptr)
+    {
+        if (! xml.hasTagName ("OlympusProject"))
+            return false;
+        if (xml.getIntAttribute ("version", 1) > kProjectVersion)
+            return false;
+
+        juce::File baseDir;
+        double currentRate = 0.0;
+        {
+            const juce::ScopedLock sl (lock);
+            baseDir = projectFile != juce::File() ? projectFile.getParentDirectory() : juce::File();
+            currentRate = sampleRate;
+        }
+        const double xmlRate = xml.getDoubleAttribute ("sampleRate", 0.0);
+        const double usableXmlRate = (std::isfinite (xmlRate) && xmlRate >= kMinValidRate && xmlRate <= kMaxValidRate) ? xmlRate : 0.0;
+        const double parseRate = currentRate > 0.0 ? currentRate : usableXmlRate;
+
+        auto parsed = parseXml (xml, baseDir, parseRate);
+
+        const juce::ScopedLock sl (lock);
+        clearProjectPlayheadsLocked();
+        tracks = std::move (parsed.tracks);
+        masterChain = std::move (parsed.masterChain);
+        attachProjectPlayheadsLocked();
+        masterDb = parsed.masterDb;
+        tempo = parsed.tempo;
+        if (sampleRate > 0.0)
+            tempo.sampleRate = sampleRate;
+        markers = std::move (parsed.markers);
+        loopStart = parsed.loopStart;
+        loopEnd = parsed.loopEnd;
+        loopOn = parsed.loopOn;
+        metronomeOn = parsed.metronomeOn;
+        grid = parsed.grid;
+        snapOn = parsed.snapOn;
+        if (warningsOut != nullptr)
+            *warningsOut = parsed.problems;
+
+        prepareLocked (offline);
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
         bumpRevision();
         return true;
     }
@@ -2023,6 +2833,9 @@ public:
             for (auto& s : t->chain)
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         tracks.clear();
+        for (auto& s : masterChain)
+            if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        masterChain.clear();
         pool.clear();
         setSampleRateLocked (0.0);
         tempo = TempoMap();
@@ -2092,6 +2905,8 @@ public:
             auto* o = new juce::DynamicObject();
             o->setProperty ("index", i++);
             o->setProperty ("name", t->name);
+            o->setProperty ("kind", t->isBus() ? "bus" : (t->kind == TrackKind::Midi ? "midi" : "audio"));
+            o->setProperty ("outputTrack", t->outputTrack);
             o->setProperty ("is_midi", t->isMidi);
             o->setProperty ("audio_found", ! t->clips.empty() && std::all_of (t->clips.begin(), t->clips.end(), [] (const Clip& c) { return c.audio != nullptr; }));
             o->setProperty ("seconds", seconds (t->length()));
@@ -2100,9 +2915,24 @@ public:
             o->setProperty ("mute", t->mute);
             o->setProperty ("solo", t->solo);
             o->setProperty ("latency_samples", t->latency());
+            o->setProperty ("frozen", t->frozen);
             o->setProperty ("armed", t->armed);
             o->setProperty ("input_left", t->inputLeft);
             o->setProperty ("input_right", t->inputRight);
+
+            juce::Array<juce::var> sendsList;
+            for (int sIdx = 0; sIdx < (int) t->sends.size(); ++sIdx)
+            {
+                const auto& snd = t->sends[(size_t) sIdx];
+                auto* so = new juce::DynamicObject();
+                so->setProperty ("index", sIdx);
+                so->setProperty ("targetTrack", snd.targetTrack);
+                so->setProperty ("levelDb", (double) snd.levelDb);
+                so->setProperty ("preFader", snd.preFader);
+                so->setProperty ("mute", snd.mute);
+                sendsList.add (juce::var (so));
+            }
+            o->setProperty ("sends", sendsList);
 
             juce::Array<juce::var> clips;
             int k = 0;
@@ -2148,12 +2978,31 @@ public:
                 c->setProperty ("installed", s->instance != nullptr);
                 if (s->instance == nullptr) c->setProperty ("reason", slotProblem (*s));
                 c->setProperty ("bypass", s->bypass);
+                c->setProperty ("wet", (double) s->wet);
+                c->setProperty ("sidechainTrack", s->sidechainTrack);
                 chain.add (juce::var (c));
             }
             o->setProperty ("chain", chain);
             list.add (juce::var (o));
         }
         root->setProperty ("tracks", list);
+
+        juce::Array<juce::var> masterList;
+        int masterIdx = 0;
+        for (auto& s : masterChain)
+        {
+            auto* entry = new juce::DynamicObject();
+            entry->setProperty ("index", masterIdx++);
+            entry->setProperty ("name", s->plugin);
+            entry->setProperty ("maker", s->instance != nullptr ? s->instance->getPluginDescription().manufacturerName : juce::String());
+            entry->setProperty ("bypass", s->bypass);
+            entry->setProperty ("wet", (double) s->wet);
+            entry->setProperty ("latencySamples", s->latency());
+            entry->setProperty ("loaded", s->instance != nullptr);
+            if (s->instance == nullptr) entry->setProperty ("reason", slotProblem (*s));
+            masterList.add (juce::var (entry));
+        }
+        root->setProperty ("masterChain", masterList);
 
         // the monitor chain: what the headphones hear, not part of the project
         juce::Array<juce::var> monitorList;
@@ -2162,6 +3011,7 @@ public:
             auto* entry = new juce::DynamicObject();
             entry->setProperty ("plugin", s->plugin);
             entry->setProperty ("bypass", s->bypass);
+            entry->setProperty ("wet", (double) s->wet);
             entry->setProperty ("latency_samples", s->latency());
             entry->setProperty ("installed", s->instance != nullptr);
             if (s->instance == nullptr) entry->setProperty ("reason", slotProblem (*s));
@@ -2181,7 +3031,7 @@ public:
     }
 
     // Makes a slot for a plugin. With `state`, the plugin is given those settings. Null, with the reason, if the plugin cannot be made.
-    std::unique_ptr<Slot> makeSlot (const juce::String& pluginName, const juce::MemoryBlock* state, juce::String& error, double rate = 0.0)
+    std::unique_ptr<Slot> makeSlot (const juce::String& pluginName, const juce::MemoryBlock* state, juce::String& error, double rate = 0.0, bool allowSidechain = true)
     {
         auto instance = catalog.create (pluginName, rate > 0.0 ? rate : (sampleRate > 0.0 ? sampleRate : 48000.0), kBlockSize, error);
         if (instance == nullptr)
@@ -2194,7 +3044,7 @@ public:
         if (state != nullptr && state->getSize() > 0)
             instance->setStateInformation (state->getData(), (int) state->getSize());
         const juce::String supports = layoutWords (*instance); // before configure: a refused layout leaves the buses empty
-        if (! configure (*instance, useRate, false))
+        if (! configure (*instance, useRate, false, allowSidechain))
         {
             instance->releaseResources(); // configure set it up and this drops it: as everywhere else, a prepared instance goes released, not straight destroyed
             error = pluginName + " cannot run on a stereo track (it supports " + supports + ")";
@@ -2202,6 +3052,7 @@ public:
         }
         auto slot = std::make_unique<Slot>();
         slot->plugin = pluginName;
+        slot->dryScratch.setSize (2, kBlockSize, false, true, false);
         instance->setPlayHead (&head);
         slot->instance = std::move (instance);
         slot->watch = &latencyWatch;
@@ -2259,23 +3110,25 @@ public:
     {
         const juce::ScopedLock sl (lock);
         int back = 0;
-        const auto retry = [this, &back] (Slot& slot)
+        const auto retry = [this] (Slot& slot, bool allowSidechain, int& count)
         {
             if (slot.instance != nullptr)
                 return;
             juce::String error;
-            auto fresh = makeSlot (slot.plugin, &slot.savedState, error);
+            auto fresh = makeSlot (slot.plugin, &slot.savedState, error, 0.0, allowSidechain);
             if (fresh == nullptr)
                 return;
             slot.instance = std::move (fresh->instance);   // fresh keeps no instance, so its destructor removes nothing
             slot.watch = fresh->watch;
-            ++back;
+            ++count;
         };
         for (auto& t : tracks)
             for (auto& s : t->chain)
-                retry (*s);
+                retry (*s, true, back);
+        for (auto& s : masterChain)
+            retry (*s, false, back);
         for (auto& s : monitor)
-            retry (*s);
+            retry (*s, false, back);
         if (back > 0)
             updateLatenciesLocked();
         return back;
@@ -2283,6 +3136,7 @@ public:
 
 private:
     juce::AudioFormatManager formats;
+    juce::AudioBuffer<float> masterScratch;  // masterChain's view of a block (channels x kBlockSize), sized here, never in the callback
     juce::AudioBuffer<float> monitorScratch; // the monitor chain's view of a block (kMaxMonitorChannels x kBlockSize), sized here, never in the callback
     juce::AudioBuffer<float> snapshotScratch;
     juce::MidiBuffer midiScratch;
@@ -2293,6 +3147,10 @@ private:
     bool lastBlockWasFallback = false;
     size_t lastFallbackTrackCount = 0;
     juce::int64 lastProcessedEnd = -1;
+    std::vector<int> cachedTopoOrder;
+    std::vector<int> cachedInLat;
+    std::vector<int> cachedOutLat;
+    std::vector<bool> cachedAudibleScratch;
 
     // The audio pool: a file's buffer, shared by the clips that play it. Held weakly, so a buffer goes when its last clip does.
     // Message thread only; the audio thread never reads it.
@@ -2405,23 +3263,25 @@ private:
         return out;
     }
 
+    static juce::File resolveSavedFile (const juce::String& relAttr, const juce::String& pathAttr, const juce::File& base)
+    {
+        const juce::File relFile = relAttr.isEmpty() ? juce::File()
+                                                     : (juce::File::isAbsolutePath (relAttr)
+                                                        ? juce::File (relAttr)
+                                                        : (base != juce::File() ? base.getChildFile (relAttr) : juce::File()));
+        const juce::File absFile = pathAttr.isNotEmpty() && juce::File::isAbsolutePath (pathAttr) ? juce::File (pathAttr) : juce::File();
+        if (relFile.existsAsFile())
+            return relFile;
+        if (absFile.existsAsFile())
+            return absFile;
+        return absFile != juce::File() ? absFile : relFile;
+    }
+
     // One clip from a project element. A version 1 track is read as its own clip: the whole file at sample 0.
     Clip readClip (const juce::XmlElement& e, const juce::File& base, double& rate, bool legacy, const juce::String& trackName, juce::StringArray& problems)
     {
         Clip c;
-        const auto relAttr = e.getStringAttribute ("file").trim();
-        const auto pathAttr = e.getStringAttribute ("path").trim();
-        const juce::File relFile = relAttr.isEmpty() ? juce::File()
-                                                     : (juce::File::isAbsolutePath (relAttr) ? juce::File (relAttr) : base.getChildFile (relAttr));
-        const juce::File absFile = pathAttr.isNotEmpty() && juce::File::isAbsolutePath (pathAttr) ? juce::File (pathAttr) : juce::File();
-        if (relFile.existsAsFile())
-            c.file = relFile;
-        else if (absFile.existsAsFile())
-            c.file = absFile;
-        else if (absFile != juce::File())
-            c.file = absFile;
-        else
-            c.file = relFile;
+        c.file = resolveSavedFile (e.getStringAttribute ("file").trim(), e.getStringAttribute ("path").trim(), base);
 
         c.name = legacy ? c.file.getFileNameWithoutExtension() : e.getStringAttribute ("name", c.file.getFileNameWithoutExtension());
         c.start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, e.getStringAttribute ("start", "0").getLargeIntValue());
@@ -2472,38 +3332,50 @@ private:
                 if (s->instance != nullptr)
                 {
                     s->instance->releaseResources();
-                    configure (*s->instance, r, false);
+                    configure (*s->instance, r, false, false);
                     s->instance->reset();
                 }
         if (changed)
             bumpRevision();
     }
 
-    // Stereo main buses, every other bus (a sidechain, an extra output) disabled, then the rate and the block, then the verdict. Returns false
-    // when the plugin does not run stereo as set up here (see runsStereo): it is set up all the same, so a slot that is kept (a project's
-    // unusable slot, a plugin that changed its own buses later) is never handed a buffer after its resources were released.
-    bool configure (juce::AudioPluginInstance& p, double rate, bool nonRealtime)
+    // Stereo main buses, optional stereo 2nd input bus (sidechain) kept enabled when stereo-compatible (unless disabled),
+    // every other bus disabled, then the rate and the block, then the verdict. Returns false when the plugin does not run stereo
+    // as set up here (see runsStereo): it is set up all the same, so a slot that is kept is never handed a buffer after releaseResources().
+    bool configure (juce::AudioPluginInstance& p, double rate, bool nonRealtime, bool allowSidechain = true)
     {
-        auto layout = p.getBusesLayout();
-        for (int i = 0; i < layout.inputBuses.size(); ++i)
-            layout.inputBuses.getReference (i) = i == 0 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled();
-        for (int i = 0; i < layout.outputBuses.size(); ++i)
-            layout.outputBuses.getReference (i) = i == 0 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled();
-        p.setBusesLayout (layout); // a refusal is caught by runsStereo, which looks at the layout the plugin ended with
+        auto base = p.getBusesLayout();
+        for (int i = 0; i < base.inputBuses.size(); ++i)
+            base.inputBuses.getReference (i) = i == 0 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled();
+        for (int i = 0; i < base.outputBuses.size(); ++i)
+            base.outputBuses.getReference (i) = i == 0 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled();
+        bool applied = false;
+        if (allowSidechain && base.inputBuses.size() > 1)
+        {
+            auto withSc = base;
+            withSc.inputBuses.getReference (1) = juce::AudioChannelSet::stereo();
+            applied = p.setBusesLayout (withSc);
+        }
+        if (! applied)
+            p.setBusesLayout (base); // a refusal is caught by runsStereo, which looks at the layout the plugin ended with
         p.setNonRealtime (nonRealtime);
         p.prepareToPlay (rate, kBlockSize);
         return runsStereo (p);
     }
 
-    // Whether the plugin, as it now is, takes two channels in and out on its main buses, with no other bus enabled. A plugin with no input bus
-    // (an instrument) is accepted.
+    // Whether the plugin takes two channels in and out on its main buses (or 0 in for an instrument),
+    // with an optional stereo 2nd input bus (sidechain) and no other auxiliary bus enabled.
     static bool runsStereo (const juce::AudioPluginInstance& p)
     {
-        const int inputs = p.getTotalNumInputChannels(), outputs = p.getTotalNumOutputChannels();
+        const int mainIn = p.getBusCount (true) > 0 ? p.getChannelCountOfBus (true, 0) : 0;
+        const int scIn = p.getBusCount (true) > 1 ? p.getChannelCountOfBus (true, 1) : 0;
+        const int outputs = p.getTotalNumOutputChannels();
         bool auxOff = true;
-        for (int i = 1; i < p.getBusCount (true); ++i) auxOff = auxOff && p.getChannelCountOfBus (true, i) == 0;
+        for (int i = 2; i < p.getBusCount (true); ++i) auxOff = auxOff && p.getChannelCountOfBus (true, i) == 0;
         for (int i = 1; i < p.getBusCount (false); ++i) auxOff = auxOff && p.getChannelCountOfBus (false, i) == 0;
-        return (inputs == 0 || inputs == 2) && outputs == 2 && auxOff;
+        const bool validMainIn = (mainIn == 0 || mainIn == 2);
+        const bool validScIn = (scIn == 0) || (mainIn == 2 && scIn == 2);
+        return validMainIn && validScIn && outputs == 2 && auxOff;
     }
 
     // The channels the plugin has, for the refusal's words: "1 in, 1 out".
@@ -2515,7 +3387,9 @@ private:
     // A track's buffers before it plays: two channels at the block size (the chain may need more; prepareLocked grows them).
     void makeTrackLocked (Track& t)
     {
-        t.scratch.setSize (2, kBlockSize, false, true, false);
+        t.scratch.setSize (juce::jmax (2, t.scratch.getNumChannels()), kBlockSize, false, true, false);
+        t.busInput.setSize (2, kBlockSize, false, true, false);
+        t.postScratch.setSize (2, kBlockSize, false, true, false);
         if (t.isMidi && t.synth == nullptr)
             t.synth = std::make_unique<BasicSynth>();
         if (t.synth != nullptr && sampleRate > 0.0)
@@ -2534,11 +3408,539 @@ private:
         }
     }
 
+    void writeSlotXml (juce::XmlElement& parent, const juce::String& tagName, const Slot& s) const
+    {
+        auto* c = parent.createNewChildElement (tagName);
+        c->setAttribute ("plugin", s.plugin);
+        c->setAttribute ("bypass", s.bypass);
+        if (s.wet < 0.9999f)
+            c->setAttribute ("wet", (double) s.wet);
+        if (s.sidechainTrack >= 0)
+            c->setAttribute ("sidechainTrack", s.sidechainTrack);
+        c->setAttribute ("state", stateOf (s).toBase64Encoding());
+    }
+
+    std::unique_ptr<Slot> readSlotXml (const juce::XmlElement& c, double rate, const juce::String& ownerLabel,
+                                       juce::StringArray& problems, std::vector<double>& slotPreparedRates)
+    {
+        juce::MemoryBlock state;
+        state.fromBase64Encoding (c.getStringAttribute ("state"));
+        juce::String problem;
+        const double slotRate = rate > 0.0 ? rate : (sampleRate > 0.0 ? sampleRate : 48000.0);
+        auto slot = makeSlot (c.getStringAttribute ("plugin"), &state, problem, rate);
+        if (slot == nullptr)
+        {
+            problems.add (ownerLabel + ": " + problem);
+            slot = std::make_unique<Slot>();
+            slot->plugin = c.getStringAttribute ("plugin");
+            slot->savedState = state;
+        }
+        else
+        {
+            slotPreparedRates.push_back (slotRate);
+        }
+        slot->bypass = c.getBoolAttribute ("bypass");
+        const double rawWet = c.getDoubleAttribute ("wet", 1.0);
+        slot->wet = std::isfinite (rawWet) ? juce::jlimit (0.0f, 1.0f, (float) rawWet) : 1.0f;
+        slot->sidechainTrack = juce::jmax (-1, c.getIntAttribute ("sidechainTrack", -1));
+        return slot;
+    }
+
+    struct ParsedXml
+    {
+        double rate = 0.0;
+        std::vector<double> slotPreparedRates;
+        std::vector<std::unique_ptr<Track>> tracks;
+        std::vector<std::unique_ptr<Slot>> masterChain;
+        TempoMap tempo;
+        std::vector<Marker> markers;
+        float masterDb = 0.0f;
+        juce::int64 loopStart = 0;
+        juce::int64 loopEnd = 0;
+        bool loopOn = false;
+        bool metronomeOn = false;
+        bool snapOn = true;
+        Grid grid = Grid::Quarter;
+        juce::StringArray problems;
+    };
+
+    ParsedXml parseXml (const juce::XmlElement& xml, const juce::File& baseDir,
+                        double initialRate, const juce::String& initialProblem = {})
+    {
+        ParsedXml out;
+        out.rate = initialRate;
+        if (initialProblem.isNotEmpty())
+            out.problems.add (initialProblem);
+
+        for (auto* e : xml.getChildWithTagNameIterator ("Track"))
+        {
+            auto t = std::make_unique<Track>();
+            t->name = e->getStringAttribute ("name");
+            const double trackGain = e->getDoubleAttribute ("gainDb", 0.0);
+            const double trackPan = e->getDoubleAttribute ("pan", 0.0);
+            // the same range as the fader and Editor::setTrackGain (-100 is silence, +12 the top)
+            if (std::isfinite (trackGain) && trackGain > 12.0)
+                out.problems.add ("Track '" + t->name + "': the gain was above +12 dB and is set to +12 dB.");
+            t->gainDb = std::isfinite (trackGain) ? (float) juce::jlimit (-100.0, 12.0, trackGain) : 0.0f;
+            t->pan = std::isfinite (trackPan) ? (float) juce::jlimit (-1.0, 1.0, trackPan) : 0.0f;
+            t->mute = e->getBoolAttribute ("mute");
+            t->solo = e->getBoolAttribute ("solo");
+            t->armed = e->getBoolAttribute ("armed");
+            t->inputLeft = juce::jmax (0, e->getIntAttribute ("inputLeft", 0));
+            t->inputRight = juce::jmax (-1, e->getIntAttribute ("inputRight", 1));
+            const auto kindStr = e->getStringAttribute ("kind").trim().toLowerCase();
+            if (kindStr == "bus")
+            {
+                t->kind = TrackKind::Bus;
+                t->isMidi = false;
+            }
+            else if (kindStr == "midi")
+            {
+                t->kind = TrackKind::Midi;
+                t->isMidi = true;
+            }
+            else if (kindStr == "audio")
+            {
+                t->kind = TrackKind::Audio;
+                t->isMidi = false;
+            }
+            else
+            {
+                t->isMidi = e->getBoolAttribute ("isMidi", false);
+                t->kind = t->isMidi ? TrackKind::Midi : TrackKind::Audio;
+            }
+            t->outputTrack = juce::jmax (-1, e->getIntAttribute ("outputTrack", -1));
+            for (auto* se : e->getChildWithTagNameIterator ("Send"))
+            {
+                AuxSend snd;
+                snd.targetTrack = se->getIntAttribute ("targetTrack", -1);
+                const double rawLvl = se->getDoubleAttribute ("levelDb", 0.0);
+                snd.levelDb = std::isfinite (rawLvl) ? (float) juce::jlimit (-100.0, 12.0, rawLvl) : 0.0f;
+                snd.preFader = se->getBoolAttribute ("preFader", false);
+                snd.mute = se->getBoolAttribute ("mute", false);
+                t->sends.push_back (snd);
+            }
+            t->showAutomation = e->getBoolAttribute ("showAutomation", false);
+            t->activeAutoTarget = e->getStringAttribute ("activeAutoTarget", "volume");
+            if (t->activeAutoTarget.isEmpty()) t->activeAutoTarget = "volume";
+            if (e->getBoolAttribute ("frozen", false))
+            {
+                const auto resolved = resolveSavedFile (e->getStringAttribute ("frozenFile").trim(),
+                                                        e->getStringAttribute ("frozenPath").trim(), baseDir);
+                juce::String problem;
+                auto audio = resolved != juce::File() ? pooledAudio (resolved, out.rate, problem) : nullptr;
+                if (audio != nullptr)
+                {
+                    t->frozen = true;
+                    t->frozenFile = resolved;
+                    t->frozenAudio = std::move (audio);
+                }
+                else
+                {
+                    out.problems.add ("Track '" + t->name + "': frozen audio missing"
+                                      + (problem.isNotEmpty() ? " (" + problem + ")" : juce::String()) + "; unfrozen.");
+                }
+            }
+            if (t->isMidi)
+                t->synth = std::make_unique<BasicSynth>();
+            const bool legacy = e->getChildByName ("Clip") == nullptr && (e->hasAttribute ("file") || e->hasAttribute ("path"));
+            if (legacy)
+                t->clips.push_back (readClip (*e, baseDir, out.rate, true, t->name, out.problems));
+            else
+                for (auto* c : e->getChildWithTagNameIterator ("Clip"))
+                    t->clips.push_back (readClip (*c, baseDir, out.rate, false, t->name, out.problems));
+
+            for (auto* mc : e->getChildWithTagNameIterator ("MidiClip"))
+            {
+                MidiClip m;
+                m.name = mc->getStringAttribute ("name");
+                m.start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, mc->getStringAttribute ("start", "0").getLargeIntValue());
+                m.length = juce::jlimit ((juce::int64) 0, kMaxSafeSample, mc->getStringAttribute ("length", "0").getLargeIntValue());
+                m.mute = mc->getBoolAttribute ("mute");
+                for (auto* ne : mc->getChildWithTagNameIterator ("Note"))
+                {
+                    MidiNote note;
+                    const double sb = ne->getDoubleAttribute ("startBeat", 0.0);
+                    const double db = ne->getDoubleAttribute ("durationBeats", 1.0);
+                    note.startBeat = std::isfinite (sb) ? juce::jlimit (0.0, 1e7, sb) : 0.0;
+                    note.durationBeats = (std::isfinite (db) && db > 0.0) ? juce::jlimit (1.0 / 64.0, 1e6, db) : 1.0;
+                    note.pitch = juce::jlimit (0, 127, ne->getIntAttribute ("pitch", 60));
+                    note.velocity = juce::jlimit (1, 127, ne->getIntAttribute ("velocity", 100));
+                    note.channel = juce::jlimit (1, 16, ne->getIntAttribute ("channel", 1));
+                    m.notes.push_back (note);
+                }
+                t->midiClips.push_back (std::move (m));
+            }
+
+            for (auto* c : e->getChildWithTagNameIterator ("Slot"))
+                t->chain.push_back (readSlotXml (*c, out.rate, "Track '" + t->name + "'", out.problems, out.slotPreparedRates));
+            for (auto* ae : e->getChildWithTagNameIterator ("AutomationLane"))
+            {
+                AutomationLane lane;
+                lane.targetId = ae->getStringAttribute ("targetId");
+                if (lane.targetId.isEmpty()) continue;
+                lane.slotIndex = ae->getIntAttribute ("slotIndex", -1);
+                lane.paramIndex = ae->getIntAttribute ("paramIndex", -1);
+                lane.enabled = ae->getBoolAttribute ("enabled", true);
+                for (auto* pe : ae->getChildWithTagNameIterator ("Point"))
+                {
+                    AutoPoint pt;
+                    pt.sample = juce::jlimit ((juce::int64) 0, kMaxSafeSample, pe->getStringAttribute ("sample", "0").getLargeIntValue());
+                    const double rawVal = pe->getDoubleAttribute ("value", 0.0);
+                    pt.value = std::isfinite (rawVal) ? (float) juce::jlimit (0.0, 1.0, rawVal) : 0.0f;
+                    pt.curve = (AutoCurveType) juce::jlimit (0, 2, pe->getIntAttribute ("curve", 0));
+                    lane.points.push_back (pt);
+                }
+                std::stable_sort (lane.points.begin(), lane.points.end(),
+                                  [] (const AutoPoint& a, const AutoPoint& b) { return a.sample < b.sample; });
+                t->automation.push_back (std::move (lane));
+            }
+            out.tracks.push_back (std::move (t));
+        }
+
+        if (auto* mc = xml.getChildByName ("MasterChain"))
+            for (auto* c : mc->getChildWithTagNameIterator ("Plugin"))
+                out.masterChain.push_back (readSlotXml (*c, out.rate, "Master", out.problems, out.slotPreparedRates));
+
+        const int numTracks = (int) out.tracks.size();
+        for (int ti = 0; ti < numTracks; ++ti)
+        {
+            auto& t = *out.tracks[(size_t) ti];
+            if (t.outputTrack >= 0)
+            {
+                if (t.outputTrack == ti || ! juce::isPositiveAndBelow (t.outputTrack, numTracks) || ! out.tracks[(size_t) t.outputTrack]->isBus())
+                {
+                    out.problems.add ("Track '" + t.name + "': invalid outputTrack reset to Master.");
+                    t.outputTrack = -1;
+                }
+            }
+            std::vector<AuxSend> validSends;
+            for (const auto& snd : t.sends)
+            {
+                if (snd.targetTrack == ti || ! juce::isPositiveAndBelow (snd.targetTrack, numTracks) || ! out.tracks[(size_t) snd.targetTrack]->isBus())
+                {
+                    out.problems.add ("Track '" + t.name + "': invalid aux send ignored.");
+                    continue;
+                }
+                validSends.push_back (snd);
+            }
+            t.sends = std::move (validSends);
+            for (auto& slot : t.chain)
+            {
+                if (slot->sidechainTrack >= 0)
+                {
+                    if (slot->sidechainTrack == ti || ! juce::isPositiveAndBelow (slot->sidechainTrack, numTracks))
+                    {
+                        out.problems.add ("Track '" + t.name + "': invalid sidechainTrack cleared.");
+                        slot->sidechainTrack = -1;
+                    }
+                }
+            }
+        }
+        // Break any cycles in malformed XML
+        for (int ti = 0; ti < numTracks; ++ti)
+        {
+            auto& t = *out.tracks[(size_t) ti];
+            if (t.outputTrack >= 0 && wouldCreateCycleIn (out.tracks, ti, t.outputTrack))
+            {
+                out.problems.add ("Track '" + t.name + "': routing cycle broken.");
+                t.outputTrack = -1;
+            }
+            for (auto it = t.sends.begin(); it != t.sends.end();)
+            {
+                const int target = it->targetTrack;
+                it->targetTrack = -1; // temporarily unlink to test if adding it creates a cycle
+                if (wouldCreateCycleIn (out.tracks, ti, target))
+                {
+                    out.problems.add ("Track '" + t.name + "': aux send cycle broken.");
+                    it = t.sends.erase (it);
+                }
+                else
+                {
+                    it->targetTrack = target;
+                    ++it;
+                }
+            }
+            for (auto& slot : t.chain)
+            {
+                if (slot->sidechainTrack >= 0)
+                {
+                    const int sc = slot->sidechainTrack;
+                    slot->sidechainTrack = -1;
+                    if (wouldCreateCycleIn (out.tracks, sc, ti))
+                        out.problems.add ("Track '" + t.name + "': sidechain cycle broken.");
+                    else
+                        slot->sidechainTrack = sc;
+                }
+            }
+        }
+
+        const double capRate = (std::isfinite (out.rate) && out.rate > 0.0) ? out.rate : 48000.0;
+        const juce::int64 maxMissingSamples = (juce::int64) std::min (capRate * 3600.0 * 2.0, (double) std::numeric_limits<juce::int64>::max() / 2.0);
+        for (auto& t : out.tracks)
+            for (auto& c : t->clips)
+                if (c.audio == nullptr)
+                {
+                    c.length = juce::jlimit ((juce::int64) 0, maxMissingSamples, c.length);
+                    c.fadeIn = juce::jlimit ((juce::int64) 0, c.length, c.fadeIn);
+                    c.fadeOut = juce::jmin (juce::jlimit ((juce::int64) 0, c.length, c.fadeOut), c.length - c.fadeIn);
+                }
+
+        std::vector<TempoPoint> points;
+        for (auto* p : xml.getChildWithTagNameIterator ("Tempo"))
+        {
+            const double rawBeat = p->getDoubleAttribute ("beat", 0.0);
+            const double rawBpm = p->getDoubleAttribute ("bpm", 120.0);
+            if (std::isfinite (rawBeat) && std::isfinite (rawBpm))
+                points.push_back ({ juce::jmax (0.0, rawBeat), juce::jlimit (TempoMap::kMinBpm, TempoMap::kMaxBpm, rawBpm) });
+        }
+        std::stable_sort (points.begin(), points.end(), [] (const TempoPoint& a, const TempoPoint& b) { return a.beat < b.beat; });
+        if (points.empty() || points.front().beat > TempoMap::kBeatEps)
+            points.insert (points.begin(), { 0.0, points.empty() ? 120.0 : points.front().bpm });
+        out.tempo.points.clear();
+        for (const auto& p : points)
+            if (out.tempo.points.empty() || p.beat > out.tempo.points.back().beat + TempoMap::kBeatEps)
+                out.tempo.points.push_back (p);
+        out.tempo.setSignature (juce::jlimit (1, 32, xml.getIntAttribute ("tsNum", 4)), xml.getIntAttribute ("tsDen", 4));
+
+        for (auto* m : xml.getChildWithTagNameIterator ("Marker"))
+            out.markers.push_back ({ m->getStringAttribute ("name"),
+                                     juce::jlimit ((juce::int64) 0, kMaxSafeSample, m->getStringAttribute ("sample", "0").getLargeIntValue()) });
+        std::stable_sort (out.markers.begin(), out.markers.end(), [] (const Marker& a, const Marker& b) { return a.start < b.start; });
+
+        // the same range as the fader and Editor::setMasterDb (-100 is silence, +12 the top)
+        const double savedMasterDb = xml.getDoubleAttribute ("masterDb", 0.0);
+        if (! std::isfinite (savedMasterDb))
+        {
+            out.masterDb = 0.0f;
+        }
+        else
+        {
+            if (savedMasterDb > 12.0)
+                out.problems.add ("The master gain was above +12 dB and is set to +12 dB.");
+            out.masterDb = (float) juce::jlimit (-100.0, 12.0, savedMasterDb);
+        }
+        out.loopStart = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml.getStringAttribute ("loopStart", "0").getLargeIntValue());
+        out.loopEnd = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml.getStringAttribute ("loopEnd", "0").getLargeIntValue());
+        out.loopOn = xml.getBoolAttribute ("loopOn") && out.loopEnd > out.loopStart;
+        out.metronomeOn = xml.getBoolAttribute ("metronome");
+        out.snapOn = xml.getBoolAttribute ("snap", true);
+        out.grid = (Grid) juce::jlimit (0, 5, xml.getIntAttribute ("grid", (int) Grid::Quarter));
+        return out;
+    }
+
+    void clearProjectPlayheadsLocked()
+    {
+        for (auto& t : tracks)
+            for (auto& s : t->chain)
+                if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        for (auto& s : masterChain)
+            if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+    }
+
+    void attachProjectPlayheadsLocked()
+    {
+        for (auto& t : tracks)
+            for (auto& s : t->chain)
+                if (s->instance != nullptr) s->instance->setPlayHead (&head);
+        for (auto& s : masterChain)
+            if (s->instance != nullptr) s->instance->setPlayHead (&head);
+    }
+
+    static void ensureSlotDryScratch (Slot& s)
+    {
+        if (s.dryScratch.getNumChannels() < 2 || s.dryScratch.getNumSamples() < kBlockSize)
+            s.dryScratch.setSize (2, kBlockSize, false, true, false);
+    }
+
+    static bool wouldCreateCycleIn (const std::vector<std::unique_ptr<Track>>& trackList, int fromTrack, int toTrack)
+    {
+        const int n = (int) trackList.size();
+        if (fromTrack == toTrack) return true;
+        if (! juce::isPositiveAndBelow (fromTrack, n) || ! juce::isPositiveAndBelow (toTrack, n)) return false;
+        std::vector<bool> visited ((size_t) n, false);
+        std::vector<int> stack { toTrack };
+        visited[(size_t) toTrack] = true;
+        while (! stack.empty())
+        {
+            const int u = stack.back();
+            stack.pop_back();
+            if (u == fromTrack) return true;
+            const auto& t = *trackList[(size_t) u];
+            auto push = [&] (int next)
+            {
+                if (juce::isPositiveAndBelow (next, n) && ! visited[(size_t) next])
+                {
+                    visited[(size_t) next] = true;
+                    stack.push_back (next);
+                }
+            };
+            if (t.outputTrack >= 0) push (t.outputTrack);
+            for (const auto& snd : t.sends)
+                if (snd.targetTrack >= 0) push (snd.targetTrack);
+            for (int v = 0; v < n; ++v)
+                for (const auto& s : trackList[(size_t) v]->chain)
+                    if (s->sidechainTrack == u) push (v);
+        }
+        return false;
+    }
+
+    bool wouldCreateCycleLocked (int fromTrack, int toTrack) const
+    {
+        return wouldCreateCycleIn (tracks, fromTrack, toTrack);
+    }
+
+    void computeRoutingLocked (std::vector<int>& order, std::vector<int>& inLat, std::vector<int>& outLat) const
+    {
+        const int n = (int) tracks.size();
+        order.clear();
+        inLat.assign ((size_t) n, 0);
+        outLat.assign ((size_t) n, 0);
+        if (n == 0)
+            return;
+
+        std::vector<int> inDegree ((size_t) n, 0);
+        std::vector<std::vector<int>> adj ((size_t) n);
+        auto addEdge = [&] (int u, int v)
+        {
+            if (u >= 0 && u < n && v >= 0 && v < n && u != v)
+            {
+                adj[(size_t) u].push_back (v);
+                ++inDegree[(size_t) v];
+            }
+        };
+        for (int i = 0; i < n; ++i)
+        {
+            const auto& t = *tracks[(size_t) i];
+            if (t.outputTrack >= 0)
+                addEdge (i, t.outputTrack);
+            for (const auto& s : t.sends)
+                if (s.targetTrack >= 0)
+                    addEdge (i, s.targetTrack);
+            for (const auto& slot : t.chain)
+                if (slot->sidechainTrack >= 0)
+                    addEdge (slot->sidechainTrack, i);
+        }
+        std::vector<int> queue;
+        queue.reserve ((size_t) n);
+        for (int i = 0; i < n; ++i)
+            if (inDegree[(size_t) i] == 0)
+                queue.push_back (i);
+        for (size_t headIdx = 0; headIdx < queue.size(); ++headIdx)
+        {
+            const int u = queue[headIdx];
+            order.push_back (u);
+            for (int v : adj[(size_t) u])
+                if (--inDegree[(size_t) v] == 0)
+                    queue.push_back (v);
+        }
+        if ((int) order.size() < n)
+        {
+            std::vector<bool> seen ((size_t) n, false);
+            for (int u : order) seen[(size_t) u] = true;
+            for (int i = 0; i < n; ++i)
+                if (! seen[(size_t) i])
+                    order.push_back (i);
+        }
+
+        for (int u : order)
+        {
+            const auto& t = *tracks[(size_t) u];
+            outLat[(size_t) u] = inLat[(size_t) u] + t.latency();
+            if (t.outputTrack >= 0 && t.outputTrack < n)
+                inLat[(size_t) t.outputTrack] = juce::jmax (inLat[(size_t) t.outputTrack], outLat[(size_t) u]);
+            for (const auto& s : t.sends)
+                if (s.targetTrack >= 0 && s.targetTrack < n)
+                    inLat[(size_t) s.targetTrack] = juce::jmax (inLat[(size_t) s.targetTrack], outLat[(size_t) u]);
+        }
+    }
+
+    template <typename TrackVec, typename OrderVec>
+    static void computeAudibility (const TrackVec& trackList, const OrderVec& topoOrder, std::vector<bool>& outAudible)
+    {
+        const int n = (int) trackList.size();
+        if ((int) outAudible.size() != n)
+            outAudible.assign ((size_t) n, false);
+        else
+            std::fill (outAudible.begin(), outAudible.end(), false);
+        if (n == 0)
+            return;
+
+        auto getTrack = [&trackList] (int idx) -> const auto&
+        {
+            if constexpr (std::is_same_v<std::decay_t<decltype (trackList[(size_t) idx])>, std::unique_ptr<Track>>)
+                return *trackList[(size_t) idx];
+            else
+                return trackList[(size_t) idx];
+        };
+
+        bool anySolo = false;
+        for (int i = 0; i < n; ++i)
+            if (getTrack (i).solo) { anySolo = true; break; }
+
+        if (! anySolo)
+        {
+            for (int i = 0; i < n; ++i)
+                outAudible[(size_t) i] = ! getTrack (i).mute;
+            return;
+        }
+
+        for (int i = 0; i < n; ++i)
+        {
+            const auto& t = getTrack (i);
+            outAudible[(size_t) i] = ! t.mute && t.solo;
+        }
+        // Upstream propagation: if a soloed bus is active, unmuted tracks feeding it become audible
+        for (int idx = (int) topoOrder.size() - 1; idx >= 0; --idx)
+        {
+            const int u = topoOrder[(size_t) idx];
+            if (! juce::isPositiveAndBelow (u, n)) continue;
+            const auto& t = getTrack (u);
+            if (t.mute || outAudible[(size_t) u]) continue;
+            bool feedsActiveBus = false;
+            if (juce::isPositiveAndBelow (t.outputTrack, n) && outAudible[(size_t) t.outputTrack])
+                feedsActiveBus = true;
+            if (! feedsActiveBus)
+            {
+                for (const auto& snd : t.sends)
+                    if (! snd.mute && juce::isPositiveAndBelow (snd.targetTrack, n) && outAudible[(size_t) snd.targetTrack])
+                        { feedsActiveBus = true; break; }
+            }
+            if (feedsActiveBus)
+                outAudible[(size_t) u] = true;
+        }
+        // Downstream propagation: if an active track routes/sends to an unmuted bus, that bus becomes audible
+        for (int u : topoOrder)
+        {
+            if (! juce::isPositiveAndBelow (u, n) || ! outAudible[(size_t) u]) continue;
+            const auto& t = getTrack (u);
+            if (juce::isPositiveAndBelow (t.outputTrack, n) && ! getTrack (t.outputTrack).mute)
+                outAudible[(size_t) t.outputTrack] = true;
+            for (const auto& snd : t.sends)
+                if (! snd.mute && juce::isPositiveAndBelow (snd.targetTrack, n) && ! getTrack (snd.targetTrack).mute)
+                    outAudible[(size_t) snd.targetTrack] = true;
+        }
+    }
+
+    void computeTrackAudibilityLocked (std::vector<bool>& outAudible) const
+    {
+        if (cachedTopoOrder.size() == tracks.size())
+        {
+            computeAudibility (tracks, cachedTopoOrder, outAudible);
+            return;
+        }
+        std::vector<int> order, inLat, outLat;
+        computeRoutingLocked (order, inLat, outLat);
+        computeAudibility (tracks, order, outAudible);
+    }
+
     void prepareLocked (bool nonRealtime)
     {
         const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
         for (auto& t : tracks)
         {
+            t->busInput.setSize (2, kBlockSize, false, true, false);
+            t->postScratch.setSize (2, kBlockSize, false, true, false);
             if (t->isMidi && t->synth == nullptr)
                 t->synth = std::make_unique<BasicSynth>();
             if (t->synth != nullptr && sampleRate > 0.0)
@@ -2547,13 +3949,30 @@ private:
                 t->synth->reset();
             }
             for (auto& s : t->chain)
+            {
+                ensureSlotDryScratch (*s);
                 if (s->instance != nullptr)
                 {
                     s->instance->releaseResources();
-                    configure (*s->instance, rate, nonRealtime);
+                    configure (*s->instance, rate, nonRealtime, true);
                     s->instance->reset();
                 }
+            }
         }
+        for (auto& s : masterChain)
+        {
+            ensureSlotDryScratch (*s);
+            if (s->instance != nullptr)
+            {
+                s->instance->releaseResources();
+                configure (*s->instance, rate, nonRealtime, false);
+                s->instance->reset();
+                s->instance->setPlayHead (&head);
+            }
+        }
+        for (auto& s : monitor)
+            ensureSlotDryScratch (*s);
+        masterScratch.setSize (2, kBlockSize, false, true, false);
         monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
         updateLatenciesLocked();
         clearDelayRingsLocked();
@@ -2562,17 +3981,30 @@ private:
     // How long each track is delayed in real time so the tracks stay aligned with each other (the one with the most latency is not).
     void updateLatenciesLocked()
     {
-        const int most = maxLatency();
-        for (auto& t : tracks)
+        computeRoutingLocked (cachedTopoOrder, cachedInLat, cachedOutLat);
+        cachedAudibleScratch.assign (tracks.size(), false);
+        int most = 0;
+        for (int lat : cachedOutLat) most = juce::jmax (most, lat);
+
+        for (size_t i = 0; i < tracks.size(); ++i)
         {
+            auto& t = tracks[i];
+            t->busInput.setSize (2, kBlockSize, false, true, false);
+            t->postScratch.setSize (2, kBlockSize, false, true, false);
             // the buffer the chain runs in has the channels of its widest plugin (two at least), so no plugin is handed more than it owns
             int channels = 2;
             for (auto& s : t->chain)
+            {
+                ensureSlotDryScratch (*s);
                 if (s->instance != nullptr)
                     channels = juce::jmax (channels, s->instance->getTotalNumInputChannels(), s->instance->getTotalNumOutputChannels());
+            }
             if (channels != t->scratch.getNumChannels())
                 t->scratch.setSize (channels, kBlockSize, false, true, false);
-            const int wanted = most - t->latency();
+            const int targetLat = (t->outputTrack >= 0 && t->outputTrack < (int) cachedInLat.size())
+                                      ? cachedInLat[(size_t) t->outputTrack]
+                                      : most;
+            const int wanted = juce::jmax (0, targetLat - cachedOutLat[i]);
             if (wanted != t->delaySamples)
             {
                 t->delaySamples = wanted;
@@ -2580,6 +4012,17 @@ private:
                 t->delayPos = 0;
             }
         }
+        int masterChannels = 2;
+        for (auto& s : masterChain)
+        {
+            ensureSlotDryScratch (*s);
+            if (s->instance != nullptr)
+                masterChannels = juce::jmax (masterChannels, s->instance->getTotalNumInputChannels(), s->instance->getTotalNumOutputChannels());
+        }
+        for (auto& s : monitor)
+            ensureSlotDryScratch (*s);
+        if (masterChannels != masterScratch.getNumChannels() || masterScratch.getNumSamples() != kBlockSize)
+            masterScratch.setSize (masterChannels, kBlockSize, false, true, false);
         bumpRevision();
     }
 
@@ -2800,7 +4243,7 @@ private:
             ~ReaderGuard() { counter.fetch_sub (1, std::memory_order_release); }
         } guard { snapshotReaders[(size_t) snapIdx] };
 
-        const auto& snap = snapshots[(size_t) snapIdx];
+        auto& snap = snapshots[(size_t) snapIdx];
         const bool continuing = lastBlockWasFallback && snap.tracks.size() == lastFallbackTrackCount;
         lastBlockWasFallback = true;
         lastFallbackTrackCount = snap.tracks.size();
@@ -2808,9 +4251,7 @@ private:
             for (auto& fs : fallbackSynths)
                 fs.reset();
 
-        bool anySolo = false;
-        for (const auto& st : snap.tracks)
-            if (st.solo) { anySolo = true; break; }
+        computeAudibility (snap.tracks, snap.topoOrder, snap.audibleScratch);
 
         const int n = out.getNumSamples();
         const int channels = juce::jmin (2, out.getNumChannels());
@@ -2818,40 +4259,106 @@ private:
         {
             const int count = juce::jmin (kBlockSize, n - done);
             const juce::int64 blockStart = start + done;
-            for (size_t ti = 0; ti < snap.tracks.size(); ++ti)
+            for (size_t i = 0; i < snap.tracks.size(); ++i)
+                if (snap.tracks[i].kind == TrackKind::Bus && i < snap.busInputs.size())
+                    snap.busInputs[i].clear (0, count);
+
+            for (int tiInt : snap.topoOrder)
             {
+                if (! juce::isPositiveAndBelow (tiInt, (int) snap.tracks.size()))
+                    continue;
+                const size_t ti = (size_t) tiInt;
                 const auto& st = snap.tracks[ti];
-                if (st.mute || (anySolo && ! st.solo))
+                const bool isBus = (st.kind == TrackKind::Bus);
+                const bool isAudible = ti < snap.audibleScratch.size() && snap.audibleScratch[ti];
+                if (! isAudible || (! isBus && ! (st.frozen && st.frozenAudio != nullptr) && st.clips.empty() && st.midiClips.empty() && ! st.isMidi))
                 {
                     if (ti < fallbackSynths.size())
                         fallbackSynths[ti].reset();
                     continue;
                 }
-                if (st.clips.empty() && st.midiClips.empty() && ! st.isMidi)
+                if (isBus)
                 {
+                    snapshotScratch.clear (0, count);
+                    if (ti < snap.busInputs.size())
+                        for (int ch = 0; ch < 2; ++ch)
+                            snapshotScratch.copyFrom (ch, 0, snap.busInputs[ti], ch, 0, count);
                     if (ti < fallbackSynths.size())
                         fallbackSynths[ti].reset();
-                    continue;
                 }
-                mixClipList (st.clips, blockStart, count, snapshotScratch);
-                if (st.isMidi && ! st.hasMidiPlugin && ti < fallbackSynths.size())
+                else if (st.frozen && st.frozenAudio != nullptr)
                 {
-                    auto& synth = fallbackSynths[ti];
-                    if (snap.sampleRate > 0.0 && std::abs (synth.getSampleRate() - snap.sampleRate) > 0.5)
-                        synth.prepare (snap.sampleRate);
-                    snapshotMidiScratch.clear();
-                    collectMidiEvents (st.midiClips, snap.tempo, blockStart, count, snapshotMidiScratch, ! continuing && done == 0, &synth);
-                    if (st.isMidi && st.armed)
-                        appendLiveMidiSlice (liveMidiScratch, done, count, snapshotMidiScratch);
-                    juce::AudioBuffer<float> view (snapshotScratch.getArrayOfWritePointers(), 2, count);
-                    synth.process (view, snapshotMidiScratch);
+                    copyFrozenSlice (*st.frozenAudio, blockStart, count, snapshotScratch);
+                    if (ti < fallbackSynths.size())
+                        fallbackSynths[ti].reset();
                 }
-                else if (ti < fallbackSynths.size())
+                else
                 {
-                    fallbackSynths[ti].reset();
+                    mixClipList (st.clips, blockStart, count, snapshotScratch);
+                    if (st.isMidi && ! st.hasMidiPlugin && ti < fallbackSynths.size())
+                    {
+                        auto& synth = fallbackSynths[ti];
+                        if (snap.sampleRate > 0.0 && std::abs (synth.getSampleRate() - snap.sampleRate) > 0.5)
+                            synth.prepare (snap.sampleRate);
+                        snapshotMidiScratch.clear();
+                        collectMidiEvents (st.midiClips, snap.tempo, blockStart, count, snapshotMidiScratch, ! continuing && done == 0, &synth);
+                        if (st.isMidi && st.armed)
+                            appendLiveMidiSlice (liveMidiScratch, done, count, snapshotMidiScratch);
+                        juce::AudioBuffer<float> view (snapshotScratch.getArrayOfWritePointers(), 2, count);
+                        synth.process (view, snapshotMidiScratch);
+                    }
+                    else if (ti < fallbackSynths.size())
+                    {
+                        fallbackSynths[ti].reset();
+                    }
                 }
-                mixTrackBlock (snapshotScratch, out, done, count, blockStart, st.gainDb, st.pan,
-                               findActiveLane (st.automation, "volume"), findActiveLane (st.automation, "pan"));
+                for (const auto& snd : st.sends)
+                {
+                    if (! snd.preFader || snd.mute) continue;
+                    if (juce::isPositiveAndBelow (snd.targetTrack, (int) snap.tracks.size())
+                        && snap.tracks[(size_t) snd.targetTrack].kind == TrackKind::Bus
+                        && (size_t) snd.targetTrack < snap.busInputs.size())
+                    {
+                        const float sg = juce::Decibels::decibelsToGain (snd.levelDb, -100.0f);
+                        for (int ch = 0; ch < 2; ++ch)
+                            snap.busInputs[(size_t) snd.targetTrack].addFrom (ch, 0, snapshotScratch, ch, 0, count, sg);
+                    }
+                }
+                if (ti < snap.postScratches.size())
+                {
+                    snap.postScratches[ti].clear (0, count);
+                    mixTrackBlock (snapshotScratch, snap.postScratches[ti], 0, count, blockStart, st.gainDb, st.pan,
+                                   findActiveLane (st.automation, "volume"), findActiveLane (st.automation, "pan"));
+                    for (const auto& snd : st.sends)
+                    {
+                        if (snd.preFader || snd.mute) continue;
+                        if (juce::isPositiveAndBelow (snd.targetTrack, (int) snap.tracks.size())
+                            && snap.tracks[(size_t) snd.targetTrack].kind == TrackKind::Bus
+                            && (size_t) snd.targetTrack < snap.busInputs.size())
+                        {
+                            const float sg = juce::Decibels::decibelsToGain (snd.levelDb, -100.0f);
+                            for (int ch = 0; ch < 2; ++ch)
+                                snap.busInputs[(size_t) snd.targetTrack].addFrom (ch, 0, snap.postScratches[ti], ch, 0, count, sg);
+                        }
+                    }
+                    if (juce::isPositiveAndBelow (st.outputTrack, (int) snap.tracks.size())
+                        && snap.tracks[(size_t) st.outputTrack].kind == TrackKind::Bus
+                        && (size_t) st.outputTrack < snap.busInputs.size())
+                    {
+                        for (int ch = 0; ch < 2; ++ch)
+                            snap.busInputs[(size_t) st.outputTrack].addFrom (ch, 0, snap.postScratches[ti], ch, 0, count, 1.0f);
+                    }
+                    else
+                    {
+                        for (int ch = 0; ch < channels; ++ch)
+                            out.addFrom (ch, done, snap.postScratches[ti], ch, 0, count, 1.0f);
+                    }
+                }
+                else
+                {
+                    mixTrackBlock (snapshotScratch, out, done, count, blockStart, st.gainDb, st.pan,
+                                   findActiveLane (st.automation, "volume"), findActiveLane (st.automation, "pan"));
+                }
             }
         }
         addMetronomeWith (out, start, snap.tempo, snap.metronomeOn);
@@ -2868,46 +4375,144 @@ private:
         }
     }
 
+    // Processes one chain slot in place, blending dry and wet when wet < 0.9999f. Real-time safe (uses pre-allocated dryScratch).
+    static void processSlot (Slot& s, juce::AudioBuffer<float>& buf, juce::MidiBuffer& midi)
+    {
+        if (s.bypass || s.instance == nullptr)
+            return;
+        const float w = juce::jlimit (0.0f, 1.0f, s.wet);
+        if (w >= 0.9999f)
+        {
+            s.instance->processBlock (buf, midi);
+            return;
+        }
+        const int n = buf.getNumSamples();
+        const int dryCh = juce::jmin (2, buf.getNumChannels(), s.dryScratch.getNumChannels());
+        if (n <= 0 || dryCh <= 0 || s.dryScratch.getNumSamples() < n)
+        {
+            s.instance->processBlock (buf, midi);
+            return;
+        }
+        for (int ch = 0; ch < dryCh; ++ch)
+            s.dryScratch.copyFrom (ch, 0, buf, ch, 0, n);
+        s.instance->processBlock (buf, midi);
+        const float dryGain = 1.0f - w;
+        for (int ch = 0; ch < dryCh; ++ch)
+        {
+            const float* dry = s.dryScratch.getReadPointer (ch);
+            float* dst = buf.getWritePointer (ch);
+            for (int i = 0; i < n; ++i)
+                dst[i] = dry[i] * dryGain + dst[i] * w;
+        }
+    }
+
+    // Copies [start, start + n) of `frozenAudio` into `dest` (cleared first, clamped to buffer length). Audio-thread safe.
+    static void copyFrozenSlice (const juce::AudioBuffer<float>& frozenAudio, juce::int64 start, int n, juce::AudioBuffer<float>& dest)
+    {
+        const int clearN = juce::jmin (n, dest.getNumSamples());
+        if (clearN <= 0)
+            return;
+        dest.clear (0, clearN);
+        const int audioLen = frozenAudio.getNumSamples();
+        const int dstCh = dest.getNumChannels();
+        const int srcCh = frozenAudio.getNumChannels();
+        if (audioLen <= 0 || dstCh <= 0 || srcCh <= 0 || start >= (juce::int64) audioLen || start + clearN <= 0)
+            return;
+        const juce::int64 srcStart = juce::jmax ((juce::int64) 0, start);
+        const juce::int64 srcEnd = juce::jmin ((juce::int64) audioLen, start + clearN);
+        const int count = (int) (srcEnd - srcStart);
+        const int dstOffset = (int) (srcStart - start);
+        if (count <= 0)
+            return;
+        const int chs = juce::jmin (2, dstCh, srcCh);
+        for (int ch = 0; ch < chs; ++ch)
+            dest.copyFrom (ch, dstOffset, frozenAudio, ch, (int) srcStart, count);
+        if (chs == 1 && dstCh >= 2)
+            dest.copyFrom (1, dstOffset, dest, 0, dstOffset, count);
+    }
+
     // The block [start, start + n) of the track through its clips and its chain, left in track.scratch. Silent outside the audio.
     void runChain (Track& t, juce::int64 start, int n, const juce::MidiBuffer* liveMidi = nullptr, int liveOffset = 0)
     {
-        mixClips (t, start, n, t.scratch);
-        juce::AudioBuffer<float> view (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
-        midiScratch.clear();
-        collectMidiEvents (t.midiClips, tempo, start, n, midiScratch);
-        if (liveMidi != nullptr)
-            appendLiveMidiSlice (*liveMidi, liveOffset, n, midiScratch);
-        bool pluginAcceptsMidi = false;
-        for (auto& s : t.chain)
+        if (n <= 0)
+            return;
+        if (t.frozen && t.frozenAudio != nullptr)
         {
-            if (s->instance != nullptr && ! s->bypass && s->instance->acceptsMidi())
-            {
-                pluginAcceptsMidi = true;
-                break;
-            }
+            copyFrozenSlice (*t.frozenAudio, start, n, t.scratch);
         }
-        if (t.isMidi && t.synth != nullptr && ! pluginAcceptsMidi)
-            t.synth->process (view, midiScratch);
-        for (const auto& lane : t.automation)
+        else
         {
-            if (! lane.enabled || lane.points.empty() || lane.slotIndex < 0 || lane.paramIndex < 0)
-                continue;
-            if (lane.slotIndex < (int) t.chain.size())
+            midiScratch.clear();
+            if (t.isBus())
             {
-                auto* inst = t.chain[(size_t) lane.slotIndex]->instance.get();
-                if (inst != nullptr)
+                t.scratch.clear (0, n);
+                for (int ch = 0; ch < 2; ++ch)
+                    t.scratch.copyFrom (ch, 0, t.busInput, ch, 0, n);
+            }
+            else
+            {
+                mixClips (t, start, n, t.scratch);
+                collectMidiEvents (t.midiClips, tempo, start, n, midiScratch);
+                if (liveMidi != nullptr)
+                    appendLiveMidiSlice (*liveMidi, liveOffset, n, midiScratch);
+                bool pluginAcceptsMidi = false;
+                for (auto& s : t.chain)
                 {
-                    const auto& params = inst->getParameters();
-                    if (juce::isPositiveAndBelow (lane.paramIndex, params.size()) && params[lane.paramIndex] != nullptr)
-                        params[lane.paramIndex]->setValue (lane.evaluateAt (start));
+                    if (s->instance != nullptr && ! s->bypass && s->instance->acceptsMidi())
+                    {
+                        pluginAcceptsMidi = true;
+                        break;
+                    }
+                }
+                if (t.isMidi && t.synth != nullptr && ! pluginAcceptsMidi)
+                {
+                    juce::AudioBuffer<float> synthView (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
+                    t.synth->process (synthView, midiScratch);
                 }
             }
+            juce::AudioBuffer<float> view (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
+            for (const auto& lane : t.automation)
+            {
+                if (! lane.enabled || lane.points.empty() || lane.slotIndex < 0 || lane.paramIndex < 0)
+                    continue;
+                if (lane.slotIndex < (int) t.chain.size())
+                {
+                    auto* inst = t.chain[(size_t) lane.slotIndex]->instance.get();
+                    if (inst != nullptr)
+                    {
+                        const auto& params = inst->getParameters();
+                        if (juce::isPositiveAndBelow (lane.paramIndex, params.size()) && params[lane.paramIndex] != nullptr)
+                            params[lane.paramIndex]->setValue (lane.evaluateAt (start));
+                    }
+                }
+            }
+            for (auto& s : t.chain)
+            {
+                if (t.scratch.getNumChannels() >= 4)
+                {
+                    const int sc = s->sidechainTrack;
+                    if (s->instance != nullptr && s->instance->getTotalNumInputChannels() >= 4
+                        && juce::isPositiveAndBelow (sc, (int) tracks.size()))
+                    {
+                        const auto& scBuf = tracks[(size_t) sc]->postScratch;
+                        const int scCh = juce::jmin (2, scBuf.getNumChannels());
+                        for (int ch = 0; ch < scCh; ++ch)
+                            t.scratch.copyFrom (2 + ch, 0, scBuf, ch, 0, n);
+                        for (int ch = scCh; ch < 2; ++ch)
+                            t.scratch.clear (2 + ch, 0, n);
+                    }
+                    else
+                    {
+                        t.scratch.clear (2, 0, n);
+                        t.scratch.clear (3, 0, n);
+                    }
+                }
+                processSlot (*s, view, midiScratch);
+            }
         }
-        for (auto& s : t.chain)
-            if (s->instance != nullptr && ! s->bypass)
-                s->instance->processBlock (view, midiScratch);
         if (t.delaySamples > 0 && t.delayRing.getNumSamples() == t.delaySamples && ! rendering() && n > 0)
         {
+            juce::AudioBuffer<float> view (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
             const int d = t.delaySamples;
             t.delayDirty = true;
             if (n <= kBlockSize)
@@ -2976,9 +4581,16 @@ private:
     bool offline = false;
     struct OfflineScope
     {
-        explicit OfflineScope (Session& s) : session (s) { session.offline = true; session.prepareLocked (true); }
-        ~OfflineScope() { session.offline = false; session.prepareLocked (false); }
+        explicit OfflineScope (Session& s) : session (s), ownsScope (! s.offline)
+        {
+            if (ownsScope) { session.offline = true; session.prepareLocked (true); }
+        }
+        ~OfflineScope()
+        {
+            if (ownsScope) { session.offline = false; session.prepareLocked (false); }
+        }
         Session& session;
+        bool ownsScope = false;
     };
 
     std::unique_ptr<juce::AudioFormatWriter> makeWriter (const juce::File& file, int bits, juce::String& error)

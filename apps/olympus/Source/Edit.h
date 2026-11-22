@@ -6,20 +6,20 @@
 #include "Session.h"
 
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
-// The one place where the timeline is edited and undone: clips, track mix, master, tempo, time signature, loop and markers. The window
-// and the MCP server call these; none of them touches the session's tracks any other way.
+// The one place where the timeline is edited and undone: tracks, plugins, clips, track mix, master, tempo, time signature, loop and markers.
+// The window and the MCP server call these; none of them touches the session's tracks any other way.
 //
 // Every editing function takes the session's lock, checks its arguments (a refusal changes nothing and says why in `error`), and when it
-// does change something it marks the session dirty and pushes ONE undo step: the state from before the change, the number of tracks and
-// a label. A Gesture groups many changes (a fader drag) into one step; a gesture that changes nothing leaves no step. Snap and the grid
-// are view settings: they are saved with the project and dirty it, but are not undone.
-//
-// Tracks are not undone: adding or removing one clears both stacks (clearUndo), and undo/redo refuse a state from another track count.
+// does change something it marks the session dirty and pushes ONE undo step: the state from before the change (or an XML snapshot for
+// structural track/plugin changes) and a label. A Gesture groups many changes (a fader drag) into one step; a gesture that changes nothing
+// leaves no step. Snap and the grid are view settings: they are saved with the project and dirty it, but are not undone on their own.
 // Positions are samples at the session's rate; indices are from 0.
 namespace olympus
 {
@@ -27,7 +27,10 @@ struct ClipRef
 {
     int track = -1;
     int clip = -1;
+    bool isMidi = false;
     bool valid() const { return track >= 0 && clip >= 0; }
+    bool operator== (const ClipRef& o) const { return track == o.track && clip == o.clip && isMidi == o.isMidi; }
+    bool operator!= (const ClipRef& o) const { return ! (*this == o); }
 };
 
 struct MidiClipRef
@@ -41,6 +44,273 @@ class Editor
 {
 public:
     explicit Editor (Session& s) : session (s) {}
+    std::function<void()> onBeforeStructureChange;
+
+    // ---- tracks and chains (structural undo) ---------------------------------------------------------------------------------
+    int addEmptyTrack (juce::String trackName)
+    {
+        auto before = captureStructuralXml();
+        const int idx = session.addEmptyTrack (std::move (trackName));
+        if (idx >= 0)
+            recordStructural (std::move (before), "Add track");
+        return idx;
+    }
+
+    int addMidiTrack (juce::String trackName)
+    {
+        auto before = captureStructuralXml();
+        const int idx = session.addMidiTrack (std::move (trackName));
+        if (idx >= 0)
+            recordStructural (std::move (before), "Add MIDI track");
+        return idx;
+    }
+
+    int addBusTrack (const juce::String& busName, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        const int idx = session.addBusTrack (busName, error);
+        if (idx >= 0)
+            recordStructural (std::move (before), "Add bus track");
+        return idx;
+    }
+
+    bool setTrackOutput (int track, int targetBus, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (isTrack (track) && session.tracks[(size_t) track]->outputTrack == targetBus)
+                return true;
+        }
+        auto before = captureStructuralXml();
+        if (! session.setTrackOutput (track, targetBus, error))
+            return false;
+        recordStructural (std::move (before), "Set track output");
+        return true;
+    }
+
+    bool setTrackSend (int track, int targetBus, float levelDb, bool preFader, bool mute, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.setTrackSend (track, targetBus, levelDb, preFader, mute, error))
+            return false;
+        recordStructural (std::move (before), "Set track send");
+        return true;
+    }
+
+    bool removeTrackSend (int track, int sendIndex, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.removeTrackSend (track, sendIndex, error))
+            return false;
+        recordStructural (std::move (before), "Remove track send");
+        return true;
+    }
+
+    bool setTrackSends (int track, const std::vector<AuxSend>& newSends, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.setTrackSends (track, newSends, error))
+            return false;
+        recordStructural (std::move (before), "Set track sends");
+        return true;
+    }
+
+    bool setSlotSidechain (int track, int slot, int sourceTrack, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (auto* s = session.slotAt (track, slot, error))
+            {
+                if (s->sidechainTrack == sourceTrack && ! session.tracks[(size_t) track]->frozen)
+                    return true;
+            }
+        }
+        auto before = captureStructuralXml();
+        if (! session.setSlotSidechain (track, slot, sourceTrack, error))
+            return false;
+        recordStructural (std::move (before), "Set slot sidechain");
+        return true;
+    }
+
+    bool addTrack (const juce::File& file, juce::String trackName, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.addTrack (file, std::move (trackName), error))
+            return false;
+        recordStructural (std::move (before), "Add track");
+        return true;
+    }
+
+    bool removeTrack (int index, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.removeTrack (index, error))
+            return false;
+        recordStructural (std::move (before), "Remove track");
+        return true;
+    }
+
+    bool freezeTrack (int track, const juce::File& targetWav, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.freezeTrack (track, targetWav, error))
+            return false;
+        recordStructural (std::move (before), "Freeze track");
+        return true;
+    }
+
+    bool unfreezeTrack (int track, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+            if (! session.tracks[(size_t) track]->frozen)
+                return true;
+        }
+        auto before = captureStructuralXml();
+        if (! session.unfreezeTrack (track, error))
+            return false;
+        recordStructural (std::move (before), "Unfreeze track");
+        return true;
+    }
+
+    bool addPlugin (int track, const juce::String& query, int position, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.addPlugin (track, query, position, error))
+            return false;
+        recordStructural (std::move (before), "Add plugin");
+        return true;
+    }
+
+    bool removePlugin (int track, int slot, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.removePlugin (track, slot, error))
+            return false;
+        recordStructural (std::move (before), "Remove plugin");
+        return true;
+    }
+
+    bool movePlugin (int track, int from, int to, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+            const int n = (int) session.tracks[(size_t) track]->chain.size();
+            if (! juce::isPositiveAndBelow (from, n) || ! juce::isPositiveAndBelow (to, n))
+            {
+                error = "No such place in the chain";
+                return false;
+            }
+            if (from == to)
+                return true;
+        }
+        auto before = captureStructuralXml();
+        if (! session.movePlugin (track, from, to, error))
+            return false;
+        recordStructural (std::move (before), "Move plugin");
+        return true;
+    }
+
+    bool bypassPlugin (int track, int slot, bool bypass, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            auto* s = session.slotAt (track, slot, error);
+            if (s == nullptr) return false;
+            if (s->bypass == bypass) return true;
+        }
+        auto before = captureStructuralXml();
+        if (! session.setBypass (track, slot, bypass, error))
+            return false;
+        recordStructural (std::move (before), bypass ? "Bypass plugin" : "Enable plugin");
+        return true;
+    }
+
+    bool setChain (int track, const juce::StringArray& plugins, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.setChain (track, plugins, error))
+            return false;
+        recordStructural (std::move (before), "Set chain");
+        return true;
+    }
+
+    bool copyChain (int from, const std::vector<int>& to, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.copyChain (from, to, error))
+            return false;
+        recordStructural (std::move (before), "Copy chain");
+        return true;
+    }
+
+    bool addMasterPlugin (const juce::String& query, int position, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.addMasterPlugin (query, position, error))
+            return false;
+        recordStructural (std::move (before), "Add master plugin");
+        return true;
+    }
+
+    bool removeMasterPlugin (int index, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.removeMasterPlugin (index, error))
+            return false;
+        recordStructural (std::move (before), "Remove master plugin");
+        return true;
+    }
+
+    bool moveMasterPlugin (int from, int to, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            const int n = (int) session.masterChain.size();
+            if (! juce::isPositiveAndBelow (from, n) || ! juce::isPositiveAndBelow (to, n))
+            {
+                error = "No master plugin " + juce::String (juce::isPositiveAndBelow (from, n) ? to : from);
+                return false;
+            }
+            if (from == to)
+                return true;
+        }
+        auto before = captureStructuralXml();
+        if (! session.moveMasterPlugin (from, to, error))
+            return false;
+        recordStructural (std::move (before), "Move master plugin");
+        return true;
+    }
+
+    bool bypassMasterPlugin (int index, bool bypass, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (! juce::isPositiveAndBelow (index, (int) session.masterChain.size()))
+            {
+                error = "No master plugin " + juce::String (index);
+                return false;
+            }
+            if (session.masterChain[(size_t) index]->bypass == bypass)
+                return true;
+        }
+        auto before = captureStructuralXml();
+        if (! session.bypassMasterPlugin (index, bypass, error))
+            return false;
+        recordStructural (std::move (before), bypass ? "Bypass master plugin" : "Enable master plugin");
+        return true;
+    }
+
+    bool setMasterChain (const juce::StringArray& plugins, juce::String& error)
+    {
+        auto before = captureStructuralXml();
+        if (! session.setMasterChain (plugins, error))
+            return false;
+        recordStructural (std::move (before), "Set master chain");
+        return true;
+    }
 
     // ---- clips ----------------------------------------------------------------------------------------------------------------
     // Adds a clip of a file to a track, at `start`: from `offset` in the file, for `length` samples (0 = to the end of the file). The file
@@ -430,58 +700,148 @@ public:
     }
 
     // ---- clipboard ------------------------------------------------------------------------------------------------------------
-    // The clipboard holds one clip: its audio (shared, not copied), its place in the file, gain, fades, mute and name. It lives in the
-    // Editor only: it is not the system clipboard, it is not saved in the project and it is not an undo step, so it survives undo and redo.
-    // It is cleared by NEW and OPEN (clearClipboard), and a paste is refused when the session's rate has changed since the copy.
-    bool hasClipboard() const { return clipboard.has_value(); }
-    int clipboardTrack() const { return clipboardFrom; }   // the track the copied clip came from; -1 when the clipboard is empty
+    // The clipboard holds one or more clips (audio or MIDI) with offsets relative to the earliest clip's start and lowest track
+    // index. Audio clips share their buffer (not copied). It lives in the Editor only: it is not the system clipboard, it is not
+    // saved in the project and it is not an undo step, so it survives undo and redo. It is cleared by NEW and OPEN (clearClipboard),
+    // and a paste is refused when the session's rate has changed since the copy.
+    struct ClipboardClip
+    {
+        bool isMidi = false;
+        Clip audio;
+        MidiClip midi;
+        juce::int64 sampleOffset = 0;
+        int trackOffset = 0;
+    };
 
-    // Copies the clip, replacing what the clipboard held. Changes nothing in the session.
+    bool hasClipboard() const { return ! clipboardClips.empty(); }
+    int clipboardTrack() const { return clipboardFrom; }   // the lowest track the copied clip(s) came from; -1 when empty
+    int clipboardCount() const { return (int) clipboardClips.size(); }
+
+    // Copies one clip, replacing what the clipboard held. Changes nothing in the session.
     bool copyClip (ClipRef ref, juce::String& error)
     {
+        return copyClips (std::vector<ClipRef> { ref }, error);
+    }
+
+    // Copies multiple clips, preserving their relative sample and track offsets. Changes nothing in the session.
+    bool copyClips (const std::vector<ClipRef>& refs, juce::String& error)
+    {
         const juce::ScopedLock sl (session.lock);
-        Clip* c = clipAt (ref.track, ref.clip, error);
-        if (c == nullptr) return false;
-        storeClipboard (*c, ref.track);
+        std::vector<ClipRef> unique;
+        if (! resolveUniqueClipsLocked (refs, unique, error)) return false;
+        storeClipboardClipsLocked (unique);
         return true;
+    }
+
+    bool copyClips (const std::vector<std::pair<int, int>>& audioClips, const std::vector<std::pair<int, int>>& midiClips, juce::String& error)
+    {
+        return copyClips (toClipRefs (audioClips, midiClips), error);
+    }
+
+    bool copyClips (const std::vector<std::pair<int, int>>& audioClips, juce::String& error)
+    {
+        return copyClips (toClipRefs (audioClips), error);
     }
 
     // Copies the clip and deletes it: ONE undo step ("Cut clip").
     bool cutClip (ClipRef ref, juce::String& error)
     {
+        return cutClips (std::vector<ClipRef> { ref }, error);
+    }
+
+    // Copies multiple clips and deletes all of them in ONE undo step.
+    bool cutClips (const std::vector<ClipRef>& refs, juce::String& error)
+    {
         const juce::ScopedLock sl (session.lock);
-        Clip* c = clipAt (ref.track, ref.clip, error);
-        if (c == nullptr) return false;
-        storeClipboard (*c, ref.track);
+        std::vector<ClipRef> unique;
+        if (! resolveUniqueClipsLocked (refs, unique, error)) return false;
+        storeClipboardClipsLocked (unique);
         auto before = captureIfNeeded();
-        auto& clips = session.tracks[(size_t) ref.track]->clips;
-        clips.erase (clips.begin() + ref.clip);
-        record (before, "Cut clip");
+        eraseClipsLocked (unique);
+        record (before, unique.size() == 1 ? "Cut clip" : "Cut clips");
         return true;
     }
 
-    // Adds a copy of the clipboard's clip to `track`, starting at sample `at` (appended to the track's clips): ONE undo step ("Paste
-    // clip"). Returns the new clip. Refused, with the reason, when the clipboard is empty, the track is not there, `at` is before 0, or
-    // the session's rate is not the one the clip was copied at.
-    ClipRef pasteClip (int track, juce::int64 at, juce::String& error)
+    bool cutClips (const std::vector<std::pair<int, int>>& audioClips, const std::vector<std::pair<int, int>>& midiClips, juce::String& error)
+    {
+        return cutClips (toClipRefs (audioClips, midiClips), error);
+    }
+
+    bool cutClips (const std::vector<std::pair<int, int>>& audioClips, juce::String& error)
+    {
+        return cutClips (toClipRefs (audioClips), error);
+    }
+
+    // Deletes multiple clips in ONE undo step.
+    bool deleteClips (const std::vector<ClipRef>& refs, juce::String& error)
     {
         const juce::ScopedLock sl (session.lock);
-        if (! clipboard) { error = "The clipboard is empty: copy or cut a clip first."; return {}; }
-        if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
+        std::vector<ClipRef> unique;
+        if (! resolveUniqueClipsLocked (refs, unique, error)) return false;
+        auto before = captureIfNeeded();
+        eraseClipsLocked (unique);
+        record (before, unique.size() == 1 ? "Delete clip" : "Delete clips");
+        return true;
+    }
+
+    bool deleteClips (const std::vector<std::pair<int, int>>& audioClips, const std::vector<std::pair<int, int>>& midiClips, juce::String& error)
+    {
+        return deleteClips (toClipRefs (audioClips, midiClips), error);
+    }
+
+    bool deleteClips (const std::vector<std::pair<int, int>>& audioClips, juce::String& error)
+    {
+        return deleteClips (toClipRefs (audioClips), error);
+    }
+
+    // Adds a copy of the clipboard's clip(s) starting at `track` and sample `at`: ONE undo step ("Paste clip" / "Paste clips").
+    // Returns the first pasted clip. Refused, with the reason, when the clipboard is empty, the track is not there, `at` is
+    // before 0, or the session's rate is not the one the clip was copied at.
+    ClipRef pasteClip (int track, juce::int64 at, juce::String& error)
+    {
+        const auto pasted = pasteClips (track, at, error);
+        return pasted.empty() ? ClipRef {} : pasted.front();
+    }
+
+    std::vector<ClipRef> pasteClips (int baseTrack, juce::int64 at, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (clipboardClips.empty()) { error = "The clipboard is empty: copy or cut a clip first."; return {}; }
+        if (! isTrack (baseTrack)) { error = "No track " + juce::String (baseTrack); return {}; }
         if (at < 0) { error = "The paste position must be 0 or later."; return {}; }
         if (std::abs (clipboardRate - session.sampleRate) > 0.5) { error = "The clipboard holds audio at another sample rate: copy the clip again."; return {}; }
         auto before = captureIfNeeded();
-        Clip copy = *clipboard;
-        copy.start = at;
-        auto& clips = session.tracks[(size_t) track]->clips;
-        clips.push_back (std::move (copy));
-        record (before, "Paste clip");
-        return { track, (int) clips.size() - 1 };
+        std::vector<ClipRef> pasted;
+        pasted.reserve (clipboardClips.size());
+        const int maxTrack = (int) session.tracks.size() - 1;
+        for (const auto& cc : clipboardClips)
+        {
+            const int dstTrack = juce::jlimit (0, maxTrack, baseTrack + cc.trackOffset);
+            const juce::int64 dstStart = juce::jlimit ((juce::int64) 0, kMaxSafeSample, at + cc.sampleOffset);
+            if (cc.isMidi)
+            {
+                MidiClip copy = cc.midi;
+                copy.start = dstStart;
+                auto& clips = session.tracks[(size_t) dstTrack]->midiClips;
+                clips.push_back (std::move (copy));
+                pasted.push_back ({ dstTrack, (int) clips.size() - 1, true });
+            }
+            else
+            {
+                Clip copy = cc.audio;
+                copy.start = dstStart;
+                auto& clips = session.tracks[(size_t) dstTrack]->clips;
+                clips.push_back (std::move (copy));
+                pasted.push_back ({ dstTrack, (int) clips.size() - 1, false });
+            }
+        }
+        record (before, clipboardClips.size() == 1 ? "Paste clip" : "Paste clips");
+        return pasted;
     }
 
     void clearClipboard()
     {
-        clipboard.reset();
+        clipboardClips.clear();
         clipboardFrom = -1;
         clipboardRate = 0.0;
     }
@@ -859,33 +1219,11 @@ public:
     bool canRedo() const { return gestureDepth == 0 && ! redoSteps.empty(); }
 
     // Puts back the state before the last edit (the current one goes to the redo stack). False when there is nothing to undo, or when
-    // the track count changed since: then both stacks are cleared.
-    bool undo()
-    {
-        const juce::ScopedLock sl (session.lock);
-        if (gestureDepth > 0 || undoSteps.empty()) return false;
-        if (undoSteps.back().tracks != (int) session.tracks.size()) { clearUndo(); return false; }
-        Step step = std::move (undoSteps.back());
-        undoSteps.pop_back();
-        redoSteps.push_back ({ session.captureEdit(), step.tracks, step.label });
-        trimSteps (redoSteps);
-        session.restoreEdit (step.state);
-        return true;
-    }
+    // a non-structural step was taken at another track count: then both stacks are cleared.
+    bool undo() { return applyStep (undoSteps, redoSteps, true); }
 
     // The mirror of undo: puts back the edit that was undone.
-    bool redo()
-    {
-        const juce::ScopedLock sl (session.lock);
-        if (gestureDepth > 0 || redoSteps.empty()) return false;
-        if (redoSteps.back().tracks != (int) session.tracks.size()) { clearUndo(); return false; }
-        Step step = std::move (redoSteps.back());
-        redoSteps.pop_back();
-        undoSteps.push_back ({ session.captureEdit(), step.tracks, step.label });
-        trimSteps (undoSteps);
-        session.restoreEdit (step.state);
-        return true;
-    }
+    bool redo() { return applyStep (redoSteps, undoSteps, false); }
 
     void clearUndo()
     {
@@ -927,7 +1265,7 @@ public:
             if (--editor.gestureDepth == 0)
             {
                 if (editor.gestureChanged && ! editor.gestureInvalid)
-                    editor.push ({ std::move (editor.gestureBefore), editor.gestureTracks, editor.gestureLabel });
+                    editor.push ({ std::move (editor.gestureBefore), editor.gestureTracks, editor.gestureLabel, false, {}, {} });
                 editor.gestureInvalid = false;
                 editor.gestureChanged = false;
                 editor.gestureBefore = {};
@@ -949,11 +1287,13 @@ private:
         EditState state;
         int tracks = 0;
         juce::String label;
+        bool structural = false;
+        std::shared_ptr<juce::XmlElement> beforeXml, afterXml;
     };
 
     Session& session;
     std::vector<Step> undoSteps, redoSteps;
-    std::optional<Clip> clipboard;        // what copyClip and cutClip put there (see the clipboard section)
+    std::vector<ClipboardClip> clipboardClips; // what copy/cut put there (see the clipboard section)
     int clipboardFrom = -1;
     double clipboardRate = 0.0;           // the session's rate when it was copied: a paste at another rate is refused
     int gestureDepth = 0;
@@ -983,7 +1323,66 @@ private:
             return;
         }
         if (before)
-            push ({ std::move (*before), (int) session.tracks.size(), label });
+            push ({ std::move (*before), (int) session.tracks.size(), label, false, {}, {} });
+    }
+
+    std::shared_ptr<juce::XmlElement> captureStructuralXml() const
+    {
+        const juce::ScopedLock sl (session.lock);
+        return session.toXml (session.projectFile);
+    }
+
+    void recordStructural (std::shared_ptr<juce::XmlElement> before, const juce::String& label)
+    {
+        auto after = captureStructuralXml();
+        const juce::ScopedLock sl (session.lock);
+        if (gestureDepth > 0)
+        {
+            gestureInvalid = true;
+            return;
+        }
+        Step step;
+        step.label = label;
+        step.structural = true;
+        step.beforeXml = std::move (before);
+        step.afterXml = std::move (after);
+        push (std::move (step));
+    }
+
+    bool applyStep (std::vector<Step>& from, std::vector<Step>& to, bool undoing)
+    {
+        Step step;
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (gestureDepth > 0 || from.empty()) return false;
+            if (! from.back().structural)
+            {
+                if (from.back().tracks != (int) session.tracks.size()) { clearUndo(); return false; }
+                step = std::move (from.back());
+                from.pop_back();
+                to.push_back ({ session.captureEdit(), step.tracks, step.label, false, {}, {} });
+                trimSteps (to);
+                session.restoreEdit (step.state);
+                return true;
+            }
+            step = std::move (from.back());
+            from.pop_back();
+        }
+        if (onBeforeStructureChange)
+            onBeforeStructureChange();
+        auto currentXml = captureStructuralXml();
+        const auto& targetXml = undoing ? step.beforeXml : step.afterXml;
+        if (targetXml == nullptr || ! session.restoreEditXml (*targetXml))
+            return false;
+        Step opposite;
+        opposite.label = step.label;
+        opposite.structural = true;
+        opposite.beforeXml = undoing ? std::move (step.beforeXml) : std::move (currentXml);
+        opposite.afterXml = undoing ? std::move (currentXml) : std::move (step.afterXml);
+        const juce::ScopedLock sl (session.lock);
+        to.push_back (std::move (opposite));
+        trimSteps (to);
+        return true;
     }
 
     void push (Step step)
@@ -999,11 +1398,98 @@ private:
             steps.erase (steps.begin(), steps.begin() + (std::ptrdiff_t) (steps.size() - kMaxSteps));
     }
 
-    void storeClipboard (const Clip& clip, int track)
+    static std::vector<ClipRef> toClipRefs (const std::vector<std::pair<int, int>>& audioClips,
+                                            const std::vector<std::pair<int, int>>& midiClips = {})
     {
-        clipboard = clip;
-        clipboardFrom = track;
+        std::vector<ClipRef> refs;
+        refs.reserve (audioClips.size() + midiClips.size());
+        for (const auto& p : audioClips) refs.push_back ({ p.first, p.second, false });
+        for (const auto& p : midiClips)  refs.push_back ({ p.first, p.second, true });
+        return refs;
+    }
+
+    bool resolveUniqueClipsLocked (const std::vector<ClipRef>& refs, std::vector<ClipRef>& uniqueOut, juce::String& error)
+    {
+        uniqueOut.clear();
+        for (const auto& r : refs)
+        {
+            if (r.isMidi)
+            {
+                if (midiClipAt (r.track, r.clip, error) == nullptr)
+                    return false;
+            }
+            else
+            {
+                if (clipAt (r.track, r.clip, error) == nullptr)
+                    return false;
+            }
+            if (std::find (uniqueOut.begin(), uniqueOut.end(), r) == uniqueOut.end())
+                uniqueOut.push_back (r);
+        }
+        if (uniqueOut.empty())
+        {
+            error = "No clips selected.";
+            return false;
+        }
+        return true;
+    }
+
+    void storeClipboardClipsLocked (const std::vector<ClipRef>& uniqueRefs)
+    {
+        juce::int64 minStart = std::numeric_limits<juce::int64>::max();
+        int minTrack = std::numeric_limits<int>::max();
+        for (const auto& r : uniqueRefs)
+        {
+            const juce::int64 st = r.isMidi ? session.tracks[(size_t) r.track]->midiClips[(size_t) r.clip].start
+                                            : session.tracks[(size_t) r.track]->clips[(size_t) r.clip].start;
+            minStart = juce::jmin (minStart, st);
+            minTrack = juce::jmin (minTrack, r.track);
+        }
+        std::vector<ClipboardClip> next;
+        next.reserve (uniqueRefs.size());
+        for (const auto& r : uniqueRefs)
+        {
+            ClipboardClip item;
+            item.isMidi = r.isMidi;
+            item.trackOffset = r.track - minTrack;
+            if (r.isMidi)
+            {
+                item.midi = session.tracks[(size_t) r.track]->midiClips[(size_t) r.clip];
+                item.sampleOffset = item.midi.start - minStart;
+            }
+            else
+            {
+                item.audio = session.tracks[(size_t) r.track]->clips[(size_t) r.clip];
+                item.sampleOffset = item.audio.start - minStart;
+            }
+            next.push_back (std::move (item));
+        }
+        clipboardClips = std::move (next);
+        clipboardFrom = minTrack;
         clipboardRate = session.sampleRate;
+    }
+
+    void eraseClipsLocked (std::vector<ClipRef> uniqueRefs)
+    {
+        std::sort (uniqueRefs.begin(), uniqueRefs.end(), [] (const ClipRef& a, const ClipRef& b)
+        {
+            if (a.track != b.track) return a.track > b.track;
+            if (a.isMidi != b.isMidi) return a.isMidi > b.isMidi;
+            return a.clip > b.clip;
+        });
+        for (const auto& r : uniqueRefs)
+        {
+            if (r.isMidi)
+            {
+                auto& clips = session.tracks[(size_t) r.track]->midiClips;
+                clips.erase (clips.begin() + r.clip);
+            }
+            else
+            {
+                auto& clips = session.tracks[(size_t) r.track]->clips;
+                clips.erase (clips.begin() + r.clip);
+            }
+        }
     }
 
     bool isTrack (int track) const { return juce::isPositiveAndBelow (track, (int) session.tracks.size()); }
