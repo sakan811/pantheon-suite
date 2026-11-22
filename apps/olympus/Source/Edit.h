@@ -30,6 +30,13 @@ struct ClipRef
     bool valid() const { return track >= 0 && clip >= 0; }
 };
 
+struct MidiClipRef
+{
+    int track = -1;
+    int clip = -1;
+    bool valid() const { return track >= 0 && clip >= 0; }
+};
+
 class Editor
 {
 public:
@@ -238,6 +245,187 @@ public:
         auto before = captureIfNeeded();
         c->name = text;
         record (before, "Rename clip");
+        return true;
+    }
+
+    // ---- MIDI clips and notes -------------------------------------------------------------------------------------------------
+    MidiClipRef addMidiClip (int track, juce::int64 start, juce::int64 length, const juce::String& name, juce::String& error)
+    {
+        if (length < 1) { error = "MIDI clip length must be at least 1 sample."; return {}; }
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return {}; }
+        auto before = captureIfNeeded();
+        auto& clips = session.tracks[(size_t) track]->midiClips;
+        MidiClip mc;
+        const auto trimmed = name.trim();
+        mc.name = trimmed.isNotEmpty() ? trimmed : "MIDI " + juce::String ((int) clips.size() + 1);
+        mc.start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, start);
+        mc.length = juce::jlimit ((juce::int64) 1, kMaxSafeSample, length);
+        clips.push_back (std::move (mc));
+        record (before, "Add MIDI clip");
+        return { track, (int) clips.size() - 1 };
+    }
+
+    bool deleteMidiClip (int track, int clip, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (midiClipAt (track, clip, error) == nullptr) return false;
+        auto before = captureIfNeeded();
+        auto& clips = session.tracks[(size_t) track]->midiClips;
+        clips.erase (clips.begin() + clip);
+        record (before, "Delete MIDI clip");
+        return true;
+    }
+
+    bool moveMidiClip (int track, int clip, juce::int64 newStart, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        const juce::int64 start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, newStart);
+        if (start == mc->start) return true;
+        auto before = captureIfNeeded();
+        mc->start = start;
+        record (before, "Move MIDI clip");
+        return true;
+    }
+
+    bool resizeMidiClip (int track, int clip, juce::int64 newLength, juce::String& error)
+    {
+        if (newLength < 1) { error = "MIDI clip length must be at least 1 sample."; return false; }
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        const juce::int64 len = juce::jlimit ((juce::int64) 1, kMaxSafeSample, newLength);
+        if (len == mc->length) return true;
+        auto before = captureIfNeeded();
+        mc->length = len;
+        record (before, "Resize MIDI clip");
+        return true;
+    }
+
+    int addMidiNote (int track, int clip, double startBeat, double durationBeats, int pitch, int velocity, int channel, juce::String& error)
+    {
+        if (! std::isfinite (startBeat) || ! std::isfinite (durationBeats))
+        {
+            error = "Note start and duration must be finite numbers.";
+            return -1;
+        }
+        if (startBeat < 0.0 || startBeat > 1e7) { error = "Note start beat must be between 0 and 1e7."; return -1; }
+        if (durationBeats <= 0.0 || durationBeats > 1e6) { error = "Note duration must be between 0 and 1e6 beats."; return -1; }
+        if (pitch < 0 || pitch > 127) { error = "Note pitch must be between 0 and 127."; return -1; }
+        if (velocity < 1 || velocity > 127) { error = "Note velocity must be between 1 and 127."; return -1; }
+        if (channel < 1 || channel > 16) { error = "MIDI channel must be between 1 and 16."; return -1; }
+
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return -1;
+        auto before = captureIfNeeded();
+        MidiNote note;
+        note.startBeat = startBeat;
+        note.durationBeats = durationBeats;
+        note.pitch = pitch;
+        note.velocity = velocity;
+        note.channel = channel;
+        mc->notes.push_back (note);
+        record (before, "Add MIDI note");
+        return (int) mc->notes.size() - 1;
+    }
+
+    int addMidiNote (int track, int clip, double startBeat, double durationBeats, int pitch, int velocity, juce::String& error)
+    {
+        return addMidiNote (track, clip, startBeat, durationBeats, pitch, velocity, 1, error);
+    }
+
+    bool deleteMidiNote (int track, int clip, int note, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        if (! juce::isPositiveAndBelow (note, (int) mc->notes.size()))
+        {
+            error = "No note " + juce::String (note) + " in MIDI clip " + juce::String (clip);
+            return false;
+        }
+        auto before = captureIfNeeded();
+        mc->notes.erase (mc->notes.begin() + note);
+        record (before, "Delete MIDI note");
+        return true;
+    }
+
+    bool moveMidiNote (int track, int clip, int note, double newStartBeat, int newPitch, juce::String& error)
+    {
+        if (! std::isfinite (newStartBeat)) { error = "Note start beat must be a finite number."; return false; }
+        const juce::ScopedLock sl (session.lock);
+        MidiNote* n = midiNoteAt (track, clip, note, error);
+        if (n == nullptr) return false;
+        const double startBeat = juce::jlimit (0.0, 1e7, newStartBeat);
+        const int pitch = juce::jlimit (0, 127, newPitch);
+        if (std::abs (startBeat - n->startBeat) < 1e-9 && pitch == n->pitch) return true;
+        auto before = captureIfNeeded();
+        n->startBeat = startBeat;
+        n->pitch = pitch;
+        record (before, "Move MIDI note");
+        return true;
+    }
+
+    bool resizeMidiNote (int track, int clip, int note, double newDurationBeats, juce::String& error)
+    {
+        if (! std::isfinite (newDurationBeats) || newDurationBeats <= 0.0 || newDurationBeats > 1e6)
+        {
+            error = "Note duration must be a positive finite number up to 1e6.";
+            return false;
+        }
+        const juce::ScopedLock sl (session.lock);
+        MidiNote* n = midiNoteAt (track, clip, note, error);
+        if (n == nullptr) return false;
+        if (std::abs (newDurationBeats - n->durationBeats) < 1e-9) return true;
+        auto before = captureIfNeeded();
+        n->durationBeats = newDurationBeats;
+        record (before, "Resize MIDI note");
+        return true;
+    }
+
+    bool setMidiNoteVelocity (int track, int clip, int note, int velocity, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiNote* n = midiNoteAt (track, clip, note, error);
+        if (n == nullptr) return false;
+        const int vel = juce::jlimit (1, 127, velocity);
+        if (vel == n->velocity) return true;
+        auto before = captureIfNeeded();
+        n->velocity = vel;
+        record (before, "MIDI note velocity");
+        return true;
+    }
+
+    bool quantizeMidiClip (int track, int clip, Grid grid, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        const double step = session.tempo.gridBeats (grid);
+        if (! (step > 0.0)) return true;
+        const double clipStartBeats = session.tempo.sampleRate > 0.0
+                                        ? session.tempo.samplesToBeats ((double) mc->start)
+                                        : 0.0;
+        auto snapBeat = [step, clipStartBeats] (double localBeat)
+        {
+            const double timelineBeat = clipStartBeats + localBeat;
+            const double snapped = std::floor (timelineBeat / step + 0.5 + TempoMap::kGridEps) * step;
+            return juce::jlimit (0.0, 1e7, snapped - clipStartBeats);
+        };
+        bool changed = false;
+        for (const auto& note : mc->notes)
+        {
+            const double q = snapBeat (note.startBeat);
+            if (std::abs (q - note.startBeat) > 1e-9) { changed = true; break; }
+        }
+        if (! changed) return true;
+        auto before = captureIfNeeded();
+        for (auto& note : mc->notes)
+            note.startBeat = snapBeat (note.startBeat);
+        record (before, "Quantize MIDI clip");
         return true;
     }
 
@@ -493,6 +681,149 @@ public:
         return true;
     }
 
+    // ---- automation -----------------------------------------------------------------------------------------------------------
+    int addAutomationPoint (int track, const juce::String& targetId, juce::int64 sample, float value, AutoCurveType curve, juce::String& error)
+    {
+        if (! std::isfinite (value)) { error = "Automation value must be a finite number."; return -1; }
+        int slotIdx = -1, paramIdx = -1;
+        if (! parseAutoTargetId (targetId, slotIdx, paramIdx, error)) return -1;
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return -1; }
+        auto before = captureIfNeeded();
+        auto& t = *session.tracks[(size_t) track];
+        auto& lane = findOrCreateLane (t, targetId, slotIdx, paramIdx);
+        const juce::int64 clampedSample = juce::jlimit ((juce::int64) 0, kMaxSafeSample, sample);
+        const float clampedValue = juce::jlimit (0.0f, 1.0f, value);
+        AutoPoint pt { clampedSample, clampedValue, curve };
+        auto it = std::upper_bound (lane.points.begin(), lane.points.end(), pt.sample,
+                                    [] (juce::int64 s, const AutoPoint& p) { return s < p.sample; });
+        const int insertedIndex = (int) (it - lane.points.begin());
+        lane.points.insert (it, pt);
+        record (before, "Add automation point");
+        return insertedIndex;
+    }
+
+    bool moveAutomationPoint (int track, const juce::String& targetId, int pointIndex, juce::int64 newSample, float newValue, juce::String& error, int* outNewIndex = nullptr)
+    {
+        if (! std::isfinite (newValue)) { error = "Automation value must be a finite number."; return false; }
+        const juce::ScopedLock sl (session.lock);
+        auto* lane = findAutomationLane (track, targetId, error);
+        if (lane == nullptr) return false;
+        if (! juce::isPositiveAndBelow (pointIndex, (int) lane->points.size()))
+        {
+            error = "No automation point " + juce::String (pointIndex) + " on lane '" + targetId + "'";
+            return false;
+        }
+        const juce::int64 s = juce::jlimit ((juce::int64) 0, kMaxSafeSample, newSample);
+        const float v = juce::jlimit (0.0f, 1.0f, newValue);
+        auto& pt = lane->points[(size_t) pointIndex];
+        if (pt.sample == s && same (pt.value, v))
+        {
+            if (outNewIndex != nullptr)
+                *outNewIndex = pointIndex;
+            return true;
+        }
+        auto before = captureIfNeeded();
+        pt.sample = s;
+        pt.value = v;
+        struct TaggedPoint { AutoPoint point; bool isMoved; };
+        std::vector<TaggedPoint> tagged;
+        tagged.reserve (lane->points.size());
+        for (int i = 0; i < (int) lane->points.size(); ++i)
+            tagged.push_back ({ lane->points[(size_t) i], i == pointIndex });
+        std::stable_sort (tagged.begin(), tagged.end(),
+                          [] (const TaggedPoint& a, const TaggedPoint& b) { return a.point.sample < b.point.sample; });
+        int newIdx = pointIndex;
+        for (int i = 0; i < (int) tagged.size(); ++i)
+        {
+            lane->points[(size_t) i] = tagged[(size_t) i].point;
+            if (tagged[(size_t) i].isMoved)
+                newIdx = i;
+        }
+        if (outNewIndex != nullptr)
+            *outNewIndex = newIdx;
+        record (before, "Move automation point");
+        return true;
+    }
+
+    bool setAutomationPointCurve (int track, const juce::String& targetId, int pointIndex, AutoCurveType curve, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        auto* lane = findAutomationLane (track, targetId, error);
+        if (lane == nullptr) return false;
+        if (! juce::isPositiveAndBelow (pointIndex, (int) lane->points.size()))
+        {
+            error = "No automation point " + juce::String (pointIndex) + " on lane '" + targetId + "'";
+            return false;
+        }
+        auto& pt = lane->points[(size_t) pointIndex];
+        if (pt.curve == curve) return true;
+        auto before = captureIfNeeded();
+        pt.curve = curve;
+        record (before, "Automation curve");
+        return true;
+    }
+
+    bool deleteAutomationPoint (int track, const juce::String& targetId, int pointIndex, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        auto* lane = findAutomationLane (track, targetId, error);
+        if (lane == nullptr) return false;
+        if (! juce::isPositiveAndBelow (pointIndex, (int) lane->points.size()))
+        {
+            error = "No automation point " + juce::String (pointIndex) + " on lane '" + targetId + "'";
+            return false;
+        }
+        auto before = captureIfNeeded();
+        lane->points.erase (lane->points.begin() + pointIndex);
+        record (before, "Delete automation point");
+        return true;
+    }
+
+    bool setAutomationLaneEnabled (int track, const juce::String& targetId, bool enabled, juce::String& error)
+    {
+        int slotIdx = -1, paramIdx = -1;
+        if (! parseAutoTargetId (targetId, slotIdx, paramIdx, error)) return false;
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        auto& t = *session.tracks[(size_t) track];
+        AutomationLane* existing = nullptr;
+        for (auto& l : t.automation)
+            if (l.targetId == targetId) { existing = &l; break; }
+        if (existing != nullptr && existing->enabled == enabled) return true;
+        auto before = captureIfNeeded();
+        auto& lane = existing != nullptr ? *existing : findOrCreateLane (t, targetId, slotIdx, paramIdx);
+        lane.enabled = enabled;
+        record (before, enabled ? "Enable automation" : "Disable automation");
+        return true;
+    }
+
+    bool setTrackShowAutomation (int track, bool show, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        auto& t = *session.tracks[(size_t) track];
+        if (t.showAutomation == show) return true;
+        t.showAutomation = show;
+        session.dirty = true;
+        session.bumpRevision();
+        return true;
+    }
+
+    bool setTrackActiveAutoTarget (int track, const juce::String& targetId, juce::String& error)
+    {
+        int slotIdx = -1, paramIdx = -1;
+        if (! parseAutoTargetId (targetId, slotIdx, paramIdx, error)) return false;
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        auto& t = *session.tracks[(size_t) track];
+        if (t.activeAutoTarget == targetId) return true;
+        t.activeAutoTarget = targetId;
+        session.dirty = true;
+        session.bumpRevision();
+        return true;
+    }
+
     // ---- view settings (not undone; saved with the project) -------------------------------------------------------------------
     void setSnap (bool on)
     {
@@ -643,6 +974,7 @@ private:
     void record (std::optional<EditState>& before, const juce::String& label)
     {
         session.dirty = true;
+        session.publishPlaybackSnapshotLocked();
         session.bumpRevision();
         if (gestureDepth > 0)
         {
@@ -688,6 +1020,83 @@ private:
             return nullptr;
         }
         return &clips[(size_t) clip];
+    }
+
+    MidiClip* midiClipAt (int track, int clip, juce::String& error)
+    {
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return nullptr; }
+        auto& clips = session.tracks[(size_t) track]->midiClips;
+        if (! juce::isPositiveAndBelow (clip, (int) clips.size()))
+        {
+            error = "No MIDI clip " + juce::String (clip) + " on track " + juce::String (track) + " (it has " + juce::String ((int) clips.size()) + ")";
+            return nullptr;
+        }
+        return &clips[(size_t) clip];
+    }
+
+    MidiNote* midiNoteAt (int track, int clip, int note, juce::String& error)
+    {
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return nullptr;
+        if (! juce::isPositiveAndBelow (note, (int) mc->notes.size()))
+        {
+            error = "No note " + juce::String (note) + " in MIDI clip " + juce::String (clip);
+            return nullptr;
+        }
+        return &mc->notes[(size_t) note];
+    }
+
+    static bool parseAutoTargetId (const juce::String& targetId, int& slotIndex, int& paramIndex, juce::String& error)
+    {
+        if (targetId == "volume" || targetId == "pan")
+        {
+            slotIndex = -1;
+            paramIndex = -1;
+            return true;
+        }
+        if (targetId.startsWith ("plugin:"))
+        {
+            const auto rest = targetId.substring (7);
+            const int colon = rest.indexOfChar (':');
+            if (colon > 0 && colon + 1 < rest.length())
+            {
+                const auto sStr = rest.substring (0, colon);
+                const auto pStr = rest.substring (colon + 1);
+                if (sStr.containsOnly ("0123456789") && pStr.containsOnly ("0123456789"))
+                {
+                    slotIndex = sStr.getIntValue();
+                    paramIndex = pStr.getIntValue();
+                    if (slotIndex >= 0 && paramIndex >= 0)
+                        return true;
+                }
+            }
+        }
+        error = "Invalid automation target '" + targetId + "'.";
+        return false;
+    }
+
+    AutomationLane* findAutomationLane (int track, const juce::String& targetId, juce::String& error)
+    {
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return nullptr; }
+        for (auto& lane : session.tracks[(size_t) track]->automation)
+            if (lane.targetId == targetId)
+                return &lane;
+        error = "No automation lane '" + targetId + "' on track " + juce::String (track);
+        return nullptr;
+    }
+
+    static AutomationLane& findOrCreateLane (Track& t, const juce::String& targetId, int slotIdx, int paramIdx)
+    {
+        for (auto& lane : t.automation)
+            if (lane.targetId == targetId)
+                return lane;
+        AutomationLane lane;
+        lane.targetId = targetId;
+        lane.slotIndex = slotIdx;
+        lane.paramIndex = paramIdx;
+        lane.enabled = true;
+        t.automation.push_back (std::move (lane));
+        return t.automation.back();
     }
 
     // Two dB, pan or master values that are the same to a millionth (a value set by the editor is exact anyway).
