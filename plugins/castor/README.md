@@ -1,90 +1,137 @@
 # Castor Pair
 
-A **stereo imager** (VST3 + AU + Standalone) for mixing and mastering: the **width of the sides in each of the six bands of music**, the level of the middle and
-of the sides as a whole, a **mono bass** that takes the sides away below a frequency, a balance, and a **goniometer** and **correlation** meter that show what the image is doing.
+Six-band stereo imager for mixing and mastering with per-band side width, Mid/Side trims, Mono Below, parallel Mix, goniometer, and correlation meter.
 
-## Name origin
+`VST3 + AU + Standalone`
 
-*Castor* is one of the Dioscuri, the twins: two that are one. The plugin works on what is the same in both channels and what is different. (CMake targets,
-namespaces and plugin codes use the short name "Castor".)
+![Castor Pair Showcase](docs/showcase.gif)
 
-![Castor Pair](docs/screenshot.png)
+*Live editor: 6-band side width bars over the knobs update alongside the goniometer cloud (M vertical, S horizontal) and correlation meter.*
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A stereo programme through the width of the sides set per band: Sub 0%, Bass 40%, Low-Mid 100%, Midrange 140%, Upper-Mid 160% and High 180%, MONO BELOW at 120 Hz and MIX at 100% (the last knob of the second row); the glass above the six knobs draws those widths as bars over their knobs (the amber line is 100%, the sides as recorded, and the top is 200%). The goniometer on the right plots the output (M up, S across, L and R on the diagonals) and the correlation meter is under it; the strip says what a width other than 100% does to the phase. The header has UNDO and REDO above the preset (UNDO is lit because the render changed the settings; REDO is dim) and PASTE beside GUIDE, which takes a width or the low-end mono from a Themis plan (not in the picture: the clipboard is not read in a render). Under the correlation bar, LISTEN is on Stereo and MIN shows the lowest correlation the bar has read (0.88). Regenerate with the command under "Development".*
+## Theme
 
-## What it does
+**Name origin:** *Castor* is one of the Dioscuri, the twins: two that are one. The plugin works on what is the same in both channels and what is different. (CMake targets, namespaces and plugin codes use the short name "Castor".)
 
-| | |
+**Core philosophy:**
+- **Separate what is shared from what differs.** Shapes Side width (`0–200%`) across the six `pdsp::bands`, trims global Mid/Side, and centres bass with **Mono Below** while checking phase on a goniometer and correlation meter.
+- **Bit-exact at 100%, difference-added elsewhere.** When all widths sit at `100%`, the Linkwitz-Riley splitter is bypassed with zero latency; off `100%`, phase turns symmetrically around band edges with a `10 ms` crossfade.
+- **Moves existing width, never invents or limits it.** Cannot create stereo from mono, adds zero delay, and does not clip peaks raised by widening; check **Listen = Mono** and correlation before bouncing.
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
+
+## See it
+
+| View | Capture | What to look at |
+|---|---|---|
+| **Main Editor** | ![Castor Pair](docs/screenshot.png) | Sub 0% to High 180%, Mono Below 120 Hz, width bars, goniometer cloud, correlation 0.88. |
+
+**UI colour legend** — exact hex values from [`Hardware.h`](../../shared/ui/include/pantheon/ui/Hardware.h) (`CastorUi.h` defines the `Castor Pair` nameplate):
+
+| Swatch | Hex | UI Element | Meaning |
+|---|---|---|---|
+| 🔵 | `#37E3C5` | Width bars above knobs, goniometer point cloud, `MIN` correlation mark (when safe) | Band side-width profile (`0–200%`) and live stereo vectorscope (`M` up, `S` across, `L/R` diagonals) |
+| 🟡 | `#FFB347` | `100%` unity line on width display, correlation meter bar (safe range), lit `UNDO` / `LISTEN` buttons | Recorded side width reference (`100%`), positive/safe correlation (`-0.1` to `+1.0`), and active header controls |
+| 🔴 | `#EF4A3D` | Correlation bar & `MIN` hold when `< -0.1` | Out-of-phase audio (`correlation < -0.1`) that thins out or cancels when summed to mono |
+| 🟠 | `#F2A33A` | Warning notes in bottom advice strip | `LISTEN` not set to `Stereo`, correlation `< -0.1`, bass band `> 150%` with `MONO BELOW` off, or `SIDE > +6 dB` |
+| ⚪ | `#EAE3D0` | Silkscreen labels & primary text | Band titles, section headers, and bright read-outs |
+| 🔘 | `#9F9680` | Secondary labels, `0%` / grid readouts, info notes | Inactive width markers, `MIN` readout when safe, and phase/balance info notes |
+
+## Try it
+
+| Recipe / Setting | What you see / hear / measure |
 |---|---|
-| **Width, six bands** | Sub (20-60 Hz), Bass (60-250), Low-Mid (250-500), Midrange (500-2 k), Upper-Mid (2-6 k) and High (6-20 k): the bands of music of `shared/dsp`. Each band's *sides* (what differs between left and right) are scaled by 0 to 200%: 0% is mono, 100% as it is, 200% twice the sides. |
-| **Mid / Side** | -12 to +12 dB each, 0 by default: the level of the middle (what is the same in both channels) and of the sides, after the widths. |
-| **Mono below** | 20 Hz (off) to 500 Hz: the sides go through a 24 dB/oct high-pass at this frequency, so below it the sound is in the middle: safe for mono playback, club systems and vinyl. |
-| **Balance** | L 100 to R 100: turns one channel down (not a pan). On a mono bus it is ignored (there is no other channel to hear it against). |
-| **Output** | -12 to +12 dB. |
-| **Mix** | 0 to 100% (100%, the processed sound): blends the sound as it came in with everything above (widths, MID, SIDE, MONO BELOW), before BALANCE and OUTPUT, so you can hear how much of the change is wanted. Castor has no delay, so the blend does not comb. A preset sets it back to 100%. |
-| **Listen** | A check on what you hear, after everything: *Stereo* (as it is; the default), *Mono* (`(L + R) / 2` in both channels: what a mono speaker plays; what is out of phase vanishes) or *Side* (`(L - R) / 2` in both: only what differs between the channels). The goniometer and the correlation still read the sound as it is. Presets set it back to Stereo, and a note reminds you before a bounce. |
-| **Paste and undo** | PASTE takes what a Themis plan suggests: the width (COPY on a width item) of the bands it names, and MONO BELOW (COPY on the low-end mono item) at the frequency of its side high-pass, as one step. The strip says what it set and that it can be changed by hand or undone; its slope is not read (MONO BELOW is always 24 dB/oct). Themis hands a width to one of Iris, Apollo or Castor, not to two, so paste a width item in one of them; the low-end cut goes to one plugin too. UNDO and REDO (Cmd+Z, Shift+Cmd+Z) take it back and forth, and undo every control change too. |
-| **Presets** | Seven starting points (Init, Mono Bass, Club Safe, Widen Highs, Wide Master, Narrow Mix, Vocal Forward). A preset sets the widths, MID, SIDE and MONO BELOW; BALANCE and OUTPUT are kept. |
+| `Sub 0%`, `Bass 40%`, `MONO BELOW 120 Hz`, `Midrange–High 140–180%` | Low-end sides drop (`-38.2 dB` at `40 Hz`, `-3.01 dB` at `120 Hz`) while upper bands widen; centred bass stays bit-identical. |
+| All six widths at `100%` (default) | Linkwitz-Riley splitter is bypassed bit for bit with `0` samples latency; moving off `100%` crossfades over `10 ms`. |
+| Copy width or low-end mono item in [Themis](../themis/README.md), click **PASTE** | Sets named band widths and/or **Mono Below** frequency in one undo step (ignores slope; **Mono Below** is `24 dB/oct`). |
+| Toggle **LISTEN** to `Mono` or `Side` | Plays `(L+R)/2` (`Mono`) or `(L-R)/2` (`Side`) in both channels while goniometer and correlation still read the stereo output. |
+| Dial **MIX** `50%` (`0` latency) | Blends dry and processed widths/Mid/Side/Mono Below cleanly without comb filtering (`10 ms` smoothing on changes). |
 
-The glass above the band knobs shows the six widths at once as bars (a drawing of the knobs, nothing measured; its top is 200% and the amber line is 100%). The goniometer draws the last 1536 samples of the output as a cloud, left and right turned a quarter (a vertical line is mono, a horizontal one out of phase); the bar under it is the
-correlation of the output over 0.3 s: +1 mono, 0 wide, -1 out of phase. **MIN** (beside LISTEN) is the lowest it has read since you last clicked it, also drawn as a thin mark on the bar: a dip under 0 is a moment that cancels in mono, even if it is over when you look.
+> [!TIP]
+> **Club-safe low end:** Keep **Sub** (`20–60 Hz`) and **Bass** (`60–250 Hz`) narrow or set **MONO BELOW** (`80–120 Hz`) while widening **Midrange–High** (`120–160%`) for air.
 
-## How it works
+> [!NOTE]
+> **Bit-exact when neutral:** At `100%` across all bands, Castor bypasses the 6-band splitter with zero latency (and crossfades over `10 ms` when engaged).
 
-1. **The sides, band by band.** Each channel is split into the six bands by the `shared/dsp` splitter (`pdsp::BandSplitter`: Linkwitz-Riley crossovers; the bands are in phase with each other, so any sum of them keeps the
-   magnitude of the sound). In each band the middle `(L + R) / 2` is kept and the side `(L - R) / 2` is multiplied by that band's width; the bands are added again.
-2. **100% everywhere is the input.** The split has its own phase (the all-pass of the crossovers), so when every width is 100% the plug-in does not use it: the sound goes through as it is. When a width leaves
-   100% (or comes back) the two are crossfaded over 10 ms.
-3. **The rest adds the difference.** MID, SIDE and MONO BELOW are applied to the sound as `difference = new - old` added to left and (for the sides, subtracted from) right, and BALANCE and OUTPUT are gains: all of them
-   exactly nothing at their neutral value, so the plug-in is the input bit for bit when nothing is changed.
+> [!IMPORTANT]
+> **Themis hand-offs:** Paste each width or low-end mono item into **one** of Iris, Apollo, or Castor so you do not double the adjustment.
 
-## Measured (`CastorTests`, 48 kHz)
+> [!WARNING]
+> **Check in Mono before bouncing:** **LISTEN** (`Stereo` / `Mono` / `Side`) persists in sessions; reset it to **Stereo** (or watch the advice warning) before exporting.
 
-- Nothing changed: the input, bit for bit, with no delay.
-- All six widths at 200%: the sides are +6.02 dB at 60 Hz, 1 kHz and 8 kHz (6.021 each: the bands add up to the side itself). All at 0%: the sides are gone (-225 dB): mono.
-- One band: Midrange at 0%: the sides are -18.7 dB at 1 kHz, -0.000 dB at 50 Hz and -0.013 dB at 9 kHz. Sub at 0% and High at 150%: -15.7 dB at 40 Hz and +3.44 dB at 12 kHz (3.52 for 150%). The edges between bands are not brick walls.
-- MID +6 dB lifts a centred sound by 6.00 dB and a side-only sound by 0.000 dB; SIDE -6 dB is -6.00 dB on the sides.
-- MONO BELOW 120 Hz: the sides are -38.2 dB at 40 Hz, -3.01 dB at 120 Hz, -0.00 dB at 480 Hz and +0.000 dB at 2 kHz; a centred bass is untouched, bit for bit.
-- MIX: 0% is the input, bit for bit, whatever the widths; 50% is the mean of the input and the processed sound (largest difference 6e-08); 100% is the processed sound itself, and a move from 100% to 0% is smoothed over 10 ms (largest step 0.0006).
-- BALANCE +50%: the left is -6.02 dB, the right untouched. OUTPUT +6 dB is +6.02 dB.
-- The correlation meter: +1.000 for a centred sound, -1.000 for an out-of-phase one, -0.002 for independent noise; +1.000 with every width at 0%.
-- LISTEN: Mono is `(L + R) / 2` in both channels and Side `(L - R) / 2`, exactly; a side-only tone is silent in the Mono check and fully heard in Side. The correlation minimum keeps a dip of -0.68 (0.5 s of an out-of-phase tone after a mono passage) after the live reading is back at +0.94. On a mono bus BALANCE +100 leaves the sound unchanged.
-- The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
+> [!CAUTION]
+> **What Castor is NOT for:** Cannot widen a mono signal (`200%` of zero side is zero), and does not limit peaks raised by widening.
 
-## Limits
+## Reference
 
-- **It cannot make stereo from mono.** A mono recording has no sides: a width of 200% of nothing is nothing. And no widener fixes a mix whose elements sit on top of each other: it moves what is already different.
-- **Wide is fragile.** Sides above 150%, SIDE above +6 dB and a wide bass can collapse or vanish in mono; the correlation bar and a note say so. Always listen in mono.
-- **With a width off 100% the phase turns around the band edges** (the magnitude is flat, the all-pass of the crossovers is in the sound). It is the same for left and right, so the image does not move, but a transient in a
-  band edge is slightly smeared. At 100% everywhere the sound is not touched at all.
-- **The six bands are fixed** (the bands of music of `shared/dsp`), not movable.
-- **LISTEN is a parameter and is saved with the session**: set it back to Stereo before you bounce (a note reminds you).
-- It has no delay and does not clip or limit: a wider image can raise the peaks.
-- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+### Controls
 
-## Building
+| Control | Range / Default | What it does |
+|---|---|---|
+| **Width (6 bands)** | `0` to `200 %` / `100 %` | Side gain per `pdsp::bands` band: Sub (`20–60 Hz`), Bass (`60–250`), Low-Mid (`250–500`), Midrange (`500–2 k`), Upper-Mid (`2–6 k`), High (`6–20 k`). `0%` = mono, `200%` = `2x` sides. |
+| **Mid** | `-12.0` to `+12.0 dB` / `0.0 dB` | Adjusts `(L + R) / 2` level after band widths. |
+| **Side** | `-12.0` to `+12.0 dB` / `0.0 dB` | Adjusts `(L - R) / 2` level after band widths. |
+| **Mono Below** | `20 Hz` (`Off`) to `500 Hz` / `Off` | `24 dB/oct` high-pass filter on the side signal only, keeping low end centred. |
+| **Mix** | `0` to `100 %` / `100 %` | Blends dry input with processed widths/Mid/Side/Mono Below before Balance and Output (`0` latency = no combing). Presets reset to `100%`. |
+| **Balance** | `L 100` to `R 100` / `C` (`0`) | Attenuates opposite channel (`-100..+100`); ignored on a mono bus. |
+| **Output** | `-12.0` to `+12.0 dB` / `0.0 dB` | Final post-Balance output trim. |
+| **Listen** | `Stereo`, `Mono`, `Side` / `Stereo` | Post-Output monitor check: `(L+R)/2` (`Mono`) or `(L-R)/2` (`Side`) in both channels. Goniometer & correlation read the un-monitored output. |
+| **Paste / Undo / Redo** | Header (`Cmd+Z` / `Shift+Cmd+Z`) | **PASTE** applies Themis' width line and/or side `lowcut` (`Mono Below`) as one undo step; **UNDO/REDO** covers every control change. |
+| **Presets & Min** | 7 presets (`Init`) + **MIN** button | *Init*, *Mono Bass*, *Club Safe*, *Widen Highs*, *Wide Master*, *Narrow Mix*, *Vocal Forward* (keeps Balance & Output); click **MIN** to reset lowest correlation hold. |
 
-Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+### Signal Flow
+
+```text
+input ─┬─► [widths != 100%] ─► 6-Band LR Splitter (pdsp::BandSplitter) ─► Side × Width[b] ─► Sum ─┐
+       │                                                                                          ├─► 10 ms Crossfade ─► +Diff (Mid/Side/Mono Below)
+       └─► [all widths == 100%] ──────────────────────────────────────────────────────────────────┘                         │
+                                                                                                                            ▼
+                                                       output ◄─ Listen (Stereo/Mono/Side) ◄─ Balance / Output ◄─ Mix (dry/wet)
+```
+
+- **Zero-phase bypass at 100%:** When all six widths sit at `100%`, the Linkwitz-Riley splitter is bypassed (`10 ms` crossfade when leaving or returning to `100%`).
+- **Difference addition:** **Mid**, **Side**, and **Mono Below** add `new - old` so neutral settings stay bit-identical to input.
+
+### Measured (`CastorTests`, 48 kHz)
+
+- **Bit-exact neutral & zero latency:** Defaults pass input bit for bit with `0` delay; bit-identical across block sizes `1`, `7`, `64`, `333`, `512`, `4096`; NaN/inf -> silence.
+- **6-band side scaling:** All widths `200%` lift sides `+6.02 dB` at `60 Hz`, `1 kHz`, `8 kHz` (`6.021` each—bands sum flat); all at `0%` cut sides to `-225 dB` (mono).
+- **Band isolation:** Midrange `0%` cuts sides `-18.7 dB` (`1 kHz`), `-0.000 dB` (`50 Hz`), `-0.013 dB` (`9 kHz`). Sub `0%` + High `150%` gives `-15.7 dB` (`40 Hz`) and `+3.44 dB` (`12 kHz`, `3.52` ideal for `150%`).
+- **Mid, Side, Mono Below:** **Mid** `+6 dB` lifts centred `+6.00 dB`, side-only `0.000 dB`; **Side** `-6 dB` cuts sides `-6.00 dB`. **Mono Below** `120 Hz` cuts sides `-38.2 dB` (`40 Hz`), `-3.01 dB` (`120 Hz`), `-0.00 dB` (`480 Hz`), `+0.000 dB` (`2 kHz`), leaving centred bass bit-identical.
+- **Mix, Balance, Output:** **Mix** `0%` bit-identical dry, `50%` mean within `6e-8`, `100% -> 0%` smoothed over `10 ms` (`0.0006` max step). **Balance** `+50%` sets left `-6.02 dB`, right untouched (`+100` unchanged on mono bus); **Output** `+6 dB` = `+6.02 dB`.
+- **Correlation & Listen:** Correlation reads `+1.000` (centred or `0%` widths), `-1.000` (out of phase), `-0.002` (independent noise); **MIN** latches `-0.68` (`0.5 s` out-of-phase burst) when live recovers to `+0.94`. **Listen** `Mono` silences side-only tones; `Side` outputs `(L-R)/2` cleanly.
+
+### Limits
+
+- **No stereo from mono:** Requires existing L/R difference; cannot un-clutter colliding mono elements.
+- **Wide is fragile in mono:** Widths `> 150%`, **Side** `> +6 dB`, or wide bass can collapse or vanish in mono—check **Listen = Mono** and correlation.
+- **Crossover phase shift off 100%:** Any width off `100%` introduces symmetric all-pass phase rotation around band edges (image stays centred, edge transients smear slightly).
+- **Fixed bands:** Six `pdsp::bands` edges (`60`, `250`, `500`, `2k`, `6k Hz`) cannot move (unlike [Atlas Span](../atlas/README.md)).
+- **Saved Listen state & no limiter:** **Listen** persists in sessions (reset to **Stereo** before bounce); Castor has `0` delay and does not clip/limit widened peaks.
+- **Platform verification:** Builds on macOS (VST3 + AU, manually verified 2026-11-13) and passes `auval -v`; not in macOS CI yet and has no `HostCheck`.
+
+## Build & develop
+
+Requires CMake 3.22+ and a C++20 compiler (JUCE fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+
+```bash
+# Fast build & check from repository root (Ninja + ccache if installed)
+./scripts/build.sh castor           # build & run CastorTests + CastorUiCheck
+./scripts/build.sh castor all       # tests, ui, snap, vst3, au, app
+./scripts/showcase.sh castor        # regenerate docs/showcase.gif (requires ffmpeg)
+```
+
+Manual CMake from `plugins/castor/` (add `-DCASTOR_INSTALL_AFTER_BUILD=ON` on macOS to install):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target Castor_VST3 Castor_AU Castor_Standalone -j 10
-```
-
-Building does **not** install the plugins; add `-DCASTOR_INSTALL_AFTER_BUILD=ON` for that (macOS).
-
-## Development
-
-```bash
-cmake --build build --target CastorTests && ./build/CastorTests_artefacts/Release/CastorTests            # DSP: no plugin, no GUI
-cmake --build build --target CastorUiCheck && ./build/CastorUiCheck_artefacts/Release/CastorUiCheck      # the editor on the real processor
+cmake --build build --target CastorTests && ./build/CastorTests_artefacts/Release/CastorTests
+cmake --build build --target CastorUiCheck && ./build/CastorUiCheck_artefacts/Release/CastorUiCheck
 cmake --build build --target CastorSnapshot && ./build/CastorSnapshot_artefacts/Release/CastorSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` is the output of `CastorSnapshot` (arguments in the file's header), never edited by hand. See
-[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+`docs/screenshot.png` and `docs/showcase.gif` are generated by `CastorSnapshot` / `scripts/showcase.sh` (never edited by hand). See [CLAUDE.md](CLAUDE.md) for invariants.
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
-the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).

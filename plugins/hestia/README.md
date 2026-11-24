@@ -1,153 +1,149 @@
 # Hestia Space
 
-A **stem spacer** (VST3 + AU + Standalone) for mixing: it makes room between the stems of a mix, in frequency and in depth, while they play. Put one
-instance on each stem (kick, bass, vocal, guitars, pads...), give each its **role** and the same **mix** letter, and each one gives up the
-frequencies where a stem with a bigger claim is playing, only while it plays, and by no more than **CARVE**. The stem that owns a band is
-never touched there. **DEPTH** then puts each stem back from the front with the cues distance gives a sound: the air takes the highs, the level falls, the
-sides narrow and the first reflections of a room come up (no reverb, no tail). The instances find each other on their own, with no routing, and any track
-can join the mix through the **sidechain** input, with Hestia on it or not.
+A zero-latency stem spacer for mixing that dynamically carves room across thirty third-octave bands and places stems in depth without reverb tails.
 
-## Name origin
+**Formats:** VST3 + AU + Standalone
 
-*Hestia* is the goddess of the hearth, the fire at the middle of the house around which everyone has a place. Her gift is that there is
-room for all of them. (CMake targets, namespaces and plugin codes use the short name "Hestia".)
+![Hestia Space Showcase](docs/showcase.gif)
 
-![Hestia Space](docs/screenshot.png)
+*Coordinating a vocal against kick, bass, and guitar stems: live spectra, the `OWNER` band strip, amber `CUT` bars, and the `DEPTH` map.*
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A lead vocal (this instance, teal) in a mix with a kick, a bass and a guitar, each fed a programme, on mix H. The curves are the stems' spectra; the strip of colours under them says which stem owns each band, and the amber bars are how far this instance cuts there (CARVE 9 dB, REACH 12 dB): it gives way to the kick and the bass below about 350 Hz and is untouched where it owns the band. DEPTH is 12%; the map on the right is the stems' distances. The strip warns that cutting 9 dB in a band can leave a stem hollow. The track names the host gave (Lead Vox, Kick In, Bass DI, Gtr Rhythm) are what the legend and the depth map call the stems; HOLD and COPY TO MIX are in the header (HOLD off). AUTO ROLE, above the ROLE box, sets the role from the track's name (here Lead Vox, which gives Lead Vocal). SPREAD, in the knob row between REACH and ATTACK, is at 0% (off), so the cuts shown are the ones without it. Regenerate with the command under "Development".*
+## Theme
 
-## What it does
+### Name origin
 
-| | |
+*Hestia* is the goddess of the hearth, the fire at the middle of the house around which everyone has a place. Her gift is that there is room for all of them. (CMake targets, namespaces, and plugin codes use the short name "Hestia".)
+
+### Core philosophy
+
+- **Only cuts, never lifts.** Each instance attenuates only its own stem where a higher-claim stem plays; a band's owner is never touched, and idle bells bypass bit-for-bit.
+- **Decentralised, zero-delay coordination.** Instances publish pre-cut `50 ms` time-domain band levels to a shared `32`-slot table in one host process and format—no FFT, no look-ahead, no master node.
+- **Depth is cues, not a reverb.** `DEPTH` combines high air (`-9 dB` @ `5 kHz`), level (`-4 dB`), side narrowing (`-30 %`), and eight single-tap early reflections (`6–37 ms`, no tail, no feedback) while yielding up to `35 %` claim.
+- **Rules of thumb, not magic.** Role curves encode mixing practice, third-octave bands cannot notch narrow resonances, and non-lockstep host threads make offline bounces vary slightly.
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
+
+## See it
+
+| View | Notes |
 |---|---|
-| **Role** | What the stem is: Kick, Bass, Drums, Hats / Cymbals, Lead Vocal, Backing Vocal, Guitar, Keys, Pad, Lead Synth, Strings, FX or Full Range. A role is a *claim* on each of thirty third-octave bands from 25 Hz to 20 kHz (a kick's thump, a bass's low end, a voice's presence), drawn from common mixing practice. They are rules of thumb, and the display shows what each stem holds. |
-| **Auto role** | AUTO ROLE (above the ROLE box) sets ROLE from the track's name when the host gives one: a word such as kick, bass, sub, vox, bv, gtr, keys, pad, hat, snare or drums, in English or the common abbreviations (the list is in `Source/RoleGuess.h`). It sets ROLE and nothing else, and one UNDO takes it back. It reads the name only, never the audio. A name with no such word is said so in the strip, and ROLE stays as it is. By itself, once: a fresh instance (ROLE still Full Range) that the host gives a name with a clear word in it (a priority-2 word or better, so not a lone "synth" or "mix") sets its ROLE when the name arrives, and the strip says what it set, until you change ROLE. A saved session is never changed by it. |
-| **Mix** | Off, or A to H. Stems of the same letter see each other; a new instance is in A, so the stems of a session find each other with no set-up. Off: the stem is alone and nothing is cut. |
-| **Importance** | 0 to 100%, 50% by default. Scales the role's claim from half to one and a half times: raise it on the stem that must not lose room, lower it on the one that may. Two stems of the same role and importance have equal claims and leave each other alone. |
-| **Carve** | 0 to 18 dB, 6 by default: the most any band is cut, when a stem with a clearly bigger claim is playing there as loud as this one. |
-| **Depth** | 0 to 100%, 0 (the front) by default: how far back the stem sits. At 100%: a high shelf at 5 kHz of -9 dB (the air), -4 dB of level, 30% of the sides gone, and four early reflections on each channel (6 to 37 ms, summed and darkened, at a gain of 0.45). A stem at the back also has up to 35% less claim, so it gives way to the ones in front. At 0% it is the input bit for bit. |
-| **Sidechain** | A second input (off until the host routes a track to it). The track on it is heard by Hestia as one more stem of the mix, with the **SC role** and **SC importance** you set; it is only listened to, never heard. Use it for a track that has no Hestia on it (any other chain, any other vendor's plugins) or that you cannot put one on. |
-| **Reach** | 0 to 36 dB, 12 by default: how much quieter than this stem another can be and still be given room. 0 dB: only when it is as loud or louder. |
-| **Spread** | 0 to 100%, 0 by default (off): how much a loud band also counts in the bands next to it, as the ear hears masking. Each band's power reaches its neighbours (six bands either way) with a weight that falls by 25 dB per Bark going down in frequency and 10 dB per Bark going up, the Bark scale being Traunmüller's approximation. Both slopes are **fixed approximations** (after Lynch et al., Eurospeech 1997: about 25 dB per band below and 10 dB above; the upper slope really depends on level, which is not modelled), named `kSpreadDownDbPerBark` and `kSpreadUpDbPerBark` in `Source/DSP/Engine.h`. It moves where the other stems give way, not what they claim: roles, importance and the bus are unchanged. At 0% the loop is not run at all, so the stem is what it was. It costs a little CPU (see Measured). |
-| **Attack / Release** | How fast a cut comes in (30 ms) and goes out (250 ms). |
-| **Output** | Gain after the cut. |
-| **Hold** | Freezes the cut where it is now: every band keeps the cut it has, whatever the other stems do, until HOLD is switched off. The stem is still measured and published, so the others still see it. A parameter (automatable, saved, kept by presets); off by default. |
-| **Copy to mix** | **COPY TO MIX** (header) hands this instance's CARVE, REACH, ATTACK and RELEASE to every other Hestia of the same mix that is playing: each takes them as if its knobs had been turned (the host sees the changes). Roles, importances and depths are not copied: they say what a stem is. The strip says how many instances got them. |
-| **Track names** | When the host tells the plugin the name of its track (hosts that do, in VST3 and AU), the legend and the depth map call each stem by it ("Bass DI") instead of by its role. A name is kept to 24 characters. |
-| **Delta** | Listen to what Hestia changes in the stem (its output minus its input: the cut and the depth). Monitoring, not saved with the session. |
-| **Presets** | Ten starting points, one for each kind of stem (Init, Kick, Bass, Drum Bus, Lead Vocal, Backing Vocals, Guitars, Lead Synth, Pads and Strings, FX and Ambience): a role, an importance, a cut and a depth. The mix letter, OUTPUT, HOLD and the sidechain's role and importance are kept. |
-| **Undo** | UNDO and REDO in the header (Cmd+Z, Shift+Cmd+Z): step back through the changes to the controls. A preset and a COPY TO MIX are one step each. |
-| **A / B** | Two complete settings, one live: switching keeps what you set in the slot you leave, so two ways of setting up the stem can be compared while listening. The mix letter, OUTPUT, HOLD and the sidechain's role and importance are kept across a switch, as for presets. Only the active slot is saved with the session; the other starts as a copy of the settings when it is first chosen. |
+| ![Hestia Space](docs/screenshot.png) | `Lead Vox` in Mix `H` giving way below `350 Hz`, `CARVE 9 dB`, `DEPTH 12 %`. |
 
-The display (above, all the stems' levels, in the colour of each, and the sidechain as a white line; the strip, who owns each band; the amber bars, the cut
-this stem is making now; on the right, the depth map: where each stem of the mix sits from the front to the back) is what the plugin reads and decides,
-not a separate analysis.
+### UI colour legend
 
-## How it works
+| Swatch | Hex / Formula | UI Element | Meaning |
+|---|---|---|---|
+| 🔵 | `#37E3C5` | **This stem** spectrum & fill, owned bands in `OWNER` strip, legend & ringed **DEPTH** dot | Active instance's energy, band ownership, and front-to-back position (`colours::accent`) |
+| 🟡 | `#FFB347` | **CUT** bars (`0` to `-18 dB`), lit **Sidechain input** label | Dynamic attenuation currently carved by this stem, or active external sidechain (`colours::amber`) |
+| 🎨 | `HSV(fmod(0.58 + 0.137×slot, 1), 0.55, 0.95)` | **Other stems** on the mix bus (traces, `OWNER` strip, legend, **DEPTH** dots) | Stable per-slot colour for up to `32` stems (`hestia::gui::stemColour`) |
+| ⚪ | `#EAE3D0` | **Sidechain** spectrum & `OWNER` strip, ring on this stem's **DEPTH** dot, primary labels | External sidechain stem and active labels (`colours::text`) |
+| 🟠 | `#F2A33A` | Advice strip warning dots | Active alerts (`DELTA` on, `MIX Off`/alone, `CARVE ≥ 9 dB` hollow cut, `CARVE 0 & DEPTH 0`) (`colours::warn`) |
+| ⚫ | `#9F9680` | Advice strip info dots, other stems' map names, axis scales | Informational hints and secondary text (`colours::dim`) |
+| ⬛ | `#090D0D` / `#1C2A29` | Recessed glass spectrum & cut pane, graticule | Display glass (`colours::glass`) and grid (`colours::glassGrid`) |
 
-1. Each instance measures its input in thirty third-octave bands (a fourth-order band-pass per band, mean square, 50 ms; no FFT, so no block and
-   no delay) and publishes the levels, its role and its importance to a small table of 32 slots that lives in the plugin binary. All the
-   instances a host loads from that binary into one process share the table.
-2. Every 64 samples, each instance reads the other stems of its mix that are live (published in the last 500 ms) and, with SPREAD above 0, spreads
-   each stem's bands to the bands next to them (the levels the rule reads, its own and the others'; what is published is the measured input). For each
-   band, it asks of each one: is its claim there bigger than mine (by 0.5 or more it takes all of it), is it there at all (-80 to -60 dB), and is it within REACH of
-   my level. What those take, combined as shares of the band, times CARVE, is the cut wanted in that band. The track on the sidechain is measured
-   the same way and is one more of the stems it asks about.
-3. The cut follows that with the ATTACK and RELEASE, and is made by thirty peaking bells in series, minimum phase, no delay. The bells overlap, so
-   the cut wanted at the band centres is turned into bell gains by inverting the overlap: a flat -6 dB is -6 dB at every centre.
-4. The depth is added after the cut: the high shelf, the narrowing of the sides, the first reflections (a delay line with eight taps, each heard once,
-   so no feedback and no tail) and the level. The direct sound is never delayed.
+## Try it
 
-## Measured (`HestiaTests`, 48 kHz)
+| Recipe / Setting | What you see, hear & measure |
+|---|---|
+| Put Hestia on stems (Mix `A`) + **AUTO ROLE** (`"Bass DI"`, `"Lead Vox"`) | Fresh `Full Range` instances auto-set clear host names once in 1 undo step; `OWNER` strip shows who holds each of the `30` bands. |
+| Vocal + Bass on `79 Hz` vs `2 kHz` (`CARVE 6 dB`) | At `79 Hz` vocal cuts `-5.9 dB` (bass `0.0 dB`); at `2 kHz` bass cuts `-5.9 dB` (vocal `0.0 dB`); equal role & `IMPORTANCE` leave each other untouched. |
+| **SPREAD** `0 %` → `100 %` on `1.25 kHz` (`-50 dB` vocal → bass) | Masks `±6` bands (`25 dB/Bark` down, `10 dB/Bark` up): 1 band up cuts `4.79 → 5.55 dB` (`+0.77 dB`), 1 band down `4.79 → 4.81 dB` (`+0.01 dB`). |
+| **DEPTH** `0 %` → `80–100 %` on background guitars | Pushes dot back on `DEPTH` map; `-9 dB` `5 kHz` shelf, `-4 dB` level, `-30 %` sides, `6.3–31.9 ms` reflections, and up to `-35 %` claim. |
+| Route non-Hestia track to **Sidechain** (`SC ROLE` = `Bass`) | Acts as an extra mix stem (`-5.9 dB` vocal cut on `79 Hz`, never heard); **COPY TO MIX** pushes `CARVE/REACH/ATTACK/RELEASE` to playing peers. |
 
-- The cut: a flat -6 dB is within 0.4 dB of -6 at every band centre; one band cut by 9 dB is 9 dB down within 0.4 dB at its own centre, whichever
-  of the thirty it is, and three or more bands away it is untouched within 0.4 dB. With nothing to cut the bells are not run, so the stem is the input bit for bit (also in a build that fuses multiplies and adds).
-- The level bank: a sine on the centre of any band reads its level within 0.8 dB; three bands away it is 20 dB under, six or more 40 dB.
-- A bass and a lead vocal on the same tone at 79 Hz: the vocal is cut by 5.9 dB (DEPTH 6), the bass by 0.0 dB; on 2 kHz it is the other way round;
-  on different tones neither is cut.
-- AUTO ROLE by itself: a fresh instance given the name "Bass DI" sets Bass, the strip says "Role set to Bass from the track name 'Bass DI'; change it any time.", and one UNDO takes it back; a saved session with ROLE Kick keeps Kick under the same name, and a name with only "Track 1" or "Synth" sets nothing (`HestiaUiCheck` pins these; the rule itself is `HestiaTests` [16]).
-- Track names: a slot keeps the host's name for its track, cut at 24 characters, and a slot given back has none. HOLD: a vocal cut by 6.00 dB under a bass keeps that cut for 3 s after the bass has stopped (the tone is still 5.9 dB down), and without HOLD it is back at 0.00 dB; held before any cut, the stem is the input bit for bit. COPY TO MIX: another stem of the mix is told and gets CARVE 11, REACH 20, ATTACK 5 and RELEASE 400; the sender, a stem of another mix and an instance made after the copy are not told (`HestiaUiCheck` checks it through two processors).
-- Stems of the same role and importance are not cut; raise one's IMPORTANCE and the other gives way. With REACH 6 dB a stem 12 dB louder than the
-  other is not cut for it; with 24 dB it is half way in (-3 dB of 6).
-- A stem that stops being processed is forgotten half a second later, and the cut goes away.
-- Depth: at 100% the direct sound of an impulse is the shelf's first sample times the narrowing times the level (left 0.2400, right 0.0424: the
-  expected values to four places); each left reflection is at 6.3, 13.1, 21.7 and 31.9 ms at 0.45 x (0.5, 0.4, 0.3, 0.2) x the damping pole x the level, to
-  under 1%, the right channel has none from a left-only impulse, and 45 ms after the impulse there is nothing left. Back at 0% the stem is bit for bit the input
-  again. Two guitars on one tone, one at 80%: the near one is untouched, the far one gives up 2.6 dB more (2.7 expected from its 28% smaller claim).
-- Sidechain: a vocal with a bass on the sidechain on the same tone is cut by 5.9 dB, the same as with a bass stem on the bus (5.9 dB); with the sidechain
-  silent, disconnected, or the mix Off, the stem passes bit for bit; a disconnected sidechain ends its cut and its level on the display.
-- SPREAD, with a vocal playing one tone at -50 dB on band 17 (1.25 kHz) and a bass that hears only the vocal (the bass's cut, after 2.5 s): with SPREAD at 100%
-  the cut one band up goes from 4.79 to 5.55 dB and one band down from 4.79 to 4.81 dB; the own band takes the full 6.00 dB. The masking reaches upward
-  further: one band up gains 0.77 dB, one band down 0.01 dB. More than six bands away the cut is the same to 1e-9 at this level. At -12 dB the bank's own
-  leakage reaches about ten bands out, so the spread reads it and bands seven to ten away move by up to 0.42 dB (see Limits); more than ten do not move.
-  A run that never sets SPREAD and one that sets it to 0 agree sample for sample; at 100% the output changes (by up to 0.0002 on a sample of a noise
-  programme). The output is the same bit for bit for blocks of 1, 7, 64, 100, 512 and 4096 samples at 100%. One band up the weight is 0.0316 (-15.0 dB,
-  1.50 Bark), one band down 0.000272 (-35.7 dB, 1.43 Bark). In `HestiaUiCheck` the default is 0%, the knob is in the row, and a bass one band above a
-  vocal's tone is cut 4.79 dB at 0% and 5.55 dB at 100%, through the processor.
-- Cost of SPREAD (`-O2`, 48 kHz, a rough benchmark outside the plugin, 20 s of audio): with four stems on the bus the engine goes from 0.78 s to 1.00 s of CPU
-  (0.97% to 1.25% of a core per stem); with 32 stems, the most the bus holds, from 21.0 s to 32.2 s, about 0.56 of a core more for the whole mix. A single
-  stem with nobody to see it is 0.17 s either way.
-- The output is the same bit for bit for blocks of 1, 7, 64, 100, 512 and 4096 samples, with a neighbour on the bus and a depth of 60%, and with a sidechain
-  and a depth of 50%.
-- A stem alone in its mix, or in mix Off, or with CARVE 0 and DEPTH 0, passes bit for bit.
-- Thirty-two stems each get a place on the bus; a thirty-third works alone.
+> [!TIP]
+> Start from the `10` stem presets (*Init*, *Kick*, *Bass*, *Drum Bus*, *Lead Vocal*, *Backing Vocals*, *Guitars*, *Lead Synth*, *Pads and Strings*, *FX and Ambience*); **COPY TO MIX** syncs `CARVE`, `REACH`, `ATTACK`, and `RELEASE` to all playing peers in one click.
 
-## Limits
+> [!IMPORTANT]
+> Instances link only within **one host process and one plugin format** (`VST3` and `AU` have separate `32`-slot tables); use **Sidechain** across sandboxed tracks or third-party chains.
 
-- **COPY TO MIX copies settings, once.** It is not a link: later changes on either side are not followed. It reaches only instances that are playing in this process and in the same mix; a stopped one takes it when it next plays.
-- **HOLD keeps a cut, not a decision.** If the other stems change while it is on (a section that needs different room), the held cut is wrong for it; switch it off to follow them again.
-- **One process.** The instances with Hestia on them see each other only inside one host process. A host that runs each plugin in its own process (some hosts'
-  sandboxing or bridging), or a bounce on another machine, does not link them: each then works as if alone, and says so in the notes.
-- **A deep cut can sound hollow.** With CARVE at 9 dB or more, a band that is cut by about 8.5 dB or more loses body, and the notes say so. Lower CARVE or REACH.
-- **A short RELEASE can flutter.** Under 60 ms the cuts follow every note of the other stems; the notes say so. Use 200 ms or more.
-- **IMPORTANCE 0 gives the stem almost no claim.** Its claim is halved, so nearly every other stem is let in front of it; the notes say so when others are playing.
-- **DELTA is a monitor.** With DELTA on you hear only what Hestia changes, not the stem; the notes warn until it is switched off. It is never saved, and it ends when the window closes.
-- **It only cuts.** It never lifts a band, and it never touches the stem that owns one. For a fixed correction use an equaliser (Iris).
-- **Depth is not a reverb.** It is distance cues and eight early reflections up to 37 ms, with no tail and no feedback: it says how far back the dry sound
-  sits, it does not make a space around it. Use a reverb for that. The cues are fixed in size (9 dB of air, 4 dB of level, 30% of the sides, 0.45 of
-  room at 100%), and there is no pre-delay or room size to set.
-- **The sidechain is one stem, and it is only as good as its role.** Hestia cannot tell what a track on the sidechain is; it is the SC role and importance
-  you set. The sidechain works wherever the host can route it (it does not need the one-process limit); the host has to be able to feed a second input.
-- **The roles are rules of thumb.** A claim is a curve from mixing practice, not a measurement of your sound; two stems with the same role and
-  importance do not cut each other, and the stem that matters is yours to say (IMPORTANCE).
-- **A note is cut after it begins.** The other stems are read as they play, not ahead of time, and the level is smoothed over 50 ms, so the first
-  tens of milliseconds of a hard note are not carved. There is no look-ahead and no delay.
-- **Offline bounces can differ in the finest details.** The stems of a session are not processed in lockstep (they run on different threads, in
-  an order the host chooses), so what one reads of the others is as it stands, not a fixed value; the result for one stem is the same for any
-  block size when the others do not change (test [8]) but not bit for bit across runs of a whole session.
-- **Third-octave resolution.** The cut is smooth over about a third of an octave; it cannot notch a single narrow resonance.
-- **SPREAD uses fixed slopes and six bands.** The 25 and 10 dB per Bark are approximations, and the upper one does not depend on level as it does in
-  the ear. The spread reads each band's power only from the six bands either side of it, which is a banded sum (it is what keeps the cost fixed), but the
-  bank's own leakage is part of what it reads: a loud tone reaches about ten bands through the bank, so the spread moves bands seven to ten away from it
-  by up to 0.42 dB at -12 dB. A quiet tone (-50 dB) does not leak past six bands into the rule, and there nothing beyond six moves. On a single tone the
-  effect is small (0.77 dB one band up, 0.01 dB one band down).
-- **SPREAD is per stem, and COPY TO MIX does not copy it.** A preset sets it back to 0%, since no preset lists it.
-- **Stereo and mono.** The same cut is made on both channels; there is no per-channel or mid/side cut.
-- **Plugin binaries.** Each plugin format (VST3, AU) and each build has its own table: a VST3 and an AU of Hestia in one session do not see each other.
+> [!WARNING]
+> **CARVE ≥ 9 dB** (`~8.5 dB+` active cut) can sound hollow, **RELEASE < 60 ms** flutters on notes (try `≥ 200 ms`), **IMPORTANCE 0 %** halves claim, and **DEPTH ≥ 80 %** is not for leads.
 
-## Building
+> [!CAUTION]
+> Hestia **never boosts** and **cannot notch narrow resonances** (use **Iris**); **DEPTH is not a reverb** (eight early reflections `≤ 37 ms`, zero tail).
 
-Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+## Reference
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target Hestia_VST3 Hestia_AU Hestia_Standalone -j 10
+### Controls
+
+| Control | Range / Choices | Default | Role |
+|---|---|---|---|
+| **Role / Auto Role** | `Kick`, `Bass`, `Drums`, `Hats / Cymbals`, `Lead Vocal`, `Backing Vocal`, `Guitar`, `Keys`, `Pad`, `Lead Synth`, `Strings`, `FX`, `Full Range` | `Full Range` | `30`-band mixing claim curve; **AUTO ROLE** reads track name ([RoleGuess.h](Source/RoleGuess.h)) |
+| **Mix** | `Off`, `A` – `H` | `A` | Shared bus letter (`Off` = isolated, no cut) |
+| **Importance** | `0–100 %` | `50 %` | Scales role claim from `0.5×` to `1.5×` |
+| **Carve** | `0.0–18.0 dB` | `6.0 dB` | Maximum attenuation when an equally loud higher-claim stem plays |
+| **Reach** | `0.0–36.0 dB` | `12.0 dB` | How much quieter another stem may be and still trigger carving |
+| **Spread** | `0–100 %` | `0 %` (Off) | Upward/downward Bark masking spread across `±6` bands (reset to `0 %` by presets) |
+| **Attack / Release** | `1–500 ms` / `20 ms–3.00 s` | `30 ms` / `250 ms` | Cut onset and recovery speed |
+| **Depth** | `0–100 %` | `0 %` (Front) | Distance cues: `-9 dB` `5 kHz` shelf, `-4 dB` level, `-30 %` sides, `4` reflections/ch (`6–37 ms` @ `0.45`), `-35 %` claim |
+| **Output** | `-24.0` to `+24.0 dB` | `0.0 dB` | Post-carve gain |
+| **SC Role / SC Importance** | Same `13` roles / `0–100 %` | `Full Range` / `50 %` | Identity and weight of external sidechain input |
+| **Hold / Copy to Mix / Delta** | `Off`, `On` / Action / Monitor | `Off` | Freeze cut (while still publishing); copy `CARVE/REACH/ATTACK/RELEASE` to mix; monitor `out - in` (unsaved) |
+| **Presets / Undo / A-B / Guide** | `10` presets, `Cmd+Z` / `Shift+Cmd+Z`, A/B | `Init` / `A` | Keep `Mix`, `Output`, `Hold`, `SC Role/Importance` (A/B slots unsaved), **GUIDE** |
+
+### Signal flow
+
+```text
+in ─► 30× 4th-order BP (25 Hz–20 kHz, 50 ms MS) ──► publish to 32-slot bus (500 ms TTL, ≤24-char track name)
+  │                                                         │
+  │                                                         ▼
+  │                         gather live mix + sidechain ─► [Spread ±6 bands, 25/10 dB/Bark] ─► Dominance × Presence × Reach × Carve
+  │                                                                                                  │
+  └──► 30× minimum-phase peaking bells (overlap-inverted, Attack/Release, [Hold]) ───────────────────┴─► Depth (shelf + M/S + 8-tap ER + gain) ─► Output ─► out
 ```
 
-Building does **not** install the plugins; add `-DHESTIA_INSTALL_AFTER_BUILD=ON` for that (macOS).
+- **Rule constants ([Engine.h](Source/DSP/Engine.h)):** `kDominanceSpan = 0.5`, presence `-80` to `-60 dB`, `64`-sample ticks; `Spread` uses Traunmüller's Bark scale with fixed slopes (`kSpreadDownDbPerBark = 25`, `kSpreadUpDbPerBark = 10` after Lynch et al., Eurospeech 1997).
 
-## Development
+### Measured (`HestiaTests` @ `48 kHz`, `HestiaUiCheck`)
+
+- **30-band cut accuracy:** flat `-6 dB` within `0.4 dB` at every band centre; single-band `9 dB` cut within `0.4 dB` (untouched `≥ 3` bands away within `0.4 dB`); idle bells bypassed bit-for-bit (including FMA builds).
+- **Level bank selectivity:** centre sine within `0.8 dB`; `3` bands away `-20 dB`, `≥ 6` bands `-40 dB`.
+- **Stem priority (`79 Hz` & `2 kHz`, bass vs lead vocal):** `79 Hz` cuts vocal `5.9 dB` (`DEPTH 6` / `CARVE 6`), bass `0.0 dB`; `2 kHz` reverses; different tones leave both untouched.
+- **Auto Role (`HestiaUiCheck`, `HestiaTests` [16]):** fresh `"Bass DI"` → `Bass` (`"Role set to Bass from the track name 'Bass DI'; change it any time."`) + `1`-step `UNDO`; saved `Kick` stays `Kick`; `"Track 1"` and `"Synth"` change nothing.
+- **Track names, Hold, Copy to Mix, Reach & TTL:** names capped at `24` chars; **Hold** keeps `6.00 dB` vocal cut `3 s` after bass stops (`5.9 dB` down vs `0.00 dB` unheld; held before cut = bit-exact); **Copy to Mix** sends `CARVE 11, REACH 20, ATTACK 5, RELEASE 400` to active peers; **Reach** `6` vs `24 dB` on `12 dB` quieter stem = `0` vs `-3 dB` of `6`; stopped stem forgotten in `0.5 s` (`500 ms`).
+- **Depth (`100 %` & `80 %`) & Sidechain:** `100 %` impulse direct L `0.2400`, R `0.0424` (exact to 4 places); left reflections at `6.3, 13.1, 21.7, 31.9 ms` at `0.45 × (0.5, 0.4, 0.3, 0.2)` (`< 1 %`), R silent on L-only impulse, clear at `45 ms`, `0 %` bit-exact; `80 %` depth guitar cuts `2.6 dB` more (`2.7` expected from `28 %` smaller claim); Sidechain matches bus (`5.9 dB`); disconnected/silent/`Off` = bit-exact.
+- **Spread (`-50 dB` & `-12 dB` band 17 `1.25 kHz`, vocal → bass after `2.5 s`):** `100 %` pushes 1 band up `4.79 → 5.55 dB` (`+0.77 dB`), 1 band down `4.79 → 4.81 dB` (`+0.01 dB`), own band `6.00 dB`, `> 6` bands unchanged (`1e-9` at `-50 dB`; up to `0.42 dB` on bands `7–10` at `-12 dB` from filter leakage); `0 %` bit-identical to never set; `100 %` changes noise output by up to `0.0002`; weights `0.0316` (`-15.0 dB`, `1.50 Bark`) up and `0.000272` (`-35.7 dB`, `1.43 Bark`) down; `HestiaUiCheck` confirms `4.79 → 5.55 dB` through the processor.
+- **Spread CPU (`-O2`, `48 kHz`, `20 s` audio) & Bus capacity:** `4` stems: `0.78 s → 1.00 s` (`0.97 % → 1.25 %` core/stem); `32` stems (bus max): `21.0 s → 32.2 s` (`+0.56` core total); `1` stem alone: `0.17 s`; `33rd` stem works alone.
+- **Block invariance & bypass:** bit-identical across `1, 7, 64, 100, 512, 4096` samples (bus + `60 %` depth, sidechain + `50 %` depth, and `100 %` Spread); alone / `Off` / `CARVE 0 & DEPTH 0` = bit-exact.
+
+### Limits
+
+- **COPY TO MIX copies settings once:** not linked; reaches only playing instances in the same process and mix (stopped ones pick up on next play).
+- **HOLD keeps a cut, not a decision:** if other stems change while held, switch it off to follow again.
+- **One process & one plugin format:** VST3 and AU have separate tables, and sandboxed/bridged hosts isolate instances (use **Sidechain** where needed).
+- **Hollow cut & flutter:** `CARVE ≥ 9 dB` (`~8.5 dB+` cut) can sound hollow; `RELEASE < 60 ms` flutters on notes (try `≥ 200 ms`); `IMPORTANCE 0 %` halves claim.
+- **DELTA is an unsaved monitor:** hear `out - in`, ends when the window closes.
+- **Only cuts, never lifts:** never touches a band's owner (use **Iris** for static/boost EQ).
+- **Depth is not a reverb:** fixed distance cues (`-9 dB` air, `-4 dB` level, `-30 %` sides, `0.45` reflections `≤ 37 ms`, no tail, no feedback, no pre-delay or room size control).
+- **Sidechain is only as good as its SC Role / SC Importance:** Hestia cannot infer the sidechain's identity; requires a host that routes a second input.
+- **Role curves are rules of thumb:** equal role and importance never cut each other; use `IMPORTANCE` to break ties.
+- **No look-ahead (`50 ms` level smoothing):** the first tens of milliseconds of a hard note are uncarved.
+- **Non-lockstep host threads:** offline bounces can differ subtly across runs because stems process asynchronously.
+- **Third-octave resolution:** smooth over `~1/3` octave; cannot notch a single narrow resonance.
+- **SPREAD approximations & scope:** fixed `25` / `10 dB/Bark` slopes (ignoring level dependence), reads `±6` bands (plus filter leakage up to `~10` bands at `-12 dB`, `0.42 dB` max; small effect on a single tone: `0.77` up / `0.01 dB` down), per stem (not copied by `COPY TO MIX`, reset to `0 %` on presets).
+- **Stereo & mono:** identical cut applied to both channels (no per-channel or M/S carving).
+
+## Build & develop
+
+Requires CMake 3.22+ and a C++20 compiler; JUCE is fetched from [cmake/Juce.cmake](../../cmake/Juce.cmake).
 
 ```bash
-cmake --build build --target HestiaTests && ./build/HestiaTests_artefacts/Release/HestiaTests            # DSP: no plugin, no GUI
-cmake --build build --target HestiaUiCheck && ./build/HestiaUiCheck_artefacts/Release/HestiaUiCheck      # the editor on the real processor
+# Recommended from repository root:
+scripts/build.sh hestia               # configure, build & run HestiaTests + HestiaUiCheck
+scripts/showcase.sh hestia            # regenerate docs/showcase.gif (requires ffmpeg)
+
+# Manual CMake from plugins/hestia/:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target Hestia_VST3 Hestia_AU Hestia_Standalone -j 10   # add -DHESTIA_INSTALL_AFTER_BUILD=ON to install (macOS)
+
+cmake --build build --target HestiaTests && ./build/HestiaTests_artefacts/Release/HestiaTests
+cmake --build build --target HestiaUiCheck && ./build/HestiaUiCheck_artefacts/Release/HestiaUiCheck
 cmake --build build --target HestiaSnapshot && ./build/HestiaSnapshot_artefacts/Release/HestiaSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` is the output of `HestiaSnapshot` (arguments in the file's header), never edited by hand. See
-[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+`docs/screenshot.png` is generated by `HestiaSnapshot` (never edited by hand); see [CLAUDE.md](CLAUDE.md) for invariants.
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
-the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).

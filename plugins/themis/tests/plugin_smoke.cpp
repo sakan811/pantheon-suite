@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <random>
 #include <set>
+#include <string_view>
 
 static int failures = 0, checks = 0;
 #define CHECK(cond, ...)                                       \
@@ -84,7 +85,7 @@ static constexpr float kAirGain = 0.02f; // the widened top of the demo programm
 // signal, so it sits in 4 - 10 kHz and up).
 static constexpr double kSibilanceEverySeconds = 1.0, kSibilanceSeconds = 0.15;
 static constexpr float kSibilanceGain = 4.0f; // +12 dB while a burst lasts (more clips against the demo's ceiling)
-static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, int block, double delaySeconds)
+static void buildDemoProgramme (double seconds, double fs, double delaySeconds, std::vector<float>& l, std::vector<float>& r)
 {
     const size_t total = static_cast<size_t> (seconds * fs), delay = static_cast<size_t> (delaySeconds * fs);
     const auto noise = pinkNoise (total, 9, 0.05f);
@@ -92,7 +93,8 @@ static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, 
     constexpr double notes[] = { 49.0, 55.0, 41.2, 61.7 }, kNoteSeconds = 5.0, kSoundingSeconds = 4.2;
     constexpr double kChorusStart = 33.0, kChorusEnd = 39.0;
     constexpr float kChorusGain = 2.6f, kCeiling = 0.891f /* -1 dBFS */, kRightTrim = 0.891f /* -1 dB */;
-    std::vector<float> l (total), r (total);
+    l.resize (total);
+    r.resize (total);
     for (size_t i = 0; i < total; ++i)
     {
         const double t = static_cast<double> (i) / fs, phase = 2.0 * juce::MathConstants<double>::pi * notes[static_cast<size_t> (t / kNoteSeconds) % 4] * t;
@@ -104,6 +106,13 @@ static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, 
         l[i] = std::clamp (gain * (bass + noise[i] + wide), -kCeiling, kCeiling);
         r[i] = std::clamp (gain * kRightTrim * (bass + noise[i >= delay ? i - delay : 0] - wide), -kCeiling, kCeiling);
     }
+}
+
+static void runDemoProgramme (ThemisProcessor& proc, double seconds, double fs, int block, double delaySeconds)
+{
+    std::vector<float> l, r;
+    buildDemoProgramme (seconds, fs, delaySeconds, l, r);
+    const size_t total = l.size();
     // Fed in slices with a pause after each, so the analysis thread keeps up and the history graphs fill like in a host
     // (it skips frames when audio arrives much faster than real time).
     const size_t slice = static_cast<size_t> (2.0 * fs);
@@ -263,9 +272,65 @@ static double contrastRatio (juce::Colour a, juce::Colour b)
     return (std::max (la, lb) + 0.05) / (std::min (la, lb) + 0.05);
 }
 
+static int runFrames (const char* outDir)
+{
+    constexpr double fs = 48000.0;
+    constexpr int kNumFrames = 30;
+    ThemisProcessor proc;
+    proc.setPlayConfigDetails (2, 2, fs, 512);
+    proc.prepareToPlay (fs, 512);
+
+    auto* target = proc.apvts.getParameter (params::target);
+    target->setValueNotifyingHost (target->convertTo0to1 (static_cast<float> (params::kDefaultTarget)));
+    auto* avg = proc.apvts.getParameter (params::avgTime);
+    avg->setValueNotifyingHost (avg->convertTo0to1 (static_cast<float> (params::kDefaultAvgTime)));
+    auto* deviceParam = proc.apvts.getParameter (params::device);
+    deviceParam->setValueNotifyingHost (deviceParam->convertTo0to1 (1.0f));
+
+    std::vector<float> l, r;
+    buildDemoProgramme (45.0, fs, 0.0005, l, r);
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
+    if (editor == nullptr)
+        return 1;
+    editor->setSize (kEditorWidth, kEditorHeight);
+
+    const juce::String dirArg (outDir);
+    const juce::File dir = juce::File::isAbsolutePath (dirArg)
+                             ? juce::File (dirArg)
+                             : juce::File::getCurrentWorkingDirectory().getChildFile (dirArg);
+    dir.createDirectory();
+
+    const size_t slice = l.size() / static_cast<size_t> (kNumFrames);
+    bool ok = true;
+    for (int f = 0; f < kNumFrames; ++f)
+    {
+        const size_t pos = static_cast<size_t> (f) * slice;
+        const size_t n = (f + 1 == kNumFrames) ? (l.size() - pos) : slice;
+        runBlocks (proc, l.data() + pos, r.data() + pos, n, 512);
+        settle();
+        pump (60);
+
+        auto img = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
+        const auto path = dir.getChildFile (juce::String::formatted ("frame_%03d.png", f)).getFullPathName();
+        ok = writePng (img, path.toRawUTF8()) && ok;
+    }
+    proc.releaseResources();
+    return ok ? 0 : 1;
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
+    if (argc >= 2 && std::string_view (argv[1]) == "--frames")
+    {
+        if (argc < 3)
+        {
+            std::printf ("usage: ThemisSmoke [snapshot.png [graphs.png]] | --frames <dir>\n");
+            return 2;
+        }
+        return runFrames (argv[2]);
+    }
     const double fs = 48000.0;
 
     ThemisProcessor proc;

@@ -1,118 +1,148 @@
 # Hera Bond
 
-A **compressor** (VST3 + AU + Standalone) for a track or a bus: a peak or RMS detector, a feed-forward or a feedback topology, a soft knee, attack and release (or a
-release that follows the programme), makeup (or one that makes up what the compression takes), a parallel **mix**, a **stereo link**, and a **sidechain** with a
-high-pass on what the detector hears (or another track as the key).
+Track and bus compressor with peak or RMS detection, feed-forward or feedback topology, soft knee, hold, auto setup, and external sidechain.
 
-## Name origin
+`VST3 + AU + Standalone`
 
-*Hera* is the goddess of marriage and of what holds together: the compressor's work is to bring the loud and the quiet closer so that they hold together as one.
-(CMake targets, namespaces and plugin codes use the short name "Hera".)
+![Hera Bond Showcase](docs/showcase.gif)
 
-![Hera Bond](docs/screenshot.png)
+*The operating-point lamp rides the soft-knee transfer curve while the 10-second gain-reduction history scrolls beside it.*
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a beat through an RMS detector, THRESH -22 dB, RATIO 4:1, ATTACK 15 ms, RELEASE 150 ms, HOLD 0 ms (the knob between RELEASE and KNEE), an 8 dB knee, AUTO REL, AUTO MAKEUP and LEVEL MATCH on. On the left, the transfer curve (input across, output up) with the dot where the level is now, the shaded band of the knee (THRESH -22 dB, 8 dB knee: -26 to -18 dB on the input) and the thin lines at THRESH; at the top, UNDO / REDO (UNDO lit, REDO not), the A / B pair (A lit, as on opening) and AUTO SETUP (idle, not pressed) beside the presets; on the right, the reduction over the last seconds (-9.3 dB now), with **LEVEL MATCH** on and its gain read out under the reduction (-9.4 dB: the compression takes about that much level, and the match gives it back). The strip warns that taking off 11 dB or more will pump. Under the knobs, beside DETECTOR (RMS), the TOPOLOGY choice is on Feed-forward, the default (the detector hears the input; Feedback is the other choice, and the picture does not show it). Regenerate with the command under "Development".*
+## Theme
 
-## What it does
+### Name origin
 
-| | |
+*Hera* is the goddess of marriage and of what holds together: the compressor's work is to bring the loud and the quiet closer so that they hold together as one. (CMake targets, namespaces, and plugin codes use the short name "Hera".)
+
+### Core philosophy
+
+- **Transparency at rest, exact law under load.** Below threshold or after release (`< 0.001 dB`), gain resets to exact `1.0` and `MIX 100 %` passes audio bit-for-bit; `15 ms` peak fall stops waveform ripple.
+- **Two honest topologies.** **Feed-forward** follows `(1 - 1/ratio) × over`; **Feedback** reads post-gain output (`slope / (1 + slope)` overshoot, `0` latency) without faking compensation.
+- **Loudness-fair and comb-free comparison.** **Look-ahead** (`1–10 ms`) delays the dry **Mix** path equally, **Level Match** balances RMS (`±12 dB`), and **Delta** / **SC Listen** isolate changes.
+- **Not a brickwall limiter.** Reads no true peak and sets no hard ceiling—place [Aegis Ceiling](../aegis/README.md) after it, [Atlas Span](../atlas/README.md) for multiband, or [Iris Prism](../iris/README.md) for dynamic EQ.
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
+
+## See it
+
+| View | What to look at |
 |---|---|
-| **Threshold** | -60 to 0 dB, -18 by default: the level (the peak of a sine) above which the sound is turned down. |
-| **Auto setup** | One press (AUTO SETUP, beside the presets): listens to four seconds of the sound and sets a complete starting point from it: RATIO, ATTACK and RELEASE from how peaky the sound is (its crest factor: 2:1, 10 ms and 300 ms for a dense mix, 4:1, 25 ms and 100 ms for a very dynamic one, linear between), and THRESH so that the sound is turned down by about 3.5 dB on average while it plays, at that RATIO. Silence is not counted; the answer is the average over the time, so a few loud bursts do not set it alone. All four move together as one undo step; MIX, MAKEUP, KNEE and the rest are left as they were. A silent passage, or a sound too quiet to reach 3.5 dB, leaves all four as they were, and the strip says which. Everything stays editable. |
-| **Ratio** | 1:1 to 20:1, 2:1 by default: how many dB it takes past the threshold for 1 dB more to come out. |
-| **Attack / Release** | 0.1 to 200 ms (10) and 10 ms to 2 s (150): the time the gain takes to go 63% of the way down and of the way back. |
-| **Hold** | 0 to 500 ms (0, off): after the level falls below what the gain is doing, the gain stays where it is for this long, and only then does RELEASE start; every time the level reaches it again the wait starts over. A hold keeps a low note or a pulse from being let go of between its peaks (the compressor designs in Giannoulis, Massberg and Reiss, JAES 2012, and in most hardware and plug-in compressors have one). With AUTO release it is not used. |
-| **Knee** | 0 to 24 dB, 6 by default: how gradually it starts, around the threshold. |
-| **Makeup** | 0 to +24 dB. **Auto makeup** adds what the compression takes from a signal at 0 dBFS, so a full-scale input is full scale out. |
-| **Mix** | 0 to 100%, 100 by default: the compressed sound blended with the dry one (parallel compression). |
-| **Link** | 0 to 100%, 100 by default: the share of the louder channel's level that both channels see, so the image does not move (0: each channel on its own). |
-| **SC high-pass** | 20 to 500 Hz, off at 20: a high-pass on what the detector listens to (not on the sound). |
-| **Detector** | Peak (quick, follows transients) or RMS (10 ms, closer to the ear; the default). Both read the peak of a sine, so THRESH means the same on both. |
-| **Auto release** | Program-dependent: two followers, a fast one (release 50 ms) and a slow one (release 600 ms, and an attack 20 times longer); the gain is the larger. A short peak lets go quickly, a long loud passage slowly. RELEASE is not used. |
-| **Key** | Listen to the **sidechain** input (a second input, off until the host routes a track to it) instead of the sound. With nothing connected it listens to itself. |
-| **Topology** | Feed-forward (default): the detector hears the input, and the gain is the law as written. **Feedback**: the detector hears the sound after the gain, the previous output sample, before MAKEUP and MIX, as many classic compressors do (Giannoulis, Massberg and Reiss, JAES 2012, on where the detector reads). The law then changes and is **not compensated**: the same settings reduce less. In steady state the reduction is the slope over `1 + slope` of the overshoot (`gr = slope / (1 + slope) x (level - THRESH)`): 0.43 dB per dB over THRESH at 4:1 (feed-forward 0.75), 0.33 at 2:1 (0.50), and never half of the overshoot whatever the RATIO. Feedback does not use LOOK-AHEAD (the latency is 0); the setting is kept for feed-forward. With KEY and a sidechain connected the detector reads the key in both. Changing it while playing restarts the compressor (a short gap). |
-| **Look-ahead** | Off (default), 1, 2, 5 or 10 ms: the detector sees the sound as it arrives and the sound is heard that long after, so the gain is already down when a peak gets to the output. It is a delay (the host compensates); MIX delays the dry sound the same, so nothing combs. Feed-forward only: Feedback does not use it. |
-| **Level match** | Takes the level the compressor and MAKEUP add or take away off again, slowly (about 0.6 s, within 12 dB), so an A/B is not decided by loudness. Off by default; while it is on, the gain it applies is read out beside the reduction. Kept by presets. |
-| **Delta** | Plays only what the compressor changes (output minus the input, delayed like the output). Not saved, not automatable, off when the window closes. |
-| **SC listen** | Plays what the detector hears: the key (this track, or the sidechain with KEY on) after SC HPF, instead of the track. Not saved, not automatable, off when the window closes. |
-| **Undo and A/B** | **UNDO / REDO** (Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus; Ctrl on other systems) take back and redo changes to the controls, a preset included (as one step each). They are not kept with the session. **A / B** holds two settings of every control except LEVEL MATCH (which stays as it is, as with a preset): choosing B the first time copies A; after that each switch keeps what you have set in the one you leave and loads the other, so the plugin can be set up two ways and compared while listening. A later switch is one undo step (the first, which only copies A into B, is not). The slots are not saved with the session, only which one is active. Both come from the shared kit (`Undo.h`, `AbCompare.h`). |
-| **Presets** | Eight starting points (Init, Vocal Level, Drum Punch, Bus Glue, Bass Control, Parallel Smash, Peak Catcher, Sidechain Duck). A preset sets every control; what it does not list goes back to its default (LEVEL MATCH is kept). The thresholds are for a source around -18 dBFS: set THRESH where the reduction meter first moves, or press AUTO SETUP to set it from the sound. |
+| ![Hera Bond](docs/screenshot.png) | RMS beat: `-22 dB` thresh, `4:1`, `8 dB` knee, `-9.3 dB` GR, `-9.4 dB` match. |
 
-The display is the transfer curve (input level across, output up; the diagonal is "no compression", the dot is the level now; the shaded band is the knee, THRESH plus or minus half the KNEE, and the thin lines mark THRESH) and the reduction of the last ten seconds.
+### UI colour legend
 
-## How it works
+| Swatch | Hex | UI Element | Meaning |
+|---|---|---|---|
+| 🟡 | `#FFB347` | Transfer curve, 10 s gain-reduction trace & fill, **REDUCTION** & **LEVEL MATCH** readouts, lit switches | Active compression curve (`IN`/`OUT`), live gain reduction (`0` to `-24 dB`), and digital readouts (`colours::amber`) |
+| 🔵 | `#37E3C5` | Operating-point lamp, shaded soft-knee zone | Current input/output level dot and `THRESH ± 0.5 × KNEE` transition band (`colours::accent`) |
+| 🟠 | `#F2A33A` | Advice strip warning dots | Active warnings (`≥ 10 dB` pumping, `RATIO 1:1`, `THRESH ≥ -1 dB`, unrouted `KEY`, `DELTA`/`SC LISTEN` on) (`colours::warn`) |
+| ⚪ | `#EAE3D0` | Primary engraved labels | Panel and control titles (`colours::text`) |
+| ⚫ | `#9F9680` | `THRESH` crosshairs, scale numbers, delay readout, advice info dots | Secondary references and informational notes (`colours::dim`) |
+| ⬛ | `#090D0D` / `#1C2A29` | Recessed glass displays, grid lines & 1:1 diagonal | Glass background (`colours::glass`) and `12 dB` / `6 dB` graticule (`colours::glassGrid`) |
 
-1. The key (the sound, or the sidechain) goes through the detector's high-pass (a 2nd-order Butterworth when it is on) and the detector: for each channel the **peak** is an envelope that
-   takes any peak at once and lets it fall over 15 ms (so a low tone does not make the gain ripple), the **RMS** is the square root of a mean square of 10 ms, times the square root of 2.
-   In **feedback** with no sidechain, the key is the channel's previous output sample after the gain (before MAKEUP and MIX) instead of the sound.
-2. LINK: each channel sees its own level plus LINK of the way to the louder one.
-3. The gain computer turns the level in dB into a reduction in dB: `(1 - 1/ratio) x over` with a quadratic soft knee of `KNEE` dB around the threshold. In feedback the level it
-   is fed is the output's, so the reduction is the same law at the level that comes out.
-4. The reduction goes through the follower: one-pole attack when it grows, one-pole release when it shrinks. At rest (under 0.001 dB with nothing to reduce) it is let go to exactly 0, so the gain is exactly 1.
-5. The gain (with makeup) is applied to the sound, and MIX blends it with the dry sound. MIX at 100% is the compressed sound itself, not a blend.
+## Try it
 
-## Measured (`HeraTests`, 48 kHz)
+| Setting | What you see / hear / measure |
+|---|---|
+| Play track → press **AUTO SETUP** | Listens `4 s`; maps crest (`2:1 / 10 / 300 ms` dense to `4:1 / 25 / 100 ms` dynamic) + **Thresh** for `~3.5 dB` avg GR in one undo step. |
+| *Bus Glue* (`1–3 dB` GR, **RMS**, **Auto Rel**, **Level Match** on) | Fast `50 ms` peak release + `600 ms` sustained release (`93 ms` vs `1008 ms`); **Level Match** keeps loudness equal (`±12 dB`). |
+| **Feed-forward** + **Peak** + **Look-ahead** `5 ms` | Delays audio `240` samples (`48 kHz`); cuts `-40 → 0 dBFS` step first ms from `-0.6` to `-11.0 dBFS` with zero **Mix** comb. |
+| **Topology** `Feedback` + **Hold** `100–300 ms` | `0` latency, overshoot capped `≤ half` (`0.43 dB/dB` at `4:1`, `0.33` at `2:1`), `+20 dB` step overshoot drops `+2.70 → +0.34 dB`. |
+| **SC HPF** `250 Hz` or **KEY** + **SC Listen** | `50 Hz` cut drops `13.4 dB → 0.0 dB` while bass passes cleanly; **SC Listen** auditions detector key. |
 
-- The law: a sine at -6 dBFS over a -24 dB threshold at 4:1 with no knee is turned down by 13.48 dB with the peak detector and 13.52 dB with the RMS one (13.5 by the law); 20:1: 17.13 dB (17.1).
-  With a 12 dB knee, exactly at the threshold the reduction is 1.14 dB (1.125), and 8 dB under it none.
-- Under the threshold the output is the input, bit for bit; three seconds after a loud passage the gain is back at exactly 1 and the quiet tone is the input, bit for bit.
-- ATTACK 20 ms: after 20 ms the reduction has come 63% of the way to its value (20.9 dB; the law 21). RELEASE 200 ms: 200 ms after the tone stops 41% is left (a one-pole is 37%; the peak detector's 15 ms fall adds the rest), after 1.4 s 0.02 dB.
-- HOLD 300 ms: with a 21 dB reduction, 200 ms after the tone stops it is still 21.0 dB (without a hold 3.5 dB are left); 100 ms after the hold has ended it is letting go (7.6 dB). A 100 ms quiet gap inside a 200 ms hold keeps the full reduction; the output is the same for any block size, and a hold of 0 is the compressor as it was (tests [2] and [8]).
-- AUTO release: the reduction halves 93 ms after a 30 ms burst but 1008 ms after a 1.5 s one.
-- LINK 100%: a loud left and a right 26 dB under it get the same gain (-13.5 dB both); LINK 0%: the left is turned down by 13.5 dB and the right by 0.00.
-- SIDECHAIN: a quiet tone is turned down by 13.4 dB by a loud key it never contained; with KEY off the sidechain is ignored (the tone is untouched). A 250 Hz detector high-pass: a 50 Hz tone that is turned down 13.4 dB without it is turned down 0.0 dB with it.
-- MAKEUP +6 dB: -7.49 dB net (13.5 down, 6 up). AUTO makeup: a full-scale tone comes out at +0.01 dBFS. MIX 50%: -4.35 dB (-4.36 expected).
-- A train of clicks: the peak detector turns it down by 15.7 dB, the RMS one by 0.0 dB.
-- LOOK-AHEAD 5 ms: with nothing to compress the output is the input 240 samples later, bit for bit; at a step from -40 to 0 dBFS (20:1, ATTACK 5 ms) the first millisecond of the output is at -0.6 dBFS without it and -11.0 dBFS with it; a change of the setting while running moves the latency (96 samples for 2 ms).
-- LEVEL MATCH: noise at 4:1 over -30 dB comes out 10.83 dB quieter; with it on it is -0.01 dB after 5 s (applying +10.83 dB); off, 0.00 dB; blocks of 1, 7, 333 and 4096 samples give the same output, bit for bit. DELTA of +6 dB makeup is -0.04 dB of the input (the wanted -0.04), and silence exactly with nothing to compress (with look-ahead too). SC LISTEN with the high-pass at 1 kHz: 5 kHz passes (-0.01 dB), 100 Hz is -40.0 dB; with KEY on it is the key. Bypassed by the host with 10 ms of look-ahead, an impulse comes out exactly the reported 480 samples late (`HeraUiCheck`).
-- AUTO THRESH: four seconds of a steady tone at -20 dB set THRESH to -24.7 dB (the law: -24.7), and the sound is then turned down 3.53 dB on average (aimed at 3.5). Four seconds of 0 dB bursts (100 ms of each second) over -30 dB set THRESH to -18.4 dB, and the sound is then turned down 3.54 dB on average, bursts and release tail included. Silence, a tone under -70 dB, RATIO 1:1 and a -58 dB tone at 2:1 leave THRESH alone; blocks of 1 and of 512 samples give the same THRESH.
-- AUTO SETUP: the crest factor a sine measures is 3.01 dB and that of the bursts above is 12.97 dB (peak 0 dB, RMS -12.97 dB). The mapping is monotonic over crest factors from -5 to 40 dB and inside the controls' ranges; a sine gets 2:1, 10 ms, 300 ms, and 20 dB and more gets 4:1, 25 ms, 100 ms. On the bursts the press sets 2.8:1, 16.2 ms and 217 ms, and THRESH is answered for that ratio: the sound is then turned down 4.24 dB on average, 0.7 dB over the 3.5 aimed at, because the release tail was measured at the settings the listening ran with (150 ms). A second press measured at the new settings lands at 2.5 dB, so it is not a refinement (see Limits). In the editor one press sets all four as one undo step, and UNDO takes all four back (`HeraTests`, `HeraUiCheck`).
-- TOPOLOGY, steady state (no knee, a sine at -6 dBFS over -24 dB): feed-forward at 4:1 turns it down 13.48 dB (peak) and 13.52 dB (RMS), the law's 13.5. Feedback at 2:1 turns it down 5.99 dB (peak) and 6.01 dB (RMS), the closed form 6.00; at 4:1 7.70 dB and 7.73 dB, the closed form 7.71 (the solved steady state is 7.714 dB). At 1000:1 it is 11.99 dB of a 24 dB overshoot, never half. On the processor the same tone at 4:1 is -13.51 dB feed-forward and -7.72 dB feedback (`HeraUiCheck`).
-- TOPOLOGY, a +20 dB step (-30 to -10 dBFS over THRESH -20, 4:1, ATTACK 5 ms, peak): the steady level is -14.27 dBFS in feedback (the law -14.29) and -17.47 dBFS in feed-forward (-17.50). The first millisecond after the attack is above the steady level by 0.34 dB in feedback and by 2.70 dB in feed-forward: the gain has not closed yet, and the feedback loop limits the overshoot, because the level it hears falls as the gain comes down. The first millisecond of the step itself is -10.20 dBFS in feedback and -10.23 in feed-forward.
-- TOPOLOGY, feedback: silence in is silence out, exactly; three seconds after a loud passage the gain is back at exactly 1 and the quiet tone is the input, bit for bit. The output is the same for blocks of 1, 7, 64, 333 and 4096 samples, with and without AUTO release, with LOOK-AHEAD set. With KEY and a sidechain connected it is feed-forward's output, bit for bit; with KEY on and nothing connected a loud tone at 4:1 is turned down 7.7 dB (feed-forward 13.5 dB), because it listens to the track.
-- TOPOLOGY, latency: with LOOK-AHEAD 5 ms set, feedback reports 0 samples and its output is the one without look-ahead, bit for bit; choosing feed-forward again tells the host 240 samples, and a session saved in feedback opens in it (`HeraUiCheck`).
-- TOPOLOGY, AUTO: on a steady tone at -20 dB, AUTO THRESH in feedback (4:1, 6 dB knee) sets THRESH to -28.6 dB, and the sound is then turned down 3.70 dB on average (aimed at 3.5). AUTO makeup in feedback takes what the feedback steady state takes at 0 dBFS: a full-scale tone comes out at -0.01 dBFS.
-- The default is feed-forward: a parameter set that never names the topology gives the output of one that names it, bit for bit (with look-ahead and MIX). Tests [2] and [8] are unchanged.
-- The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit (with look-ahead too). NaN and infinity in the input are silence.
+> [!TIP]
+> **Quick start:** Aim for `1–3 dB` reduction on buses (or press **AUTO SETUP**), and keep **LEVEL MATCH** (`~0.6 s`, `±12 dB`) or **DELTA** handy so louder does not fool A/B.
 
-## Limits
+> [!NOTE]
+> **Hold, Undo & A/B:** **Hold** pauses release after signal drops (ignored in **Auto Rel**); **UNDO/REDO** & **A/B** preserve **LEVEL MATCH**; **DELTA** and **SC LISTEN** switch off on close.
 
-- **It compresses; it does not limit.** It reads no true peak, and with LOOK-AHEAD off a fast peak gets through before ATTACK closes (with it on, the gain is already down, but it is still no ceiling). Put a limiter after it (Aegis).
-- **LOOK-AHEAD delays the sound** by its time (the host compensates it); changing it while playing restarts the compressor (a short gap). Feedback does not use it (the output is not known early), and the latency is 0 in feedback.
-- **Feedback is not feed-forward with a different name.** At the same settings it reduces less: at most half of the overshoot over THRESH, whatever the RATIO (0.43 dB per dB at 4:1, where feed-forward gives 0.75), and no RATIO compensates it. Set THRESH and RATIO by ear in feedback; the transfer curve draws its steady state. AUTO SETUP and AUTO THRESH answer for the topology set, but were measured only on a steady tone (`HeraTests`), not on bursts or on programme material.
-- **Taking off 10 dB or more pumps.** Raise THRESH or lower RATIO. A very fast ATTACK on the peak detector takes the transient away.
-- **MIX under 100% blends the compressed path with the dry one**; the meter and the transfer curve show the compressed path, not the blend. The dry sound is delayed by the look-ahead like the compressed one, so the blend does not comb.
-- **LEVEL MATCH is slow and is not a loudness meter.** It equals the RMS of the whole sound (about 0.6 s to settle, so it follows a section, not a note), stops at 12 dB, and does not weigh frequencies as an ear does; judge by ear, and with DELTA.
-- **The RMS detector's 10 ms** means a very short peak (a click) is hardly seen: use the peak detector for them.
-- **KEY with nothing connected listens to itself**, so a session saved with it still works without a sidechain.
-- **AUTO THRESH measures once.** It sets THRESH for the four seconds it heard, at the RATIO and KNEE set when it is done: a passage that is louder later is not followed, and changing RATIO or KNEE afterwards does not re-measure. It needs the sound to be playing while it listens (a stopped transport gives "NO AUDIO" after 20 s).
-- **AUTO SETUP's THRESH is approximate for a bursty sound.** The release tail is corrected with one offset, measured at the settings the listening ran with. When the press changes RATIO, ATTACK or RELEASE, that offset is not the one the new settings have, and it depends on THRESH: on the bursts above the first press lands 0.7 dB over, and a second press (which moves THRESH again) lands 1.0 dB under. Set THRESH by ear from there, or UNDO. A steady sound is exact. Measured on synthetic bursts only, not on real programme material.
-- **AUTO SETUP's RATIO, ATTACK and RELEASE are a starting point from one crest factor**, not a match to the programme: a dense mix and a sparse one can have the same crest factor. The mapping follows the usual starting points (a 2:1 default for a dense bus, 4:1 for drums with a 20 to 30 ms attack, and drum releases of 60 to 250 ms) and the placement of the release (long for dense, short for dynamic) is reasoned, not sourced.
-- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+> [!IMPORTANT]
+> **Look-ahead & Feedback:** **Feedback** ignores **Look-ahead** (`0` latency, `≤ half` overshoot) and switching either while playing restarts the compressor; unrouted **KEY** listens to itself.
 
-## Building
+> [!WARNING]
+> **Settings pitfalls:** `≥ 10 dB` GR pumps; **Peak** with `≤ 2 ms` Attack strips transients while `10 ms` **RMS** misses clicks; **MIX < 100 %** blends dry without changing the meter/curve.
 
-Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+> [!CAUTION]
+> **Not a limiter:** Hera reads no true peak and sets no ceiling—put [Aegis Ceiling](../aegis/README.md) after it, [Atlas Span](../atlas/README.md) for multiband, or [Iris Prism](../iris/README.md) for dynamic EQ.
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target Hera_VST3 Hera_AU Hera_Standalone -j 10
+## Reference
+
+### Controls
+
+| Control | Range / Choices | Default | Role |
+|---|---|---|---|
+| **Threshold** | `-60.0` to `0.0 dB` | `-18.0 dB` | Sine-peak level above which compression begins |
+| **Ratio** | `1.0:1` to `20.0:1` | `2.0:1` | Input dB per `1 dB` output above threshold |
+| **Attack / Release** | `0.1–200.0 ms` / `10 ms–2.00 s` | `10.0 ms` / `150 ms` | Time to travel `63 %` down and back |
+| **Hold** | `0.0–500 ms` | `0.0 ms` (Off) | Holds gain after signal drops before **Release** starts (unused in **Auto Rel**) |
+| **Knee** | `0.0–24.0 dB` | `6.0 dB` | Quadratic soft-knee width centred on **Threshold** |
+| **Makeup / Auto Makeup** | `0.0` to `+24.0 dB` / `Off`, `On` | `0.0 dB` / `Off` | **Auto Makeup** restores full-scale (`0 dBFS`) loss; **Makeup** adds on top |
+| **Mix / Link** | `0–100 %` / `0–100 %` | `100 %` / `100 %` | Parallel dry/wet blend (`0` comb-free); stereo louder-channel link |
+| **SC High-pass** | `Off` (`20 Hz`) to `500 Hz` | `Off` (`20 Hz`) | 2nd-order Butterworth high-pass on detector key only |
+| **Detector / Topology** | `Peak`, `RMS` (`10 ms`) / `Feed-forward`, `Feedback` | `RMS` / `Feed-forward` | Peak (`15 ms` fall) vs RMS; input vs post-gain output detection |
+| **Look-ahead** | `Off`, `1 ms`, `2 ms`, `5 ms`, `10 ms` | `Off` | Delays audio for pre-peak gain reduction (feed-forward only) |
+| **Auto Rel / Key / Level Match** | `Off`, `On` | `Off` | Dual-follower release; external sidechain; slow (`~0.6 s`, `±12 dB`) RMS match |
+| **Auto Setup / Delta / SC Listen** | Actions & monitors | Off | `4 s` crest+thresh auto setup; `output - input` delta; listen to detector key |
+| **Presets / Undo / A-B / Guide** | 8 presets (`Init`, `Vocal Level`, `Drum Punch`, `Bus Glue`, `Bass Control`, `Parallel Smash`, `Peak Catcher`, `Sidechain Duck`), Undo/Redo, A/B | `Init` / `A` | Complete presets (keep **Level Match**), `Cmd+Z`, `A/B` compare, **GUIDE** |
+
+### Signal flow
+
+```text
+in ──► [key: track or sidechain (or prev out in Feedback)] ──► SC HPF (2nd-order BW) ──► Peak (15 ms fall) / RMS (10 ms)
+                                                                                                    │
+in ──► [Look-ahead delay] ──┬───────────────────────────────────────────────────► gain + makeup ────┼──► MIX ──► [Level Match] ──► out
+                            └───────────────────────────────────────────────────► dry blend ────────┘
 ```
 
-Building does **not** install the plugins; add `-DHERA_INSTALL_AFTER_BUILD=ON` for that (macOS).
+- **Detection:** **Peak** tracks instantaneously with a `15 ms` fall; **RMS** computes `sqrt(mean_square_10ms) × sqrt(2)` so both read sine peaks identically. In **Feedback** (without external **Key**), the detector reads the previous post-gain sample (before **Makeup** and **Mix**).
+- **Link & Gain Computer:** Each channel sees `own + Link × (louder - own)`, mapped via `(1 - 1/ratio) × over` with quadratic soft knee.
+- **Follower & Rest:** One-pole attack/release (or max of `50 ms` fast and `600 ms` / `20×` attack slow followers in **Auto Rel**); below `0.001 dB` at rest, gain resets to exact `1.0`.
 
-## Development
+### Measured
+
+| Check (`HeraTests` @ `48 kHz`, `HeraUiCheck`) | Result |
+|---|---|
+| Gain law (`-6 dBFS` sine over `-24 dB`, no knee; `12 dB` knee) | `4:1`: **13.48 dB** Peak, **13.52 dB** RMS (law `13.5`); `20:1`: **17.13 dB** (`17.1`); `12 dB` knee at thresh: **1.14 dB** (`1.125`), `8 dB` below: **none** |
+| Transparency & release tail | Below thresh: **bit-identical**; `3 s` after loud passage: gain exact `1` (**bit-identical**) |
+| **Attack** (`20 ms`) / **Release** (`200 ms`) / **Auto release** | `20 ms`: `63 %` (**20.9 dB** vs `21`); `200 ms`: `41 %` left (1-pole `37 %` + `15 ms` peak fall), `0.02 dB` at `1.4 s`; **Auto**: halves in **93 ms** (`30 ms` burst) vs **1008 ms** (`1.5 s` burst) |
+| **Hold** (`300 ms`, `21 dB` reduction) | `200 ms` after stop: **21.0 dB** (`3.5 dB` without hold); `100 ms` post-hold: **7.6 dB**; `100 ms` gap inside `200 ms` hold keeps full reduction; `0 ms` identical to prior engine |
+| **Link** / **Sidechain** / **Makeup** / **Mix** / **Clicks** | Link `100 %`: `-13.5 dB` both (`26 dB` offset); `0 %`: `-13.5 / 0.00 dB`; SC `250 Hz` HPF turns `50 Hz` cut from `13.4 dB` to **0.0 dB**; Makeup `+6 dB`: **-7.49 dB**; Auto makeup: **+0.01 dBFS**; Mix `50 %`: **-4.35 dB** (`-4.36`); Clicks: Peak **15.7 dB**, RMS **0.0 dB** |
+| **Look-ahead** (`5 ms`) & **Host bypass** (`10 ms`) | Delay **240 samples** bit-exact (`96` @ `2 ms`); `-40 → 0 dBFS` step first ms: `-0.6 dBFS` off vs **-11.0 dBFS** on; Host bypass @ `10 ms`: **480 samples** (`HeraUiCheck`) |
+| **Level Match**, **Delta**, **SC Listen** | `-10.83 dB` noise becomes **-0.01 dB** after `5 s` (`+10.83 dB`); Delta `+6 dB` makeup: **-0.04 dB** (`0` when idle); SC Listen `1 kHz` HPF: `5 kHz` `-0.01 dB`, `100 Hz` `-40.0 dB` |
+| **Auto Thresh** & **Auto Setup** | Steady `-20 dB` → `-24.7 dB` thresh (**3.53 dB** avg GR, target `3.5`); `0 dB` bursts (`100 ms/s` over `-30 dB`) → `-18.4 dB` (**3.54 dB** avg GR); crest `3.01 dB` sine → `2:1 / 10 ms / 300 ms`; `12.97 dB` bursts → `2.8:1 / 16.2 ms / 217 ms` (**4.24 dB** avg GR; 2nd press `2.5 dB`); `20+ dB` crest (`-5..40 dB` monotonic) → `4:1 / 25 ms / 100 ms`; silent/`< -70 dB`/`1:1`/`-58 dB @ 2:1` unchanged; 1 press = 1 undo (`HeraUiCheck`) |
+| **Feedback topology** (steady, `+20 dB` step, latency, Auto) | Steady `-6` over `-24`: `2:1` **5.99 / 6.01 dB** (`6.00`), `4:1` **7.70 / 7.73 dB** (`7.71`), `1000:1` **11.99 dB** (`< half` of `24 dB`); Processor: `-13.51 dB` FF vs **-7.72 dB** FB; `+20 dB` step (`-30 → -10 dBFS`, `THRESH -20`, `5 ms` Peak): steady **-14.27 dBFS** FB (`-14.29`) vs **-17.47 dBFS** FF (`-17.50`), 1st ms post-attack overshoot **+0.34 dB** FB vs **+2.70 dB** FF, 1st ms step `-10.20` FB / `-10.23` FF; Latency `0` in FB (`240` restored in FF); Auto Thresh `-28.6 dB` (**3.70 dB** GR); Auto Makeup **-0.01 dBFS** |
+| Block invariance & NaN/Inf | Bit-identical across `1, 7, 64, 333, 512, 4096` samples (with look-ahead & feedback); NaN/Inf treated as silence |
+
+### Limits
+
+- **Not a limiter:** No true peak, no hard ceiling; put [Aegis Ceiling](../aegis/README.md) after it.
+- **Look-ahead & Feedback:** Look-ahead adds latency and switching it or **Topology** while playing restarts the compressor; **Feedback** forces `0` latency, reduces at most half the overshoot (`0.43 dB/dB` at `4:1` vs `0.75`, `0.33` at `2:1` vs `0.50`), and Auto Thresh/Setup in feedback were tested on steady tones only.
+- **Pumping, transients & Mix display:** `≥ 10 dB` GR pumps; fast Peak **Attack** strips transients; `10 ms` **RMS** misses brief clicks; **MIX < 100 %** does not alter meter/curve display.
+- **Level Match:** Slow (`~0.6 s`, `±12 dB`) unweighted RMS, not perceptual loudness.
+- **Unrouted KEY:** Listens to itself when no sidechain track is routed so saved sessions keep working.
+- **AUTO THRESH / AUTO SETUP:** Measure once over `4 s` (`NO AUDIO` after `20 s` stopped); **Thresh** is approximate on bursts (`+0.7 dB` 1st press, `-1.0 dB` 2nd press, synthetic bursts only), and crest-to-ratio/attack/release is a reasoned starting point, not programme-matched.
+- **Platform verification:** Builds on macOS (`VST3`, `AU`, `auval -v` pass, checked 2026-11-13); no macOS CI job and no `HostCheck`.
+
+## Build & develop
+
+Requires CMake 3.22+ and a C++20 compiler; JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake).
 
 ```bash
-cmake --build build --target HeraTests && ./build/HeraTests_artefacts/Release/HeraTests            # DSP: no plugin, no GUI
-cmake --build build --target HeraUiCheck && ./build/HeraUiCheck_artefacts/Release/HeraUiCheck      # the editor on the real processor
+# Recommended from repository root:
+scripts/build.sh hera                 # configure, build & run HeraTests + HeraUiCheck
+scripts/showcase.sh hera              # regenerate docs/showcase.gif (requires ffmpeg)
+
+# Manual CMake from plugins/hera/:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target Hera_VST3 Hera_AU Hera_Standalone -j 10   # add -DHERA_INSTALL_AFTER_BUILD=ON to install (macOS)
+
+cmake --build build --target HeraTests && ./build/HeraTests_artefacts/Release/HeraTests
+cmake --build build --target HeraUiCheck && ./build/HeraUiCheck_artefacts/Release/HeraUiCheck
 cmake --build build --target HeraSnapshot && ./build/HeraSnapshot_artefacts/Release/HeraSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` is the output of `HeraSnapshot` (arguments in the file's header), never edited by hand. See
-[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+`docs/screenshot.png` and `docs/showcase.gif` are generated by `HeraSnapshot` / `scripts/showcase.sh` (never edited by hand); see [CLAUDE.md](CLAUDE.md) for invariants.
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
-the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).

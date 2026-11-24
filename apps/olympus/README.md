@@ -1,131 +1,134 @@
 # Olympus Basic DAW
 
-A **basic DAW for the Pantheon plugins**, as a standalone macOS app. Audio goes on tracks as clips on a timeline with a tempo map, a grid,
-markers and a loop; each track has a chain of plugins (the suite's own, and any VST3 or, on macOS, Audio Unit plugin the scan finds); you set
-the faders and pans, save the project, and write the stems out again with their chains. The window shows the arrangement (the clips on their
-tracks, the ruler, the markers and the loop) under a transport bar. It records from an audio interface onto armed tracks (REC). The engine and the window are
-covered by the automated tests; playback and recording on a real audio device have not yet been checked by ear. An AI agent can place the chains for you through the built-in **MCP server**, whose 38 tools cover
-the same clips, tempo, markers, loop and master.
+A basic DAW for the Pantheon plugins with audio and MIDI tracks, VST3/AU hosting, live recording, stem rendering, and a 38-tool MCP server.
 
-## Name origin
+**Format:** Standalone app (macOS · Linux CI; hosts VST3 + AU on macOS) + `OlympusMcp` stdio server
 
-*Olympus* is the mountain where the Greek gods lived together; here it is the one place where the suite's plugins (Hermes, Hestia, Aegis and the others) sit side by side on a song.
-(CMake targets and namespaces use the short name "Olympus". It is an app, not a plugin: it lives in `apps/`.)
+![Olympus Showcase](docs/showcase.gif)
 
-![Olympus Basic DAW](docs/screenshot.png)
+*Headless render of the arrangement, transport, meter strip, `MONITOR` headphone chain, and live recording take strip.*
 
-*Headless render of the window (the hardware-style interface shared with the plugins) over a small song: four tracks cut from synthetic stems into clips, on a 96 bpm
-timeline with the bars and beats on the ruler, three markers (Intro, Verse, Chorus), the loop lit from bar 3 to bar 9, and the snap on. The Chords clips have fades; the
-Vocal track has one test plugin, which its FX button lists. Each track is a row in the left column: its name, FX (its plugins) and X (remove), mute and solo, the pan, the fader and
-the meter; under them R (arm for recording) and IN (its input, here the default pair). The playhead is the amber line at 11 seconds (bar 5, beat 2), and the position read-out in the top
-right says the same in bars and in time. The MASTER block at the left of the row under the transport has the master fader at 0 dB, a stereo level meter, the dB read-out of the peak and the CLIP lamp: here the meter reads -inf dB and CLIP is unlit, because nothing is playing. The device line to its right names the audio device (none, in a headless render). The MONITOR row under the header holds the monitor chain: here one stand-in plugin (Test Gain, lit,
-so it is on), CORRECTION ON in green, and the chain's latency (0.0 ms). A headphone correction plugin would sit there (see "Monitoring through headphone correction").
-Regenerate with the command under "Development".*
+## Theme
 
-![Olympus recording a take](docs/screenshot-record.png)
+**Name origin:** *Olympus* is the mountain where the Greek gods lived together; here it is the one place where the suite's plugins (Hermes, Hestia, Aegis and the others) sit side by side on a song. (CMake targets and namespaces use the short name `Olympus`. It is an app, not a plugin: it lives in `apps/`.)
 
-*The same session while it records, in a headless render: Vocal (on IN 1) and Drums (on IN 3+4) are armed, so their R lamps are lit and their meters show the input (a 440 Hz tone the
-render feeds to the device). REC is lit and reads the take's time in red (00:03.50), and the armed lanes carry a red strip from where the take began (8 seconds) to the playhead
-(11.5 seconds). The MASTER block at the left of the row under the transport shows the fader at 0 dB, the stereo meter lit green at about -1.7 dB (the render feeds a tone to the device) and CLIP unlit. The device line to its right names the device, IN: Interface / OUT: Headphones / 48.0 kHz / 128 smp: the render has no audio device, so the device is a stand-in.
-The MONITOR row is the same stand-in chain as in the picture above: the stand-in is on the headphones' playback only, and the take is not affected by it.
-Regenerate with the command under "Development".*
+### Core philosophy
 
-## Core philosophy
-
-- **Place now, edit later.** The point is to get the chains onto the stems quickly, by hand or by an agent, and to keep every setting in a project file, so nothing is final.
-  Open any plugin from its chain, change it, save.
-- **Any plugin it finds.** It hosts every VST3 (and, on macOS, Audio Unit) plugin the folders hold, the suite's own and third-party ones alike, and nothing else. Hestia's instances
-  (which listen to each other) still work across the stems. The setting *scanSuiteOnly* in `settings.xml` narrows this to the suite's own plugins.
+- **Place now, edit later.** The point is to get the chains onto the stems quickly, by hand or by an agent, and to keep every setting in a project file, so nothing is final. Open any plugin from its chain, change it, save.
+- **Any plugin it finds.** It hosts every VST3 (and, on macOS, Audio Unit) plugin the folders hold, the suite's own and third-party ones alike, and nothing else. Hestia's instances (which listen to each other) still work across the stems. The setting *scanSuiteOnly* in `settings.xml` narrows this to the suite's own plugins.
 - **A basic DAW, not a full one.** There is no time-stretching: audio plays at its own speed, and when the tempo changes the grid moves, not the audio. It supports audio tracks, basic MIDI tracks (built-in 16-voice synth or MIDI-accepting plugins, Piano Roll, Velocity Lane) and track/plugin automation curves, and records from an audio interface onto tracks; software input monitoring, punch-in and comping stay in your own DAW.
 - **Nothing is hidden from the agent.** The server reads and sets every setting of a plugin by the names the plugin gives them, loads its presets, and says why anything it cannot do failed.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [the repository notes](../../NOTICE.md)).
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
-## Features
+## See it
 
-| Area | What it does |
+| View | Preview | What to look at |
+|---|---|---|
+| **Arrangement & Mixer** | ![Olympus Basic DAW](docs/screenshot.png) | Four-track `96 bpm` song, bars/beats ruler, three markers, loop bar `3–9`, `MONITOR` strip. |
+| **Recording a Take** | ![Olympus recording a take](docs/screenshot-record.png) | Armed Vocal/Drums tracks with lit `R` lamps, red take strip, `−1.7 dB` master meter. |
+
+### UI colour legend
+
+| Swatch | Hex | UI Element | Meaning |
+|---|---|---|---|
+| 🩵 | `#37E3C5` | Active display traces, accent indicators | Corrected/active visual data and selected state (`colours::accent`) |
+| 🟡 | `#FFB347` | Playhead line, bars/time & dB LCD read-outs, lit switches | Playhead position, numeric readouts, and active transport/track switches (`colours::amber`) |
+| 🟢 | `#5FD68C` | Nominal meter bars, `CORRECTION ON` lamp | Safe signal levels and active monitor headphone chain (`colours::good`) |
+| 🟠 | `#F2A33A` | Hot meter levels, bottom warning strip | Levels approaching `0 dBFS` and operational notes (`colours::warn`) |
+| 🔴 | `#EF4A3D` | `CLIP` lamp, `REC` lamp, active take strip, missing plugins | Clipping at `0 dBFS`, recording in progress, or unavailable plugin (`colours::bad`) |
+| ⚪ | `#EAE3D0` | Faceplate labels, track/control names, numeric text | Engraved silkscreen hardware labels (`colours::text`) |
+
+## Try it
+
+### Quick launch
+
+```bash
+./scripts/open.sh olympus
+./scripts/open.sh olympus path/to/song.olympus
+```
+
+| Workflow | Action / Setting | What you see / hear / measure |
+|---|---|---|
+| **Build track chains & mix** | Drop stems (WAV/AIFF/FLAC/MP3/M4A/Ogg/CAF), `+ MIDI` for `BasicSynth`, click `FX` → `Add plugin...`, `AUTO` for curves | Stereo tracks auto-resample to device rate; double-click MIDI clip for **Piano Roll** & **Velocity Lane**. |
+| **Headphone correction (`MONITOR`)** | Click `+` in `MONITOR` strip, add correction last, shift-click or `CORRECTION / BYPASS` to toggle | Runs on playback only (`monitor.xml`); never baked into stems or `mix.wav`; warns if latency `> 30 ms`. |
+| **Record from interface** | Pick `IN` (`In 1`, `In 1+2`), arm `R` (meter shows live input), press `REC` (or `R`), stop (`Space` / `REC`) | Writes 32-bit float WAVs to `<project> Recordings/` (or `~/Music/Olympus Recordings/`); lands minus round-trip + monitor + max track latency. |
+| **Render stems / export** | **Render stems** (`32-bit float` default, `24`/`16-bit`, or `Mix only`) or **Export** (`mix.wav`) | Writes `01-Vocal.wav` etc. + `mix.wav` aligned (chain latency trimmed, up to `1 min` tail); all tracks run block-by-block so Hestia listens across stems. |
+| **Agent mixing (`OlympusMcp`)** | *"Add stems in `~/song/`, put Hestia and Hermes on each, Aegis on vocal, save `song.olympus`, render stems"* | `38` MCP tools edit via `Editor` undo; saving `.olympus` externally auto-reloads a clean window (or prompts if dirty). |
+
+> [!TIP]
+> **Shortcuts:** Double-click faders/knobs to reset to `0 dB`/default, shift-click a `MONITOR` plugin to bypass, and use `,` / `.` for markers (`Home` / `End` for audio bounds).
+
+> [!NOTE]
+> **No time-stretching & local monitor:** Changing tempo (`20–300 bpm`) moves the grid, never the audio; `monitor.xml` stays per-machine beside `settings.xml` and independent of `.olympus` projects.
+
+> [!IMPORTANT]
+> **Latency & sample-rate adopt:** Opening a project at a different device sample rate resamples buffers once, scales clips/markers/loop, and clears undo; takes subtract round-trip + monitor + longest track chain latency.
+
+> [!WARNING]
+> **Unverified hardware & crash guards:** Playback/recording on a real interface has not been checked by ear (`MONITOR` tested with stand-in `Test Gain`); `.pedal` files guard scans/startup (**PLUGINS > Forget blacklisted plugins**).
+
+> [!CAUTION]
+> **Watch `CLIP` and disk drop-outs:** `CLIP` latches red at `0 dBFS` before the device safety rail (pull faders down before `16/24-bit` WAV export); disk stalls during recording drop frames without padding.
+
+## Reference
+
+### Controls & capabilities
+
+| Area | Details |
 |---|---|
-| **Tracks** | Any number of audio or MIDI tracks, each with a name, a fader, a balance pan, mute and solo. **+ MIDI** adds a MIDI track powered by the built-in 16-voice polyphonic `BasicSynth` (or any MIDI-accepting plugin in its chain). A track is stereo at the session's rate, which is the device's (with no device running, the first file's); other files are resampled to it. A project opened at another rate is converted to the device's once, with its clips, markers and loop scaled and its undo steps cleared. A plugin is a stereo one: a sidechain is switched off, and a plugin that cannot run stereo is refused with the reason. A file longer than two hours is refused. |
-| **Clips & Piano Roll** | Audio files (WAV, AIFF, FLAC, MP3, M4A, Ogg, CAF) and MIDI clips placed on a track at a position on the timeline. A clip can be moved (also to another track), split, trimmed, duplicated, deleted, renamed, given a gain and fades, and muted. Double-clicking a MIDI clip splits the window to open the **Piano Roll** and **Velocity Lane** below the arrangement, where notes can be added, moved, resized, multi-selected, quantized, deleted, and adjusted in velocity. **Cmd+C**, **Cmd+X** and **Cmd+V** copy, cut and paste the selected clip: the paste lands at the playhead on its track (the clipboard's track when no clip is selected), and a right-click on an empty lane pastes at the clicked place. The clipboard holds one clip that shares its audio; it is not saved in the project, and NEW and OPEN clear it. Overlapping clips on a track are summed. A clip whose file is missing keeps its place and plays silence. Import puts each file on a track of its own at the playhead; a file dropped on a lane goes on that track. |
-| **Automation** | Toggle **AUTO** on a track header to expand its automation lane and choose a target (track **VOL**, **PAN**, or any plugin parameter). Click or drag in the lane to add and move points with linear, smooth or step curves; edits are grouped into undo steps and follow playback and renders. |
-| **Tempo and grid** | One tempo map: tempo changes at a beat (20 to 300 bpm) and one time signature for the project. The grid (bar, 1/2 to 1/32) and snap are view settings, saved with the project. Audio is never time-stretched: a tempo change moves the grid, not the audio. The tempo field sets the tempo of a project with one tempo; with tempo changes it shows the tempo at the playhead. |
-| **Markers, loop, metronome** | Named markers (**,** and **.** jump to the one before or after the playhead; **Home** and **End** go to the start and the end of the audio), one loop (start, end, on or off) and a metronome (a click on every beat, a higher one on the bar; not in the stems), all saved with the project. The plugins read the tempo, the position and the loop from the playhead. |
-| **Fader, pan, master** | A fader and a balance pan for each track, after its chain (the far side of a pan is attenuated; the centre is unity; the fader's tooltip shows its gain in dB). One master gain on the sum: it applies to playback and to `mix.wav`, never to the stems. The master section in the top bar (MASTER) has the master fader (a drag is one undo step, double-click for 0 dB), a stereo meter in dBFS with the track meters' colours, the peak of the last two seconds in dB, and a CLIP lamp that lights at 0 dBFS and stays lit until it is clicked (or a new project starts). A muted track, or any track not soloed when another is, is not played and gets no stem. |
-| **Undo** | Undo and redo cover every timeline edit, MIDI note edit, automation lane edit, adding/removing tracks, adding/removing/moving/bypassing plugins and changing chains (on tracks and the master bus), track mix setting, master, tempo, time signature, marker, loop and metronome change; a drag is one step. Opening or starting a new project (or changing the sample rate) clears the history. The MCP server's undo and redo tools use the same history. |
-| **Chains** | Any plugin Olympus found, in any order, several of the same kind if you like. A track's FX button lists its plugins: each one opens its own window, can be bypassed, moved or removed, and `Add plugin...` puts a new one at the end. A plugin that is not installed on this machine stays in the chain, passes the audio through and keeps its settings. |
-| **Devices** | **AUDIO** opens the system's audio device settings: the input and the output device, the sample rate and the buffer size (audio device selection). The top bar names the devices, the rate and the buffer; its tooltip gives the round trip, the input plus the output latency in samples and ms. The choice is saved in `settings.xml`, so the device comes back as it was chosen, and the default device is used when it cannot be opened. |
-| **Recording** | Arm a track with **R**: its lamp lights, and its meter shows its input while the transport is stopped. **IN** chooses its device input, one input or a neighbouring pair (`In 1`, `In 1+2`); only the inputs switched on in AUDIO are offered, with the device's own name for an input where it has one (`In 2: Guitar`). REC is refused, naming the track and the input, when an armed track records an input that is off. **REC** (or the R key) starts playback from the playhead and records every armed track into a take: one 32-bit float WAV per track, written by a background thread and kept on disk. A take's WAV is on disk from its first block, in the recordings folder beside the project (`<name> Recordings`), or in Music/Olympus Recordings when the project has no file; the project is marked changed as soon as REC starts. After a crash, the take is not in the project: import its WAV by hand with **Import audio**. Stop (or Space, or REC again) places each take on its track as a clip, one undo step, starting the device's round trip (and the extra latency in the settings, the monitor chain's, and the longest track chain's, which the tracks are delayed by) earlier, so it lines up with what was heard. A take that begins before the start of the project keeps its sound: the part that falls before 0 is skipped. REC is refused, with the reason, when no track is armed or no device runs. While a take runs the loop does not wrap, the playhead goes on past the end of the audio and cannot be moved; a device that stops or changes ends the take with what it has. Takes go to `<project> Recordings/` beside the project file, or to `~/Music/Olympus Recordings/` for a project not saved yet. Quit, NEW or OPEN during a take stops it the same way first, so it is placed before the save question. The app never deletes a take that has audio. A take the disk could not keep up with is reported when it stops: the samples it lost are not written, so the take is shorter by that much and what follows the loss sits that much early (nothing is padded in). Stop reports lost samples and a take that could not be written, and a take that cannot be placed does not stop the others (the files stay on disk). A file whose writes failed is named (what was written stays). Recording has not been tried on a real interface yet. |
-| **Monitoring** | The MONITOR strip under the header holds the plugins the headphones hear, such as a headphone correction plugin: one button per plugin (click opens its window, shift-click bypasses it, right-click gives Open, Bypass, Move left, Move right, Remove), `+` adds one, CORRECTION / BYPASS switches the whole chain, and the chain's latency is shown. They run on playback only, after the tracks; they are never in a render, the stems or the mix. The chain is saved in `monitor.xml` beside `settings.xml`, not in the project, and it is not an undo step. |
-| **Playback** | From the playhead to the end of the audio, through each track's clips, chain, fader and pan, and the master, on the audio device. With the loop on, playback wraps from the loop's end to its start. The plugins read the same playhead. A plugin's reported latency is compensated across the tracks, so the stems stay in time. The device's output is held at full scale; the master's meter and CLIP read before that hold, and renders are not held. |
-| **Project** | `.olympus`: a small XML file (version 3) with the tracks and their audio clips (a relative path to each audio file, and the absolute one as a fallback), MIDI clips, automation lanes, faders, pans and mutes, the master, the tempo map, markers, loop and grid, and every plugin's complete state. Version 1 and 2 files still load (a version 1 file opens as one clip at 0). A project opens without its plugins or audio (each is a warning) and saves again without losing what they held. A project from a newer version is refused. **Save prompt:** NEW, OPEN and quit with changes ask Save, Don't save or Cancel (Save on a project with no file goes through the Save As chooser, and the action goes on only once the file is written). **External save reload:** when the open `.olympus` file is saved on disk outside the window (for example by `OlympusMcp`), the window reloads it automatically if it has no unsaved changes, or asks (**Reload** / **Keep mine**) if it does. **Autosave:** every 120 seconds while there are changes, the project is written beside its file as `<name>.olympus.autosave` (an untitled one as `autosave-untitled.olympus` beside `settings.xml`), without changing the project itself. A save deletes the project's autosave, and Save As the old project's too; NEW, a discard at Quit and an OPEN that succeeds delete the autosave of the work they drop, and a failed open keeps it. At the next start a named project's autosave is offered when it is newer than the project, and an untitled one whenever it exists: Open it loads it with its changes and saves to the project's own file, Ignore deletes it. An autosave error is shown once, and again only after an autosave has succeeded. |
-| **Render stems** | One WAV per audible track, after its clips, chain, fader and pan, aligned with the audio (the chain's latency is taken off the front), named `01-Vocal.wav`, and `mix.wav`, the sum with the master. A dialog asks first: the bit depth (32-bit float by default, so a stem cannot clip and can be edited later; 24 or 16 bit on request) and **Mix only (no stems)**, which writes `mix.wav` alone, with the same bytes as the mix of a full render. The **Export** button writes the final mix (`mix.wav`) directly without stems or the monitor chain (asking only for the bit depth). The choice is remembered in `settings.xml`. Cancelling the progress window deletes the files that run had written and says nothing, and a failed render deletes its run's stems and reports the error; a render overwrites a same-named stem from an earlier render in that folder as soon as it starts; a finished render names the folder and the files it wrote, and reveals the folder. A tail of at most a minute for reverbs and delays; a render longer than three hours is refused. All tracks run together block by block, which Hestia's bus needs. While a render runs the window stays responsive: the arrangement shows what it showed before. |
-| **MCP server** | `OlympusMcp`: the same session without a window, 38 tools (the clip, tempo, marker, loop and master ones go through the same editor as the window, and so do undo and redo), over stdio (see below). |
+| **Tracks & Clips** | Unlimited stereo audio/MIDI tracks (`BasicSynth` 16-voice or MIDI plugins); sidechains disabled (non-stereo refused); files `> 2 hr` refused; clip move, split, trim, duplicate, rename, gain, fades, mute, `Cmd+C/X/V` clipboard; missing files keep place as silence. |
+| **Automation & Tempo** | `AUTO` lane per track (`VOL`, `PAN`, any plugin parameter) with linear/smooth/step curves; tempo map (`20–300 bpm`), time signature, grid (`bar`, `1/2–1/32`), snap, named markers, loop, metronome (not in stems). |
+| **Master, Undo & Project** | Track fader/pan (`-inf` to `+12 dB`), master fader (`-100` to `+12 dB`, applies to playback & `mix.wav` only), `2 s` peak readout & latched `CLIP`; `.olympus` XML v3 (v1/v2 load), `120 s` autosave (`.olympus.autosave` / `autosave-untitled.olympus`), external save reload, full structural & parameter undo/redo. |
+| **Plugin Hosting & Safety** | Scans system VST3, macOS Audio Units, **PLUGINS > Look in a folder...**, `OLYMPUS_PLUGIN_PATH`, `--plugins`; caches in `plugins.xml` (`scanSuiteOnly` narrows to `suiteNames()`); `plugin-scan.pedal`, `monitor-load.pedal`, `project-load.pedal` skip crashing plugins; `Name (Maker)` disambiguates, VST3 wins over AU. |
+| **MCP Server (`OlympusMcp`)** | JSON-RPC 2.0 over stdio (`38` tools): project/track/clip/tempo/marker/loop/master CRUD, `undo`/`redo`, `add/remove/move/bypass/set_plugin_wet/set_chain/copy_chain` (`≤ 64` plugins/chain, `≤ 128` target tracks), `list/set_parameter` (text readback verified), `list/load_preset`, `get/set_plugin_state` (base64), `plugin_notes`, `render_stems`, `analyze_audio`. |
 
-## Where it finds the plugins
-
-Olympus hosts **VST3** plugins and, on macOS, **Audio Units**, loading them at run time and linking none of their code. A scan reads what it finds in the system's VST3 folders, in the
-folders you give it with **PLUGINS > Look in a folder...** (the choice is remembered, and the MCP server uses it too), in `OLYMPUS_PLUGIN_PATH`, and in `--plugins` for the server; the
-Audio Units are the ones the system registers. Point it at this repository's `plugins/` folder and it finds the build folders under it, so `scripts/build.sh hermes vst3` is enough.
-
-Third-party plugins are scanned on your machine, as you install them; nothing is sent anywhere. The result is kept beside the settings (`plugins.xml`), so the window starts from it and
-reads the folders again only when the cache is empty or you choose **PLUGINS > Rescan plugins**. A plugin that crashes while it is being read is written to `plugin-scan.pedal` first, and
-the next scan blacklists it and skips it (the blacklist is kept in `plugins.xml`; delete that file to try it again). A plugin that hangs in its read is only caught by the next run, once you
-have quit. **PLUGINS > Forget blacklisted plugins** (shown only when there is a blacklist) clears it and rescans. A save keeps the blacklist the file already holds, so the window and the server cannot erase each other's crash guard; the server's first scan (no cache yet) reads only the suite's own plugins, as the window's first scan does. A plugin that was missing from a project or the monitor chain is tried again after each scan. Two plugins with one name are both listed as `Name (Maker)`; a VST3 and an Audio Unit of one name show as the VST3. With no plugin found at all, the foot says so and points to **PLUGINS > Look in a folder...**; with the *scanSuiteOnly* setting on, that note is not shown.
-
-## Starting safely
-
-A plugin that crashes while it is loaded at start (a licence check, say) would crash Olympus on every start. So the monitor chain and the last project are each written with a pedal file beside `settings.xml` (`monitor-load.pedal`, `project-load.pedal`) while they load, and the pedal is removed when they are loaded. A pedal found at the next start means the last start died inside it: that one is skipped this time, its file is left as it is, and a note at the foot says so. **PLUGINS > Load saved monitor chain** tries the chain again; for the project, **OPEN** opens it. A settings file that cannot be read is kept as `settings.xml.bad`.
-`suiteNames()` in `Source/Catalog.h` still lists the suite's own plugins, which a test compares with `plugins/`.
-
-## Monitoring through headphone correction
-
-The monitor chain is for a headphone correction plugin, or any other plugin that should sit on what the headphones hear and nowhere else. Add one with **+** in the MONITOR strip (it lists
-the plugins the scan found, grouped by maker when there are many). If a plugin you have just installed is not listed, choose **PLUGINS > Rescan plugins** first. A correction plugin is
-usually a VST3 (on macOS also an Audio Unit); for example Sonarworks SoundID Reference is added the same way, and it should be the last plugin of the chain.
-
-- **It is for playback only.** The chain runs on what the device plays, after the tracks. It is never in a render, the stems or `mix.wav`, and it does not process what you record or the
-  files you write. The takes are placed with the chain's latency taken off (so they line up with what you heard), but the chain itself is not recorded.
-- **Bypass to compare.** CORRECTION / BYPASS on the strip switches the whole chain off, so the headphones hear the uncorrected mix; shift-click or the menu bypasses one plugin. Use the chain
-  last, and bypass it to check the mix by ear without correction.
-- **Its state is kept on this computer.** The chain is saved in `monitor.xml`, next to `settings.xml`, after each change, and when a plugin's window is closed (a profile or a licence changed
-  there is kept). It is not part of the project, so NEW and OPEN leave the chain and its open windows alone. A plugin that is not installed on this machine stays on the strip in red and passes
-  the audio through.
-- **Latency.** The strip shows the chain's latency in ms beside CORRECTION. Above 30 ms a note at the foot says that a linear-phase correction adds delay: recording is compensated, playback
-  alignment with the transport is not.
-- **What is checked here.** Only with a stand-in plugin: the checks use a gain (and a delay) made in code, so the strip, the bypass, the file and the render are tested, but no real correction
-  plugin has been loaded or heard on this machine.
-
-## The MCP server
+### Signal flow
 
 ```
-cmake --build build --target OlympusMcp       # in apps/olympus; or: scripts/build.sh olympus OlympusMcp
-build/OlympusMcp_artefacts/Release/OlympusMcp [--plugins <folder>] [--project <file.olympus>]
+Audio Clips / MIDI (BasicSynth) ──► [Track FX Chain (stereo, latency-aligned)] ──► [Track Vol/Pan] ──┐
+                                                                                                      ▼
+Audio Inputs ──► [Recorder: 32-bit float WAV] ──(stop: -latency clip)──► Timeline        [Master Fader]
+                                                                               ┌──────────────────────┴──────────────────────┐
+                                                                               ▼                                             ▼
+                                                           (Playback: MONITOR Chain ─► 0 dBFS Hold ─► Out)   (Render: Stems + mix.wav, ≤ 3 hr, ≤ 1 min tail)
 ```
 
-For Claude Code, register it once (the path is where you built it):
+### Measured
 
-```
-claude mcp add olympus -- /path/to/pantheon-suite/apps/olympus/build/OlympusMcp_artefacts/Release/OlympusMcp
-```
+- **`OlympusTests` (61 test groups + `TempoTests.h`):** Session, `renderStems` alignment & mix-only byte parity, latency compensation across tracks (Hestia block-by-block), XML v1–v3 & relative paths, `38` MCP tools + `analyze_audio`, `Editor` undo/redo (timeline, MIDI `BasicSynth`, automation curves, structural track/plugin chains), `Recorder` start latch / `64`-input cap / chunk atomicity, clipboard, `Catalog` deduplication, `0 dBFS` rail / NaN recovery.
+- **`OlympusUiCheck` (49 UI/lifecycle groups):** `MONITOR` strip/bypass/`monitor.xml`, recording inputs & latencies, safe-start `.pedal` guards, save/autosave/recovery, external reload, render cancel cleanup without UI lock wait, `Export` mix-only, Piano Roll & Velocity Lane, automation lane UI, and `16:10` window layout.
+- **CI:** Runs `OlympusTests` + `OlympusUiCheck` on Linux ([.github/workflows/olympus.yml](../../.github/workflows/olympus.yml)) using stand-in `test::GainPlugin`; pass `OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build` to test a real VST3.
 
-It speaks MCP (JSON-RPC 2.0, one message per line on stdin and stdout; diagnostics go to stderr). The tools: `list_plugins`, `project_info`, `new_project`, `open_project`, `save_project`,
-`add_track`, `remove_track`, `set_track` (fader, pan, mute, solo, name), `add_clip` (a file at a position, in seconds or beats), `move_clip` (also to another track), `split_clip`,
-`trim_clip`, `delete_clip`, `set_clip` (gain, fades, mute, name), `set_tempo`, `set_time_signature`, `add_marker`, `remove_marker`, `set_loop`, `set_master`, `undo`, `redo`, `add_plugin`, `remove_plugin`,
-`move_plugin`, `bypass_plugin`, `set_plugin_wet`, `set_chain`, `copy_chain` (the same chain, with its settings, onto other tracks; at most 64 plugins per chain and 128 target tracks), `list_parameters`, `set_parameter` (by value 0..1 or by the text the plugin shows; text the plugin does not read back as that value is refused and nothing changes),
-`list_presets`, `load_preset`, `get_plugin_state` and `set_plugin_state` (a whole plugin state as base64), `plugin_notes` (the GUIDE and the session's notes), `render_stems` and `analyze_audio` (DSP mixing and mastering analysis of the session mix/stems, a single track, or an audio file). Tracks, clips, markers and slots are numbered from 0; a track may be named and a plugin given by the start of its name. A failed call comes back as an error result with the reason. It edits and renders; it does not play. A typical request: *"Add the four stems in
-`~/song/`, put Hestia and Hermes on each, Aegis on the vocal, save it as `~/song/song.olympus` and render the stems."* Then open the project here (or if it is already open in the window, `save_project` triggers an automatic reload when the window has no unsaved edits, or prompts to reload when it does).
+### Limits
 
-## Development
+- **No time-stretching, mixer view, or multi-select clip editing;** single clip selection only; fader/pan live in track headers; plugin UIs open in separate windows (no inline panel or per-slot wet/dry UI).
+- **Recording & hardware unverified by ear:** Never tested on a real audio interface, macOS mic prompt, real disk stall (`~6 s` writer buffer; closing writers on stop can briefly block UI), or real third-party correction plugin; no software input monitoring, punch-in, loop recording, comping, or take lanes.
+- **Scanning & UI details:** Plugin scanning runs on the message thread (hangs caught on next launch via `.pedal`); monitor add-plugin menu groups by maker past `25` plugins with no search box; no macOS CI job yet.
 
-Build and check with the script (it builds the targets in one go and runs the checks):
+## Build & develop
+
+Requires CMake 3.22+, a C++20 compiler, and `ffmpeg` (for `showcase.sh`). JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake). See [CLAUDE.md](CLAUDE.md).
 
 ```bash
 scripts/build.sh olympus            # OlympusTests and OlympusUiCheck
-scripts/build.sh olympus snap       # docs/screenshot.png and docs/screenshot-record.png (the record picture is a headless take)
-scripts/build.sh olympus app        # the app
-OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests   # also hosts a built plugin
+scripts/build.sh olympus snap       # docs/screenshot.png and docs/screenshot-record.png
+scripts/showcase.sh olympus         # regenerate docs/showcase.gif
+scripts/build.sh olympus app        # standalone app
+scripts/build.sh olympus OlympusMcp # 38-tool MCP stdio server
+scripts/open.sh olympus             # build (if needed) and launch
+OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests
 ```
 
-`OlympusTests` (session, render, alignment, project file, MCP server) and `OlympusUiCheck` (the window driven with synthetic events) use plugins made in code, so they need no built plugin; set
-`OLYMPUS_PLUGIN_DIR` to add the check against real ones. The same checks run in CI on Linux ([.github/workflows/olympus.yml](../../.github/workflows/olympus.yml)); a macOS build is not covered there.
+Plain CMake & MCP registration (from `apps/olympus`):
 
-Licence, contributions and security: see the repository root ([LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md), [CONTRIBUTING.md](../../CONTRIBUTING.md), [SECURITY.md](../../SECURITY.md)).
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target Olympus OlympusMcp -j 10
+./build/OlympusMcp_artefacts/Release/OlympusMcp [--plugins <folder>] [--project <file.olympus>]
+claude mcp add olympus -- /path/to/pantheon-suite/apps/olympus/build/OlympusMcp_artefacts/Release/OlympusMcp
+```
+
+## Licence
+
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).

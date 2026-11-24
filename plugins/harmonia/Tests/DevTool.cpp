@@ -427,6 +427,64 @@ static int snapshot (const char* path, double feedSeconds, const char* wavPath =
     return 0;
 }
 
+static int snapshotFrames (const char* outDir)
+{
+    constexpr double fs = 48000.0;
+    constexpr int kNumFrames = 30;
+    HarmoniaProcessor proc;
+    proc.setPlayConfigDetails (2, 2, fs, 512);
+    proc.prepareToPlay (fs, 512);
+
+    setParam (proc, ids::key, 0);
+    setParam (proc, ids::scale, (float) harmonia::kMajorScale);
+    setParam (proc, ids::speed, 120.0f);
+    setParam (proc, ids::natural, 70.0f);
+
+    const double notes[] = { 60.0 - 0.35, 62.0 + 0.30, 64.0 - 0.20, 65.0 + 0.40, 67.0 - 0.30, 64.0 + 0.2 };
+    auto phrase = testsig::makeVoice (fs, 4.2, [&] (double t) {
+        const int k = (int) (t / 0.68);
+        if (k >= 6 || std::fmod (t, 0.68) > 0.62)
+            return 0.0;
+        return testsig::midiToHz (notes[k] + 0.22 * std::sin (2.0 * testsig::kPi * 5.6 * t));
+    });
+    std::vector<float> audio;
+    audio.reserve (phrase.size() * 2);
+    audio.insert (audio.end(), phrase.begin(), phrase.end());
+    audio.insert (audio.end(), phrase.begin(), phrase.end());
+
+    auto* editor = new HarmoniaEditor (proc);
+    editor->setSize (2 * HarmoniaEditor::kDesignW, 2 * HarmoniaEditor::kDesignH);
+
+    const juce::String dirArg (outDir);
+    const juce::File dir = juce::File::isAbsolutePath (dirArg)
+                             ? juce::File (dirArg)
+                             : juce::File::getCurrentWorkingDirectory().getChildFile (dirArg);
+    dir.createDirectory();
+    const size_t step = (size_t) (0.2 * fs);
+    size_t pos = 0;
+    bool ok = true;
+    for (int i = 0; i < kNumFrames; ++i)
+    {
+        const float t = (float) i / (float) (kNumFrames - 1);
+        setParam (proc, ids::speed, 120.0f - 115.0f * t);
+        setParam (proc, ids::strength, 40.0f + 60.0f * t);
+        const size_t end = std::min (pos + step, audio.size());
+        if (end > pos)
+            run (proc, std::vector<float> (audio.begin() + (ptrdiff_t) pos, audio.begin() + (ptrdiff_t) end));
+        pos = end >= audio.size() ? 0 : end;
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+
+        auto img = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
+        auto f = dir.getChildFile (juce::String::formatted ("frame_%03d.png", i));
+        f.deleteFile();
+        juce::FileOutputStream out (f);
+        ok = out.openedOk() && juce::PNGImageFormat().writeImageToStream (img, out) && ok;
+    }
+    delete editor;
+    std::printf ("wrote %d frames to %s\n", kNumFrames, outDir);
+    return ok ? 0 : 1;
+}
+
 // Streams a WAV file through the processor in host-sized blocks, the way a DAW would, and writes the
 // result shifted back by the reported latency so that it lines up with the input.
 static int processFile (int argc, char** argv)
@@ -489,6 +547,15 @@ int main (int argc, char** argv)
     juce::ScopedJuceInitialiser_GUI init;
     if (argc >= 2 && std::string (argv[1]) == "selftest")
         return selftest();
+    if (argc >= 3 && std::string (argv[1]) == "snapshot" && std::string (argv[2]) == "--frames")
+    {
+        if (argc < 4)
+        {
+            std::printf ("usage: HarmoniaDevTool selftest | snapshot out.png | snapshot --frames <dir> | process in.wav out.wav [key scale speed natural strength]\n");
+            return 2;
+        }
+        return snapshotFrames (argv[3]);
+    }
     if (argc >= 3 && std::string (argv[1]) == "snapshot")
         return snapshot (argv[2], argc >= 4 ? std::atof (argv[3]) : 4.2, argc >= 6 ? argv[4] : nullptr, argc >= 6 ? std::atof (argv[5]) : 0.0);
     if (argc >= 4 && std::string (argv[1]) == "process")

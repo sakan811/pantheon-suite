@@ -14,6 +14,8 @@
 #include "TestPlugin.h"
 #include "UI/MainComponent.h"
 
+#include <string_view>
+
 namespace
 {
 constexpr double kRate = 48000.0;
@@ -92,34 +94,8 @@ bool writePicture (olympus::gui::MainComponent& window, const juce::File& out)
     return ok;
 }
 
-int main (int argc, char** argv)
+static void setupDemoSession (olympus::gui::MainComponent& window, const juce::File& folder, const juce::String& pluginFolder)
 {
-    if (argc < 2)
-    {
-        std::printf ("usage: OlympusSnapshot <out.png> [plugins=<folder>]\n");
-        return 2;
-    }
-    juce::ScopedJuceInitialiser_GUI gui;
-    juce::String pluginFolder;
-    for (int i = 2; i < argc; ++i)
-        if (juce::String (argv[i]).startsWith ("plugins="))
-            pluginFolder = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false);
-
-    // starts empty every time: the window reads monitor.xml from here, and each run adds its own stand-in plugin to the strip, so a kept
-    // folder would grow the picture's strip by one button per run
-    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("olympus-snapshot");
-    folder.deleteRecursively();
-    folder.createDirectory();
-    olympus::gui::MainComponent::Options options;
-    options.audioDevice = false;
-    options.scanPlugins = false;
-    options.settingsFile = folder.getChildFile ("settings.xml");
-    options.recordings = folder.getChildFile ("takes");
-    if (pluginFolder.isEmpty())
-        options.fillCatalog = [] (olympus::Catalog& catalog) { test::addTestPlugins (catalog); };
-    olympus::gui::MainComponent window (options);
-    window.setSize (olympus::gui::MainComponent::kDesignWidth, olympus::gui::MainComponent::kDesignHeight);
-
     juce::StringArray chainNames;
     if (pluginFolder.isNotEmpty())
     {
@@ -173,14 +149,10 @@ int main (int argc, char** argv)
     editor.clearUndo();
     window.arrange.zoomToFit();
     window.refreshNow();
-    window.seek ((juce::int64) (11.0 * kRate));
-    window.arrange.playhead = (double) window.position();
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
-    window.arrange.refresh();
+}
 
-    bool ok = writePicture (window, juce::File (argv[1]));
-
-    // the second picture: two armed tracks, IN 1 and IN 3+4, while a take runs from bar 4 (8 seconds); the armed lanes show the take in red
+static olympus::gui::MainComponent::DeviceState makeTestDevice()
+{
     olympus::gui::MainComponent::DeviceState device;
     device.running = true;
     device.inputName = "Interface";
@@ -192,32 +164,123 @@ int main (int argc, char** argv)
     device.inputLatency = 96;
     device.outputLatency = 48;
     device.activeInputs.setRange (0, 4, true);
-    window.setDeviceForTest (device);
-    session.setTrackArm (0, true, error);
-    session.setTrackArm (2, true, error);
-    session.setTrackInput (0, 0, -1, error);
-    session.setTrackInput (2, 2, 3, error);
+    return device;
+}
+
+static void feedDeviceAudio (olympus::gui::MainComponent& window, int totalSamples, double amp, int phaseOffset = 0)
+{
+    std::vector<std::vector<float>> in (4, std::vector<float> (128, 0.0f));
+    std::vector<std::vector<float>> out (2, std::vector<float> (128, 0.0f));
+    for (int done = 0; done < totalSamples; done += 128)
+    {
+        for (int i = 0; i < 128; ++i)
+        {
+            const float v = (float) amp * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (phaseOffset + done + i) / kRate);
+            in[0][(size_t) i] = v;
+            in[2][(size_t) i] = 0.6f * v;
+            in[3][(size_t) i] = 0.6f * v;
+        }
+        const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+        float* outPtr[2] = { out[0].data(), out[1].data() };
+        window.io.deviceBlock (inPtr, 4, outPtr, 2, 128);
+    }
+}
+
+int main (int argc, char** argv)
+{
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
+    {
+        std::printf ("usage: OlympusSnapshot <out.png> [plugins=<folder>]\n"
+                     "       OlympusSnapshot --frames <dir> [plugins=<folder>]\n");
+        return 2;
+    }
+    const bool framesMode = std::string_view (argv[1]) == "--frames";
+    juce::ScopedJuceInitialiser_GUI gui;
+    juce::String pluginFolder;
+    for (int i = framesMode ? 3 : 2; i < argc; ++i)
+        if (juce::String (argv[i]).startsWith ("plugins="))
+            pluginFolder = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false);
+
+    // starts empty every time: the window reads monitor.xml from here, and each run adds its own stand-in plugin to the strip, so a kept
+    // folder would grow the picture's strip by one button per run
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("olympus-snapshot");
+    folder.deleteRecursively();
+    folder.createDirectory();
+    olympus::gui::MainComponent::Options options;
+    options.audioDevice = false;
+    options.scanPlugins = false;
+    options.settingsFile = folder.getChildFile ("settings.xml");
+    options.recordings = folder.getChildFile ("takes");
+    if (pluginFolder.isEmpty())
+        options.fillCatalog = [] (olympus::Catalog& catalog) { test::addTestPlugins (catalog); };
+    olympus::gui::MainComponent window (options);
+    window.setSize (olympus::gui::MainComponent::kDesignWidth, olympus::gui::MainComponent::kDesignHeight);
+
+    setupDemoSession (window, folder, pluginFolder);
+
+    if (framesMode)
+    {
+        constexpr int kNumFrames = 30;
+        const juce::String dirArg (argv[2]);
+        const juce::File outDir = juce::File::isAbsolutePath (dirArg)
+                                    ? juce::File (dirArg)
+                                    : juce::File::getCurrentWorkingDirectory().getChildFile (dirArg);
+        outDir.createDirectory();
+        window.setDeviceForTest (makeTestDevice());
+        bool ok = true;
+        int samplePhase = 0;
+
+        for (int f = 0; f < 15; ++f)
+        {
+            const double sec = 1.0 + (double) f * 1.0;
+            window.seek ((juce::int64) (sec * kRate));
+            window.arrange.playhead = (double) window.position();
+            feedDeviceAudio (window, (int) (0.05 * kRate), 0.15 + 0.35 * (0.5 + 0.5 * std::sin (f * 0.7)), samplePhase);
+            samplePhase += (int) (0.05 * kRate);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+            window.arrange.refresh();
+            ok = writePicture (window, outDir.getChildFile (juce::String::formatted ("frame_%03d.png", f))) && ok;
+        }
+
+        juce::String error;
+        window.session.setTrackArm (0, true, error);
+        window.session.setTrackArm (2, true, error);
+        window.session.setTrackInput (0, 0, -1, error);
+        window.session.setTrackInput (2, 2, 3, error);
+        window.seek ((juce::int64) (8.0 * kRate));
+        window.toggleRecord();
+        for (int f = 15; f < kNumFrames; ++f)
+        {
+            const int blockSamples = (int) (0.25 * kRate);
+            feedDeviceAudio (window, blockSamples, 0.2 + 0.45 * (0.5 + 0.5 * std::sin ((f - 15) * 0.8)), samplePhase);
+            samplePhase += blockSamples;
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+            window.arrange.playhead = (double) window.position();
+            window.arrange.refresh();
+            ok = writePicture (window, outDir.getChildFile (juce::String::formatted ("frame_%03d.png", f))) && ok;
+        }
+        window.toggleRecord();
+        folder.deleteRecursively();
+        return ok ? 0 : 1;
+    }
+
+    window.seek ((juce::int64) (11.0 * kRate));
+    window.arrange.playhead = (double) window.position();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+    window.arrange.refresh();
+
+    bool ok = writePicture (window, juce::File (argv[1]));
+
+    // the second picture: two armed tracks, IN 1 and IN 3+4, while a take runs from bar 4 (8 seconds); the armed lanes show the take in red
+    window.setDeviceForTest (makeTestDevice());
+    juce::String error;
+    window.session.setTrackArm (0, true, error);
+    window.session.setTrackArm (2, true, error);
+    window.session.setTrackInput (0, 0, -1, error);
+    window.session.setTrackInput (2, 2, 3, error);
     window.seek ((juce::int64) (8.0 * kRate));
     window.toggleRecord();
-    {
-        // 3.5 seconds of the device: a 440 Hz tone on the inputs, in 128-frame blocks
-        const int total = (int) (3.5 * kRate);
-        std::vector<std::vector<float>> in (4, std::vector<float> (128, 0.0f));
-        std::vector<std::vector<float>> out (2, std::vector<float> (128, 0.0f));
-        for (int done = 0; done < total; done += 128)
-        {
-            for (int i = 0; i < 128; ++i)
-            {
-                const float v = 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (done + i) / kRate);
-                in[0][(size_t) i] = v;
-                in[2][(size_t) i] = 0.6f * v;
-                in[3][(size_t) i] = 0.6f * v;
-            }
-            const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
-            float* outPtr[2] = { out[0].data(), out[1].data() };
-            window.io.deviceBlock (inPtr, 4, outPtr, 2, 128);
-        }
-    }
+    feedDeviceAudio (window, (int) (3.5 * kRate), 0.4);
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
     window.arrange.refresh();
     ok = writePicture (window, juce::File (argv[1]).getSiblingFile ("screenshot-record.png")) && ok;
