@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <functional>
 #include <iterator>
@@ -189,6 +190,82 @@ struct AuxSend
     bool mute = false;
 };
 
+// Fixed-size, zero-allocation active MIDI note ledger (16 channels x 128 pitches = 2048 bits).
+// Tracks sounding notes per track on the audio thread so transport seeks, loop wraps, and track mutes flush NoteOffs.
+struct ActiveNoteMask
+{
+    std::array<std::uint64_t, 32> words {};
+
+    bool any() const noexcept
+    {
+        for (auto w : words)
+            if (w != 0)
+                return true;
+        return false;
+    }
+
+    bool isActive (int channel, int pitch) const noexcept
+    {
+        const int ch = std::clamp (channel, 1, 16) - 1;
+        const int p = std::clamp (pitch, 0, 127);
+        const std::size_t idx = (std::size_t) (ch * 2 + (p >> 6));
+        return (words[idx] & (std::uint64_t (1) << (p & 63))) != 0;
+    }
+
+    void set (int channel, int pitch) noexcept
+    {
+        const int ch = std::clamp (channel, 1, 16) - 1;
+        const int p = std::clamp (pitch, 0, 127);
+        const std::size_t idx = (std::size_t) (ch * 2 + (p >> 6));
+        words[idx] |= (std::uint64_t (1) << (p & 63));
+    }
+
+    void clear (int channel, int pitch) noexcept
+    {
+        const int ch = std::clamp (channel, 1, 16) - 1;
+        const int p = std::clamp (pitch, 0, 127);
+        const std::size_t idx = (std::size_t) (ch * 2 + (p >> 6));
+        words[idx] &= ~(std::uint64_t (1) << (p & 63));
+    }
+
+    void reset() noexcept
+    {
+        words.fill (0);
+    }
+
+    void updateFromBuffer (const juce::MidiBuffer& buf) noexcept
+    {
+        for (const auto meta : buf)
+        {
+            const auto msg = meta.getMessage();
+            if (msg.isNoteOn())
+                set (msg.getChannel(), msg.getNoteNumber());
+            else if (msg.isNoteOff())
+                clear (msg.getChannel(), msg.getNoteNumber());
+            else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+                reset();
+        }
+    }
+
+    void appendNoteOffs (juce::MidiBuffer& dest, int sampleOffset = 0) const
+    {
+        for (int ch = 0; ch < 16; ++ch)
+        {
+            for (int half = 0; half < 2; ++half)
+            {
+                std::uint64_t w = words[(std::size_t) (ch * 2 + half)];
+                while (w != 0)
+                {
+                    const int bit = std::countr_zero (w);
+                    w &= ~(std::uint64_t (1) << bit);
+                    const int pitch = half * 64 + bit;
+                    dest.addEvent (juce::MidiMessage::noteOff (ch + 1, pitch), sampleOffset);
+                }
+            }
+        }
+    }
+};
+
 struct Track
 {
     using TrackKind = ::olympus::TrackKind;
@@ -247,6 +324,8 @@ struct Track
     juce::AudioBuffer<float> delayRing;
     int delaySamples = 0, delayPos = 0;
     bool delayDirty = false;                             // the ring holds audio from a block that ran (cleared when the track is skipped)
+    ActiveNoteMask activeNotes;
+    bool pendingNoteFlush = false;
 };
 
 struct RenderOptions
@@ -429,7 +508,7 @@ public:
         masterScratch.setSize (2, kBlockSize, false, true, false);
         monitorScratch.setSize (kMaxMonitorChannels, kBlockSize, false, true, false);
         snapshotScratch.setSize (2, kBlockSize, false, true, false);
-        midiScratch.ensureSize (16384);
+        midiScratch.ensureSize (32768);
         snapshotMidiScratch.ensureSize (16384);
         liveMidiScratch.ensureSize (16384);
     }
@@ -2102,8 +2181,12 @@ public:
         if (wasFallback || discontinuous)
         {
             for (auto& t : tracks)
+            {
                 if (t->synth != nullptr)
                     t->synth->reset();
+                if (t->activeNotes.any())
+                    t->pendingNoteFlush = true;
+            }
         }
         computeTrackAudibilityLocked (cachedAudibleScratch);
         const int channels = juce::jmin (2, out.getNumChannels());
@@ -2128,6 +2211,23 @@ public:
                 {
                     if (t.synth != nullptr)
                         t.synth->reset();
+                    if (t.activeNotes.any())
+                    {
+                        if (t.scratch.getNumChannels() >= 2)
+                        {
+                            midiScratch.clear();
+                            t.activeNotes.appendNoteOffs (midiScratch, 0);
+                            t.scratch.clear (0, count);
+                            juce::AudioBuffer<float> instView (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), count);
+                            if (t.instrument != nullptr && t.instrument->instance != nullptr && ! t.instrument->bypass)
+                                processSlot (*t.instrument, instView, midiScratch);
+                            for (auto& s : t.chain)
+                                if (s->instance != nullptr && ! s->bypass && s->instance->acceptsMidi())
+                                    processSlot (*s, instView, midiScratch);
+                        }
+                        t.activeNotes.reset();
+                    }
+                    t.pendingNoteFlush = false;
                     // skipped: its delay must not come back with stale audio when it plays again
                     if (t.delayDirty)
                     {
@@ -4095,6 +4195,8 @@ private:
                 t->synth->prepare (sampleRate);
                 t->synth->reset();
             }
+            t->activeNotes.reset();
+            t->pendingNoteFlush = false;
             if (t->instrument != nullptr)
             {
                 ensureSlotDryScratch (*t->instrument);
@@ -4615,9 +4717,17 @@ private:
             else
             {
                 mixClips (t, start, n, t.scratch);
+                if (! rendering() && t.pendingNoteFlush)
+                {
+                    t.activeNotes.appendNoteOffs (midiScratch, 0);
+                    t.activeNotes.reset();
+                    t.pendingNoteFlush = false;
+                }
                 collectMidiEvents (t.midiClips, tempo, start, n, midiScratch);
                 if (liveMidi != nullptr)
                     appendLiveMidiSlice (*liveMidi, liveOffset, n, midiScratch);
+                if (! rendering())
+                    t.activeNotes.updateFromBuffer (midiScratch);
                 if (t.instrument != nullptr && t.instrument->instance != nullptr && ! t.instrument->bypass)
                 {
                     if (t.scratch.getNumChannels() >= 4)
