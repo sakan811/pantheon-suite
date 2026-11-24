@@ -4235,6 +4235,48 @@ void midiAndSnapshotChecks()
         test::check (ed.deleteMidiNote (0, 0, 1, err) && s.tracks[0]->midiClips[0].notes.size() == 1, "deleteMidiNote removes note");
         test::check (ed.deleteMidiClip (0, 0, err) && s.tracks[0]->midiClips.empty(), "deleteMidiClip removes clip");
         test::check (ed.undo() && s.tracks[0]->midiClips.size() == 1, "undo restores deleted MIDI clip");
+
+        // resizeMidiClipStart: shifts notes, trims crossing notes, erases notes before 0, undo/redo, and clamps bounds
+        {
+            Session rs;
+            Editor red (rs);
+            red.addMidiTrack ("Lead");
+            // 44100 Hz, 120 bpm -> 22050 samples/beat. Clip from beat 1 (22050) to beat 5 (110250).
+            const auto rref = red.addMidiClip (0, 22050, 88200, "Pattern", err);
+            test::check (rref.valid(), "add clip for resizeMidiClipStart test");
+            red.addMidiNote (0, 0, 0.25, 0.5, 60, 100, err);  // ends at 0.75 (before 1.0)
+            red.addMidiNote (0, 0, 0.75, 0.75, 62, 100, err); // crosses 1.0 (ends at 1.5)
+            red.addMidiNote (0, 0, 1.5, 0.5, 64, 100, err);   // starts after 1.0
+
+            // Trim start forward by 1 beat to sample 44100 (deltaBeats = +1.0)
+            test::check (red.resizeMidiClipStart (0, 0, 44100, err), "resizeMidiClipStart trims forward");
+            const auto& mc = rs.tracks[0]->midiClips[0];
+            test::check (mc.start == 44100 && mc.length == 66150 && mc.end() == 110250,
+                         "resizeMidiClipStart keeps clip end fixed and updates start and length");
+            test::check (mc.notes.size() == 2
+                         && mc.notes[0].pitch == 62 && close (mc.notes[0].startBeat, 0.0) && close (mc.notes[0].durationBeats, 0.5)
+                         && mc.notes[1].pitch == 64 && close (mc.notes[1].startBeat, 0.5) && close (mc.notes[1].durationBeats, 0.5),
+                         "resizeMidiClipStart erases earlier notes, trims crossing note, and shifts remaining notes");
+
+            // Extend start earlier by 1 beat back to sample 22050 (deltaBeats = -1.0)
+            test::check (red.resizeMidiClipStart (0, 0, 22050, err), "resizeMidiClipStart extends earlier");
+            test::check (mc.start == 22050 && mc.length == 88200
+                         && close (mc.notes[0].startBeat, 1.0) && close (mc.notes[1].startBeat, 1.5),
+                         "resizeMidiClipStart extending earlier shifts notes forward");
+
+            test::check (red.undo() && mc.start == 44100 && mc.length == 66150 && mc.notes.size() == 2 && close (mc.notes[0].startBeat, 0.0),
+                         "undo reverts resizeMidiClipStart extend");
+            test::check (red.undo() && mc.start == 22050 && mc.length == 88200 && mc.notes.size() == 3 && close (mc.notes[0].startBeat, 0.25),
+                         "undo restores erased and trimmed notes");
+            test::check (red.redo() && mc.start == 44100 && mc.length == 66150 && mc.notes.size() == 2 && close (mc.notes[0].startBeat, 0.0),
+                         "redo re-applies resizeMidiClipStart");
+
+            // Clamp to [0, end - 1]
+            test::check (red.resizeMidiClipStart (0, 0, -500, err) && mc.start == 0 && mc.end() == 110250,
+                         "resizeMidiClipStart clamps negative start to 0");
+            test::check (red.resizeMidiClipStart (0, 0, 999999, err) && mc.start == 110249 && mc.length == 1,
+                         "resizeMidiClipStart clamps start to end - 1");
+        }
     }
 
     // 4. processBlock + chain plugin + instrument plugin override + renderStems on MIDI track
@@ -5604,6 +5646,308 @@ void busSendSidechainChecks()
     dir.deleteRecursively();
 }
 
+static void trackInstrumentSlotChecks()
+{
+    std::printf ("[66] Track instrument slot\n");
+    const auto dir = tempFolder().getChildFile ("track-instrument");
+    dir.createDirectory();
+    juce::String err;
+
+    // Tiny test synth that outputs a constant 0.25f on both channels while a note is active,
+    // so tests can distinguish it from BasicSynth and verify it runs before the FX chain.
+    struct TinySynthPlugin : public juce::AudioPluginInstance
+    {
+        TinySynthPlugin()
+        {
+            setPlayConfigDetails (2, 2, 48000.0, 512);
+        }
+        const juce::String getName() const override { return "Test Synth"; }
+        void fillInPluginDescription (juce::PluginDescription& d) const override { d = test::GainPlugin::description ("Test Synth"); }
+        void prepareToPlay (double, int) override {}
+        void releaseResources() override {}
+        void reset() override { gate = false; }
+        void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer& midi) override
+        {
+            for (const auto meta : midi)
+            {
+                const auto msg = meta.getMessage();
+                if (msg.isNoteOn()) gate = true;
+                else if (msg.isNoteOff()) gate = false;
+            }
+            const float val = gate ? 0.25f : 0.0f;
+            for (int ch = 0; ch < juce::jmin (2, b.getNumChannels()); ++ch)
+            {
+                auto* dst = b.getWritePointer (ch);
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                    dst[i] = val;
+            }
+        }
+        using juce::AudioProcessor::processBlock;
+        juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+        bool hasEditor() const override { return false; }
+        bool acceptsMidi() const override { return true; }
+        bool producesMidi() const override { return false; }
+        double getTailLengthSeconds() const override { return 0.0; }
+        int getNumPrograms() override { return 1; }
+        int getCurrentProgram() override { return 0; }
+        void setCurrentProgram (int) override {}
+        const juce::String getProgramName (int) override { return "Default"; }
+        void changeProgramName (int, const juce::String&) override {}
+        void getStateInformation (juce::MemoryBlock& m) override { m.setSize (0); }
+        void setStateInformation (const void*, int) override {}
+        bool gate = false;
+    };
+
+    auto registerSynth = [] (Catalog& cat)
+    {
+        cat.addInternal (test::GainPlugin::description ("Test Synth"),
+                         [] (double, int) { return std::make_unique<TinySynthPlugin>(); });
+    };
+
+    // 1. setTrackInstrument, bypassTrackInstrument, removeTrackInstrument, latency & refusal checks
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        registerSynth (s.catalog);
+        Editor ed (s);
+        int structureNotifications = 0;
+        ed.onBeforeStructureChange = [&structureNotifications] { ++structureNotifications; };
+
+        const int midiIdx = ed.addMidiTrack ("Lead");
+        const int busIdx = ed.addBusTrack ("Bus", err);
+        test::check (midiIdx == 0 && busIdx == 1, "created MIDI and Bus tracks");
+
+        {
+            const juce::ScopedLock sl (s.lock);
+            juce::String slotErr;
+            test::check (s.instrumentSlot (midiIdx, slotErr) == nullptr && slotErr.isNotEmpty(),
+                         "instrumentSlot returns nullptr with error when no instrument is set");
+        }
+
+        // Refusal on Bus track
+        juce::String busErr;
+        test::check (! ed.setTrackInstrument (busIdx, "Test Gain", busErr) && busErr.isNotEmpty(),
+                     "setTrackInstrument refuses Bus track");
+
+        // Set instrument + latency with chain
+        test::check (ed.setTrackInstrument (midiIdx, "Test Delay", err)
+                         && s.tracks[0]->instrument != nullptr
+                         && s.tracks[0]->instrument->plugin == "Test Delay",
+                     "setTrackInstrument sets Test Delay as track instrument");
+        test::check (structureNotifications == 1, "onBeforeStructureChange fired on setTrackInstrument");
+
+        {
+            const juce::ScopedLock sl (s.lock);
+            juce::String slotErr;
+            test::check (s.instrumentSlot (midiIdx, slotErr) == s.tracks[0]->instrument.get() && slotErr.isEmpty(),
+                         "instrumentSlot returns active instrument slot");
+        }
+
+        // Failed setTrackInstrument leaves existing instrument untouched and does not fire onBeforeStructureChange
+        juce::String missErr;
+        test::check (! ed.setTrackInstrument (midiIdx, "No Such Synth", missErr)
+                         && missErr.isNotEmpty()
+                         && s.tracks[0]->instrument != nullptr
+                         && s.tracks[0]->instrument->plugin == "Test Delay"
+                         && structureNotifications == 1,
+                     "failed setTrackInstrument leaves existing instrument untouched");
+
+        test::check (ed.addPlugin (midiIdx, "Test Delay", -1, err), "add Test Delay to FX chain");
+        test::check (s.tracks[0]->latency() == 128,
+                     test::fmt ("Track::latency() sums instrument (64) + chain (64) = 128 (got %d)", s.tracks[0]->latency()));
+
+        test::check (ed.bypassTrackInstrument (midiIdx, true, err)
+                         && s.tracks[0]->instrument->bypass
+                         && s.tracks[0]->latency() == 64,
+                     "bypassTrackInstrument updates bypass and removes instrument latency");
+        test::check (ed.bypassTrackInstrument (midiIdx, false, err)
+                         && ! s.tracks[0]->instrument->bypass
+                         && s.tracks[0]->latency() == 128,
+                     "unbypassing instrument restores combined latency");
+
+        // Frozen track refusals
+        test::check (ed.addMidiClip (midiIdx, 0, 44100, "Clip", err).valid(), "add MIDI clip for freeze");
+        test::check (ed.addMidiNote (midiIdx, 0, 0.0, 1.0, 60, 100, err) >= 0, "add MIDI note for freeze");
+        const auto freezeWav = dir.getChildFile ("frozen.wav");
+        test::check (ed.freezeTrack (midiIdx, freezeWav, err) && s.tracks[0]->frozen, "freeze MIDI track");
+        test::check (s.tracks[0]->latency() == 0, "frozen track latency is 0");
+        juce::String frozenErr;
+        test::check (! ed.setTrackInstrument (midiIdx, "Test Gain", frozenErr) && frozenErr.isNotEmpty(),
+                     "setTrackInstrument refuses frozen track");
+        frozenErr.clear();
+        test::check (! ed.bypassTrackInstrument (midiIdx, true, frozenErr) && frozenErr.isNotEmpty(),
+                     "bypassTrackInstrument refuses frozen track");
+        frozenErr.clear();
+        test::check (! ed.removeTrackInstrument (midiIdx, frozenErr) && frozenErr.isNotEmpty(),
+                     "removeTrackInstrument refuses frozen track");
+        test::check (ed.unfreezeTrack (midiIdx, err), "unfreeze MIDI track");
+
+        // Remove instrument
+        test::check (ed.removeTrackInstrument (midiIdx, err) && s.tracks[0]->instrument == nullptr,
+                     "removeTrackInstrument clears instrument");
+        test::check (structureNotifications == 2, "onBeforeStructureChange fired on removeTrackInstrument");
+        juce::String rmErr;
+        test::check (! ed.removeTrackInstrument (midiIdx, rmErr) && rmErr.isNotEmpty(),
+                     "removeTrackInstrument refuses when no instrument is present");
+    }
+
+    // 2. Audio routing: instrument runs before FX chain, suppresses BasicSynth, updates PlaybackSnapshot
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        registerSynth (s.catalog);
+        Editor ed (s);
+        const int t = ed.addMidiTrack ("Synth");
+        test::check (ed.addMidiClip (t, 0, 44100, "Notes", err).valid(), "audio test: add MIDI clip");
+        test::check (ed.addMidiNote (t, 0, 0.0, 2.0, 60, 100, err) >= 0, "audio test: add note");
+        test::check (ed.addPlugin (t, "Test Gain", -1, err), "audio test: add Test Gain to FX chain");
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.tracks[0]->chain[0]->instance->getParameters()[0]))
+            p->setValueNotifyingHost (p->convertTo0to1 (6.0f));
+
+        // Without instrument: BasicSynth runs
+        {
+            const auto& snap = s.snapshots[(size_t) s.activeSnapshot.load()];
+            test::check (! snap.tracks[0].hasMidiPlugin, "snapshot hasMidiPlugin is false without instrument");
+        }
+        juce::AudioBuffer<float> blk (2, 512);
+        s.processBlock (blk, 0);
+        test::check (s.tracks[0]->synth->activeVoiceCount() == 1 && blk.getMagnitude (0, 0, 512) > 0.01f,
+                     "BasicSynth triggers when no instrument is set");
+
+        // With instrument: Test Synth outputs 0.25f -> Test Gain (+6 dB) -> ~0.5f, BasicSynth stays silent
+        test::check (ed.setTrackInstrument (t, "Test Synth", err), "set Test Synth instrument");
+        {
+            const auto& snap = s.snapshots[(size_t) s.activeSnapshot.load()];
+            test::check (snap.tracks[0].hasMidiPlugin, "snapshot hasMidiPlugin is true with active instrument");
+        }
+        s.processBlock (blk, 0);
+        const float expected = 0.25f * juce::Decibels::decibelsToGain (6.0f);
+        test::check (s.tracks[0]->synth->activeVoiceCount() == 0
+                         && std::abs (blk.getSample (0, 100) - expected) < 1e-3f,
+                     "instrument runs before FX chain and suppresses BasicSynth");
+
+        // Bypass instrument: BasicSynth runs again and snapshot hasMidiPlugin becomes false
+        test::check (ed.bypassTrackInstrument (t, true, err), "bypass Test Synth");
+        {
+            const auto& snap = s.snapshots[(size_t) s.activeSnapshot.load()];
+            test::check (! snap.tracks[0].hasMidiPlugin, "snapshot hasMidiPlugin is false when instrument is bypassed");
+        }
+        s.processBlock (blk, 0);
+        test::check (s.tracks[0]->synth->activeVoiceCount() == 1,
+                     "bypassing instrument falls back to BasicSynth");
+    }
+
+    // 3. Undo and redo for set / bypass / remove (with parameter state)
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        const int t = ed.addMidiTrack ("Keys");
+
+        test::check (ed.setTrackInstrument (t, "Test Gain", err) && s.tracks[0]->instrument != nullptr,
+                     "undo test: set Test Gain instrument");
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.tracks[0]->instrument->instance->getParameters()[0]))
+            p->setValueNotifyingHost (p->convertTo0to1 (6.0f));
+        test::check (ed.bypassTrackInstrument (t, true, err) && s.tracks[0]->instrument->bypass,
+                     "undo test: bypass instrument");
+        test::check (ed.undoLabel() == "Bypass instrument", "bypass records 'Bypass instrument' undo step");
+        test::check (ed.removeTrackInstrument (t, err) && s.tracks[0]->instrument == nullptr,
+                     "undo test: remove instrument");
+        test::check (ed.undoLabel() == "Remove instrument", "remove records 'Remove instrument' undo step");
+
+        // Undo remove -> instrument returns bypassed with +6 dB state
+        test::check (ed.undo() && s.tracks[0]->instrument != nullptr
+                         && s.tracks[0]->instrument->plugin == "Test Gain"
+                         && s.tracks[0]->instrument->bypass,
+                     "undo removeTrackInstrument restores instrument and bypass flag");
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.tracks[0]->instrument->instance->getParameters()[0]))
+            test::check (std::abs (p->convertFrom0to1 (p->getValue()) - 6.0f) < 0.05f,
+                         "undo removeTrackInstrument restores instrument parameter state");
+
+        // Undo bypass -> instrument enabled
+        test::check (ed.undo() && s.tracks[0]->instrument != nullptr && ! s.tracks[0]->instrument->bypass,
+                     "undo bypassTrackInstrument restores unbypassed state");
+        test::check (ed.undoLabel() == "Set instrument", "previous step is 'Set instrument'");
+
+        // Undo set -> instrument gone
+        test::check (ed.undo() && s.tracks[0]->instrument == nullptr,
+                     "undo setTrackInstrument removes instrument");
+
+        // Redo set -> bypass -> remove
+        test::check (ed.redo() && s.tracks[0]->instrument != nullptr && ! s.tracks[0]->instrument->bypass,
+                     "redo setTrackInstrument restores instrument");
+        test::check (ed.redo() && s.tracks[0]->instrument != nullptr && s.tracks[0]->instrument->bypass,
+                     "redo bypassTrackInstrument reapplies bypass");
+        test::check (ed.redo() && s.tracks[0]->instrument == nullptr,
+                     "redo removeTrackInstrument removes instrument again");
+    }
+
+    // 4. XML toXml/fromXml round-trip, describe(), and retryMissing()
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        const int t = ed.addMidiTrack ("Pad");
+        test::check (ed.setTrackInstrument (t, "Test Gain", err), "xml test: set Test Gain");
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*> (s.tracks[0]->instrument->instance->getParameters()[0]))
+            p->setValueNotifyingHost (p->convertTo0to1 (-6.0f));
+        test::check (ed.bypassTrackInstrument (t, true, err), "xml test: bypass instrument");
+
+        const auto desc = s.describe();
+        const auto instDesc = desc["tracks"][0]["instrument"];
+        test::check (instDesc.isObject()
+                         && instDesc["plugin"].toString() == "Test Gain"
+                         && (bool) instDesc["bypass"]
+                         && ! (bool) instDesc["missing"]
+                         && (int) instDesc["latencySamples"] == 0
+                         && instDesc.hasProperty ("maker"),
+                     "describe() includes instrument object with expected fields");
+
+        const auto xml = s.toXml (juce::File());
+        test::check (xml != nullptr && xml->getChildByName ("Track")->getChildByName ("Instrument") != nullptr,
+                     "toXml writes <Instrument> child on <Track>");
+
+        const auto projFile = dir.getChildFile ("inst.olympus");
+        test::check (s.save (projFile, err), "save project with instrument");
+
+        // Round-trip with plugin available
+        Session loaded;
+        test::addTestPlugins (loaded.catalog);
+        test::check (loaded.load (projFile, err) && loaded.warnings.isEmpty(), "load project with instrument");
+        test::check (loaded.tracks.size() == 1
+                         && loaded.tracks[0]->instrument != nullptr
+                         && loaded.tracks[0]->instrument->plugin == "Test Gain"
+                         && loaded.tracks[0]->instrument->bypass
+                         && loaded.tracks[0]->instrument->instance != nullptr,
+                     "fromXml restores instrument slot, plugin, and bypass");
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*> (loaded.tracks[0]->instrument->instance->getParameters()[0]))
+            test::check (std::abs (p->convertFrom0to1 (p->getValue()) + 6.0f) < 0.05f,
+                         "fromXml restores instrument parameter state");
+
+        // Missing plugin keeps savedState, reports missing in describe(), and recovers on retryMissing()
+        Session missingSession;
+        test::check (missingSession.load (projFile, err) && ! missingSession.warnings.isEmpty(),
+                     "load with missing instrument records warning");
+        test::check (missingSession.tracks[0]->instrument != nullptr
+                         && missingSession.tracks[0]->instrument->instance == nullptr
+                         && missingSession.tracks[0]->instrument->bypass
+                         && missingSession.tracks[0]->instrument->savedState.getSize() > 0,
+                     "missing instrument preserves Slot, bypass, and savedState");
+        test::check ((bool) missingSession.describe()["tracks"][0]["instrument"]["missing"],
+                     "describe() marks missing instrument as missing: true");
+
+        test::addTestPlugins (missingSession.catalog);
+        test::check (missingSession.retryMissing() == 1
+                         && missingSession.tracks[0]->instrument->instance != nullptr,
+                     "retryMissing() reloads missing track instrument with savedState");
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*> (missingSession.tracks[0]->instrument->instance->getParameters()[0]))
+            test::check (std::abs (p->convertFrom0to1 (p->getValue()) + 6.0f) < 0.05f,
+                         "retryMissing() restores saved instrument parameter state");
+    }
+
+    dir.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -5674,6 +6018,7 @@ int main()
     structuralUndoChecks();
     trackFreezeChecks();
     busSendSidechainChecks();
+    trackInstrumentSlotChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

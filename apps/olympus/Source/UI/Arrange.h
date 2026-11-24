@@ -70,6 +70,8 @@ public:
     std::function<void (const juce::File& file)> onProjectDropped;
     // The IN button of a track: the window shows the device's inputs and sets the track's input (Session::setTrackInput).
     std::function<void (int track)> onInputMenu;
+    // The INST button of a MIDI track: the window shows the track's instrument menu and picker.
+    std::function<void (int track)> onInstrumentMenu;
     // The input a track records, the peak it reads from that input (linear; reading resets it), and whether the meters show it: the
     // window sets these (the view knows no device). An armed track's meter shows its input when showInputLevels is on.
     std::function<float (int track)> inputLevel;
@@ -103,9 +105,10 @@ public:
     // The label of a track's input: "IN 1" for a mono input, "IN 1+2" for a pair (inputs are numbered from 1 here).
     static juce::String inputText (int left, int right);
 
-    // The header's ARM, IN, AUTO, and target buttons and fader (the checks press and read them; nullptr when there is no such track).
+    // The header's ARM, IN, INST, AUTO, and target buttons and fader (the checks press and read them; nullptr when there is no such track).
     juce::Button* armButton (int track);
     juce::Button* inputButton (int track);
+    juce::Button* instrumentButton (int track);
     juce::Button* automationButton (int track);
     juce::Button* autoTargetButton (int track);
     juce::Slider* faderSlider (int track);
@@ -153,7 +156,7 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum class Mode { none, ruler, loop, marker, scrollX, marquee, move, moveMidi, trimStart, trimEnd, fadeIn, fadeOut, autoPoint };
+    enum class Mode { none, ruler, loop, marker, scrollX, marquee, move, moveMidi, resizeMidiStart, resizeMidiEnd, trimStart, trimEnd, fadeIn, fadeOut, autoPoint };
     friend class ArrangeTrackHeader; // the header column reads and edits through the view's Editor and callbacks
 
     Session& session;
@@ -170,6 +173,7 @@ private:
     ClipRef dragClip;
     MidiClipRef dragMidiClip;
     juce::int64 origStart = 0, origEnd = 0, origFadeIn = 0, origFadeOut = 0;
+    MidiClip origMidiClip;
     juce::int64 origMarker = 0;
     int dragMarker = -1;
     int dragAutoTrack = -1;

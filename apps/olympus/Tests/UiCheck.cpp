@@ -3592,6 +3592,73 @@ int main()
         test::check (deleteConsumed && w->session.tracks[0]->midiClips.size() == 1 && w->pianoRoll.isVisible(),
                      "Delete key with empty selection in PianoRollView is consumed without deleting the open MIDI clip");
 
+        // Toolbar -/+ bar length controls & clipEndX handle drag in PianoRollView
+        test::check (w->pianoRoll.lengthTextForTest() == "1 bar",
+                     "PianoRollView lengthLabel shows '1 bar' initially");
+        const juce::int64 initialMidiLen = w->session.tracks[0]->midiClips[0].length;
+        press (w->pianoRoll.lengthPlusButton);
+        test::check (w->session.tracks[0]->midiClips[0].length == initialMidiLen * 2
+                     && w->pianoRoll.lengthTextForTest() == "2 bars",
+                     "lengthPlusButton extends MIDI clip by 1 bar and updates lengthLabel");
+        press (w->pianoRoll.lengthMinusButton);
+        test::check (w->session.tracks[0]->midiClips[0].length == initialMidiLen
+                     && w->pianoRoll.lengthTextForTest() == "1 bar",
+                     "lengthMinusButton shortens MIDI clip back to 1 bar");
+        press (w->pianoRoll.lengthMinusButton);
+        test::check (w->session.tracks[0]->midiClips[0].length == initialMidiLen / 4
+                     && w->pianoRoll.lengthTextForTest() == "0.25 bars",
+                     "lengthMinusButton at 1 bar clamps down to 1 beat (0.25 bars)");
+        test::check (w->editor.undo() && w->session.tracks[0]->midiClips[0].length == initialMidiLen,
+                     "undo restores MIDI clip length after lengthMinusButton");
+        w->pianoRoll.refresh();
+
+        {
+            const int endX = w->pianoRoll.clipEndXForTest();
+            const juce::Point<int> clipHandle { endX, grid.getY() + 8 };
+            w->pianoRoll.mouseMove (mouseAtComp (w->pianoRoll, clipHandle));
+            test::check (w->pianoRoll.getMouseCursor() == juce::MouseCursor::LeftRightResizeCursor,
+                         "PianoRollView shows LeftRightResizeCursor over clipEndX handle");
+            w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, clipHandle));
+            w->pianoRoll.mouseDrag (mouseAtComp (w->pianoRoll, clipHandle + juce::Point<int> (160, 0)));
+            w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, clipHandle + juce::Point<int> (160, 0)));
+            test::check (w->session.tracks[0]->midiClips[0].length > initialMidiLen
+                         && w->pianoRoll.lengthTextForTest() == "1.5 bars",
+                         "dragging clipEndX handle resizes MIDI clip to 1.5 bars");
+            test::check (w->editor.undo() && w->session.tracks[0]->midiClips[0].length == initialMidiLen,
+                         "undo reverts PianoRollView clipEndX drag");
+            w->pianoRoll.refresh();
+        }
+
+        // Draggable splitterBar in MainComponent resizes ArrangeView / PianoRollView split
+        {
+            const double origRatio = w->bodySplitRatioForTest();
+            const int origPianoH = w->pianoRoll.getHeight();
+            const int origArrangeH = w->arrange.getHeight();
+            const auto sb = w->splitterBoundsForTest();
+            test::check (w->splitterBar.isVisible() && ! sb.isEmpty() && sb.getHeight() == 6,
+                         "splitterBar is visible in the 6px gap between ArrangeView and PianoRollView");
+            const auto center = w->splitterBar.getLocalBounds().getCentre();
+            w->splitterBar.mouseDown (mouseAtComp (w->splitterBar, center));
+            w->splitterBar.mouseDrag (mouseAtComp (w->splitterBar, center + juce::Point<int> (0, -80)));
+            w->splitterBar.mouseUp (mouseAtComp (w->splitterBar, center + juce::Point<int> (0, -80)));
+            test::check (w->bodySplitRatioForTest() < origRatio
+                         && w->pianoRoll.getHeight() > origPianoH
+                         && w->arrange.getHeight() < origArrangeH,
+                         "dragging splitterBar up increases PianoRollView height and decreases ArrangeView height");
+
+            w->splitterBar.mouseDown (mouseAtComp (w->splitterBar, center));
+            w->splitterBar.mouseDrag (mouseAtComp (w->splitterBar, center + juce::Point<int> (0, -2000)));
+            w->splitterBar.mouseUp (mouseAtComp (w->splitterBar, center + juce::Point<int> (0, -2000)));
+            test::check (std::abs (w->bodySplitRatioForTest() - 0.20) < 1e-6,
+                         "splitterBar drag clamps bodySplitRatio to 0.20 minimum");
+
+            w->splitterBar.mouseDown (mouseAtComp (w->splitterBar, center));
+            w->splitterBar.mouseDrag (mouseAtComp (w->splitterBar, center + juce::Point<int> (0, 2000)));
+            w->splitterBar.mouseUp (mouseAtComp (w->splitterBar, center + juce::Point<int> (0, 2000)));
+            test::check (std::abs (w->bodySplitRatioForTest() - 0.80) < 1e-6,
+                         "splitterBar drag clamps bodySplitRatio to 0.80 maximum");
+        }
+
         // Paint ArrangeView (with miniature MIDI note bars) and PianoRollView, plus non-blocking refresh under renderBusy
         const auto arrangeImg = w->arrange.createComponentSnapshot (w->arrange.getLocalBounds());
         const auto pianoImg = w->pianoRoll.createComponentSnapshot (w->pianoRoll.getLocalBounds());
@@ -3607,8 +3674,26 @@ int main()
 
         // Close button hides PianoRollView and restores full ArrangeView height
         press (w->pianoRoll.closeButton);
-        test::check (! w->pianoRoll.isVisible() && w->arrange.getHeight() == fullArrangeH,
-                     "Close button hides PianoRollView and restores ArrangeView height");
+        test::check (! w->pianoRoll.isVisible() && ! w->splitterBar.isVisible() && w->arrange.getHeight() == fullArrangeH,
+                     "Close button hides PianoRollView, hides splitterBar, and restores ArrangeView height");
+
+        // Resizing MIDI clip via ArrangeView right-edge drag (and undo)
+        {
+            w->refreshNow();
+            const auto mcR = w->arrange.midiClipBounds ({ 0, 0 });
+            const juce::int64 lenBefore = w->session.tracks[0]->midiClips[0].length;
+            const juce::Point<int> rightEdgePt { mcR.getRight() - 2, mcR.getCentreY() };
+            w->arrange.mouseMove (mouseAt (w->arrange, rightEdgePt));
+            test::check (w->arrange.getMouseCursor() == juce::MouseCursor::LeftRightResizeCursor,
+                         "ArrangeView shows LeftRightResizeCursor on MIDI clip right edge");
+            w->arrange.mouseDown (mouseAt (w->arrange, rightEdgePt));
+            w->arrange.mouseDrag (mouseAt (w->arrange, rightEdgePt + juce::Point<int> (160, 0)));
+            w->arrange.mouseUp (mouseAt (w->arrange, rightEdgePt + juce::Point<int> (160, 0)));
+            test::check (w->session.tracks[0]->midiClips[0].length > lenBefore,
+                         "dragging MIDI clip right edge in ArrangeView resizes clip length");
+            test::check (w->editor.undo() && w->session.tracks[0]->midiClips[0].length == lenBefore,
+                         "undo reverts ArrangeView MIDI clip right-edge resize");
+        }
     }
 
     // [50] Master bus FX chain UI: layout, button state, add/bypass/move/remove, openEditor(-2, 0), dirty tracking, and closeTrackEditors / NEW
@@ -4223,6 +4308,175 @@ int main()
         const auto mixerBusImg = w->mixer.createComponentSnapshot (w->mixer.getLocalBounds());
         test::check (arrangeBusImg.isValid() && mixerBusImg.isValid(),
                      "ArrangeView and MixerView paint cleanly with Bus, routed tracks, sends, and sidechain slot");
+
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    std::printf ("[55] MIDI Instrument Slot (INST button), PluginPicker Instruments & Editor Window\n");
+    {
+        struct UiTestInstrument : public juce::AudioPluginInstance
+        {
+            UiTestInstrument() { setPlayConfigDetails (0, 2, 48000.0, 512); }
+            const juce::String getName() const override { return "Test Synth"; }
+            void fillInPluginDescription (juce::PluginDescription& d) const override
+            {
+                d = test::GainPlugin::description ("Test Synth");
+                d.isInstrument = true;
+                d.manufacturerName = "Acme";
+                d.numInputChannels = 0;
+                d.numOutputChannels = 2;
+            }
+            void prepareToPlay (double, int) override {}
+            void releaseResources() override {}
+            void reset() override {}
+            void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&) override { b.clear(); }
+            using juce::AudioProcessor::processBlock;
+            juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+            bool hasEditor() const override { return false; }
+            bool acceptsMidi() const override { return true; }
+            bool producesMidi() const override { return false; }
+            double getTailLengthSeconds() const override { return 0.0; }
+            int getNumPrograms() override { return 1; }
+            int getCurrentProgram() override { return 0; }
+            void setCurrentProgram (int) override {}
+            const juce::String getProgramName (int) override { return "Default"; }
+            void changeProgramName (int, const juce::String&) override {}
+            void getStateInformation (juce::MemoryBlock& m) override { m.setSize (0); }
+            void setStateInformation (const void*, int) override {}
+        };
+
+        const auto dir55 = tempFolder().getChildFile ("midi-inst-ui");
+        dir55.deleteRecursively();
+        dir55.createDirectory();
+        auto w = makeWindow (true, dir55.getChildFile ("settings.xml"));
+
+        // Register an internal instrument (isInstrument = true) and a suite-named plugin ("Hermes Level")
+        juce::PluginDescription instDesc = test::GainPlugin::description ("Test Synth");
+        instDesc.isInstrument = true;
+        instDesc.manufacturerName = "Acme";
+        instDesc.numInputChannels = 0;
+        instDesc.numOutputChannels = 2;
+        w->session.catalog.addInternal (instDesc, [] (double, int) { return std::make_unique<UiTestInstrument>(); });
+
+        juce::PluginDescription suiteDesc = test::GainPlugin::description ("Hermes Level");
+        suiteDesc.manufacturerName = "Other";
+        w->session.catalog.addInternal (suiteDesc, [] (double, int) { return std::make_unique<test::GainPlugin> ("Hermes Level", 0); });
+
+        // Verify PluginPicker puts suite plugin under "Pantheon" maker label and FilterMode::Instruments shows only instruments
+        const auto allEntries = PluginPicker::entriesFromCatalog (w->session.catalog, PluginPicker::FilterMode::All);
+        bool hermesPantheon = false;
+        for (const auto& e : allEntries)
+            if (e.name == "Hermes Level" && e.maker == "Pantheon")
+                hermesPantheon = true;
+        test::check (hermesPantheon && ! allEntries.empty() && allEntries[0].maker == "Pantheon",
+                     "PluginPicker places suite-named plugin under Pantheon maker label and sorts Pantheon first");
+
+        PluginPicker allPicker (w->session.catalog, PluginPicker::FilterMode::All, [] (const juce::String&) {});
+        allPicker.setFilter ("Pantheon");
+        test::check (allPicker.filteredCount() == 1 && allPicker.filteredNameAt (0) == "Hermes Level",
+                     "PluginPicker searching 'Pantheon' matches suite plugin");
+
+        PluginPicker instPicker (w->session.catalog, PluginPicker::FilterMode::Instruments, [] (const juce::String&) {});
+        test::check (instPicker.filteredCount() == 1 && instPicker.filteredNameAt (0) == "Test Synth",
+                     "PluginPicker FilterMode::Instruments shows only instrument plugins");
+
+        // Add Audio (0), MIDI (1), and Bus (2) tracks and verify IN vs INST visibility
+        w->addEmptyTrack();
+        w->addMidiTrack();
+        w->addBusTrack();
+        w->refreshNow();
+
+        auto* in0 = w->arrange.inputButton (0);
+        auto* inst0 = w->arrange.instrumentButton (0);
+        auto* in1 = w->arrange.inputButton (1);
+        auto* inst1 = w->arrange.instrumentButton (1);
+        auto* in2 = w->arrange.inputButton (2);
+        auto* inst2 = w->arrange.instrumentButton (2);
+        test::check (in0 != nullptr && inst0 != nullptr && in1 != nullptr && inst1 != nullptr && in2 != nullptr && inst2 != nullptr,
+                     "ArrangeView exposes inputButton and instrumentButton for all track headers");
+        test::check (in0->isVisible() && in0->isEnabled() && ! inst0->isVisible() && ! inst0->isEnabled(),
+                     "Audio track shows IN and hides INST");
+        test::check (! in1->isVisible() && ! in1->isEnabled() && inst1->isVisible() && inst1->isEnabled(),
+                     "MIDI track shows INST and hides IN");
+        test::check (! in2->isVisible() && ! in2->isEnabled() && ! inst2->isVisible() && ! inst2->isEnabled(),
+                     "Bus track hides both IN and INST");
+        test::check (! inst1->getToggleState() && inst1->getTooltip().contains ("BasicSynth"),
+                     "MIDI track INST button defaults to off with BasicSynth tooltip");
+
+        // Open instrument picker via openPluginPicker(FilterMode::Instruments)
+        w->openPluginPicker (inst1->getBounds(), PluginPicker::FilterMode::Instruments, [] (const juce::String&) {});
+        test::check (true, "openPluginPicker with FilterMode::Instruments launches cleanly");
+
+        // Set instrument, check instButton state and tooltip
+        juce::String err;
+        test::check (w->editor.setTrackInstrument (1, "Test Synth", err), "editor.setTrackInstrument sets Test Synth");
+        w->refreshNow();
+        test::check (inst1->getToggleState()
+                         && inst1->getTooltip().contains ("Test Synth")
+                         && ! inst1->getTooltip().contains ("bypassed"),
+                     "INST button lights up and shows Test Synth tooltip when instrument is set");
+
+        // Open instrument editor window and verify title & lifecycle
+        juce::String openedTitle;
+        auto baseFactory = w->makeEditorWindow;
+        w->makeEditorWindow = [&] (const juce::String& title, juce::AudioProcessorEditor* ed, std::function<void()> closed)
+        {
+            openedTitle = title;
+            return baseFactory (title, ed, std::move (closed));
+        };
+        w->openInstrumentEditor (1);
+        const auto expectedTitle = juce::String ("Track 2") + juce::String::fromUTF8 (" \xe2\x80\x94 ") + "Test Synth";
+        test::check (w->openEditors() == 1 && openedTitle == expectedTitle,
+                     "openInstrumentEditor opens window titled 'Track 2 — Test Synth'");
+        w->openInstrumentEditor (1);
+        test::check (w->openEditors() == 1, "openInstrumentEditor brings existing window to front without duplicating");
+        w->closeTrackEditors();
+        test::check (w->openEditors() == 0, "closeTrackEditors closes instrument plugin window");
+
+        // Bypass / unbypass instrument updates INST button state and tooltip
+        test::check (w->editor.bypassTrackInstrument (1, true, err), "editor.bypassTrackInstrument(true)");
+        w->refreshNow();
+        test::check (! inst1->getToggleState() && inst1->getTooltip().contains ("bypassed"),
+                     "bypassing instrument unlights INST button and appends (bypassed) tooltip");
+        test::check (w->editor.bypassTrackInstrument (1, false, err), "editor.bypassTrackInstrument(false)");
+        w->refreshNow();
+        test::check (inst1->getToggleState() && ! inst1->getTooltip().contains ("bypassed"),
+                     "unbypassing instrument relights INST button");
+
+        // Open editor again, remove instrument -> editor closes cleanly and INST reverts to BasicSynth
+        w->openInstrumentEditor (1);
+        test::check (w->openEditors() == 1, "instrument editor reopened before removal");
+        test::check (w->editor.removeTrackInstrument (1, err) && w->session.tracks[1]->instrument == nullptr,
+                     "editor.removeTrackInstrument removes instrument");
+        w->refreshNow();
+        test::check (w->openEditors() == 0 && ! inst1->getToggleState() && inst1->getTooltip().contains ("BasicSynth"),
+                     "removeTrackInstrument closes instrument window and reverts INST button to BasicSynth");
+
+        // Undo / redo updates instButton state
+        test::check (w->editor.undo() && w->session.tracks[1]->instrument != nullptr,
+                     "undo restores track instrument");
+        w->refreshNow();
+        test::check (inst1->getToggleState() && inst1->getTooltip().contains ("Test Synth"),
+                     "undo relights INST button");
+        test::check (w->editor.redo() && w->session.tracks[1]->instrument == nullptr,
+                     "redo removes track instrument again");
+        w->refreshNow();
+        test::check (! inst1->getToggleState() && inst1->getTooltip().contains ("BasicSynth"),
+                     "redo reverts INST button to BasicSynth");
+
+        // Refuse openInstrumentEditor & showInstrumentMenu while renderRunning() is true
+        const auto errCountBefore = gErrors.size();
+        w->session.renderBusy = true;
+        w->openInstrumentEditor (1);
+        w->showInstrumentMenu (1);
+        w->session.renderBusy = false;
+        test::check (gErrors.size() == errCountBefore + 2,
+                     "openInstrumentEditor and showInstrumentMenu refuse while renderRunning() is true");
+
+        // Clean painting
+        const auto arrangeInstImg = w->arrange.createComponentSnapshot (w->arrange.getLocalBounds());
+        test::check (arrangeInstImg.isValid(), "ArrangeView with INST button paints cleanly");
 
         w.reset();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (40);

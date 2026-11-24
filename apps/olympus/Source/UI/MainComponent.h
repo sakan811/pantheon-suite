@@ -88,6 +88,42 @@ public:
     }
 };
 
+// Draggable vertical splitter bar between ArrangeView and the bottom panel (PianoRollView / MixerView).
+class SplitterBar : public juce::Component
+{
+public:
+    std::function<void()> onDragStart;
+    std::function<void (int deltaY)> onDrag;
+
+    SplitterBar() { setMouseCursor (juce::MouseCursor::UpDownResizeCursor); }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (colours::panelEdge);
+        g.fillRect (getLocalBounds());
+        g.setColour (colours::dim.withAlpha (0.55f));
+        g.fillRect (getWidth() / 2 - 16, getHeight() / 2 - 1, 32, 2);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        dragStartY = parentY (e);
+        if (onDragStart) onDragStart();
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (onDrag) onDrag (parentY (e) - dragStartY);
+    }
+
+private:
+    int parentY (const juce::MouseEvent& e) const
+    {
+        return getParentComponent() != nullptr ? getParentComponent()->getLocalPoint (this, e.getPosition()).y : e.y;
+    }
+    int dragStartY = 0;
+};
+
 // The audio device's settings dialog: a window that stays open beside the arrangement (no modal loop).
 class AudioDialog : public juce::DialogWindow
 {
@@ -260,6 +296,7 @@ public:
     bool isScanning() const { return scanning; }
     // Opens the editor of a plugin: track `track`'s chain slot `slot`, with track -1 a plugin of the monitor chain, or with track -2 a plugin of the master chain. One window per plugin.
     void openEditor (int track, int slot);
+    void openInstrumentEditor (int track);
     int openEditors() const { return (int) windows.size(); }
     void closeEditors();
     // Closes the editors of the project's plugins (tracks and master), not those of the monitor chain (which stay open across NEW and OPEN).
@@ -327,8 +364,10 @@ public:
 
     // The menus of a track and the master bus: their plugins (open, bypass, move, remove) and the plugins to add.
     void openPluginPicker (juce::Rectangle<int> anchor, std::function<void (const juce::String&)> onPick);
+    void openPluginPicker (juce::Rectangle<int> anchor, PluginPicker::FilterMode filter, std::function<void (const juce::String&)> onPick);
     void showAddPluginMenu (int track);
     void showTrackMenu (int track);
+    void showInstrumentMenu (int track);
     void showAddMasterPluginMenu();
     void showMasterMenu();
 
@@ -403,6 +442,9 @@ public:
     ArrangeView arrange { session, editor };
     PianoRollView pianoRoll { session, editor };
     MixerView mixer { session, editor };
+    SplitterBar splitterBar;
+    double bodySplitRatioForTest() const { return bodySplitRatio; }
+    juce::Rectangle<int> splitterBoundsForTest() const { return splitterBar.getBounds(); }
 
 private:
     // The audio callback's copy of the transport: the playhead, the loop, the click and the end of the audio. The callback reads and writes
@@ -478,6 +520,7 @@ private:
     bool hasOpenTrackEditor() const;
     juce::int64 trackPluginStateHash() const;
     Slot* slotOf (int track, int slot, juce::String& error);  // a track's chain slot, the monitor chain's (-1), or the master chain's (-2)
+    void openSlotEditor (Slot* s, const juce::String& title, bool isTrackEditor);
 
     Options opts;
     bool monitorLoaded = false;                     // the chain is read: until then no save writes monitor.xml
@@ -509,6 +552,8 @@ private:
     bool scanQueued = false;                        // the start's scan is queued and has not begun
     juce::StringArray signatures { "4/4", "3/4", "2/4", "5/4", "6/8", "7/8", "12/8" };
     juce::Rectangle<int> noteStrip, bodyArea;
+    double bodySplitRatio = 0.58;
+    double dragStartSplitRatio = 0.58;
     // a take in progress: the latency its clips are placed earlier by (fixed at REC), and the playhead it began at (the fallback when the
     // callback never ran); the device stopped (set by the device thread, read by the timer)
     juce::int64 takeLatency = 0, takeFrom = 0;

@@ -203,6 +203,7 @@ struct Track
     std::vector<MidiClip> midiClips;
     bool isMidi = false;
     std::unique_ptr<BasicSynth> synth;
+    std::unique_ptr<Slot> instrument;
     float gainDb = 0.0f;                                 // the fader
     float pan = 0.0f;                                    // -1 (left) .. 1 (right), a balance: see Session::panGains
     bool mute = false, solo = false;
@@ -219,12 +220,12 @@ struct Track
     std::shared_ptr<const juce::AudioBuffer<float>> frozenAudio;
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };   // post fader and pan; the audio thread keeps the max, the display resets them
 
-    // The sum of the chain's reported latencies (0 when frozen, since latency is baked out).
+    // The sum of the instrument and chain reported latencies (0 when frozen, since latency is baked out).
     int latency() const
     {
         if (frozen)
             return 0;
-        int sum = 0;
+        int sum = instrument != nullptr ? instrument->latency() : 0;
         for (auto& s : chain) sum += s->latency();
         return juce::jmax (0, sum);
     }
@@ -364,13 +365,16 @@ public:
             t.outputTrack = src.outputTrack;
             t.sends = src.sends;
             t.isMidi = src.isMidi;
-            t.hasMidiPlugin = false;
-            for (const auto& s : src.chain)
+            t.hasMidiPlugin = (src.instrument != nullptr && src.instrument->instance != nullptr && ! src.instrument->bypass);
+            if (! t.hasMidiPlugin)
             {
-                if (s->instance != nullptr && ! s->bypass && s->instance->acceptsMidi())
+                for (const auto& s : src.chain)
                 {
-                    t.hasMidiPlugin = true;
-                    break;
+                    if (s->instance != nullptr && ! s->bypass && s->instance->acceptsMidi())
+                    {
+                        t.hasMidiPlugin = true;
+                        break;
+                    }
                 }
             }
             t.gainDb = src.gainDb;
@@ -432,8 +436,12 @@ public:
     ~Session()
     {
         for (auto& t : tracks)
+        {
+            if (t->instrument != nullptr && t->instrument->instance != nullptr)
+                t->instrument->instance->setPlayHead (nullptr);
             for (auto& s : t->chain)
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        }
         for (auto& s : masterChain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         for (auto& s : monitor)
@@ -771,6 +779,8 @@ public:
     {
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (index, (int) tracks.size())) { error = "No track " + juce::String (index); return false; }
+        if (tracks[(size_t) index]->instrument != nullptr && tracks[(size_t) index]->instrument->instance != nullptr)
+            tracks[(size_t) index]->instrument->instance->setPlayHead (nullptr);
         for (auto& s : tracks[(size_t) index]->chain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         tracks.erase (tracks.begin() + index);
@@ -1371,6 +1381,91 @@ public:
         auto& chain = tracks[(size_t) track]->chain;
         if (! juce::isPositiveAndBelow (slot, (int) chain.size())) { error = "No plugin " + juce::String (slot) + " on track " + juce::String (track); return nullptr; }
         return chain[(size_t) slot].get();
+    }
+
+    Slot* instrumentSlot (int track, juce::String& error) const
+    {
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return nullptr; }
+        auto* inst = tracks[(size_t) track]->instrument.get();
+        if (inst == nullptr) { error = "No instrument on track " + juce::String (track); return nullptr; }
+        return inst;
+    }
+
+    bool setTrackInstrument (int track, const juce::String& query, juce::String& error,
+                             const std::function<void()>& onBeforeReplace = {})
+    {
+        double snapRate = 0.0;
+        {
+            const juce::ScopedLock sl (lock);
+            if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+            auto& trk = *tracks[(size_t) track];
+            if (trk.isBus()) { error = "Cannot set an instrument on a bus track."; return false; }
+            if (trk.frozen) { error = frozenTrackError (trk); return false; }
+            snapRate = sampleRate;
+        }
+        const auto exact = catalog.resolve (query, error);
+        if (exact.isEmpty()) return false;
+        auto slot = makeSlot (exact, nullptr, error, snapRate);
+        if (slot == nullptr) return false;
+        if (onBeforeReplace)
+            onBeforeReplace();
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size()))
+        {
+            if (slot->instance != nullptr) { slot->instance->releaseResources(); slot->instance->setPlayHead (nullptr); }
+            error = "No track " + juce::String (track);
+            return false;
+        }
+        auto& trk = *tracks[(size_t) track];
+        if (trk.isBus())
+        {
+            if (slot->instance != nullptr) { slot->instance->releaseResources(); slot->instance->setPlayHead (nullptr); }
+            error = "Cannot set an instrument on a bus track.";
+            return false;
+        }
+        if (trk.frozen)
+        {
+            if (slot->instance != nullptr) { slot->instance->releaseResources(); slot->instance->setPlayHead (nullptr); }
+            error = frozenTrackError (trk);
+            return false;
+        }
+        if (trk.instrument != nullptr && trk.instrument->instance != nullptr)
+            trk.instrument->instance->setPlayHead (nullptr);
+        trk.instrument = std::move (slot);
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool removeTrackInstrument (int track, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        auto& trk = *tracks[(size_t) track];
+        if (trk.frozen) { error = frozenTrackError (trk); return false; }
+        if (trk.instrument == nullptr) { error = "No instrument on track " + juce::String (track); return false; }
+        if (trk.instrument->instance != nullptr)
+            trk.instrument->instance->setPlayHead (nullptr);
+        trk.instrument.reset();
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return true;
+    }
+
+    bool bypassTrackInstrument (int track, bool bypass, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
+        auto& trk = *tracks[(size_t) track];
+        if (trk.frozen) { error = frozenTrackError (trk); return false; }
+        if (trk.instrument == nullptr) { error = "No instrument on track " + juce::String (track); return false; }
+        trk.instrument->bypass = bypass;
+        updateLatenciesLocked();
+        publishPlaybackSnapshotLocked();
+        dirty = true;
+        return true;
     }
 
     // ---- master bus FX chain --------------------------------------------------------------------------------------------
@@ -2576,6 +2671,8 @@ public:
                     ne->setAttribute ("channel", note.channel);
                 }
             }
+            if (t->instrument != nullptr)
+                writeSlotXml (*e, "Instrument", *t->instrument);
             for (auto& s : t->chain)
                 writeSlotXml (*e, "Slot", *s);
             for (const auto& lane : t->automation)
@@ -2830,8 +2927,12 @@ public:
     {
         const juce::ScopedLock sl (lock);
         for (auto& t : tracks)
+        {
+            if (t->instrument != nullptr && t->instrument->instance != nullptr)
+                t->instrument->instance->setPlayHead (nullptr);
             for (auto& s : t->chain)
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        }
         tracks.clear();
         for (auto& s : masterChain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
@@ -2967,6 +3068,21 @@ public:
                 midiClips.add (juce::var (mco));
             }
             o->setProperty ("midi_clips", midiClips);
+
+            if (t->instrument != nullptr)
+            {
+                auto* inst = new juce::DynamicObject();
+                inst->setProperty ("plugin", t->instrument->plugin);
+                inst->setProperty ("bypass", t->instrument->bypass);
+                inst->setProperty ("missing", t->instrument->instance == nullptr);
+                inst->setProperty ("latencySamples", t->instrument->latency());
+                inst->setProperty ("maker", t->instrument->instance != nullptr
+                                                ? t->instrument->instance->getPluginDescription().manufacturerName
+                                                : juce::String());
+                if (t->instrument->instance == nullptr)
+                    inst->setProperty ("reason", slotProblem (*t->instrument));
+                o->setProperty ("instrument", juce::var (inst));
+            }
 
             juce::Array<juce::var> chain;
             int j = 0;
@@ -3123,14 +3239,21 @@ public:
             ++count;
         };
         for (auto& t : tracks)
+        {
+            if (t->instrument != nullptr)
+                retry (*t->instrument, true, back);
             for (auto& s : t->chain)
                 retry (*s, true, back);
+        }
         for (auto& s : masterChain)
             retry (*s, false, back);
         for (auto& s : monitor)
             retry (*s, false, back);
         if (back > 0)
+        {
             updateLatenciesLocked();
+            publishPlaybackSnapshotLocked();
+        }
         return back;
     }
 
@@ -3572,6 +3695,9 @@ private:
                 t->midiClips.push_back (std::move (m));
             }
 
+            if (auto* instEl = e->getChildByName ("Instrument"))
+                if (! t->isBus())
+                    t->instrument = readSlotXml (*instEl, out.rate, "Track '" + t->name + "'", out.problems, out.slotPreparedRates);
             for (auto* c : e->getChildWithTagNameIterator ("Slot"))
                 t->chain.push_back (readSlotXml (*c, out.rate, "Track '" + t->name + "'", out.problems, out.slotPreparedRates));
             for (auto* ae : e->getChildWithTagNameIterator ("AutomationLane"))
@@ -3732,8 +3858,12 @@ private:
     void clearProjectPlayheadsLocked()
     {
         for (auto& t : tracks)
+        {
+            if (t->instrument != nullptr && t->instrument->instance != nullptr)
+                t->instrument->instance->setPlayHead (nullptr);
             for (auto& s : t->chain)
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
+        }
         for (auto& s : masterChain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
     }
@@ -3741,8 +3871,12 @@ private:
     void attachProjectPlayheadsLocked()
     {
         for (auto& t : tracks)
+        {
+            if (t->instrument != nullptr && t->instrument->instance != nullptr)
+                t->instrument->instance->setPlayHead (&head);
             for (auto& s : t->chain)
                 if (s->instance != nullptr) s->instance->setPlayHead (&head);
+        }
         for (auto& s : masterChain)
             if (s->instance != nullptr) s->instance->setPlayHead (&head);
     }
@@ -3948,6 +4082,16 @@ private:
                 t->synth->prepare (sampleRate);
                 t->synth->reset();
             }
+            if (t->instrument != nullptr)
+            {
+                ensureSlotDryScratch (*t->instrument);
+                if (t->instrument->instance != nullptr)
+                {
+                    t->instrument->instance->releaseResources();
+                    configure (*t->instrument->instance, rate, nonRealtime, true);
+                    t->instrument->instance->reset();
+                }
+            }
             for (auto& s : t->chain)
             {
                 ensureSlotDryScratch (*s);
@@ -3993,6 +4137,12 @@ private:
             t->postScratch.setSize (2, kBlockSize, false, true, false);
             // the buffer the chain runs in has the channels of its widest plugin (two at least), so no plugin is handed more than it owns
             int channels = 2;
+            if (t->instrument != nullptr)
+            {
+                ensureSlotDryScratch (*t->instrument);
+                if (t->instrument->instance != nullptr)
+                    channels = juce::jmax (channels, t->instrument->instance->getTotalNumInputChannels(), t->instrument->instance->getTotalNumOutputChannels());
+            }
             for (auto& s : t->chain)
             {
                 ensureSlotDryScratch (*s);
@@ -4455,19 +4605,32 @@ private:
                 collectMidiEvents (t.midiClips, tempo, start, n, midiScratch);
                 if (liveMidi != nullptr)
                     appendLiveMidiSlice (*liveMidi, liveOffset, n, midiScratch);
-                bool pluginAcceptsMidi = false;
-                for (auto& s : t.chain)
+                if (t.instrument != nullptr && t.instrument->instance != nullptr && ! t.instrument->bypass)
                 {
-                    if (s->instance != nullptr && ! s->bypass && s->instance->acceptsMidi())
+                    if (t.scratch.getNumChannels() >= 4)
                     {
-                        pluginAcceptsMidi = true;
-                        break;
+                        t.scratch.clear (2, 0, n);
+                        t.scratch.clear (3, 0, n);
                     }
+                    juce::AudioBuffer<float> instView (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
+                    processSlot (*t.instrument, instView, midiScratch);
                 }
-                if (t.isMidi && t.synth != nullptr && ! pluginAcceptsMidi)
+                else
                 {
-                    juce::AudioBuffer<float> synthView (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
-                    t.synth->process (synthView, midiScratch);
+                    bool pluginAcceptsMidi = false;
+                    for (auto& s : t.chain)
+                    {
+                        if (s->instance != nullptr && ! s->bypass && s->instance->acceptsMidi())
+                        {
+                            pluginAcceptsMidi = true;
+                            break;
+                        }
+                    }
+                    if (t.isMidi && t.synth != nullptr && ! pluginAcceptsMidi)
+                    {
+                        juce::AudioBuffer<float> synthView (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
+                        t.synth->process (synthView, midiScratch);
+                    }
                 }
             }
             juce::AudioBuffer<float> view (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);

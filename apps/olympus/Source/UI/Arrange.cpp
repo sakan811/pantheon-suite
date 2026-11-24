@@ -99,6 +99,9 @@ struct ArrangeSnapshot
         int inputLeft = 0, inputRight = -1;
         float peakL = 0.0f, peakR = 0.0f; // only when taken with peaks: the maximum since the last read
         bool isMidi = false;
+        bool hasInstrument = false;
+        bool instrumentBypassed = false;
+        juce::String instrumentName;
         TrackKind kind = TrackKind::Audio;
         int outputTrack = -1;
         std::vector<AuxSend> sends;
@@ -141,7 +144,9 @@ static bool sameArrangeVisual (const ArrangeSnapshot& a, const ArrangeSnapshot& 
     {
         const auto& ta = a.tracks[i];
         const auto& tb = b.tracks[i];
-        if (ta.name != tb.name || ta.mute != tb.mute || ta.isMidi != tb.isMidi || ta.kind != tb.kind || ta.outputTrack != tb.outputTrack
+        if (ta.name != tb.name || ta.mute != tb.mute || ta.isMidi != tb.isMidi
+            || ta.hasInstrument != tb.hasInstrument || ta.instrumentBypassed != tb.instrumentBypassed || ta.instrumentName != tb.instrumentName
+            || ta.kind != tb.kind || ta.outputTrack != tb.outputTrack
             || ta.sends.size() != tb.sends.size() || ta.showAutomation != tb.showAutomation || ta.activeAutoTarget != tb.activeAutoTarget
             || ta.clips.size() != tb.clips.size() || ta.midiClips.size() != tb.midiClips.size() || ta.automation.size() != tb.automation.size())
             return false;
@@ -260,7 +265,7 @@ public:
         muteButton.setClickingTogglesState (true);
         muteButton.lamp = colours::bad;
         // a header switch never takes the keyboard: Space and the other transport keys reach the window
-        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &autoButton, &autoTargetButton, &autoEnableButton, &fxButton, &removeButton, &armButton, &inputButton }) b->setWantsKeyboardFocus (false);
+        for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &autoButton, &autoTargetButton, &autoEnableButton, &fxButton, &removeButton, &armButton, &inputButton, &instButton }) b->setWantsKeyboardFocus (false);
         faderSlider.setWantsKeyboardFocus (false);
         panKnob.setWantsKeyboardFocus (false);
         autoButton.setClickingTogglesState (true);
@@ -322,7 +327,11 @@ public:
         };
         inputButton.setTooltip ("The device input this track records. Click to choose it.");
         inputButton.onClick = [this] { if (view.onInputMenu) view.onInputMenu (index); };
+        instButton.lamp = colours::accent;
+        instButton.setClickingTogglesState (false);
+        instButton.onClick = [this] { if (view.onInstrumentMenu) view.onInstrumentMenu (index); };
         for (auto* b : std::initializer_list<juce::Component*> { &muteButton, &soloButton, &autoButton, &fxButton, &removeButton, &armButton, &inputButton }) addAndMakeVisible (*b);
+        addChildComponent (instButton);
         addChildComponent (autoTargetButton);
         addChildComponent (autoEnableButton);
 
@@ -363,7 +372,8 @@ public:
     }
 
     void setState (const juce::String& title, float gainDb, float panValue, bool isMuted, bool isSoloed, bool isArmed, const juce::String& input,
-                   bool showAuto, const juce::String& targetLabel, bool autoLaneEnabled, bool busTrack)
+                   bool showAuto, const juce::String& targetLabel, bool autoLaneEnabled, bool busTrack,
+                   bool midiTrack, bool hasInstrument, bool instrumentBypassed, const juce::String& instrumentName)
     {
         if (isBus != busTrack)
         {
@@ -391,8 +401,12 @@ public:
         armButton.setToggleState (isArmed, juce::dontSendNotification);
         armButton.setEnabled (! isBus);
         armButton.setVisible (! isBus);
-        inputButton.setEnabled (! isBus);
-        inputButton.setVisible (! isBus);
+        const bool showInput = ! isBus && ! midiTrack;
+        const bool showInst = ! isBus && midiTrack;
+        inputButton.setEnabled (showInput);
+        inputButton.setVisible (showInput);
+        instButton.setEnabled (showInst);
+        instButton.setVisible (showInst);
         if (isBus)
         {
             const juce::String busTip ("Bus track receives routed tracks/sends");
@@ -405,6 +419,19 @@ public:
             const juce::String inTip ("The device input this track records. Click to choose it.");
             if (armButton.getTooltip() != armTip) armButton.setTooltip (armTip);
             if (inputButton.getTooltip() != inTip) inputButton.setTooltip (inTip);
+        }
+        if (showInst)
+        {
+            instButton.setToggleState (hasInstrument && ! instrumentBypassed, juce::dontSendNotification);
+            const juce::String instTip = hasInstrument
+                ? ("Instrument: " + instrumentName + (instrumentBypassed ? " (bypassed)" : ""))
+                : juce::String ("Instrument: Built-in BasicSynth (click to choose)");
+            if (instButton.getTooltip() != instTip)
+                instButton.setTooltip (instTip);
+        }
+        else
+        {
+            instButton.setToggleState (false, juce::dontSendNotification);
         }
         if (inputButton.getButtonText() != input) inputButton.setButtonText (input);
         autoButton.setToggleState (showAuto, juce::dontSendNotification);
@@ -435,6 +462,7 @@ public:
         panKnob.setBounds (66, 27, 100, 32);
         armButton.setBounds (8, 62, 26, 22);
         inputButton.setBounds (38, 62, 58, 22);
+        instButton.setBounds (38, 62, 58, 22);
         faderSlider.setBounds (102, 66, w - 110, 16);
         if (getHeight() > ArrangeView::kLaneHeight)
         {
@@ -476,6 +504,7 @@ public:
     int index;
     ArrangeLamp armButton { "R" };
     juce::TextButton inputButton { "IN" };
+    ArrangeLamp instButton { "INST" };
     ArrangeLamp autoButton { "AUTO" };
     juce::TextButton autoTargetButton { "VOL" };
     juce::Slider& fader() { return faderSlider; }
@@ -530,6 +559,11 @@ juce::Button* ArrangeView::armButton (int track)
 juce::Button* ArrangeView::inputButton (int track)
 {
     return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->inputButton : nullptr;
+}
+
+juce::Button* ArrangeView::instrumentButton (int track)
+{
+    return juce::isPositiveAndBelow (track, (int) headers.size()) ? &headers[(size_t) track]->instButton : nullptr;
 }
 
 juce::Button* ArrangeView::automationButton (int track)
@@ -728,6 +762,9 @@ std::shared_ptr<const ArrangeSnapshot> ArrangeView::snapshotPtr (bool takePeaks)
             v.inputLeft = t->inputLeft;
             v.inputRight = t->inputRight;
             v.isMidi = t->isMidi;
+            v.hasInstrument = (t->instrument != nullptr);
+            v.instrumentBypassed = (t->instrument != nullptr && t->instrument->bypass);
+            v.instrumentName = (t->instrument != nullptr ? t->instrument->plugin : juce::String());
             v.kind = t->kind;
             v.outputTrack = t->outputTrack;
             v.sends = t->sends;
@@ -1053,7 +1090,8 @@ void ArrangeView::syncHeaders (const ArrangeSnapshot& s, bool readMeters)
         for (const auto& lane : t.automation)
             if (lane.targetId == t.activeAutoTarget) { laneEnabled = lane.enabled; break; }
         h.setState (t.name, t.gainDb, t.pan, t.mute, t.solo, t.armed, inputText (t.inputLeft, t.inputRight),
-                    t.showAutomation, targetLabel, laneEnabled, t.kind == TrackKind::Bus);
+                    t.showAutomation, targetLabel, laneEnabled, t.kind == TrackKind::Bus,
+                    t.isMidi, t.hasInstrument, t.instrumentBypassed, t.instrumentName);
         if (! readMeters) continue;
         if (t.armed && showInputLevels && inputLevel)
         {
@@ -1911,7 +1949,8 @@ void ArrangeView::mouseExit (const juce::MouseEvent&)
 
 juce::MouseCursor ArrangeView::getMouseCursor()
 {
-    if (mode == Mode::trimStart || mode == Mode::trimEnd || mode == Mode::fadeIn || mode == Mode::fadeOut)
+    if (mode == Mode::trimStart || mode == Mode::trimEnd || mode == Mode::fadeIn || mode == Mode::fadeOut
+        || mode == Mode::resizeMidiStart || mode == Mode::resizeMidiEnd)
         return juce::MouseCursor::LeftRightResizeCursor;
     if (mode == Mode::marker || mode == Mode::autoPoint)
         return juce::MouseCursor::PointingHandCursor;
@@ -1936,6 +1975,17 @@ juce::MouseCursor ArrangeView::getMouseCursor()
     {
         if (hitAutoPoint (s, track, hoverPos, pps) >= 0)
             return juce::MouseCursor::PointingHandCursor;
+        return juce::MouseCursor::NormalCursor;
+    }
+    const auto midiHit = midiClipAt (hoverPos);
+    if (midiHit.valid())
+    {
+        const auto r = midiClipBounds (midiHit);
+        const bool canEdge = r.getWidth() >= 12;
+        const bool edgeStart = canEdge && (hoverPos.x - r.getX() <= kEdgeGrab);
+        const bool edgeEnd = canEdge && ! edgeStart && (r.getRight() - hoverPos.x <= kEdgeGrab);
+        if (edgeStart || edgeEnd)
+            return juce::MouseCursor::LeftRightResizeCursor;
         return juce::MouseCursor::NormalCursor;
     }
     const auto& clips = s.tracks[(size_t) track].clips;
@@ -2140,6 +2190,33 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
             return;
         }
         const auto& mc = s.tracks[(size_t) midiHit.track].midiClips[(size_t) midiHit.clip];
+        const auto r = midiClipBounds (midiHit);
+        const bool canEdge = r.getWidth() >= 12;
+        const bool edgeStart = canEdge && (p.x - r.getX() <= kEdgeGrab);
+        const bool edgeEnd = canEdge && ! edgeStart && (r.getRight() - p.x <= kEdgeGrab);
+        if (edgeStart)
+        {
+            selectSingleClip (midiRef);
+            repaint();
+            dragMidiClip = midiHit;
+            origMidiClip = mc;
+            origStart = mc.start;
+            origEnd = mc.end();
+            mode = Mode::resizeMidiStart;
+            beginGesture ("Resize MIDI clip");
+            return;
+        }
+        if (edgeEnd)
+        {
+            selectSingleClip (midiRef);
+            repaint();
+            dragMidiClip = midiHit;
+            origStart = mc.start;
+            origEnd = mc.end();
+            mode = Mode::resizeMidiEnd;
+            beginGesture ("Resize MIDI clip");
+            return;
+        }
         if (isSelected (midiHit.track, midiHit.clip, true) && effectiveSelection().size() > 1)
         {
             pendingSingleSelect = midiRef;
@@ -2387,6 +2464,24 @@ void ArrangeView::mouseDrag (const juce::MouseEvent& e)
         {
             const auto newStart = editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + (double) std::llround (deltaSamples)));
             if (! editor.moveMidiClip (dragMidiClip.track, dragMidiClip.clip, newStart, error))
+                report (error);
+            break;
+        }
+
+        case Mode::resizeMidiStart:
+        {
+            const auto targetStart = juce::jlimit ((juce::int64) 0, juce::jmax ((juce::int64) 0, origEnd - 1),
+                                                   editor.snap ((juce::int64) juce::jmax (0.0, (double) origStart + (double) std::llround (deltaSamples))));
+            if (! editor.resizeMidiClipStart (dragMidiClip.track, dragMidiClip.clip, targetStart, error, &origMidiClip))
+                report (error);
+            break;
+        }
+
+        case Mode::resizeMidiEnd:
+        {
+            const auto targetEnd = editor.snap ((juce::int64) juce::jmax (0.0, (double) origEnd + (double) std::llround (deltaSamples)));
+            const auto newLen = juce::jmax ((juce::int64) 1, targetEnd - origStart);
+            if (! editor.resizeMidiClip (dragMidiClip.track, dragMidiClip.clip, newLen, error))
                 report (error);
             break;
         }
