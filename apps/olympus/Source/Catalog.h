@@ -21,7 +21,7 @@ namespace olympus
 inline const juce::StringArray& suiteNames()
 {
     static const juce::StringArray names { "Aegis Ceiling", "Apollo Curve", "Atlas Span", "Castor Pair", "Dionysus Warmth", "Harmonia Pitch", "Hephaestus Forge",
-                                           "Hera Bond", "Hermes Level", "Hestia Space", "Iris Prism", "Nemesis Hush", "Themis Verdict" };
+                                           "Hera Bond", "Hermes Level", "Hestia Space", "Iris Prism", "Nemesis Hush", "Selene Poly", "Themis Verdict" };
     return names;
 }
 
