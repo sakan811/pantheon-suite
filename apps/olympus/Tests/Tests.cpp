@@ -4445,6 +4445,157 @@ void midiAndSnapshotChecks()
                      "processBlock discontinuity resets synth cleanly without stuck notes");
     }
 
+    // 8. collectMidiEvents puts noteOff before noteOn at identical sample offset for back-to-back same-pitch notes
+    {
+        TempoMap map;
+        map.sampleRate = 44100.0;
+        map.points = { { 0.0, 120.0 } }; // 22050 samples per beat
+
+        MidiClip mc;
+        mc.start = 0;
+        mc.length = 88200;
+        // Put the later note first in mc.notes to ensure ordering doesn't rely on note vector order.
+        mc.notes.push_back ({ 1.0, 1.0, 60, 110, 1 });
+        mc.notes.push_back ({ 0.0, 1.0, 60, 100, 1 });
+
+        juce::MidiBuffer buf;
+        Session::collectMidiEvents ({ mc }, map, 22000, 512, buf);
+
+        std::vector<std::pair<bool, bool>> atBoundary; // (isNoteOff, isNoteOn)
+        for (const auto meta : buf)
+        {
+            if (meta.samplePosition == 50)
+            {
+                const auto msg = meta.getMessage();
+                if (msg.getNoteNumber() == 60)
+                    atBoundary.emplace_back (msg.isNoteOff(), msg.isNoteOn());
+            }
+        }
+        test::check (atBoundary.size() == 2 && atBoundary[0].first && ! atBoundary[0].second
+                     && ! atBoundary[1].first && atBoundary[1].second,
+                     "collectMidiEvents emits noteOff before noteOn at identical sample offset");
+
+        BasicSynth synth;
+        synth.prepare (44100.0);
+        juce::MidiBuffer initBuf;
+        initBuf.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+        juce::AudioBuffer<float> tmp (2, 512);
+        tmp.clear();
+        synth.process (tmp, initBuf);
+        tmp.clear();
+        synth.process (tmp, buf);
+        test::check (synth.isNoteActive (1, 60),
+                     "BasicSynth remains active when noteOff precedes noteOn at same sample offset");
+    }
+
+    // 9. Editor batch & DAW-logic MIDI note methods + undo/redo
+    {
+        Session s;
+        Editor ed (s);
+        const int t = s.addMidiTrack ("Lead");
+        const auto ref = ed.addMidiClip (t, 0, 176400, "Batch", err);
+        test::check (ref.valid(), "addMidiClip for batch MIDI note tests");
+
+        const int n0 = ed.addMidiNote (t, 0, 0.10, 0.50, 60, 100, err);
+        const int n1 = ed.addMidiNote (t, 0, 0.90, 0.50, 64, 90, err);
+        const int n2 = ed.addMidiNote (t, 0, 2.20, 0.50, 67, 80, err);
+        test::check (n0 == 0 && n1 == 1 && n2 == 2, "initial notes added");
+
+        // moveMidiNotes (with duplicates and out-of-range indices ignored, and no-op check)
+        const int prevUndoDepth = [&] { int d = 0; while (ed.undo()) ++d; for (int i = 0; i < d; ++i) ed.redo(); return d; }();
+        test::check (ed.moveMidiNotes (t, 0, { 0, 0, 99, 1 }, 0.0, 0, err), "moveMidiNotes no-op succeeds");
+        const int afterNoOpDepth = [&] { int d = 0; while (ed.undo()) ++d; for (int i = 0; i < d; ++i) ed.redo(); return d; }();
+        test::check (afterNoOpDepth == prevUndoDepth, "moveMidiNotes no-op does not record undo step");
+
+        test::check (ed.moveMidiNotes (t, 0, { 0, 0, -1, 1 }, 0.5, 2, err), "moveMidiNotes shifts selected unique notes");
+        const auto& notes = s.tracks[0]->midiClips[0].notes;
+        test::check (close (notes[0].startBeat, 0.60) && notes[0].pitch == 62
+                     && close (notes[1].startBeat, 1.40) && notes[1].pitch == 66
+                     && close (notes[2].startBeat, 2.20) && notes[2].pitch == 67,
+                     "moveMidiNotes updates only selected notes with deduplication");
+        test::check (ed.undo() && close (notes[0].startBeat, 0.10) && notes[0].pitch == 60, "undo restores moveMidiNotes");
+        test::check (ed.redo() && close (notes[0].startBeat, 0.60) && notes[0].pitch == 62, "redo re-applies moveMidiNotes");
+        test::check (ed.undo(), "undo back to initial positions");
+
+        // resizeMidiNotes (clamped [0.05, 1e6])
+        test::check (ed.resizeMidiNotes (t, 0, { 0, 2 }, -0.60, err), "resizeMidiNotes shrinks and clamps to 0.05");
+        test::check (close (notes[0].durationBeats, 0.05) && close (notes[1].durationBeats, 0.50)
+                     && close (notes[2].durationBeats, 0.05),
+                     "resizeMidiNotes clamps minimum duration to 0.05");
+        test::check (ed.undo() && close (notes[0].durationBeats, 0.50), "undo restores resizeMidiNotes");
+
+        // quantizeMidiNotes: partial selection + 0.5 strength (n0 at 0.10 -> 0.05, n1 at 0.90 -> 0.95, n2 untouched at 2.20)
+        test::check (ed.quantizeMidiNotes (t, 0, { 0, 1 }, Grid::Quarter, 0.5, err),
+                     "quantizeMidiNotes partial selection with 0.5 strength");
+        test::check (close (notes[0].startBeat, 0.05) && close (notes[1].startBeat, 0.95)
+                     && close (notes[2].startBeat, 2.20),
+                     "quantizeMidiNotes moves selected notes halfway to quarter grid and leaves unselected untouched");
+        test::check (ed.undo() && close (notes[0].startBeat, 0.10) && close (notes[1].startBeat, 0.90),
+                     "undo restores quantizeMidiNotes");
+
+        // duplicateMidiNotes
+        const auto dupIdx = ed.duplicateMidiNotes (t, 0, { 0, 2, 0 }, 1.0, err);
+        test::check (dupIdx.size() == 2 && dupIdx[0] == 3 && dupIdx[1] == 4 && notes.size() == 5,
+                     "duplicateMidiNotes deduplicates, shifts by offsetBeats, and returns new indices");
+        test::check (close (notes[3].startBeat, 1.10) && notes[3].pitch == 60
+                     && close (notes[4].startBeat, 3.20) && notes[4].pitch == 67,
+                     "duplicated notes have shifted startBeat and matching properties");
+        test::check (ed.undo() && notes.size() == 3, "undo removes duplicated notes");
+
+        // transposeMidiNotes (all if empty, clamped [0, 127])
+        test::check (ed.transposeMidiNotes (t, 0, {}, 70, err), "transposeMidiNotes clamps to 127");
+        test::check (notes[0].pitch == 127 && notes[1].pitch == 127 && notes[2].pitch == 127,
+                     "transposeMidiNotes clamps pitches at 127");
+        test::check (ed.undo() && notes[0].pitch == 60 && notes[1].pitch == 64 && notes[2].pitch == 67,
+                     "undo restores transposeMidiNotes");
+
+        // legatoMidiNotes: overlap trim on same pitch + legato extend to next startBeat
+        Session ls;
+        Editor led (ls);
+        led.addMidiTrack ("Legato");
+        led.addMidiClip (0, 0, 176400, "Leg", err);
+        led.addMidiNote (0, 0, 0.0, 2.0, 60, 100, err);  // overlaps next C4 (note 1) at 1.0 -> trims to 1.0
+        led.addMidiNote (0, 0, 1.0, 0.25, 60, 100, err); // extends to E4 (note 2) at 2.5 -> duration 1.5
+        led.addMidiNote (0, 0, 2.5, 0.50, 64, 100, err); // last note -> remains 0.50
+        test::check (led.legatoMidiNotes (0, 0, {}, err), "legatoMidiNotes succeeds");
+        const auto& lnotes = ls.tracks[0]->midiClips[0].notes;
+        test::check (close (lnotes[0].durationBeats, 1.0) && close (lnotes[1].durationBeats, 1.5)
+                     && close (lnotes[2].durationBeats, 0.5),
+                     "legatoMidiNotes trims overlapping same-pitch note and extends note to next startBeat");
+        test::check (led.undo() && close (lnotes[0].durationBeats, 2.0) && close (lnotes[1].durationBeats, 0.25),
+                     "undo restores legatoMidiNotes");
+        test::check (led.redo() && close (lnotes[0].durationBeats, 1.0) && close (lnotes[1].durationBeats, 1.5),
+                     "redo re-applies legatoMidiNotes");
+
+        // humanizeMidiNotes: deterministic, bounded, and undoable
+        Session hs1, hs2;
+        Editor hed1 (hs1), hed2 (hs2);
+        auto setupHumanize = [&] (Editor& he)
+        {
+            he.addMidiTrack ("Hum");
+            he.addMidiClip (0, 0, 176400, "H", err);
+            he.addMidiNote (0, 0, 1.0, 0.5, 60, 100, err);
+            he.addMidiNote (0, 0, 2.0, 0.5, 64, 80, err);
+        };
+        setupHumanize (hed1);
+        setupHumanize (hed2);
+        test::check (hed1.humanizeMidiNotes (0, 0, {}, 0.05, 10, err)
+                     && hed2.humanizeMidiNotes (0, 0, {}, 0.05, 10, err),
+                     "humanizeMidiNotes succeeds");
+        const auto& hn1 = hs1.tracks[0]->midiClips[0].notes;
+        const auto& hn2 = hs2.tracks[0]->midiClips[0].notes;
+        test::check (close (hn1[0].startBeat, hn2[0].startBeat) && hn1[0].velocity == hn2[0].velocity
+                     && close (hn1[1].startBeat, hn2[1].startBeat) && hn1[1].velocity == hn2[1].velocity,
+                     "humanizeMidiNotes is deterministic");
+        test::check (std::abs (hn1[0].startBeat - 1.0) <= 0.05 + 1e-9 && std::abs (hn1[0].velocity - 100) <= 10
+                     && std::abs (hn1[1].startBeat - 2.0) <= 0.05 + 1e-9 && std::abs (hn1[1].velocity - 80) <= 10,
+                     "humanizeMidiNotes stays within timing and velocity bounds");
+        test::check (hed1.undo() && close (hn1[0].startBeat, 1.0) && hn1[0].velocity == 100,
+                     "undo restores humanizeMidiNotes");
+        test::check (hed1.redo() && close (hn1[0].startBeat, hn2[0].startBeat) && hn1[0].velocity == hn2[0].velocity,
+                     "redo re-applies humanizeMidiNotes");
+    }
+
     dir.deleteRecursively();
 }
 
