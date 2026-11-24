@@ -4594,6 +4594,77 @@ void midiAndSnapshotChecks()
                      "undo restores humanizeMidiNotes");
         test::check (hed1.redo() && close (hn1[0].startBeat, hn2[0].startBeat) && hn1[0].velocity == hn2[0].velocity,
                      "redo re-applies humanizeMidiNotes");
+
+        // 10. Swing quantize, removeOverlapsMidiNotes, invertMidiNotes, reverseMidiNotes
+        {
+            Session ds;
+            Editor ded (ds);
+            ded.addMidiTrack ("DAW");
+            ded.addMidiClip (0, 0, 192000, "D", err);
+            ded.addMidiNote (0, 0, 0.05, 1.5, 60, 100, err); // 0: C4, overlaps note 1
+            ded.addMidiNote (0, 0, 1.02, 0.5, 60, 100, err); // 1: C4, off-beat (gridIdx 1)
+            ded.addMidiNote (0, 0, 2.00, 1.0, 67, 100, err); // 2: G4
+
+            // Swing quantize (Grid::Quarter, strength 1.0, swing 0.5): index 0 -> 0.0, index 1 -> 1.25, index 2 -> 2.0
+            test::check (ded.quantizeMidiNotes (0, 0, { 0, 1, 2 }, Grid::Quarter, 1.0, 0.5, err),
+                         "quantizeMidiNotes with swing succeeds");
+            const auto& dn = ds.tracks[0]->midiClips[0].notes;
+            test::check (close (dn[0].startBeat, 0.0) && close (dn[1].startBeat, 1.25) && close (dn[2].startBeat, 2.0),
+                         "swing quantize shifts odd subdivisions by swing * 0.5 * step");
+            test::check (ded.undo() && close (dn[1].startBeat, 1.02), "undo restores swing quantize");
+
+            // removeOverlapsMidiNotes: trims note 0 (0.05..1.55) to end at note 1 (1.02) without extending note 1
+            test::check (ded.removeOverlapsMidiNotes (0, 0, {}, err), "removeOverlapsMidiNotes succeeds");
+            test::check (close (dn[0].durationBeats, 0.97) && close (dn[1].durationBeats, 0.5),
+                         "removeOverlapsMidiNotes trims same-pitch overlap without extending short notes");
+            test::check (ded.undo() && close (dn[0].durationBeats, 1.5), "undo restores removeOverlapsMidiNotes");
+
+            // invertMidiNotes: min=60, max=67 -> 60->67, 60->67, 67->60
+            test::check (ded.invertMidiNotes (0, 0, {}, err), "invertMidiNotes succeeds");
+            test::check (dn[0].pitch == 67 && dn[1].pitch == 67 && dn[2].pitch == 60,
+                         "invertMidiNotes mirrors pitches around selection midpoint");
+            test::check (ded.undo() && dn[0].pitch == 60 && dn[2].pitch == 67, "undo restores invertMidiNotes");
+
+            // reverseMidiNotes: span [0.05, 3.00] -> note 2 (2.0..3.0) moves to 0.05..1.05
+            test::check (ded.reverseMidiNotes (0, 0, {}, err), "reverseMidiNotes succeeds");
+            test::check (close (dn[2].startBeat, 0.05) && close (dn[0].startBeat, 1.50),
+                         "reverseMidiNotes reverses note positions within selection span");
+            test::check (ded.undo() && close (dn[2].startBeat, 2.00), "undo restores reverseMidiNotes");
+        }
+
+        // 11. ActiveNoteMask & hanging-note prevention on mute and seek
+        {
+            ActiveNoteMask mask;
+            test::check (! mask.any(), "ActiveNoteMask starts empty");
+            mask.set (1, 60);
+            mask.set (2, 64);
+            test::check (mask.any() && mask.isActive (1, 60) && mask.isActive (2, 64) && ! mask.isActive (1, 61),
+                         "ActiveNoteMask tracks channel and pitch");
+            juce::MidiBuffer offBuf;
+            mask.appendNoteOffs (offBuf, 0);
+            int offCount = 0;
+            for (const auto meta : offBuf)
+                if (meta.getMessage().isNoteOff())
+                    ++offCount;
+            test::check (offCount == 2, "ActiveNoteMask::appendNoteOffs emits NoteOff for every active note");
+            mask.clear (1, 60);
+            test::check (! mask.isActive (1, 60) && mask.isActive (2, 64), "ActiveNoteMask::clear clears single note");
+
+            Session ps;
+            Editor ped (ps);
+            ped.addMidiTrack ("HangGuard");
+            ped.addMidiClip (0, 0, 96000, "Long", err);
+            ped.addMidiNote (0, 0, 0.0, 4.0, 60, 100, err);
+            ps.prepare (false);
+            juce::AudioBuffer<float> buf (2, 512);
+            ps.processBlock (buf, 0);
+            test::check (ps.tracks[0]->activeNotes.isActive (1, 60),
+                         "processBlock records active note in track ActiveNoteMask");
+            ped.setTrackMute (0, true, err);
+            ps.processBlock (buf, 512);
+            test::check (! ps.tracks[0]->activeNotes.any(),
+                         "muting track clears activeNotes and prevents hanging notes");
+        }
     }
 
     dir.deleteRecursively();

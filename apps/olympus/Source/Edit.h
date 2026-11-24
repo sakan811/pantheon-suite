@@ -814,13 +814,15 @@ public:
         return true;
     }
 
-    bool quantizeMidiNotes (int track, int clip, const std::vector<int>& notes, Grid grid, double strength, juce::String& error)
+    bool quantizeMidiNotes (int track, int clip, const std::vector<int>& notes, Grid grid, double strength, double swing, juce::String& error)
     {
         if (! std::isfinite (strength)) { error = "Quantize strength must be a finite number."; return false; }
+        if (! std::isfinite (swing)) { error = "Quantize swing must be a finite number."; return false; }
         const juce::ScopedLock sl (session.lock);
         MidiClip* mc = midiClipAt (track, clip, error);
         if (mc == nullptr) return false;
         const double s = juce::jlimit (0.0, 1.0, strength);
+        const double sw = juce::jlimit (0.0, 1.0, swing);
         const double step = session.tempo.gridBeats (grid);
         if (! (step > 0.0) || s <= 0.0) return true;
         const auto targets = resolveMidiNoteTargets (*mc, notes, true);
@@ -828,10 +830,13 @@ public:
         const double clipStartBeats = session.tempo.sampleRate > 0.0
                                         ? session.tempo.samplesToBeats ((double) mc->start)
                                         : 0.0;
-        auto snapBeat = [step, clipStartBeats, s] (double localBeat)
+        auto snapBeat = [step, clipStartBeats, s, sw] (double localBeat)
         {
             const double timelineBeat = clipStartBeats + localBeat;
-            const double snapped = std::floor (timelineBeat / step + 0.5 + TempoMap::kGridEps) * step;
+            const double gridIdx = std::floor (timelineBeat / step + 0.5 + TempoMap::kGridEps);
+            double snapped = gridIdx * step;
+            if (sw > 0.0 && (std::llround (std::abs (gridIdx)) % 2) == 1)
+                snapped += sw * 0.5 * step;
             const double snappedLocal = juce::jlimit (0.0, 1e7, snapped - clipStartBeats);
             return juce::jlimit (0.0, 1e7, localBeat + (snappedLocal - localBeat) * s);
         };
@@ -847,6 +852,11 @@ public:
             mc->notes[(size_t) idx].startBeat = snapBeat (mc->notes[(size_t) idx].startBeat);
         record (before, notes.empty() ? "Quantize MIDI clip" : "Quantize MIDI notes");
         return true;
+    }
+
+    bool quantizeMidiNotes (int track, int clip, const std::vector<int>& notes, Grid grid, double strength, juce::String& error)
+    {
+        return quantizeMidiNotes (track, clip, notes, grid, strength, 0.0, error);
     }
 
     bool quantizeMidiClip (int track, int clip, Grid grid, juce::String& error)
@@ -934,7 +944,7 @@ public:
                 if (b.pitch == a.pitch)
                 {
                     if (a.startBeat + durations[i] > b.startBeat)
-                        durations[i] = juce::jmax (0.05, b.startBeat - a.startBeat);
+                        durations[i] = juce::jmin (durations[i], juce::jmax (1e-4, b.startBeat - a.startBeat));
                     break;
                 }
             }
@@ -984,6 +994,129 @@ public:
         for (size_t k = 0; k < m; ++k)
             mc->notes[(size_t) targets[k]].durationBeats = durations[k];
         record (before, "Legato MIDI notes");
+        return true;
+    }
+
+    bool removeOverlapsMidiNotes (int track, int clip, const std::vector<int>& notes, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        auto targets = resolveMidiNoteTargets (*mc, notes, true);
+        if (targets.size() < 2) return true;
+
+        std::sort (targets.begin(), targets.end(), [mc] (int a, int b)
+        {
+            const auto& na = mc->notes[(size_t) a];
+            const auto& nb = mc->notes[(size_t) b];
+            if (na.startBeat < nb.startBeat) return true;
+            if (nb.startBeat < na.startBeat) return false;
+            if (na.pitch != nb.pitch) return na.pitch < nb.pitch;
+            return a < b;
+        });
+
+        const size_t m = targets.size();
+        std::vector<double> durations (m);
+        for (size_t k = 0; k < m; ++k)
+            durations[k] = mc->notes[(size_t) targets[k]].durationBeats;
+
+        for (size_t i = 0; i < m; ++i)
+        {
+            const auto& a = mc->notes[(size_t) targets[i]];
+            for (size_t j = i + 1; j < m; ++j)
+            {
+                const auto& b = mc->notes[(size_t) targets[j]];
+                if (b.pitch == a.pitch && b.startBeat > a.startBeat + 1e-9)
+                {
+                    if (a.startBeat + durations[i] > b.startBeat)
+                        durations[i] = juce::jmin (durations[i], juce::jmax (1e-4, b.startBeat - a.startBeat));
+                    break;
+                }
+            }
+        }
+
+        bool changed = false;
+        for (size_t k = 0; k < m; ++k)
+        {
+            if (std::abs (durations[k] - mc->notes[(size_t) targets[k]].durationBeats) >= 1e-9)
+            {
+                changed = true;
+                break;
+            }
+        }
+        if (! changed) return true;
+
+        auto before = captureIfNeeded();
+        for (size_t k = 0; k < m; ++k)
+            mc->notes[(size_t) targets[k]].durationBeats = durations[k];
+        record (before, "Remove MIDI note overlaps");
+        return true;
+    }
+
+    bool invertMidiNotes (int track, int clip, const std::vector<int>& notes, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        const auto targets = resolveMidiNoteTargets (*mc, notes, true);
+        if (targets.size() < 2) return true;
+
+        int minPitch = 127;
+        int maxPitch = 0;
+        for (int idx : targets)
+        {
+            minPitch = juce::jmin (minPitch, mc->notes[(size_t) idx].pitch);
+            maxPitch = juce::jmax (maxPitch, mc->notes[(size_t) idx].pitch);
+        }
+
+        bool changed = false;
+        for (int idx : targets)
+        {
+            const int inv = juce::jlimit (0, 127, minPitch + maxPitch - mc->notes[(size_t) idx].pitch);
+            if (inv != mc->notes[(size_t) idx].pitch) { changed = true; break; }
+        }
+        if (! changed) return true;
+
+        auto before = captureIfNeeded();
+        for (int idx : targets)
+            mc->notes[(size_t) idx].pitch = juce::jlimit (0, 127, minPitch + maxPitch - mc->notes[(size_t) idx].pitch);
+        record (before, "Invert MIDI notes");
+        return true;
+    }
+
+    bool reverseMidiNotes (int track, int clip, const std::vector<int>& notes, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        const auto targets = resolveMidiNoteTargets (*mc, notes, true);
+        if (targets.size() < 2) return true;
+
+        double minStart = std::numeric_limits<double>::max();
+        double maxEnd = 0.0;
+        for (int idx : targets)
+        {
+            const auto& n = mc->notes[(size_t) idx];
+            minStart = juce::jmin (minStart, n.startBeat);
+            maxEnd = juce::jmax (maxEnd, n.startBeat + n.durationBeats);
+        }
+
+        bool changed = false;
+        for (int idx : targets)
+        {
+            const auto& n = mc->notes[(size_t) idx];
+            const double rev = juce::jlimit (0.0, 1e7, minStart + maxEnd - (n.startBeat + n.durationBeats));
+            if (std::abs (rev - n.startBeat) > 1e-9) { changed = true; break; }
+        }
+        if (! changed) return true;
+
+        auto before = captureIfNeeded();
+        for (int idx : targets)
+        {
+            auto& n = mc->notes[(size_t) idx];
+            n.startBeat = juce::jlimit (0.0, 1e7, minStart + maxEnd - (n.startBeat + n.durationBeats));
+        }
+        record (before, "Reverse MIDI notes");
         return true;
     }
 
