@@ -17,6 +17,7 @@ under the AGPL-3.0-or-later. It holds source only: no binaries or downloads.
 | [Hestia Space](plugins/hestia/README.md) | A stem spacer: one instance on each stem, a role and a mix for each; the stems that share a mix give up the bands where a more important one is playing, found through each other with no routing, and each can be put back from the front (depth). A sidechain input brings in any track. |
 | [Iris Prism](plugins/iris/README.md) | A dynamic equaliser: bands on left, right, mid or side, a clean or saturated mode, delta and gain match, solo for bands, curves and frequency regions, and a reference to match another track's shape. |
 | [Nemesis Hush](plugins/nemesis/README.md) | A de-esser: a band detector, split-band or wideband, absolute or relative detection, and a listen switch to find the s. |
+| [Selene Poly](plugins/selene/README.md) | A 16-voice polyphonic analog-style synthesizer: dual oscillators with sub and FM, a ZDF resonant filter, dual ADSR, LFO, BBD stereo chorus and tape echo. |
 | [Themis Verdict](plugins/themis/README.md) | A mastering check suite: tonal balance, translation, phase, clipping, loudness and a plan of what to do next. |
 
 There are also two standalone apps:
