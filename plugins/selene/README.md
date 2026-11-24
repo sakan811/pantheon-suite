@@ -10,7 +10,7 @@ A 16-voice polyphonic analog-style synthesizer voiced for 80s City Pop: BBD chor
 
 ## Theme
 
-**Name origin:** *Selene* is the Greek goddess of the moon — fitting for late-night City Pop chords and shimmering twilight pads. (CMake targets, namespaces, and plugin codes use the short name `Selene`.)
+**Name origin:** *Selene* is the goddess of the moon, fitting for late-night City Pop chords and twilight pads; *Poly* is its 16-voice polyphonic analog-style architecture. (CMake targets, namespaces, and plugin codes use the short name `Selene`.)
 
 ### Core philosophy
 
@@ -18,8 +18,6 @@ A 16-voice polyphonic analog-style synthesizer voiced for 80s City Pop: BBD chor
 - **Classic dual-oscillator warmth.** PolyBLEP/PolyBLAMP oscillators, `-1 oct` sub, ZDF resonant filter, dual ADSRs, global LFO, BBD stereo chorus, and stereo tape echo.
 - **Built-in instrument only, never an audio effect.** Stereo synth (`0 in / 2 out`) with no external audio input or sidechain; not wavetable, granular, or sample-based.
 - **Honest about digital headroom and limits.** Unoversampled FM/filter drive can mildly alias near `98%` resonance, and stacked chords need `Master Gain` headroom.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -29,14 +27,14 @@ A 16-voice polyphonic analog-style synthesizer voiced for 80s City Pop: BBD chor
 
 ### UI colour legend
 
+See [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes (`SeleneUi.h` defines `kFilterCurve`, `kScopeTrace`, and `kChorusGlow`).
+
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
 | 🩵 | `#37e3c5` | `kFilterCurve` (`FILTER RESPONSE` trace & fill), active white audition keys, lit switches | Static ZDF filter frequency response (`20 Hz – 20 kHz`, `−36` to `+18 dB`) and held white keys |
 | 🟡 | `#ffb347` | `kScopeTrace` (`OSCILLOSCOPE` trace & fill), dashed filter env peak curve, LCD readouts, active black keys | Triggered output waveform, maximum envelope sweep (`ENV AMT`), active voice/preset readouts, and held black keys |
 | 🟣 | `#b388ff` | `kChorusGlow` (`SeleneUi.h`) | Twilight City Pop accent colour defined for chorus/shimmer styling |
 | 🟠 | `#f2a33a` | Bottom note strip warnings | Alerts for output peak `≥ 0.99` / `Master Gain ≥ +6 dB`, `Resonance ≥ 90%`, or `Cutoff < 120 Hz` with low env/keytrack |
-| ⚪ | `#eae3d0` / `#9f9680` | Module captions, knob scales, grid ticks, info notes | Hardware faceplate silkscreen (`OSC 1/2`, `FILTER`, `AMP/FILTER ENV`, `LFO`, `ANALOG`, `CHORUS & ECHO`), plus Mono/Unison/Chorus `I+II` info notes |
-| ⬛ | `#090d0d` / `#1c2a29` | Recessed glass & graticule lines | Filter/scope display background and `0 dB` / octave grid divisions |
 
 ## Try it
 
@@ -107,7 +105,7 @@ MIDI (Note, Vel, PB, CC1/CC64, C3–B4 Audition)
 
 ## Build & develop
 
-Requires CMake 3.22+, a C++20 compiler, and `ffmpeg` (for `showcase.sh`); JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake). See [CLAUDE.md](CLAUDE.md) for invariants.
+See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```bash
 scripts/build.sh selene             # builds & runs SeleneTests + SeleneUiCheck
@@ -127,4 +125,4 @@ cmake --build build --target SeleneSnapshot && ./build/SeleneSnapshot_artefacts/
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).

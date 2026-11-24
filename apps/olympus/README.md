@@ -10,16 +10,14 @@ A basic DAW for the Pantheon plugins with audio and MIDI tracks, VST3/AU hosting
 
 ## Theme
 
-**Name origin:** *Olympus* is the mountain where the Greek gods lived together; here it is the one place where the suite's plugins (Hermes, Hestia, Aegis and the others) sit side by side on a song. (CMake targets and namespaces use the short name `Olympus`. It is an app, not a plugin: it lives in `apps/`.)
+**Name origin:** *Olympus* is the mountain where the Greek gods live and act together; *Basic DAW* is an intentionally focused host — tracks, MIDI, automation, recording, stem render, and an MCP server — rather than a full-featured studio DAW. (CMake targets and namespaces use the short name `Olympus`. It is an app, not a plugin: it lives in `apps/`.)
 
 ### Core philosophy
 
 - **Place now, edit later.** The point is to get the chains onto the stems quickly, by hand or by an agent, and to keep every setting in a project file, so nothing is final. Open any plugin from its chain, change it, save.
 - **Any plugin it finds.** It hosts every VST3 (and, on macOS, Audio Unit) plugin the folders hold, the suite's own and third-party ones alike, and nothing else. Hestia's instances (which listen to each other) still work across the stems. The setting *scanSuiteOnly* in `settings.xml` narrows this to the suite's own plugins.
-- **A basic DAW, not a full one.** There is no time-stretching: audio plays at its own speed, and when the tempo changes the grid moves, not the audio. It supports audio tracks, basic MIDI tracks (built-in 16-voice synth or MIDI-accepting plugins, Piano Roll, Velocity Lane) and track/plugin automation curves, and records from an audio interface onto tracks; software input monitoring, punch-in and comping stay in your own DAW.
+- **A basic DAW, not a full one.** No time-stretching (tempo changes move the grid, not audio), software input monitoring, punch-in, or comping — built around audio tracks, basic MIDI tracks (`BasicSynth` or MIDI plugins), automation curves, and dry interface recording.
 - **Nothing is hidden from the agent.** The server reads and sets every setting of a plugin by the names the plugin gives them, loads its presets, and says why anything it cannot do failed.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -30,23 +28,11 @@ A basic DAW for the Pantheon plugins with audio and MIDI tracks, VST3/AU hosting
 
 ### UI colour legend
 
-| Swatch | Hex | UI Element | Meaning |
-|---|---|---|---|
-| 🩵 | `#37E3C5` | Active display traces, accent indicators | Corrected/active visual data and selected state (`colours::accent`) |
-| 🟡 | `#FFB347` | Playhead line, bars/time & dB LCD read-outs, lit switches | Playhead position, numeric readouts, and active transport/track switches (`colours::amber`) |
-| 🟢 | `#5FD68C` | Nominal meter bars, `CORRECTION ON` lamp | Safe signal levels and active monitor headphone chain (`colours::good`) |
-| 🟠 | `#F2A33A` | Hot meter levels, bottom warning strip | Levels approaching `0 dBFS` and operational notes (`colours::warn`) |
-| 🔴 | `#EF4A3D` | `CLIP` lamp, `REC` lamp, active take strip, missing plugins | Clipping at `0 dBFS`, recording in progress, or unavailable plugin (`colours::bad`) |
-| ⚪ | `#EAE3D0` | Faceplate labels, track/control names, numeric text | Engraved silkscreen hardware labels (`colours::text`) |
+Uses the shared [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) (`good` also marks the `CORRECTION ON` lamp; `bad` also flags the active take strip and missing plugins).
 
 ## Try it
 
-### Quick launch
-
-```bash
-./scripts/open.sh olympus
-./scripts/open.sh olympus path/to/song.olympus
-```
+See [Quick launch](../../README.md#quick-launch) to build and run Olympus (optionally passing a `.olympus` project file).
 
 | Workflow | Action / Setting | What you see / hear / measure |
 |---|---|---|
@@ -108,7 +94,7 @@ Audio Inputs ──► [Recorder: 32-bit float WAV] ──(stop: -latency clip)�
 
 ## Build & develop
 
-Requires CMake 3.22+, a C++20 compiler, and `ffmpeg` (for `showcase.sh`). JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake). See [CLAUDE.md](CLAUDE.md).
+See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, [Quick launch](../../README.md#quick-launch) to run the app, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```bash
 scripts/build.sh olympus            # OlympusTests and OlympusUiCheck
@@ -116,7 +102,6 @@ scripts/build.sh olympus snap       # docs/screenshot.png and docs/screenshot-re
 scripts/showcase.sh olympus         # regenerate docs/showcase.gif
 scripts/build.sh olympus app        # standalone app
 scripts/build.sh olympus OlympusMcp # 38-tool MCP stdio server
-scripts/open.sh olympus             # build (if needed) and launch
 OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests
 ```
 
@@ -131,4 +116,4 @@ claude mcp add olympus -- /path/to/pantheon-suite/apps/olympus/build/OlympusMcp_
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).

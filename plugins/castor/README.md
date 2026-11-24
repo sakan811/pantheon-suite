@@ -10,14 +10,12 @@ Six-band stereo imager for mixing and mastering with per-band side width, Mid/Si
 
 ## Theme
 
-**Name origin:** *Castor* is one of the Dioscuri, the twins: two that are one. The plugin works on what is the same in both channels and what is different. (CMake targets, namespaces and plugin codes use the short name "Castor".)
+**Name origin:** *Castor* is one of the Dioscuri twins, inseparable in myth; *Pair* is the stereo left/right and mid/side channel pair the imager balances, widens, or folds to mono. (CMake targets, namespaces, and plugin codes use the short name "Castor".)
 
 **Core philosophy:**
 - **Separate what is shared from what differs.** Shapes Side width (`0–200%`) across the six `pdsp::bands`, trims global Mid/Side, and centres bass with **Mono Below** while checking phase on a goniometer and correlation meter.
 - **Bit-exact at 100%, difference-added elsewhere.** When all widths sit at `100%`, the Linkwitz-Riley splitter is bypassed with zero latency; off `100%`, phase turns symmetrically around band edges with a `10 ms` crossfade.
 - **Moves existing width, never invents or limits it.** Cannot create stereo from mono, adds zero delay, and does not clip peaks raised by widening; check **Listen = Mono** and correlation before bouncing.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -25,7 +23,7 @@ Six-band stereo imager for mixing and mastering with per-band side width, Mid/Si
 |---|---|---|
 | **Main Editor** | ![Castor Pair](docs/screenshot.png) | Sub 0% to High 180%, Mono Below 120 Hz, width bars, goniometer cloud, correlation 0.88. |
 
-**UI colour legend** — exact hex values from [`Hardware.h`](../../shared/ui/include/pantheon/ui/Hardware.h) (`CastorUi.h` defines the `Castor Pair` nameplate):
+**UI colour legend** — see [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes (`CastorUi.h` defines the `Castor Pair` nameplate):
 
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
@@ -33,8 +31,6 @@ Six-band stereo imager for mixing and mastering with per-band side width, Mid/Si
 | 🟡 | `#FFB347` | `100%` unity line on width display, correlation meter bar (safe range), lit `UNDO` / `LISTEN` buttons | Recorded side width reference (`100%`), positive/safe correlation (`-0.1` to `+1.0`), and active header controls |
 | 🔴 | `#EF4A3D` | Correlation bar & `MIN` hold when `< -0.1` | Out-of-phase audio (`correlation < -0.1`) that thins out or cancels when summed to mono |
 | 🟠 | `#F2A33A` | Warning notes in bottom advice strip | `LISTEN` not set to `Stereo`, correlation `< -0.1`, bass band `> 150%` with `MONO BELOW` off, or `SIDE > +6 dB` |
-| ⚪ | `#EAE3D0` | Silkscreen labels & primary text | Band titles, section headers, and bright read-outs |
-| 🔘 | `#9F9680` | Secondary labels, `0%` / grid readouts, info notes | Inactive width markers, `MIN` readout when safe, and phase/balance info notes |
 
 ## Try it
 
@@ -107,17 +103,17 @@ input ─┬─► [widths != 100%] ─► 6-Band LR Splitter (pdsp::BandSplitte
 - **Crossover phase shift off 100%:** Any width off `100%` introduces symmetric all-pass phase rotation around band edges (image stays centred, edge transients smear slightly).
 - **Fixed bands:** Six `pdsp::bands` edges (`60`, `250`, `500`, `2k`, `6k Hz`) cannot move (unlike [Atlas Span](../atlas/README.md)).
 - **Saved Listen state & no limiter:** **Listen** persists in sessions (reset to **Stereo** before bounce); Castor has `0` delay and does not clip/limit widened peaks.
-- **Platform verification:** Builds on macOS (VST3 + AU, manually verified 2026-11-13) and passes `auval -v`; not in macOS CI yet and has no `HostCheck`.
+- **Platform verification:** See [CI & platform status](../../CLAUDE.md#not-yet-in-line).
 
 ## Build & develop
 
-Requires CMake 3.22+ and a C++20 compiler (JUCE fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```bash
-# Fast build & check from repository root (Ninja + ccache if installed)
+# Fast build & check from repository root
 ./scripts/build.sh castor           # build & run CastorTests + CastorUiCheck
 ./scripts/build.sh castor all       # tests, ui, snap, vst3, au, app
-./scripts/showcase.sh castor        # regenerate docs/showcase.gif (requires ffmpeg)
+./scripts/showcase.sh castor        # regenerate docs/showcase.gif
 ```
 
 Manual CMake from `plugins/castor/` (add `-DCASTOR_INSTALL_AFTER_BUILD=ON` on macOS to install):
@@ -130,8 +126,6 @@ cmake --build build --target CastorUiCheck && ./build/CastorUiCheck_artefacts/Re
 cmake --build build --target CastorSnapshot && ./build/CastorSnapshot_artefacts/Release/CastorSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` and `docs/showcase.gif` are generated by `CastorSnapshot` / `scripts/showcase.sh` (never edited by hand). See [CLAUDE.md](CLAUDE.md) for invariants.
-
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).

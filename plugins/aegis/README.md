@@ -10,14 +10,12 @@ True-peak look-ahead limiter for mastering: raises loudness and holds every samp
 
 ## Theme
 
-**Name origin:** The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. (CMake targets, namespaces and plugin codes use the short name "Aegis".)
+**Name origin:** *Aegis* is the shield of Zeus and Athena that no blow can get through; *Ceiling* is the hard true-peak `dBTP` limit that no sample or inter-sample peak can cross. (CMake targets, namespaces, and plugin codes use the short name "Aegis".)
 
 **Core philosophy:**
 - **True-peak ceiling first, transparent stereo always.** Reads 7 points between every two samples (8x, 64-tap windowed sinc) with look-ahead and one stereo-linked gain so peaks never sneak through and the image never shifts.
 - **Bit-exact when idle, guarded against bad input.** Audio below the ceiling passes delayed bit for bit, NaN and infinity become silence, and a final sample clamp backs up the gain math.
 - **Limiter, not compressor or loudness meter.** Reduction of `6 dB` or more sounds squashed and **Release** under `40 ms` distorts bass; compress upstream and meter BS.1770 loudness in [Themis](../themis/README.md) after it.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -25,7 +23,7 @@ True-peak look-ahead limiter for mastering: raises loudness and holds every samp
 |---|---|---|
 | **Main Editor** | ![Aegis Ceiling](docs/screenshot.png) | Gain `+8 dB`, `-1.0 dBTP` ceiling: amber reduction hits `-9.8 dB` MAX; strip warns squashed. |
 
-**UI colour legend** — exact hex values from [`Hardware.h`](../../shared/ui/include/pantheon/ui/Hardware.h) (`AegisUi.h` sets `-18 dB` reduction depth and `-36 dBFS` bar floor):
+**UI colour legend** — see [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes (`AegisUi.h` sets `-18 dB` reduction depth and `-36 dBFS` bar floor):
 
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
@@ -33,8 +31,6 @@ True-peak look-ahead limiter for mastering: raises loudness and holds every samp
 | 🔵 | `#37E3C5` | `IN` and `OUT` level bars | Live input and output peak levels (floor `-36 dBFS`) when below `0 dBFS` / ceiling |
 | 🔴 | `#EF4A3D` | `OUT PEAK` read-out & `OUT` / `IN` bar clipping | `OUT PEAK` exceeded the ceiling (held until **CLEAR** or ceiling/true-peak change), or `IN` level exceeded `0 dBFS` |
 | 🟠 | `#F2A33A` | Warning notes in bottom advice strip | Actionable warnings: `TRUE PEAK` off, `DELTA` or `MATCH` left on, ceiling above `-0.3 dBTP`, or `>= 6 dB` reduction |
-| ⚪ | `#EAE3D0` | Silkscreen labels & primary text | Control titles and bright text |
-| 🔘 | `#9F9680` | Secondary labels, inactive switches, info notes | Graticule labels, latency read-out, `CLEAR` / unlit buttons, and informational strip notes |
 
 ## Try it
 
@@ -117,17 +113,17 @@ input ─► Gain ─┬─► 8x True-Peak Detector (64-tap sinc, 32-sample del
 - **Auto Gain:** Divides out active **Gain** over the 4 s listen—leave **Gain** untouched while listening.
 - **Listening aids & session state:** **Delta** and **Match** persist in sessions (presets switch off); **Match** uses plain RMS, not BS.1770 LUFS. A/B slot contents and undo history are not saved (active slot only saved; first switch to B copies loaded state).
 - **No loudness meter or clipper:** Put [Themis](../themis/README.md) after Aegis for LUFS and COPY/PASTE (shares `pdsp::TruePeakReader` so true peaks match **OUT PEAK**).
-- **Platform verification:** Builds on macOS (VST3 + AU, manually verified 2026-11-13) and passes `auval -v`; not in macOS CI yet and has no `HostCheck`.
+- **Platform verification:** See [CI & platform status](../../CLAUDE.md#not-yet-in-line).
 
 ## Build & develop
 
-Requires CMake 3.22+ and a C++20 compiler (JUCE fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```bash
-# Fast build & check from repository root (Ninja + ccache if installed)
+# Fast build & check from repository root
 ./scripts/build.sh aegis            # build & run AegisTests + AegisUiCheck
 ./scripts/build.sh aegis all        # tests, ui, snap, vst3, au, app
-./scripts/showcase.sh aegis         # regenerate docs/showcase.gif (requires ffmpeg)
+./scripts/showcase.sh aegis         # regenerate docs/showcase.gif
 ```
 
 Manual CMake from `plugins/aegis/` (add `-DAEGIS_INSTALL_AFTER_BUILD=ON` on macOS to install):
@@ -140,8 +136,6 @@ cmake --build build --target AegisUiCheck && ./build/AegisUiCheck_artefacts/Rele
 cmake --build build --target AegisSnapshot && ./build/AegisSnapshot_artefacts/Release/AegisSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` and `docs/showcase.gif` are generated by `AegisSnapshot` / `scripts/showcase.sh` (never edited by hand). See [CLAUDE.md](CLAUDE.md) for invariants.
-
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).
