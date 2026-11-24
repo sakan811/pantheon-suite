@@ -8,6 +8,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <pantheon/ui/Hardware.h>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <vector>
@@ -21,10 +22,17 @@ class PluginPicker : public juce::Component,
                      private juce::KeyListener
 {
 public:
+    enum class FilterMode
+    {
+        All,
+        Instruments
+    };
+
     struct Entry
     {
         juce::String name;
         juce::String maker;
+        bool isInstrument = false;
     };
 
     PluginPicker (std::vector<Entry> items, std::function<void (const juce::String& pluginName)> onPick)
@@ -61,7 +69,12 @@ public:
     }
 
     PluginPicker (const Catalog& catalog, std::function<void (const juce::String& pluginName)> onPick)
-        : PluginPicker (entriesFromCatalog (catalog), std::move (onPick))
+        : PluginPicker (catalog, FilterMode::All, std::move (onPick))
+    {
+    }
+
+    PluginPicker (const Catalog& catalog, FilterMode filter, std::function<void (const juce::String& pluginName)> onPick)
+        : PluginPicker (entriesFromCatalog (catalog, filter), std::move (onPick))
     {
     }
 
@@ -71,7 +84,7 @@ public:
         list.setModel (nullptr);
     }
 
-    static std::vector<Entry> entriesFromCatalog (const Catalog& catalog)
+    static std::vector<Entry> entriesFromCatalog (const Catalog& catalog, FilterMode filter = FilterMode::All)
     {
         std::vector<Entry> out;
         const auto names = catalog.names();
@@ -80,17 +93,28 @@ public:
         for (const auto& label : names)
         {
             juce::String maker;
+            bool isInst = false;
             for (const auto& d : descs)
             {
                 const auto suffix = d.manufacturerName.isNotEmpty() ? d.manufacturerName : d.pluginFormatName;
                 if (label == d.name || label == d.name + " (" + suffix + ")")
                 {
-                    maker = d.manufacturerName;
+                    const bool isSuite = suiteNames().contains (d.name);
+                    maker = isSuite ? juce::String ("Pantheon") : d.manufacturerName;
+                    isInst = d.isInstrument;
                     break;
                 }
             }
-            out.push_back ({ label, maker });
+            if (filter == FilterMode::Instruments && ! isInst)
+                continue;
+            out.push_back ({ label, maker, isInst });
         }
+        std::stable_sort (out.begin(), out.end(), [] (const Entry& a, const Entry& b)
+        {
+            const bool aPantheon = (a.maker == "Pantheon");
+            const bool bPantheon = (b.maker == "Pantheon");
+            return aPantheon && ! bPantheon;
+        });
         return out;
     }
 
@@ -189,7 +213,8 @@ private:
             auto makerArea = bounds.removeFromRight (makerW);
             bounds.removeFromRight (6);
             g.setFont (makerFont);
-            g.setColour (rowIsSelected ? colours::text.withAlpha (0.75f) : colours::dim);
+            g.setColour (rowIsSelected ? colours::text.withAlpha (0.75f)
+                                       : (entry.maker == "Pantheon" ? colours::accent.withAlpha (0.85f) : colours::dim));
             g.drawText (entry.maker, makerArea, juce::Justification::centredRight, true);
         }
         g.setFont (ui::font (13.0f));

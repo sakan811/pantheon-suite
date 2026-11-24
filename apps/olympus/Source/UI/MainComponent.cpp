@@ -491,6 +491,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.onProjectDropped = [this] (const juce::File& file) { openProjectRequested (file); };
     arrange.reportError = [this] (const juce::String& message) { showError (message); };
     arrange.onInputMenu = [this] (int track) { showInputMenu (track); };
+    arrange.onInstrumentMenu = [this] (int track) { showInstrumentMenu (track); };
     arrange.onOpenMidiClip = [this] (MidiClipRef ref)
     {
         if (mixer.isVisible())
@@ -583,6 +584,15 @@ MainComponent::MainComponent (Options options) : opts (options)
     };
     mixer.reportError = [this] (const juce::String& message) { showError (message); };
     addChildComponent (mixer);
+
+    splitterBar.onDragStart = [this] { dragStartSplitRatio = bodySplitRatio; };
+    splitterBar.onDrag = [this] (int deltaY)
+    {
+        const int avail = juce::jmax (1, bodyArea.getHeight() - 6);
+        bodySplitRatio = juce::jlimit (0.20, 0.80, dragStartSplitRatio + (double) deltaY / (double) avail);
+        resized();
+    };
+    addChildComponent (splitterBar);
 
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &addBusButton, &importButton, &pluginsButton, &renderButton, &exportButton, &audioButton,
                      &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton })
@@ -2176,14 +2186,27 @@ void MainComponent::addSidechainMenu (juce::PopupMenu& menu, int track, int slot
 
 void MainComponent::openPluginPicker (juce::Rectangle<int> anchor, std::function<void (const juce::String&)> onPick)
 {
-    if (session.catalog.names().isEmpty())
+    openPluginPicker (anchor, PluginPicker::FilterMode::All, std::move (onPick));
+}
+
+void MainComponent::openPluginPicker (juce::Rectangle<int> anchor, PluginPicker::FilterMode filter, std::function<void (const juce::String&)> onPick)
+{
+    if (PluginPicker::entriesFromCatalog (session.catalog, filter).empty())
+    {
+        juce::PopupMenu emptyMenu;
+        emptyMenu.addItem (filter == PluginPicker::FilterMode::Instruments
+                               ? "No instrument plugin found: use PLUGINS"
+                               : "No plugin found: use PLUGINS",
+                           false, false, nullptr);
+        emptyMenu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (localAreaToGlobal (anchor)));
         return;
+    }
     if (pickerBox != nullptr)
     {
         pickerBox->exitModalState (0);
         pickerBox = nullptr;
     }
-    auto picker = std::make_unique<PluginPicker> (session.catalog, std::move (onPick));
+    auto picker = std::make_unique<PluginPicker> (session.catalog, filter, std::move (onPick));
     auto& box = juce::CallOutBox::launchAsynchronously (std::move (picker), anchor, this);
     pickerBox = &box;
 }
@@ -2449,6 +2472,108 @@ void MainComponent::showTrackMenu (int track)
     menu.showMenuAsync (juce::PopupMenu::Options());
 }
 
+void MainComponent::showInstrumentMenu (int track)
+{
+    if (session.renderRunning())
+    {
+        showError ("A render is running: wait for it or cancel it first.");
+        return;
+    }
+    const auto safe = juce::Component::SafePointer<MainComponent> (this);
+    juce::PopupMenu menu;
+    juce::Rectangle<int> anchor;
+    {
+        const juce::ScopedTryLock sl (session.lock);
+        if (! sl.isLocked())
+            return;
+        if (! juce::isPositiveAndBelow (track, (int) session.tracks.size()))
+            return;
+        const auto& trk = *session.tracks[(size_t) track];
+        if (trk.isBus() || ! trk.isMidi)
+            return;
+        const bool frozen = trk.frozen;
+        if (auto* btn = arrange.instrumentButton (track))
+            anchor = getLocalArea (btn, btn->getLocalBounds());
+        if (anchor.isEmpty())
+            anchor = juce::Rectangle<int> (arrange.getX() + 60, arrange.getY() + 80, 1, 1);
+
+        auto pickInstrument = [safe, track, anchor]
+        {
+            if (safe == nullptr) return;
+            if (safe->session.renderRunning())
+            {
+                safe->showError ("A render is running: wait for it or cancel it first.");
+                return;
+            }
+            if (! juce::isPositiveAndBelow (track, (int) safe->session.tracks.size())) return;
+            if (safe->session.tracks[(size_t) track]->frozen)
+            {
+                safe->showError ("Unfreeze track to edit plugins.");
+                return;
+            }
+            safe->openPluginPicker (anchor, PluginPicker::FilterMode::Instruments, [safe, track] (const juce::String& n)
+            {
+                if (safe == nullptr) return;
+                if (safe->session.renderRunning())
+                {
+                    safe->showError ("A render is running: wait for it or cancel it first.");
+                    return;
+                }
+                if (! juce::isPositiveAndBelow (track, (int) safe->session.tracks.size())) return;
+                juce::String error;
+                if (! safe->editor.setTrackInstrument (track, n, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+        };
+
+        if (trk.instrument != nullptr)
+        {
+            const bool missing = trk.instrument->instance == nullptr;
+            const bool bypassed = trk.instrument->bypass;
+            menu.addItem ("Open " + trk.instrument->plugin, ! missing && ! frozen, false,
+                          [safe, track] { if (safe != nullptr) safe->openInstrumentEditor (track); });
+            menu.addItem (bypassed ? "Switch on" : "Bypass", ! frozen, false, [safe, track, bypassed]
+            {
+                if (safe == nullptr) return;
+                if (safe->session.renderRunning()) { safe->showError ("A render is running: wait for it or cancel it first."); return; }
+                juce::String error;
+                if (! safe->editor.bypassTrackInstrument (track, ! bypassed, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+            menu.addSeparator();
+            menu.addItem ("Change instrument...", ! frozen, false, pickInstrument);
+            menu.addItem ("Remove instrument (use BasicSynth)", ! frozen, false, [safe, track]
+            {
+                if (safe == nullptr) return;
+                if (safe->session.renderRunning()) { safe->showError ("A render is running: wait for it or cancel it first."); return; }
+                safe->closeTrackEditors();
+                juce::String error;
+                if (! safe->editor.removeTrackInstrument (track, error)) safe->showError (error);
+                safe->requestRefresh();
+            });
+            if (frozen)
+            {
+                menu.addSeparator();
+                menu.addItem ("Unfreeze track to edit plugins", false, false, nullptr);
+            }
+        }
+        else
+        {
+            menu.addItem ("Built-in: BasicSynth", false, true, nullptr);
+            menu.addSeparator();
+            menu.addItem ("Choose instrument...", ! frozen, false, pickInstrument);
+            if (frozen)
+            {
+                menu.addSeparator();
+                menu.addItem ("Unfreeze track to edit plugins", false, false, nullptr);
+            }
+        }
+    }
+    auto* target = arrange.instrumentButton (track);
+    menu.showMenuAsync (target != nullptr ? juce::PopupMenu::Options().withTargetComponent (target)
+                                          : juce::PopupMenu::Options().withTargetComponent (&arrange));
+}
+
 void MainComponent::showAddMasterPluginMenu()
 {
     if (session.renderRunning())
@@ -2643,30 +2768,18 @@ void MainComponent::showMixerSlotMenu (int track, int slot, juce::Rectangle<int>
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (mixer.localAreaToGlobal (anchor)));
 }
 
-// A plugin's slot: a track's chain (track >= 0), the monitor chain (track == -1), or the master chain (track == -2).
+// A plugin's slot: a track's chain (track >= 0, or slot == -1 for the track's instrument), the monitor chain (track == -1), or the master chain (track == -2).
 Slot* MainComponent::slotOf (int track, int slot, juce::String& error)
 {
-    if (track >= 0) return session.slotAt (track, slot, error);
+    if (track >= 0) return slot == -1 ? session.instrumentSlot (track, error) : session.slotAt (track, slot, error);
     if (track == -1) return session.monitorSlotAt (slot, error);
     if (track == -2) return session.masterSlot (slot, error);
     error = "No track " + juce::String (track);
     return nullptr;
 }
 
-void MainComponent::openEditor (int track, int slot)
+void MainComponent::openSlotEditor (Slot* s, const juce::String& title, bool isTrackEditor)
 {
-    if (track >= 0 && juce::isPositiveAndBelow (track, (int) session.tracks.size()) && session.tracks[(size_t) track]->frozen)
-    {
-        showError ("Unfreeze track to edit plugins.");
-        return;
-    }
-    juce::String error;
-    auto* s = slotOf (track, slot, error);
-    if (s == nullptr || s->instance == nullptr)
-    {
-        showError (s == nullptr ? error : "That plugin is not installed here, so there is nothing to open.");
-        return;
-    }
     if (auto it = windows.find (s); it != windows.end()) { it->second->toFront (true); return; }
     juce::AudioProcessorEditor* pluginEditor = s->instance->hasEditor() ? s->instance->createEditorAndMakeActive() : new juce::GenericAudioProcessorEditor (*s->instance);
     if (pluginEditor == nullptr)
@@ -2674,15 +2787,12 @@ void MainComponent::openEditor (int track, int slot)
         showError (s->plugin + " has no editor window");   // a plugin that says it has one but gives none: said, not silent
         return;
     }
-    const auto owner = track == -1 ? juce::String ("Monitor")
-                     : track == -2 ? juce::String ("Master")
-                                   : session.tracks[(size_t) track]->name;
     // the window that opens now is the first of the project's (a track or the master chain), so the state the timer compares against has to
     // be the state as it is now: the periodic read only runs every 15 ticks, and an edit made and its window closed inside half a second
     // would never be noticed
-    const bool firstTrackEditor = track != -1 && ! hasOpenTrackEditor();
-    windows[s] = makeEditorWindow (owner + " - " + s->plugin, pluginEditor,
-                                   [this, s, safe = juce::Component::SafePointer<MainComponent> (this)]
+    const bool firstTrackEditor = isTrackEditor && ! hasOpenTrackEditor();
+    windows[s] = makeEditorWindow (title, pluginEditor,
+                                   [s, safe = juce::Component::SafePointer<MainComponent> (this)]
                                    {
                                        juce::MessageManager::callAsync ([safe, s]
                                        {
@@ -2697,6 +2807,58 @@ void MainComponent::openEditor (int track, int slot)
         if (sl.isLocked() && ! session.renderRunning())
             lastEditorHash = trackPluginStateHash();   // the same read as the timer's: a busy lock leaves it to the next look
     }
+}
+
+void MainComponent::openEditor (int track, int slot)
+{
+    if (track >= 0 && slot == -1)
+    {
+        openInstrumentEditor (track);
+        return;
+    }
+    if (track >= 0 && juce::isPositiveAndBelow (track, (int) session.tracks.size()) && session.tracks[(size_t) track]->frozen)
+    {
+        showError ("Unfreeze track to edit plugins.");
+        return;
+    }
+    juce::String error;
+    auto* s = slotOf (track, slot, error);
+    if (s == nullptr || s->instance == nullptr)
+    {
+        showError (s == nullptr ? error : "That plugin is not installed here, so there is nothing to open.");
+        return;
+    }
+    const auto owner = track == -1 ? juce::String ("Monitor")
+                     : track == -2 ? juce::String ("Master")
+                                   : session.tracks[(size_t) track]->name;
+    openSlotEditor (s, owner + " - " + s->plugin, track != -1);
+}
+
+void MainComponent::openInstrumentEditor (int track)
+{
+    if (session.renderRunning())
+    {
+        showError ("A render is running: wait for it or cancel it first.");
+        return;
+    }
+    if (! juce::isPositiveAndBelow (track, (int) session.tracks.size()))
+    {
+        showError ("No track " + juce::String (track));
+        return;
+    }
+    if (session.tracks[(size_t) track]->frozen)
+    {
+        showError ("Unfreeze track to edit plugins.");
+        return;
+    }
+    juce::String error;
+    auto* s = session.instrumentSlot (track, error);
+    if (s == nullptr || s->instance == nullptr)
+    {
+        showError (s == nullptr ? error : "That plugin is not installed here, so there is nothing to open.");
+        return;
+    }
+    openSlotEditor (s, "Track " + juce::String (track + 1) + juce::String::fromUTF8 (" \xe2\x80\x94 ") + s->plugin, true);
 }
 
 void MainComponent::closeEditors() { windows.clear(); }
@@ -3099,8 +3261,12 @@ juce::int64 MainComponent::trackPluginStateHash() const
         }
     };
     for (const auto& t : session.tracks)
+    {
+        if (t->instrument != nullptr)
+            hashSlot (*t->instrument);
         for (const auto& s : t->chain)
             hashSlot (*s);
+    }
     for (const auto& s : session.masterChain)
         hashSlot (*s);
     return h == 0 ? 1 : (juce::int64) h;
@@ -3333,26 +3499,24 @@ void MainComponent::resized()
 
     noteStrip = { kMargin, r.getHeight() - kMargin - ui::kNoteStripHeight, w - 2 * kMargin, ui::kNoteStripHeight };
     bodyArea = { kMargin, kBodyTop, w - 2 * kMargin, noteStrip.getY() - 10 - kBodyTop };
-    if (pianoRoll.isVisible())
+    if (pianoRoll.isVisible() || mixer.isVisible())
     {
         const int gap = 6;
         const int avail = juce::jmax (0, bodyArea.getHeight() - gap);
-        const int arrangeH = juce::roundToInt (avail * 0.58);
+        const int arrangeH = juce::roundToInt (avail * bodySplitRatio);
         arrange.setBounds (bodyArea.withHeight (arrangeH));
-        pianoRoll.setBounds (bodyArea.getX(), arrange.getBottom() + gap, bodyArea.getWidth(),
-                             juce::jmax (0, bodyArea.getBottom() - (arrange.getBottom() + gap)));
-    }
-    else if (mixer.isVisible())
-    {
-        const int gap = 6;
-        const int avail = juce::jmax (0, bodyArea.getHeight() - gap);
-        const int arrangeH = juce::roundToInt (avail * 0.58);
-        arrange.setBounds (bodyArea.withHeight (arrangeH));
-        mixer.setBounds (bodyArea.getX(), arrange.getBottom() + gap, bodyArea.getWidth(),
-                         juce::jmax (0, bodyArea.getBottom() - (arrange.getBottom() + gap)));
+        splitterBar.setBounds (bodyArea.getX(), arrange.getBottom(), bodyArea.getWidth(), gap);
+        splitterBar.setVisible (true);
+        const auto bottomBounds = juce::Rectangle<int> (bodyArea.getX(), arrange.getBottom() + gap,
+                                                        bodyArea.getWidth(), juce::jmax (0, bodyArea.getBottom() - (arrange.getBottom() + gap)));
+        if (pianoRoll.isVisible())
+            pianoRoll.setBounds (bottomBounds);
+        else
+            mixer.setBounds (bottomBounds);
     }
     else
     {
+        splitterBar.setVisible (false);
         arrange.setBounds (bodyArea);
     }
 

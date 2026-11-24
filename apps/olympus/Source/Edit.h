@@ -228,6 +228,56 @@ public:
         return true;
     }
 
+    bool setTrackInstrument (int track, const juce::String& pluginName, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+            const auto& trk = *session.tracks[(size_t) track];
+            if (trk.isBus()) { error = "Cannot set an instrument on a bus track."; return false; }
+            if (trk.frozen) { error = "Track '" + trk.name + "' is frozen: unfreeze track to edit plugins."; return false; }
+        }
+        auto before = captureStructuralXml();
+        if (! session.setTrackInstrument (track, pluginName, error, [this] { if (onBeforeStructureChange) onBeforeStructureChange(); }))
+            return false;
+        recordStructural (std::move (before), "Set instrument");
+        return true;
+    }
+
+    bool removeTrackInstrument (int track, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+            const auto& trk = *session.tracks[(size_t) track];
+            if (trk.frozen) { error = "Track '" + trk.name + "' is frozen: unfreeze track to edit plugins."; return false; }
+            if (trk.instrument == nullptr) { error = "No instrument on track " + juce::String (track); return false; }
+        }
+        auto before = captureStructuralXml();
+        if (onBeforeStructureChange) onBeforeStructureChange();
+        if (! session.removeTrackInstrument (track, error))
+            return false;
+        recordStructural (std::move (before), "Remove instrument");
+        return true;
+    }
+
+    bool bypassTrackInstrument (int track, bool bypass, juce::String& error)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+            const auto& trk = *session.tracks[(size_t) track];
+            if (trk.frozen) { error = "Track '" + trk.name + "' is frozen: unfreeze track to edit plugins."; return false; }
+            if (trk.instrument == nullptr) { error = "No instrument on track " + juce::String (track); return false; }
+            if (trk.instrument->bypass == bypass) return true;
+        }
+        auto before = captureStructuralXml();
+        if (! session.bypassTrackInstrument (track, bypass, error))
+            return false;
+        recordStructural (std::move (before), "Bypass instrument");
+        return true;
+    }
+
     bool setChain (int track, const juce::StringArray& plugins, juce::String& error)
     {
         auto before = captureStructuralXml();
@@ -570,6 +620,40 @@ public:
         if (len == mc->length) return true;
         auto before = captureIfNeeded();
         mc->length = len;
+        record (before, "Resize MIDI clip");
+        return true;
+    }
+
+    bool resizeMidiClipStart (int track, int clip, juce::int64 newStart, juce::String& error, const MidiClip* baseClip = nullptr)
+    {
+        const juce::ScopedLock sl (session.lock);
+        MidiClip* mc = midiClipAt (track, clip, error);
+        if (mc == nullptr) return false;
+        const juce::int64 baseStart = (baseClip != nullptr) ? baseClip->start : mc->start;
+        const juce::int64 baseEnd = (baseClip != nullptr) ? baseClip->end() : mc->end();
+        const juce::int64 start = juce::jlimit ((juce::int64) 0, juce::jmax ((juce::int64) 0, baseEnd - 1), newStart);
+        if (start == mc->start && baseEnd == mc->end()) return true;
+        const double deltaBeats = session.tempo.samplesToBeats ((double) start) - session.tempo.samplesToBeats ((double) baseStart);
+        auto before = captureIfNeeded();
+        mc->length = baseEnd - start;
+        mc->start = start;
+        if (baseClip != nullptr && baseClip != mc)
+            mc->notes = baseClip->notes;
+        for (auto it = mc->notes.begin(); it != mc->notes.end();)
+        {
+            it->startBeat -= deltaBeats;
+            if (it->startBeat + it->durationBeats <= 1e-6)
+                it = mc->notes.erase (it);
+            else
+            {
+                if (it->startBeat < 0.0)
+                {
+                    it->durationBeats += it->startBeat;
+                    it->startBeat = 0.0;
+                }
+                ++it;
+            }
+        }
         record (before, "Resize MIDI clip");
         return true;
     }

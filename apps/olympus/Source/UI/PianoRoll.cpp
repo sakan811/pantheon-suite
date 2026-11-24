@@ -94,7 +94,44 @@ PianoRollView::PianoRollView (Session& s, Editor& e) : session (s), editor (e)
     closeButton.setTooltip ("Close the Piano Roll.");
     closeButton.onClick = [this] { if (onClose) onClose(); };
 
-    for (auto* b : std::initializer_list<juce::Component*> { &snapButton, &gridButton, &quantizeButton, &closeButton })
+    const auto stepBars = [this] (int deltaBars)
+    {
+        if (! targetRef.valid()) return;
+        const auto sp = snapshotPtr();
+        if (! sp->valid) return;
+        const double bpb = sp->tempo.beatsPerBar();
+        const double curBeats = clipBeats (*sp);
+        double newBeats = curBeats + deltaBars * bpb;
+        if (deltaBars < 0)
+        {
+            const double floorBeats = juce::jmin (curBeats, 1.0);
+            if (curBeats <= floorBeats + 1e-6)
+                return;
+            const double minBeats = (curBeats > bpb + 1e-6) ? bpb : floorBeats;
+            newBeats = juce::jmax (minBeats, newBeats);
+        }
+        const double startBeat = sp->tempo.samplesToBeats ((double) sp->clip.start);
+        const auto endSample = (juce::int64) std::llround (sp->tempo.beatsToSamples (startBeat + newBeats));
+        const auto newLen = juce::jmax ((juce::int64) 1, endSample - sp->clip.start);
+        juce::String error;
+        if (! editor.resizeMidiClip (targetRef.track, targetRef.clip, newLen, error))
+            report (error);
+        edited();
+    };
+
+    lengthMinusButton.setWantsKeyboardFocus (false);
+    lengthMinusButton.setTooltip ("Shorten MIDI clip by 1 bar.");
+    lengthMinusButton.onClick = [stepBars] { stepBars (-1); };
+
+    lengthLabel.setFont (ui::labelFont (10.5f));
+    lengthLabel.setColour (juce::Label::textColourId, colours::text);
+    lengthLabel.setJustificationType (juce::Justification::centred);
+
+    lengthPlusButton.setWantsKeyboardFocus (false);
+    lengthPlusButton.setTooltip ("Extend MIDI clip by 1 bar.");
+    lengthPlusButton.onClick = [stepBars] { stepBars (1); };
+
+    for (auto* b : std::initializer_list<juce::Component*> { &lengthMinusButton, &lengthLabel, &lengthPlusButton, &snapButton, &gridButton, &quantizeButton, &closeButton })
         addAndMakeVisible (*b);
 
     centerOnPitch (60);
@@ -135,6 +172,7 @@ void PianoRollView::clearTarget()
     selectedNotes.clear();
     lastSnapshotRevision = 0;
     lastSnapshot.reset();
+    lengthLabel.setText ({}, juce::dontSendNotification);
     repaint();
 }
 
@@ -215,6 +253,32 @@ void PianoRollView::syncToolbar (const PianoRollSnapshot& s)
     const auto gText = juce::String (gridName (s.grid));
     if (gridButton.getButtonText() != gText)
         gridButton.setButtonText (gText);
+
+    if (s.valid)
+    {
+        const double bars = clipBeats (s) / juce::jmax (0.25, s.tempo.beatsPerBar());
+        juce::String barText;
+        if (std::abs (bars - std::round (bars)) < 0.005)
+        {
+            const int n = juce::roundToInt (bars);
+            barText = juce::String (n) + (n == 1 ? " bar" : " bars");
+        }
+        else
+        {
+            auto num = juce::String (bars, 2);
+            while (num.endsWithChar ('0'))
+                num = num.dropLastCharacters (1);
+            if (num.endsWithChar ('.'))
+                num = num.dropLastCharacters (1);
+            barText = num + " bars";
+        }
+        if (lengthLabel.getText() != barText)
+            lengthLabel.setText (barText, juce::dontSendNotification);
+    }
+    else if (lengthLabel.getText().isNotEmpty())
+    {
+        lengthLabel.setText ({}, juce::dontSendNotification);
+    }
 }
 
 void PianoRollView::edited()
@@ -399,6 +463,23 @@ juce::Rectangle<int> PianoRollView::noteBoundsForTest (int noteIndex) const
     return noteRect (sp->clip.notes[(size_t) noteIndex]);
 }
 
+double PianoRollView::clipBeats (const PianoRollSnapshot& s) const
+{
+    if (! s.valid || s.tempo.sampleRate <= 0.0)
+        return 4.0;
+    const double b0 = s.tempo.samplesToBeats ((double) s.clip.start);
+    const double b1 = s.tempo.samplesToBeats ((double) s.clip.end());
+    return juce::jmax (0.25, b1 - b0);
+}
+
+int PianoRollView::clipEndXForTest() const
+{
+    const auto sp = snapshotPtr();
+    if (! sp->valid)
+        return -1;
+    return juce::roundToInt (beatToX (clipBeats (*sp)));
+}
+
 juce::Point<int> PianoRollView::pianoKeyCenterForTest (int pitch) const
 {
     const auto kb = keyboardBounds();
@@ -414,6 +495,9 @@ void PianoRollView::resized()
     quantizeButton.setBounds (closeButton.getX() - 78, by, 72, bh);
     gridButton.setBounds (quantizeButton.getX() - 62, by, 56, bh);
     snapButton.setBounds (gridButton.getX() - 60, by, 54, bh);
+    lengthPlusButton.setBounds (snapButton.getX() - 32, by, 24, bh);
+    lengthLabel.setBounds (lengthPlusButton.getX() - 62, by, 60, bh);
+    lengthMinusButton.setBounds (lengthLabel.getX() - 26, by, 24, bh);
 
     if (! centeredOnce && noteGridBounds().getHeight() > 0)
     {
@@ -438,7 +522,7 @@ void PianoRollView::paint (juce::Graphics& g)
     g.fillRect (0, tb.getBottom() - 1, getWidth(), 1);
 
     const auto title = s.valid ? (s.trackName + "  \xe2\x80\x94  " + s.clip.name) : juce::String ("Piano Roll");
-    ui::hw::drawLabel (g, title, { 10, 0, juce::jmax (60, snapButton.getX() - 18), kToolbarHeight },
+    ui::hw::drawLabel (g, title, { 10, 0, juce::jmax (60, lengthMinusButton.getX() - 18), kToolbarHeight },
                        juce::Justification::centredLeft, s.valid ? colours::text : colours::dim, 11.0f);
 
     const auto ruler = rulerBounds();
@@ -478,19 +562,17 @@ void PianoRollView::paint (juce::Graphics& g)
         }
 
         // Shade area past clip end
-        double clipBeats = 4.0;
-        if (s.valid && s.tempo.sampleRate > 0.0)
-        {
-            const double b0 = s.tempo.samplesToBeats ((double) s.clip.start);
-            const double b1 = s.tempo.samplesToBeats ((double) (s.clip.start + s.clip.length));
-            clipBeats = juce::jmax (0.25, b1 - b0);
-        }
-        const int clipEndX = juce::roundToInt (beatToX (clipBeats));
+        const int clipEndX = juce::roundToInt (beatToX (clipBeats (s)));
         if (clipEndX < grid.getRight())
         {
             const int sx = juce::jmax (grid.getX(), clipEndX);
             g.setColour (juce::Colours::black.withAlpha (0.35f));
             g.fillRect (sx, grid.getY(), grid.getRight() - sx, grid.getHeight());
+        }
+        if (s.valid)
+        {
+            g.setColour (colours::amber.withAlpha (0.85f));
+            g.fillRect (clipEndX - 1, grid.getY(), 2, grid.getHeight());
         }
 
         // Grid lines
@@ -561,6 +643,12 @@ void PianoRollView::paint (juce::Graphics& g)
                 g.drawText (juce::String ((int) std::floor (b / bpb + 1.0e-9) + 1), x + 3, ruler.getY() + 2, 36, ruler.getHeight() - 4, juce::Justification::centredLeft);
             else if (pxPerBeat >= 32.0)
                 g.drawText (juce::String ((int) std::fmod (std::round (b), bpb) + 1), x + 3, ruler.getY() + 4, 24, ruler.getHeight() - 6, juce::Justification::centredLeft);
+        }
+        if (s.valid)
+        {
+            const int clipEndX = juce::roundToInt (beatToX (clipBeats (s)));
+            g.setColour (colours::amber);
+            g.fillRect (clipEndX - 1, ruler.getY(), 2, ruler.getHeight());
         }
         g.restoreState();
     }
@@ -653,23 +741,31 @@ void PianoRollView::mouseMove (const juce::MouseEvent& e)
 
 juce::MouseCursor PianoRollView::getMouseCursor()
 {
-    if (mode == Mode::resizeNote)
+    if (mode == Mode::resizeNote || mode == Mode::resizeClipEnd)
         return juce::MouseCursor::LeftRightResizeCursor;
     if (mode == Mode::velocity)
         return juce::MouseCursor::UpDownResizeCursor;
+    const auto ruler = rulerBounds();
     const auto grid = noteGridBounds();
-    if (grid.contains (hoverPos))
+    if (ruler.contains (hoverPos) || grid.contains (hoverPos))
     {
         const auto sp = snapshotPtr();
         if (sp->valid)
         {
-            const int hit = hitNoteAt (*sp, hoverPos);
-            if (hit >= 0)
+            if (grid.contains (hoverPos))
             {
-                const auto r = noteRect (sp->clip.notes[(size_t) hit]);
-                if (r.getRight() - hoverPos.x <= kEdgeGrab && hoverPos.x >= r.getX() + r.getWidth() / 2)
-                    return juce::MouseCursor::LeftRightResizeCursor;
+                const int hit = hitNoteAt (*sp, hoverPos);
+                if (hit >= 0)
+                {
+                    const auto r = noteRect (sp->clip.notes[(size_t) hit]);
+                    if (r.getRight() - hoverPos.x <= kEdgeGrab && hoverPos.x >= r.getX() + r.getWidth() / 2)
+                        return juce::MouseCursor::LeftRightResizeCursor;
+                    return juce::MouseCursor::NormalCursor;
+                }
             }
+            const int clipEndX = juce::roundToInt (beatToX (clipBeats (*sp)));
+            if (std::abs (hoverPos.x - clipEndX) <= kEdgeGrab)
+                return juce::MouseCursor::LeftRightResizeCursor;
         }
     }
     return juce::MouseCursor::NormalCursor;
@@ -742,7 +838,16 @@ void PianoRollView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    const auto ruler = rulerBounds();
     const auto grid = noteGridBounds();
+    const int clipEndX = juce::roundToInt (beatToX (clipBeats (*sp)));
+    if (ruler.contains (p) && std::abs (p.x - clipEndX) <= kEdgeGrab)
+    {
+        mode = Mode::resizeClipEnd;
+        beginGesture ("Resize MIDI clip");
+        return;
+    }
+
     if (grid.contains (p))
     {
         const int hit = hitNoteAt (*sp, p);
@@ -775,6 +880,12 @@ void PianoRollView::mouseDown (const juce::MouseEvent& e)
                 }
             }
             repaint();
+            return;
+        }
+        if (std::abs (p.x - clipEndX) <= kEdgeGrab)
+        {
+            mode = Mode::resizeClipEnd;
+            beginGesture ("Resize MIDI clip");
             return;
         }
         if (! e.mods.isShiftDown())
@@ -834,6 +945,21 @@ void PianoRollView::mouseDrag (const juce::MouseEvent& e)
         refresh();
         if (onStructure) onStructure();
     }
+    else if (mode == Mode::resizeClipEnd)
+    {
+        const double step = juce::jmax (0.125, sp->tempo.gridBeats (sp->grid));
+        const double rawBeat = juce::jmax (0.25, xToBeat (p.x));
+        const double targetBeat = sp->snapOn
+            ? juce::jmax (step, std::floor (rawBeat / step + 0.5 + TempoMap::kGridEps) * step)
+            : rawBeat;
+        const double clipStartBeat = sp->tempo.samplesToBeats ((double) sp->clip.start);
+        const auto endSample = (juce::int64) std::llround (sp->tempo.beatsToSamples (clipStartBeat + targetBeat));
+        const auto newLen = juce::jmax ((juce::int64) 1, endSample - sp->clip.start);
+        if (! editor.resizeMidiClip (targetRef.track, targetRef.clip, newLen, error))
+            report (error);
+        refresh();
+        if (onStructure) onStructure();
+    }
     else if (mode == Mode::velocity)
     {
         const int curVel = yToVel (p.y);
@@ -851,7 +977,7 @@ void PianoRollView::mouseUp (const juce::MouseEvent& e)
     dragSourceIndex = -1;
     if (mode == Mode::previewKey)
         sendPreviewNoteOff();
-    const bool wasEdit = (mode == Mode::moveNote || mode == Mode::resizeNote || mode == Mode::velocity);
+    const bool wasEdit = (mode == Mode::moveNote || mode == Mode::resizeNote || mode == Mode::resizeClipEnd || mode == Mode::velocity);
     mode = Mode::none;
     dragNote = -1;
     endGesture();

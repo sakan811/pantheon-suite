@@ -43,6 +43,9 @@ public:
     std::function<void (const juce::String&)> reportError;
 
     // Toolbar controls (public for UI checks)
+    juce::TextButton lengthMinusButton { "-" };
+    juce::Label lengthLabel;
+    juce::TextButton lengthPlusButton { "+" };
     LampButton snapButton { "Snap" };
     juce::TextButton gridButton { "1/4" };
     juce::TextButton quantizeButton { "Quantize" };
@@ -55,6 +58,8 @@ public:
     juce::Rectangle<int> noteGridBoundsForTest() const { return noteGridBounds(); }
     juce::Point<int> pianoKeyCenterForTest (int pitch) const;
     int selectedNotesCountForTest() const { return (int) selectedNotes.size(); }
+    int clipEndXForTest() const;
+    juce::String lengthTextForTest() const { return lengthLabel.getText(); }
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -68,7 +73,7 @@ public:
     bool keyPressed (const juce::KeyPress& key) override;
 
 private:
-    enum class Mode { none, moveNote, resizeNote, velocity, previewKey };
+    enum class Mode { none, moveNote, resizeNote, resizeClipEnd, velocity, previewKey };
 
     Session& session;
     Editor& editor;
@@ -99,6 +104,7 @@ private:
     std::unique_ptr<Gesture> gesture;
 
     std::shared_ptr<const PianoRollSnapshot> snapshotPtr() const;
+    double clipBeats (const PianoRollSnapshot& s) const;
     juce::Rectangle<int> toolbarBounds() const;
     juce::Rectangle<int> rulerBounds() const;
     juce::Rectangle<int> keyboardBounds() const;
