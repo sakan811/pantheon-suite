@@ -42,7 +42,11 @@ public:
     std::function<void()> onStructure;
     std::function<void (const juce::String&)> reportError;
 
+    double playhead = 0.0;
+
     // Toolbar controls (public for UI checks)
+    juce::TextButton scaleButton { "Scale" };
+    juce::TextButton toolsButton { "Tools" };
     juce::TextButton lengthMinusButton { "-" };
     juce::Label lengthLabel;
     juce::TextButton lengthPlusButton { "+" };
@@ -60,6 +64,9 @@ public:
     int selectedNotesCountForTest() const { return (int) selectedNotes.size(); }
     int clipEndXForTest() const;
     juce::String lengthTextForTest() const { return lengthLabel.getText(); }
+    void setScaleForTest (int scaleIndex);
+    int activeScaleForTest() const { return activeScaleIndex; }
+    void runToolsActionForTest (int actionId);
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -73,7 +80,15 @@ public:
     bool keyPressed (const juce::KeyPress& key) override;
 
 private:
-    enum class Mode { none, moveNote, resizeNote, resizeClipEnd, velocity, previewKey };
+    enum class Mode { none, moveNote, resizeNote, resizeClipEnd, velocity, previewKey, marquee };
+
+    struct OrigNote
+    {
+        int index = -1;
+        double startBeat = 0.0;
+        double durationBeats = 1.0;
+        int pitch = 60;
+    };
 
     Session& session;
     Editor& editor;
@@ -89,6 +104,7 @@ private:
     bool centeredOnce = false;
 
     std::vector<int> selectedNotes;
+    std::vector<OrigNote> origNotes;
     Mode mode = Mode::none;
     int dragNote = -1;
     int pressX = 0, pressY = 0;
@@ -96,6 +112,14 @@ private:
     double origDuration = 1.0;
     int origPitch = 60;
     int pressPitch = 60;
+    double appliedDeltaBeats = 0.0;
+    int appliedDeltaPitch = 0;
+    double appliedDeltaDur = 0.0;
+    juce::Point<int> marqueeOrigin;
+    juce::Rectangle<int> marqueeRect;
+    std::vector<int> marqueeInitialSelection;
+    std::vector<MidiNote> copiedNotes;
+    int activeScaleIndex = 0;
     int lastVelX = 0;
     int lastVel = 100;
     int previewPitch = -1;
@@ -130,6 +154,14 @@ private:
     void sendPreviewNoteOff();
     void cycleGrid();
     void showGridMenu();
+    void showScaleMenu();
+    void showToolsMenu (juce::Component* target, juce::Point<int> localPoint);
+    void applyScaleIndex (int index);
+    void runToolsAction (int actionId);
+    void selectAllNotes();
+    void duplicateSelectedNotes();
+    void copySelectedNotes();
+    void pasteNotes();
     void syncToolbar (const PianoRollSnapshot& s);
     void edited();
     void beginGesture (const juce::String& label) { gesture = std::make_unique<Gesture> (editor, label); }

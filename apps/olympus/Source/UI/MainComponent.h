@@ -492,7 +492,12 @@ private:
     void markDirty();
     void showSignature (int numerator, int denominator);
     void applyBpm();
-    void syncPlayhead() { arrange.playhead = (double) position(); }
+    void syncPlayhead()
+    {
+        const double pos = (double) position();
+        arrange.playhead = pos;
+        pianoRoll.playhead = pos;
+    }
     juce::int64 endOfPlay() const { return session.length() + session.maxLatency(); }
     void readDevice();                              // the device as it is now, into `device`
     void adoptDeviceRate();                         // the session takes the device's rate (converting a project opened at another one); message thread

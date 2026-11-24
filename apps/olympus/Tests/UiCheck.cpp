@@ -3672,6 +3672,114 @@ int main()
             test::check (took < 200.0, "PianoRollView::refresh is non-blocking when renderRunning() is true");
         }
 
+        // Seam 2: toolbar Scale/Tools buttons, marquee selection, multi-note drag + audition, shortcuts, playhead, scale & tools
+        {
+            // Restore enough PianoRoll height for grid interaction after the splitter clamp test
+            const auto sbCenter = w->splitterBar.getLocalBounds().getCentre();
+            w->splitterBar.mouseDown (mouseAtComp (w->splitterBar, sbCenter));
+            w->splitterBar.mouseDrag (mouseAtComp (w->splitterBar, sbCenter + juce::Point<int> (0, -220)));
+            w->splitterBar.mouseUp (mouseAtComp (w->splitterBar, sbCenter + juce::Point<int> (0, -220)));
+
+            test::check (w->pianoRoll.scaleButton.isVisible() && w->pianoRoll.toolsButton.isVisible()
+                         && inside (w->pianoRoll.scaleButton, w->pianoRoll)
+                         && inside (w->pianoRoll.toolsButton, w->pianoRoll)
+                         && ! w->pianoRoll.scaleButton.getBounds().intersects (w->pianoRoll.toolsButton.getBounds())
+                         && ! w->pianoRoll.toolsButton.getBounds().intersects (w->pianoRoll.lengthMinusButton.getBounds()),
+                         "Scale and Tools buttons sit cleanly in PianoRollView toolbar");
+
+            // Marquee box selection selects both notes
+            w->pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey));
+            test::check (w->pianoRoll.selectedNotesCountForTest() == 0, "Escape clears selection before marquee");
+            const auto gBounds = w->pianoRoll.noteGridBoundsForTest();
+            const auto r0 = w->pianoRoll.noteBoundsForTest (0);
+            const auto r1 = w->pianoRoll.noteBoundsForTest (1);
+            const juce::Point<int> mStart { gBounds.getX() + 10, juce::jmax (gBounds.getY() + 2, juce::jmin (r0.getY(), r1.getY()) - 6) };
+            const juce::Point<int> mEnd { juce::jmax (r0.getRight(), r1.getRight()) + 10,
+                                           juce::jmin (gBounds.getBottom() - 2, juce::jmax (r0.getBottom(), r1.getBottom()) + 6) };
+            w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, mStart));
+            w->pianoRoll.mouseDrag (mouseAtComp (w->pianoRoll, mEnd));
+            w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, mEnd));
+            test::check (w->pianoRoll.selectedNotesCountForTest() == 2,
+                         "marquee box selection selects both notes");
+
+            // Multi-note drag moves all selected notes together, auditions pitch changes, and undoes in one gesture
+            const double b0Before = w->session.tracks[0]->midiClips[0].notes[0].startBeat;
+            const int p0Before = w->session.tracks[0]->midiClips[0].notes[0].pitch;
+            const double b1Before = w->session.tracks[0]->midiClips[0].notes[1].startBeat;
+            const int p1Before = w->session.tracks[0]->midiClips[0].notes[1].pitch;
+            w->session.liveMidiFifo.clear();
+            const auto dragStart = r0.getCentre();
+            const auto dragEnd = dragStart + juce::Point<int> (40, -PianoRollView::kRowHeight);
+            w->pianoRoll.mouseDown (mouseAtComp (w->pianoRoll, dragStart));
+            w->pianoRoll.mouseDrag (mouseAtComp (w->pianoRoll, dragEnd));
+            w->pianoRoll.mouseUp (mouseAtComp (w->pianoRoll, dragEnd));
+            test::check (std::abs (w->session.tracks[0]->midiClips[0].notes[0].startBeat - (b0Before + 0.5)) < 1e-6
+                         && w->session.tracks[0]->midiClips[0].notes[0].pitch == p0Before + 1
+                         && std::abs (w->session.tracks[0]->midiClips[0].notes[1].startBeat - (b1Before + 0.5)) < 1e-6
+                         && w->session.tracks[0]->midiClips[0].notes[1].pitch == p1Before + 1,
+                         "multi-note drag moves all selected notes together");
+            test::check (w->session.liveMidiFifo.getNumReady() >= 3,
+                         "note click and pitch drag push audition NoteOn/NoteOff events to liveMidiFifo");
+            test::check (w->editor.undo()
+                         && std::abs (w->session.tracks[0]->midiClips[0].notes[0].startBeat - b0Before) < 1e-6
+                         && w->session.tracks[0]->midiClips[0].notes[0].pitch == p0Before
+                         && std::abs (w->session.tracks[0]->midiClips[0].notes[1].startBeat - b1Before) < 1e-6
+                         && w->session.tracks[0]->midiClips[0].notes[1].pitch == p1Before,
+                         "undo reverts multi-note drag in one step");
+
+            // Cmd+A selects all notes, Cmd+D duplicates selected notes
+            w->pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey));
+            test::check (w->pianoRoll.keyPressed (juce::KeyPress ('a', cmd(), 'a'))
+                         && w->pianoRoll.selectedNotesCountForTest() == 2,
+                         "Cmd+A selects all notes");
+            test::check (w->pianoRoll.keyPressed (juce::KeyPress ('d', cmd(), 'd'))
+                         && w->session.tracks[0]->midiClips[0].notes.size() == 4
+                         && w->pianoRoll.selectedNotesCountForTest() == 2,
+                         "Cmd+D duplicates selected notes and selects the duplicates");
+            test::check (w->editor.undo() && w->session.tracks[0]->midiClips[0].notes.size() == 2,
+                         "undo reverts Cmd+D duplicate");
+            w->pianoRoll.refresh();
+
+            // Arrow keys Up/Right transpose and nudge selected notes
+            test::check (w->pianoRoll.keyPressed (juce::KeyPress ('a', cmd(), 'a'))
+                         && w->pianoRoll.selectedNotesCountForTest() == 2,
+                         "Cmd+A re-selects both notes");
+            test::check (w->pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::upKey))
+                         && w->session.tracks[0]->midiClips[0].notes[0].pitch == p0Before + 1
+                         && w->session.tracks[0]->midiClips[0].notes[1].pitch == p1Before + 1,
+                         "Up arrow transposes selected notes up 1 semitone");
+            test::check (w->pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::rightKey))
+                         && std::abs (w->session.tracks[0]->midiClips[0].notes[0].startBeat - (b0Before + 0.5)) < 1e-6
+                         && std::abs (w->session.tracks[0]->midiClips[0].notes[1].startBeat - (b1Before + 0.5)) < 1e-6,
+                         "Right arrow nudges selected notes forward by grid step");
+            test::check (w->editor.undo() && w->editor.undo()
+                         && std::abs (w->session.tracks[0]->midiClips[0].notes[0].startBeat - b0Before) < 1e-6
+                         && w->session.tracks[0]->midiClips[0].notes[0].pitch == p0Before,
+                         "undo reverts arrow nudge and transpose");
+            w->pianoRoll.refresh();
+
+            // Playhead line renders cleanly when inside the clip
+            w->seek ((juce::int64) std::llround (w->session.tempo.beatsToSamples (1.5)));
+            test::check (w->pianoRoll.playhead > 0.0, "seek/syncPlayhead updates pianoRoll.playhead");
+            const auto phImg = w->pianoRoll.createComponentSnapshot (w->pianoRoll.getLocalBounds());
+            test::check (phImg.isValid(), "PianoRollView with active playhead renders cleanly");
+
+            // Scale highlighting and Tools menu actions
+            w->pianoRoll.setScaleForTest (1);
+            test::check (w->pianoRoll.activeScaleForTest() == 1
+                         && w->pianoRoll.scaleButton.getButtonText() == "C Major"
+                         && w->pianoRoll.createComponentSnapshot (w->pianoRoll.getLocalBounds()).isValid(),
+                         "Scale highlighting renders cleanly when active");
+            w->pianoRoll.setScaleForTest (0);
+            test::check (w->pianoRoll.scaleButton.getButtonText() == "Scale", "Scale Off restores button label");
+
+            w->pianoRoll.runToolsActionForTest (5); // Transpose +1 Oct
+            test::check (w->session.tracks[0]->midiClips[0].notes[0].pitch == p0Before + 12,
+                         "Tools Transpose +1 Oct shifts pitch by +12");
+            test::check (w->editor.undo() && w->session.tracks[0]->midiClips[0].notes[0].pitch == p0Before,
+                         "undo reverts Tools Transpose +1 Oct");
+        }
+
         // Close button hides PianoRollView and restores full ArrangeView height
         press (w->pianoRoll.closeButton);
         test::check (! w->pianoRoll.isVisible() && ! w->splitterBar.isVisible() && w->arrange.getHeight() == fullArrangeH,
