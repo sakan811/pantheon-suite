@@ -4,18 +4,26 @@
 // Renders the plugin editor to a PNG while feeding it something like a voice: a buzzing vowel with bursts of hiss, so the reduction display shows real activity.
 //
 //   NemesisSnapshot <out.png> [listen]
+//   NemesisSnapshot --frames <dir> [listen]
 
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
 #include <random>
+#include <string_view>
 
 int main (int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
     {
-        std::printf ("usage: NemesisSnapshot <out.png> [listen]\n");
+        std::printf ("usage: NemesisSnapshot <out.png> [listen] | --frames <dir> [listen]\n");
         return 2;
     }
+    const bool framesMode = argc >= 3 && std::string_view (argv[1]) == "--frames";
+    const auto resolvePath = [] (const char* p)
+    {
+        const juce::String s (p);
+        return juce::File::isAbsolutePath (s) ? juce::File (s) : juce::File::getCurrentWorkingDirectory().getChildFile (s);
+    };
     juce::ScopedJuceInitialiser_GUI gui;
     NemesisProcessor proc;
     proc.setPlayConfigDetails (2, 2, 48000.0, 512);
@@ -27,9 +35,17 @@ int main (int argc, char** argv)
     set (nemesis::id::detection, 0.0f);
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
-    for (int i = 2; i < argc; ++i)
+    for (int i = framesMode ? 3 : 2; i < argc; ++i)
         if (juce::String (argv[i]) == "listen")
             set (nemesis::id::listen, 1.0f);
+
+    auto& designed = ui::innerOf<NemesisEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const juce::File framesDir = framesMode ? resolvePath (argv[2]) : juce::File();
+    if (framesMode)
+        framesDir.createDirectory();
+    int frameIdx = 0;
+    bool framesOk = true;
+    juce::PNGImageFormat png;
 
     // A vowel (a buzz at 140 Hz through a few formants) and every 0.6 s an s: noise through a band at 6.5 kHz, 120 ms long.
     std::mt19937 gen (7);
@@ -58,14 +74,27 @@ int main (int argc, char** argv)
         }
         proc.processBlock (buffer, midi);
         if (block % 4 == 0)
+        {
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+            if (framesMode && block >= 600 && frameIdx < 30)
+            {
+                const auto frame = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
+                const auto f = framesDir.getChildFile (juce::String::formatted ("frame_%03d.png", frameIdx++));
+                f.deleteFile();
+                juce::FileOutputStream stream (f);
+                framesOk = framesOk && stream.openedOk() && png.writeImageToStream (frame, stream);
+            }
+        }
     }
-    auto& designed = ui::innerOf<NemesisEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    if (framesMode)
+    {
+        std::printf ("%s %d frames to %s\n", framesOk ? "wrote" : "could not write", frameIdx, framesDir.getFullPathName().toRawUTF8());
+        return framesOk && frameIdx == 30 ? 0 : 1;
+    }
     const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
-    const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
+    const juce::File out = resolvePath (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);
-    juce::PNGImageFormat png;
     const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
     std::printf ("%s %s\n", ok ? "wrote" : "could not write", out.getFullPathName().toRawUTF8());
     return ok ? 0 : 1;

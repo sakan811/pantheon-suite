@@ -1,107 +1,156 @@
 # Dionysus Warmth
 
-A **saturator** (VST3 + AU + Standalone) for mixing and mastering: six curves (tape, tube, transformer, diode, fold, clip) that round off or fold the peaks and add harmonics,
-a **bias** that adds even harmonics, a **tone** tilt, a parallel **mix**, an **auto gain** that keeps the loudness the same so you judge the tone and not the level, and
-**oversampling** up to 8x so the harmonics above half the sample rate do not fold back as tones that were never there. The display shows the curve and the harmonics a sine gets.
+Six-curve harmonic saturator for mixing and mastering with asymmetric bias, wet-only low cut, tone tilt, auto gain, ADAA, and 8x oversampling.
 
-## Name origin
+`VST3 + AU + Standalone`
+
+![Dionysus Warmth Showcase](docs/showcase.gif)
+
+*IN/OUT transfer curve, odd/even harmonic bars (`-60..0 dB`), and `DRIVE LEVEL` meter animate as curve, drive, and bias change.*
+
+## Theme
+
+### Name origin
 
 *Dionysus* is the god of wine and of excess: the tame form of it is warmth. (CMake targets, namespaces and plugin codes use the short name "Dionysus".)
 
-![Dionysus Warmth](docs/screenshot.png)
+### Core philosophy
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). The tape curve at +16 dB of drive with BIAS +25%, TONE +20%, LOW CUT off, MIX 85%, 4x oversampling and AUTO GAIN on. On the left, the curve the signal goes through (input across, output up); on the right, the harmonics it makes from a sine at -12 dBFS, odd ones amber and even ones teal (the bias is what brings the even ones). The strip explains the bias' DC blocker and the delayed dry sound under 100% MIX. On the far right, the **drive level** meter: the level that reaches the curve (a 0.25 sine times +16 dB, +4.0 dB here: red above 0 dB, where the curves turn over) and the CLIP lamp (the output reached 0 dBFS; off here). The ADAA switch under AUTO GAIN is off; at 4x it would be ignored anyway. Regenerate with the command under "Development".*
+- **Warmth first, never clipping for loudness.** Six curves round off peaks and add harmonics (`slope 1` at `0`); drives of `24 dB+` distort, and [Aegis Ceiling](../aegis/README.md) handles true-peak limiting.
+- **Judge tone, not level.** **Auto Gain** matches `-12 dBFS` RMS across curve, drive, and bias changes, while **Delta** isolates only what the saturator added.
+- **Zero-comb parallel shaping.** **Low Cut** filters only the wet path, and the dry path waits in an exact integer delay (`0–44` samples) matching the oversampler.
+- **Clean aliasing control, honest trade-offs.** Half-band oversampling (`2x–8x`) cuts fold-back by up to `44.8 dB`; `1x` **ADAA** gives `0` latency at the cost of a `-2 dB` @ `10 kHz` low-pass.
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
-## What it does
+## See it
 
-| | |
+| View | What to look at |
 |---|---|
-| **Drive** | 0 to +36 dB, 12 by default: how hard the sound is pushed into the curve. |
-| **Curve** | *Tape* (tanh: symmetric, gentle), *Tube* (`x / (1 + |x|)`: softer onset, more high harmonics as it is driven), *Transformer* (a cubic: thick, strong 3rd), *Diode* (uneven: a tanh with a knee of 0.7 on the negative side: even harmonics of its own), *Fold* (`sin x`: peaks turn back on themselves), *Clip* (hard). Every curve has a slope of 1 at 0, so a quiet sound passes unchanged. |
-| **Bias** | -100 to +100%: moves the working point of the curve before it (up to 0.5 in the curve's units), which adds even harmonics. What the curve gives for that offset alone is taken off, so silence stays silence, and a 10 Hz high-pass takes the rest of the DC away. |
-| **Tone** | -100 to +100%: after the curve, a low shelf and a high shelf at 1 kHz turning opposite ways, 6 dB each: a tilt of 12 dB at the ends. + is brighter. |
-| **Low cut** | 20 to 500 Hz, off at 20: a high-pass (2nd order) on the saturated path only, before the curve, so the bass is not saturated and stays clean. The dry sound is not filtered: under 100% MIX the lows come back through it, and at 100% the whole sound loses them. |
-| **Mix** | 0 to 100%: the saturated sound blended with the dry one. The dry sound is delayed to match the oversampler, so nothing combs. 100% is the saturated sound itself. |
-| **Set drive** | A one-shot for beginners: press it while the track plays and for one second it measures the loudest level before DRIVE, then sets DRIVE so that level reaches the curves' turning point (0 dB on the drive meter). MIX stays as it is: back it off to keep more of the clean sound. With no sound in that second DRIVE is left alone and the button says NO AUDIO. It is one parameter change, and DRIVE is an ordinary knob afterwards. |
-| **Delta** | Plays only what the saturator adds (the output minus the input, delayed like the output). Not saved, not automatable, off when the window closes. |
-| **Drive level** | A meter at the right of the display: the largest level that reaches the curve (the sound after LOW CUT times DRIVE), 0 dB where the curves turn over, red above it, and a CLIP lamp for an output at 0 dBFS (held one second). |
-| **Output** | -24 to +12 dB, after everything. |
-| **Auto gain** | On by default: the gain that brings the RMS of a sine at -12 dBFS back to what it was before the curve (the AC part: the DC is taken off). |
-| **Oversampling** | Off, 2x, 4x or 8x: half-band, linear phase (a 65-tap stage and then 33-tap stages), delay 0, 32, 40 or 44 samples. |
-| **ADAA** | Off by default, and at 1x only: antiderivative anti-aliasing of the curve (Parker, Zavalishin, Le Bivic, DAFx 2016): each sample is the curve averaged over its step, which cuts the tones a hard curve folds back (Clip, Fold, Transformer) with no delay. In the linear region it is a one-zero lowpass (-2 dB at 10 kHz), so the top of the whole sound dulls a little. Ignored at 2x, 4x and 8x. The display shows the static curve, without it. |
-| **Presets** | Eight starting points (Init, Tape Warmth, Tube Glow, Transformer Thick, Parallel Grit, Bass Harmonics, Fold Fuzz, Hard Clip Edge). A preset sets every control, oversampling included; what it does not list goes back to its default (Parallel Grit sets LOW CUT to 120 Hz). |
+| ![Dionysus Warmth](docs/screenshot.png) | Tape `+16 dB` drive, `+25%` bias, `85%` mix, `4x` OS: odd amber, even teal harmonics. |
 
-## How it works
+### UI colour legend
 
-1. DRIVE is a gain (smoothed over 5 ms) before the curve; the curve runs at the oversampled rate; the signal comes back through the half-band filters.
-2. Each half-band stage is a windowed-sinc (Blackman) filter, with the gain of 2 on the way up that makes up for the inserted zeros; the delay of a round trip is a whole number of samples, so the dry sound is
-   delayed by exactly the same.
-3. The curve's harmonic display is not drawn from a measurement: it is one cycle of a sine at -12 dBFS pushed through the same `saturate()` function the engine runs, read by a DFT. At 1x with ADAA on the engine runs the averaged form instead (`saturateAdaa()`), and the display stays the static curve. The tests check that
-   the engine, measured at 8x, gives the same harmonics.
+Exact hex values from [`Hardware.h`](../../shared/ui/include/pantheon/ui/Hardware.h) (`DionysusUi.h` sets `kHarmonicFloorDb = -60.0f` for the harmonic bars):
 
-## Measured (`DionysusTests`, 48 kHz)
+| Swatch | Hex | UI Element | Meaning |
+|---|---|---|---|
+| 🟡 | `#FFB347` | Transfer curve (`IN / OUT`), odd harmonic bars (`3rd, 5th, 7th...`), `DRIVE LEVEL` bar (`<= 0 dB`) & text readout, lit switches (`AUTO GAIN`, `DELTA`, etc.) | Static saturation waveshaper, symmetric odd-order harmonics, and drive level up to the curve's `0 dB` turnover point |
+| 🔵 | `#37E3C5` | Even harmonic bars (`2nd, 4th, 6th...`), transfer curve glass border | Asymmetric even-order harmonics introduced by **BIAS** or the **Diode** curve |
+| 🔴 | `#EF4A3D` | `DRIVE LEVEL` bar above `0 dB` & `CLIP` lamp (`0 dBFS` hold, 1 s) | Signal hitting the curve's nonlinear turnover/saturation zone (`> 0 dB`), or output reaching `0 dBFS` |
+| 🟠 | `#F2A33A` | Warning notes in bottom advice strip | `DELTA` left on, `MIX` at `0%`, or hard curves (**Clip / Fold / Transformer**) at `>= 12 dB` Drive without oversampling |
+| ⚪ | `#EAE3D0` | Silkscreen labels & primary text | Control titles and bright text |
+| 🔘 | `#9F9680` | Grid numbers, harmonic/drive axis labels, unlit `ADAA` switch, info strip notes | `-60..0 dB` scales, latency readout, and informational notes (DC blocker, delayed dry Mix, ADAA 1x-only) |
 
-- Every curve has a slope of 1 at 0 and stays within +-1 for any input. Tape is symmetric; the diode is not.
-- Tape at 14 dB of drive, 8x: the fundamental is +11.37 dB and the 3rd harmonic -9.07 dB, exactly what the curve gives; there is no 2nd harmonic (-228 dB). With BIAS 60% a 2nd harmonic appears at -8.0 dB (the curve: -8.0) and the output has no DC (mean 2e-9).
-- The harmonics each curve makes at 14 dB of drive (a sine at -12 dBFS, dB under what went in):
+## Try it
 
-  | | 2nd | 3rd | 5th |
-  |---|---|---|---|
-  | Tape | none | -9.1 | -27.4 |
-  | Tube | none | -10.4 | -20.9 |
-  | Transformer | none | -4.9 | -25.0 |
-  | Diode | -14.3 | -7.9 | -23.5 |
-  | Fold | none | -10.5 | -44.2 |
-  | Clip | none | -8.4 | -16.2 |
+| Setting | What you see / hear / measure |
+|---|---|
+| Play track → press **Set Drive** | Listens `1 s` before **Drive**; sets **Drive** so loudest peak hits `0 dB` on meter (`NO AUDIO` on silence). |
+| **Tape** (`+14 dB` Drive, `0%` Bias, `8x`) | Odd harmonics only: `3rd -9.1 dB`, `5th -27.4 dB`, `2nd -228 dB` (amber bars only); RMS stays within `0.008 dB` with **Auto Gain**. |
+| **Tape** (`+14 dB` Drive, `60%` Bias, `8x`) | Teal even bars appear (`2nd -8.0 dB`); `10 Hz` HPF strips DC (`mean 2e-9`). |
+| *Parallel Grit* (`120 Hz` **Low Cut**, **Mix** `< 100%`) | Bass `< 120 Hz` stays clean via delayed dry path; only `> 120 Hz` saturates with zero combs. |
+| **Clip** (`+24 dB` Drive, `7 kHz` sine) across OS modes | `13 kHz` alias drops from `-12.2 dB` (`1x`) → `-23.3 dB` (`1x ADAA`) → `-44.5 dB` (`2x`) → `-54.8 dB` (`4x`) → `-57.0 dB` (`8x`). |
 
-- Aliasing: a 7 kHz sine at -6 dBFS, hard-clipped with 24 dB of drive: its 5th harmonic (35 kHz) folds back to 13 kHz at -12.2 dB at 1x, -44.5 at 2x, -54.8 at 4x and -57.0 dB at 8x. The level of the fundamental is the same at all four (-6.519 dB).
-- MIX 0% is the input delayed by 0, 32, 40 and 44 samples for 1x, 2x, 4x and 8x, bit for bit; an impulse through the saturated path peaks exactly the reported latency later (44 at 8x).
-- AUTO GAIN: a sine at -12 dBFS comes out as loud as it went in, for every curve at 6, 18 and 30 dB of drive, within 0.008 dB (RMS). With ADAA on at 1x it is within 0.18 dB (AUTO GAIN is measured on the static curve).
-- ADAA (1x only): the antiderivative of each curve has the curve as its slope to within 7e-10 at 2000 points in [-6, 6] (the diode's is 0.49 ln cosh(x / 0.7)). A 7 kHz sine hard-clipped with 24 dB of drive: its 13 kHz alias is -12.2 dB at 1x and -23.3 dB with ADAA, 11.1 dB lower (fold 5.3 dB lower, transformer 10.8 dB lower); the fundamental moves from +2.09 to +1.75 dB.
-- ADAA in the linear region is a one-zero lowpass: a quiet sine through the clip at 1x comes out -0.02 dB at 1 kHz and -2.01 dB at 10 kHz, as |cos (pi f / fs)| says (the test checks it).
-- ADAA with MIX 50% at 1x on a quiet sine: -0.01 dB at 1 kHz, -1.41 dB at 10 kHz and -5.23 dB at 20 kHz against the same MIX without ADAA, as the blend `(1 - m/2) x[n] + (m/2) x[n-1]` gives (the test checks it): a gentler lowpass, no notch.
-- With ADAA on, silence in is exactly 0 out for every curve at BIAS 60%. With it off, the output is that of a run that never sets it, bit for bit; at 2x, 4x and 8x with it on, the output is that of it off, bit for bit.
-- TONE +100%: 100 Hz -6.0 dB, 8 kHz +6.0 dB (a tilt of 12.0 dB); at 0 it is flat.
-- LOW CUT 500 Hz: a 50 Hz tone through the saturated path is -40.0 dB; at MIX 0% it is untouched (+0.00 dB), at 50% -6.1 dB (half of it is the dry sound); at 20 Hz (Off) the sound is as it was, bit for bit.
-- DELTA plus the input delayed by 32 samples is the output (largest difference 7.5e-09); the 3rd harmonic of a hard-clipped tone is as loud in DELTA as in the output (0.000 dB); at MIX 0% it is silence, exactly.
-- SET DRIVE on a -12 dBFS sine measured at +6 dB of drive sets DRIVE to 12.0 dB, and the peak then reaches the curve at +0.00 dB (test [9]); with no sound it leaves DRIVE alone, and a very quiet or very loud programme is kept inside the knob's 0 to +36 dB.
-- The drive meter reads 1.000 for a -12 dBFS sine at +12 dB of drive. Bypassed by the host at 8x, an impulse comes out exactly the reported 44 samples late (`DionysusUiCheck`).
-- The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
+> [!TIP]
+> **1-click gain staging:** Press **SET DRIVE** during playback to target `0 dB` on the **DRIVE LEVEL** meter, then dial **Mix** back for parallel warmth.
 
-## Limits
+> [!NOTE]
+> **Odd vs Even harmonics:** **Bias** (or **Diode**) shifts the working point for teal even harmonics; a `10 Hz` high-pass strips the DC offset automatically.
 
-- **It is not a clipper or a limiter for loudness** (Aegis limits). A drive of 24 dB or more is distortion, not warmth, and loud sounds better: compare at the same level (AUTO GAIN does that).
-- **Without oversampling, hard curves alias.** Clip, Fold and Transformer at 12 dB of drive or more make tones that were never there; the half-band filters have a transition band, so a harmonic just over half the sample rate is only partly removed
-  even at 8x. ADAA at 1x removes part of it, not all: 11 dB on the clipped sine above, where 2x gives 32 dB (-44.5 dB against -12.2 dB at 1x).
-- **ADAA is 1x only, and it is not free.** It is ignored at 2x, 4x and 8x. It is a first-order method, so on the whole sound it is a lowpass (-2 dB at 10 kHz, from the linear region, not just the drive's harmonics); it is off by default for that reason. With MIX under 100% at 1x the dry sound is the plain input and the wet one is the average of two samples (half a sample later), so the blend is the same lowpass in proportion to MIX, not a comb: no frequency cancels (MIX 50% on a quiet sound: -0.01 dB at 1 kHz, -1.41 dB at 10 kHz, -5.23 dB at 20 kHz). The delay is half a sample, which no host can be told about, so the reported latency stays 0 and MIX 0% is still the input.
-- **Oversampling delays the sound** (up to 44 samples) and costs CPU; switching it while playing restarts the saturator (it clicks).
-- **LOW CUT filters the saturated path only.** At 100% MIX that is the whole sound, so it takes the lows out of it; lower MIX to keep them (the dry sound is not filtered). It is a 2nd-order filter, so its phase differs from the dry sound's around the cutoff.
-- Each channel is saturated on its own, so a hard-panned sound stays where it is; the two channels' harmonics are not linked.
-- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+> [!IMPORTANT]
+> **Oversampling vs ADAA:** Hard curves at `>= 12 dB` alias at `1x`—prefer **2x–8x** (`32 / 40 / 44` samples, host-compensated); `1x` **ADAA** adds `-2 dB` @ `10 kHz` roll-off and is ignored at `2x–8x`.
 
-## Building
+> [!WARNING]
+> **Wet-only Low Cut:** **Low Cut** (`20–500 Hz`) filters only the saturated path—lower **Mix** below `100%` so clean bass returns via the dry path.
 
-Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+> [!CAUTION]
+> **Not a limiter:** Drives of `24 dB+` distort; keep **Auto Gain** on to judge tone fairly, and use [Aegis Ceiling](../aegis/README.md) for true-peak limiting.
+
+## Reference
+
+### Controls
+
+| Control | Range / Default | What it does |
+|---|---|---|
+| **Drive** | `0.0` to `+36.0 dB` / `+12.0 dB` | Gain (`5 ms` smoothed) pushing signal into the saturation curve. |
+| **Curve** | `Tape`, `Tube`, `Transformer`, `Diode`, `Fold`, `Clip` / `Tape` | *Tape* (`tanh`), *Tube* (`x/(1+\|x\|)`), *Transformer* (cubic, thick 3rd), *Diode* (uneven `0.7` negative knee), *Fold* (`sin x`), *Clip* (hard). All have slope `1` at `0`. |
+| **Bias** | `-100` to `+100 %` / `0 %` | Shifts working point (up to `0.5` units) for even harmonics; steady offset subtracted + `10 Hz` DC blocker. |
+| **Tone** | `-100` to `+100 %` / `0 %` | Post-curve tilt EQ at `1 kHz` (`±6 dB` opposite low/high shelves = `12 dB` max tilt; `+` brighter). |
+| **Low Cut** | `20 Hz` (`Off`) to `500 Hz` / `Off` | 2nd-order high-pass on saturated path only (keeps bass clean when blended with dry **Mix**). |
+| **Mix** | `0` to `100 %` / `100 %` | Blends dry (latency-aligned to oversampler) with wet saturated path; `100%` is pure wet. |
+| **Set Drive** | One-shot button | Listens `1 s` before Drive and sets **Drive** (`0..+36 dB`) so peak hits `0 dB` (`NO AUDIO` on silence). |
+| **Auto Gain** | `On` / `Off` (`On`) | Compensates output level so a `-12 dBFS` sine keeps its AC RMS across Curve/Drive/Bias changes. |
+| **Oversampling** | `Off` (`1x`), `2x`, `4x`, `8x` / `2x` | Linear-phase half-band Sinc (`65`-tap + `33`-tap stages), adding `0, 32, 40, 44` samples delay. |
+| **ADAA** | `On` / `Off` (`Off`) | `1x`-only antiderivative anti-aliasing (Parker, Zavalishin, Le Bivic, DAFx 2016) with `0` reported latency; ignored at `2x–8x`. |
+| **Output / Delta** | `-24.0` to `+12.0 dB` / `0.0 dB`; **Delta** `Off` | Final trim; **DELTA** outputs `output - delayed_input` (unsaved, not automatable, off when editor closes). |
+| **Drive Level / Clip** | Peak meter + `0 dBFS` hold (`1 s`) | Peak reaching curve (`0 dB` turnover, red above) and `CLIP` lamp at `0 dBFS` output. |
+| **Presets** | 8 presets (`Init`) | *Init*, *Tape Warmth*, *Tube Glow*, *Transformer Thick*, *Parallel Grit* (`120 Hz` Low Cut), *Bass Harmonics*, *Fold Fuzz*, *Hard Clip Edge*. |
+
+### Signal flow
+
+```text
+input ─┬─► [Wet] Low Cut (20–500 Hz) ─► Drive (+5 ms smooth) ─► Upsample (1x–8x, ×2 gain) ─► Curve (+ Bias / ADAA at 1x) ─► Downsample ─► 10 Hz DC Block ─► Tone Tilt ─┐
+       │                                                                                                                                                                   ├─► Mix ─► Auto Gain + Output ─► Delta ─► output
+       └─► [Dry] Integer Delay Line (0, 32, 40, or 44 samples) ────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Matched half-band delay:** Blackman-windowed sinc half-band filters (`65`-tap first stage, `33`-tap subsequent stages) yield exact integer round-trip latency (`0, 32, 40, 44` samples), matched bit-for-bit on the dry path.
+- **Live DFT display:** The harmonic display evaluates one cycle of a `-12 dBFS` sine through `saturate()` (always the static curve, even when `1x` ADAA runs `saturateAdaa()`).
+
+### Measured
+
+`DionysusTests` (`48 kHz`) and `DionysusUiCheck`:
+
+| Curve (`+14 dB`, `-12 dBFS` sine, `8x`, dB re input) | 2nd | 3rd | 5th |
+|---|---|---|---|
+| **Tape** | none (`-228 dB`) | `-9.1` | `-27.4` |
+| **Tube** | none | `-10.4` | `-20.9` |
+| **Transformer** | none | `-4.9` | `-25.0` |
+| **Diode** | `-14.3` | `-7.9` | `-23.5` |
+| **Fold** | none | `-10.5` | `-44.2` |
+| **Clip** | none | `-8.4` | `-16.2` |
+
+- **Curve & Bias:** Every curve has slope `1` at `0` and stays within `±1`; Tape `+14 dB` (`8x`) fundamental `+11.37 dB`, 3rd `-9.07 dB`, 2nd `-228 dB`; `60%` Bias 2nd `-8.0 dB` (curve `-8.0`) and DC mean `2e-9`.
+- **Aliasing (`7 kHz` `-6 dBFS`, Clip `+24 dB`):** 5th harmonic (`35 kHz`) folds to `13 kHz` at `-12.2 dB` (`1x`), `-44.5 dB` (`2x`), `-54.8 dB` (`4x`), `-57.0 dB` (`8x`); fundamental identical at `-6.519 dB`.
+- **Delay & Mix `0%`:** `Mix 0%` equals input delayed by `0, 32, 40, 44` samples (`1x, 2x, 4x, 8x`), bit for bit; impulse peaks at `44` samples (`8x`); host bypass at `8x` delays impulse by `44` samples (`DionysusUiCheck`).
+- **Auto Gain:** `-12 dBFS` sine matches input RMS within `0.008 dB` across all curves at `6, 18, 30 dB` Drive (`0.18 dB` with `1x` ADAA).
+- **ADAA (`1x` only):** Antiderivatives match derivatives within `7e-10` across `2000` points in `[-6, 6]` (Diode: `0.49 ln cosh(x / 0.7)`). On `7 kHz` Clip `+24 dB`, `13 kHz` alias drops `11.1 dB` (`-12.2` → `-23.3 dB`), Fold `5.3 dB` lower, Transformer `10.8 dB` lower (fundamental `+2.09` → `+1.75 dB`). Linear-region low-pass matches `|cos(pi f / fs)|`: `-0.02 dB` (`1 kHz`), `-2.01 dB` (`10 kHz`); `50%` Mix `(1 - m/2) x[n] + (m/2) x[n-1]`: `-0.01 dB` (`1 kHz`), `-1.41 dB` (`10 kHz`), `-5.23 dB` (`20 kHz`). Silence at `60%` Bias = `0` out; off or `2x–8x` is bit-identical to pre-ADAA.
+- **Tone, Low Cut, Delta, Set Drive, Stability:** **Tone** `+100%`: `100 Hz` `-6.0 dB`, `8 kHz` `+6.0 dB` (`12.0 dB` tilt; `0%` flat). **Low Cut** `500 Hz`: `50 Hz` wet `-40.0 dB`, `0%` Mix `+0.00 dB`, `50%` Mix `-6.1 dB`, `20 Hz` (Off) bit-exact. **Delta** + `32`-sample delayed input = output (`7.5e-09` max diff; 3rd `0.000 dB`; `0%` Mix = silence). **Set Drive** (`-12 dBFS` at `+6 dB`) sets `12.0 dB` (`+0.00 dB` on curve, meter `1.000`; test [9]). Bit-identical across `1, 7, 64, 333, 512, 4096` blocks; NaN/inf treated as silence.
+
+### Limits
+
+- **Not a loudness clipper or limiter:** Drives `>= 24 dB` distort; compare at equal loudness with **Auto Gain** on, and use [Aegis Ceiling](../aegis/README.md) to limit.
+- **Hard-curve aliasing:** Clip, Fold, and Transformer `>= 12 dB` alias without oversampling, and transition-band harmonics near Nyquist still leak partly even at `8x`.
+- **ADAA trade-offs:** `1x`-only (ignored at `2x–8x`); adds a first-order low-pass (`-2 dB` at `10 kHz` wet; `0.5`-sample uncompensated group delay) and removes less aliasing than `2x` oversampling (`11 dB` vs `32 dB` on clipped `7 kHz` sine).
+- **Oversampling cost & switching:** Adds up to `44` samples latency and CPU; changing **Oversampling** while playing restarts the saturator (clicks).
+- **Wet-only Low Cut:** Filters only the saturated path (`2nd`-order phase shift relative to dry around cutoff).
+- **Unlinked stereo:** Channels saturate independently; harmonics are not stereo-linked.
+- **Platform verification:** Builds on macOS (VST3 + AU, verified by hand 2026-11-13) and passes `auval -v`; no macOS CI job and no `HostCheck`.
+
+## Build & develop
+
+Requires CMake 3.22+ and a C++20 compiler; JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake).
+
+```bash
+# Fast build & check from repository root (Ninja + ccache if installed)
+./scripts/build.sh dionysus         # build & run DionysusTests + DionysusUiCheck
+./scripts/build.sh dionysus all     # tests, ui, snap, vst3, au, app
+./scripts/showcase.sh dionysus      # regenerate docs/showcase.gif (requires ffmpeg)
+```
+
+Manual CMake from `plugins/dionysus/`:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target Dionysus_VST3 Dionysus_AU Dionysus_Standalone -j 10
-```
-
-Building does **not** install the plugins; add `-DDIONYSUS_INSTALL_AFTER_BUILD=ON` for that (macOS).
-
-## Development
-
-```bash
-cmake --build build --target DionysusTests && ./build/DionysusTests_artefacts/Release/DionysusTests            # DSP: no plugin, no GUI
-cmake --build build --target DionysusUiCheck && ./build/DionysusUiCheck_artefacts/Release/DionysusUiCheck      # the editor on the real processor
+cmake --build build --target Dionysus_VST3 Dionysus_AU Dionysus_Standalone -j 10  # add -DDIONYSUS_INSTALL_AFTER_BUILD=ON on macOS to install
+cmake --build build --target DionysusTests && ./build/DionysusTests_artefacts/Release/DionysusTests
+cmake --build build --target DionysusUiCheck && ./build/DionysusUiCheck_artefacts/Release/DionysusUiCheck
 cmake --build build --target DionysusSnapshot && ./build/DionysusSnapshot_artefacts/Release/DionysusSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` is the output of `DionysusSnapshot` (arguments in the file's header), never edited by hand. See
-[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+`docs/screenshot.png` and `docs/showcase.gif` are generated by `DionysusSnapshot` / `scripts/showcase.sh` (never edited by hand); see [CLAUDE.md](CLAUDE.md) for invariants.
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
-the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).

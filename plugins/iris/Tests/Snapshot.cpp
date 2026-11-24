@@ -4,6 +4,7 @@
 // Renders the plugin editor to a PNG while feeding it a stereo programme (see TestSignals.h), so the display shows real activity.
 //
 //   IrisSnapshot <out.png> [preset name] [band=N] [region=MASK] [solo=BAND:band|curve] [delta]
+//   IrisSnapshot --frames <dir> [preset name] [band=N] ...
 //
 //   band=N     select band N (1-based)
 //   region=M   solo the frequency regions in bit mask M (1 = sub ... 32 = high)
@@ -16,30 +17,38 @@
 #include <pantheon/ui/Scaled.h>
 #include "PluginProcessor.h"
 #include "TestSignals.h"
+#include <string_view>
 
 int main (int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
     {
-        std::printf ("usage: IrisSnapshot <out.png> [preset name] [band=N] [region=MASK] [solo=N:band|curve] [phase=N] [delta]\n");
+        std::printf ("usage: IrisSnapshot <out.png> [preset name] [band=N] [region=MASK] [solo=N:band|curve] [phase=N] [delta] | --frames <dir> [...]\n");
         return 2;
     }
+    const bool framesMode = argc >= 3 && std::string_view (argv[1]) == "--frames";
+    const auto resolvePath = [] (const char* p)
+    {
+        const juce::String s (p);
+        return juce::File::isAbsolutePath (s) ? juce::File (s) : juce::File::getCurrentWorkingDirectory().getChildFile (s);
+    };
 
     juce::ScopedJuceInitialiser_GUI gui;
     IrisProcessor proc;
     proc.setPlayConfigDetails (2, 2, 48000.0, 512);
     proc.prepareToPlay (48000.0, 512);
 
-    if (argc > 2)
+    const int presetArg = framesMode ? 3 : 2;
+    if (argc > presetArg)
         for (int i = 0; i < proc.getNumPrograms(); ++i)
-            if (proc.getProgramName (i) == argv[2])
+            if (proc.getProgramName (i) == argv[presetArg])
                 proc.setCurrentProgram (i);
 
     bool sidechain = false, reference = false;
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
 
-    for (int i = 3; i < argc; ++i)
+    for (int i = presetArg + 1; i < argc; ++i)
     {
         const juce::String arg (argv[i]);
         if (arg.startsWith ("band="))
@@ -90,6 +99,14 @@ int main (int argc, char** argv)
         view.toggleLearning();
     }
 
+    auto& designed = ui::innerOf<IrisEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const juce::File framesDir = framesMode ? resolvePath (argv[2]) : juce::File();
+    if (framesMode)
+        framesDir.createDirectory();
+    int frameIdx = 0;
+    bool framesOk = true;
+    juce::PNGImageFormat png;
+
     test::Programme programme;
     juce::AudioBuffer<float> buffer (2, 512);
     juce::MidiBuffer midi;
@@ -115,7 +132,22 @@ int main (int argc, char** argv)
         }
         proc.processBlock (buffer, midi);
         if (block % 4 == 0)
+        {
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34); // about one display tick per 4 blocks, so the averaged views (resonances, masking) fill in
+            if (framesMode && block >= 160 && (block - 160) % 8 == 0 && frameIdx < 30)
+            {
+                const auto frame = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
+                const auto f = framesDir.getChildFile (juce::String::formatted ("frame_%03d.png", frameIdx++));
+                f.deleteFile();
+                juce::FileOutputStream stream (f);
+                framesOk = framesOk && stream.openedOk() && png.writeImageToStream (frame, stream);
+            }
+        }
+    }
+    if (framesMode)
+    {
+        std::printf ("%s %d frames to %s\n", framesOk ? "wrote" : "could not write", frameIdx, framesDir.getFullPathName().toRawUTF8());
+        return framesOk && frameIdx == 30 ? 0 : 1;
     }
     if (reference)
     {
@@ -129,12 +161,10 @@ int main (int argc, char** argv)
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
 
-    auto& designed = ui::innerOf<IrisEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
     const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     juce::File out (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);
-    juce::PNGImageFormat png;
     const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
     std::printf ("%s %s\n", ok ? "wrote" : "FAILED to write", out.getFullPathName().toRawUTF8());
     return ok ? 0 : 1;

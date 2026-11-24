@@ -4,18 +4,26 @@
 // Renders the plugin editor to a PNG while feeding it a programme, so the displays show real activity.
 //
 //   HeraSnapshot <out.png>
+//   HeraSnapshot --frames <dir>
 
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
 #include <random>
+#include <string_view>
 
 int main (int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
     {
-        std::printf ("usage: HeraSnapshot <out.png>\n");
+        std::printf ("usage: HeraSnapshot <out.png> | --frames <dir>\n");
         return 2;
     }
+    const bool framesMode = argc >= 3 && std::string_view (argv[1]) == "--frames";
+    const auto resolvePath = [] (const char* p)
+    {
+        const juce::String s (p);
+        return juce::File::isAbsolutePath (s) ? juce::File (s) : juce::File::getCurrentWorkingDirectory().getChildFile (s);
+    };
     juce::ScopedJuceInitialiser_GUI gui;
     HeraProcessor proc;
     proc.setPlayConfigDetails (2, 2, 48000.0, 512);
@@ -33,6 +41,13 @@ int main (int argc, char** argv)
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
+    auto& designed = ui::innerOf<HeraEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const juce::File framesDir = framesMode ? resolvePath (argv[2]) : juce::File();
+    if (framesMode)
+        framesDir.createDirectory();
+    int frameIdx = 0;
+    bool framesOk = true;
+    juce::PNGImageFormat png;
 
     // A beat: a kick on the quarter notes under a bed of noise that swells.
     std::mt19937 gen (7);
@@ -55,15 +70,29 @@ int main (int argc, char** argv)
         }
         proc.processBlock (buffer, midi);
         if (block % 4 == 0)
+        {
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+            if (framesMode && block >= 600 && frameIdx < 30)
+            {
+                const auto frame = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
+                const auto f = framesDir.getChildFile (juce::String::formatted ("frame_%03d.png", frameIdx++));
+                f.deleteFile();
+                juce::FileOutputStream stream (f);
+                framesOk = framesOk && stream.openedOk() && png.writeImageToStream (frame, stream);
+            }
+        }
     }
 
-    auto& designed = ui::innerOf<HeraEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    if (framesMode)
+    {
+        std::printf ("%s %d frames to %s\n", framesOk ? "wrote" : "could not write", frameIdx, framesDir.getFullPathName().toRawUTF8());
+        return framesOk && frameIdx == 30 ? 0 : 1;
+    }
+
     const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
-    const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
+    const juce::File out = resolvePath (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);
-    juce::PNGImageFormat png;
     const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
     std::printf ("%s %s\n", ok ? "wrote" : "could not write", out.getFullPathName().toRawUTF8());
     return ok ? 0 : 1;

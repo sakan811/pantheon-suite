@@ -1,99 +1,140 @@
 # Nemesis Hush
 
-A **de-esser** (VST3 + AU + Standalone) for vocals and anything else with sibilance: it listens to a band around the s, and when that band is louder than a threshold it turns it down,
-by up to a range. It turns down **only the band** (split-band) or the whole sound (wideband), can compare the band with the whole sound (relative detection) so one setting works for
-quiet and loud passages, and can play you the band it listens to, so you can find the s.
+A transparent de-esser for vocals and bright instruments with split-band/wideband modes, absolute/relative detection, look-ahead, and one-click calibration.
 
-## Name origin
+**Formats:** VST3 + AU + Standalone
 
-*Nemesis* is the goddess of what is out of measure being brought back to it. (CMake targets, namespaces and plugin codes use the short name "Nemesis".)
+![Nemesis Hush Showcase](docs/showcase.gif)
 
-![Nemesis Hush](docs/screenshot.png)
+*Left glass plotting the detector's band-pass response (amber at rest, teal when `LISTEN` is active) while the right glass scrolls 8 seconds of gain reduction.*
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A buzzing vowel with bursts of hiss, in split-band mode with absolute detection: FREQ 6.5 kHz, WIDTH Q 1.5, THRESH -30 dB, RANGE 12 dB, RATIO Inf (the knob between RANGE and RELEASE, here at its default: the law as it was) and RELEASE 40 ms. LISTEN, DELTA and FIND (dimmed: LISTEN is off) are under the selectors; UNDO / REDO sit in the header's top strip, above the labels: UNDO is lit and REDO dimmed, as after a change; SET THRESH is in the header, beside LOOK-AHEAD. On the left, the band it listens to; on the right, the reduction over the last seconds, which falls at every burst of hiss (-2.0 dB at the moment of the render) and rests at 0 between them. Regenerate with the command under "Development".*
+## Theme
 
-## What it does
+### Name origin
 
-| | |
+*Nemesis* is the Greek goddess of what is out of measure being brought back to it. (CMake targets, namespaces, and plugin codes use the short name `Nemesis`.)
+
+### Core philosophy
+
+- **Only subtracts what crosses the line.** Split-band computes `in − (1 − gain) × band` instead of a dynamic filter, so vowels and below-threshold audio (`gain = 1`) pass bit-for-bit identical.
+- **One gain across both channels.** The louder channel's `2 ms` peak envelope drives both channels equally so stereo sibilants never drift.
+- **Band energy, not phoneme recognition.** `FIND` (`4–10 kHz`, `17` Q-`10` bins) and `SET THRESH` (loudest `6%` over `-100 dBFS`) measure raw band energy, so cymbals or bright buses trigger reduction too.
+- **Single-band focus.** Tracks one sibilant region cleanly; widen `WIDTH` (`Q`) or stack two instances (or use **Iris Prism**) if sibilance jumps in frequency.
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
+
+## See it
+
+| View | Preview | Notes |
+|---|---|---|
+| **Default editor** | ![Nemesis Hush](docs/screenshot.png) | Split-band Absolute (`6.5 kHz`, `Q 1.5`, `-30 dB`, `Inf`) cutting hiss `-2.0 dB`. |
+
+### UI colour legend
+
+| Swatch | Hex | UI Element | Meaning |
+|---|---|---|---|
+| 🟡 | `#ffb347` | Detector curve (`LISTEN` off), reduction trace & fill, lit switches (`DELTA`, `UNDO`) | Active de-essing band, live gain reduction history (`0` to `−24 dB`), and active switches |
+| 🩵 | `#37e3c5` | Detector curve (`LISTEN` on) & left glass frame | Auditioning only the band-pass detector signal (`WHAT IT LISTENS TO`) |
+| 🟠 | `#f2a33a` | Note strip warnings | Alerts when `LISTEN`/`DELTA` are active, `RANGE` is `0 dB`, `THRESH ≥ -3 dB`, or reduction reaches `≥ 10 dB` (lisp risk) |
+| ⚪ | `#eae3d0` / `#9f9680` | Silkscreen labels, info notes, grid axis labels | Static hardware panel markings, scale ticks, and contextual info tips |
+| ⬛ | `#090d0d` / `#1c2a29` | Recessed glass & graticule lines | Display background (`−36 dB` band floor, `−24 dB` reduction depth) and reference grid |
+
+## Try it
+
+| Recipe / Setting | What you see, hear & measure |
 |---|---|
-| **Freq** | 2 to 12 kHz, 6.5 kHz by default: the centre of the sibilance. Male voices sit at 4 to 7 kHz, female at 6 to 10. |
-| **Width** | Q 0.5 to 5, 1.5 by default: how wide the band is (higher is narrower). |
-| **Thresh** | -60 to 0 dB, -30 by default. *Absolute:* the level of the band (peak of a sine, dBFS) above which it is turned down. *Relative:* how far under the whole sound the band may be. |
-| **Range** | 0 to 24 dB, 8 by default: the most it takes off. |
-| **Ratio** | 1:1 to Inf, Inf by default. Above THRESH each dB over it takes off `1 - 1/ratio` dB: 4:1 takes off 0.75 dB per dB over, a gentler reduction than the band held at THRESH (Giannoulis, Massberg and Reiss, JAES 2012). Inf holds the band at THRESH, the de-esser as it was before RATIO. |
-| **Release** | 5 to 300 ms, 40 by default. The attack is fixed at 0.3 ms. |
-| **Mode** | *Split-band:* only the band is turned down (the rest of the voice is not touched). *Wideband:* the whole sound is turned down. |
-| **Detection** | *Absolute* or *Relative* (see Thresh). |
-| **Listen** | Hear the band the detector hears. Monitoring: switch it off before a bounce. |
-| **Delta** | Off by default. Hear only what is turned down (the sound minus the output: `(1 - gain) x band` in split-band, `(1 - gain) x sound` in wideband): if it is the voice and not just the hiss of the s, THRESH is too low or RANGE too high. It takes the place of LISTEN while it is on; presets switch it off. |
-| **Find** | With LISTEN on, **FIND** listens to the next 1.5 s of the sound that plays and sets FREQ to the strongest place between 4 and 10 kHz: a bank of 17 narrow band-passes (Q 10, equal ratios) keeps the energy of the mono sum, the energy per hertz is smoothed over the neighbours, and the strongest place is refined between the bins. A sound under -100 dBFS gives no answer and FREQ is left alone. |
-| **Set thresh** | With the sound playing, **SET THRESH** (in the header) listens for 1.5 s to the band the detector hears at FREQ and sets THRESH where the loudest 6% of the s begin: a 1 dB histogram of the active sound, in the detection Detection shows (absolute or relative). FREQ is not moved. With no s in the sound (silence, or a band as loud all the time) THRESH stays as it was and the strip says why. It is one undo step. |
-| **Undo** | **UNDO / REDO** (in the header's top strip) take back and redo every control change, SET THRESH and a preset included, one step each (Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus; Ctrl on other systems). They are not kept with the session. From the shared kit (`Undo.h`). |
-| **Look-ahead** | Off (default), 0.5, 1, 2 or 5 ms: the detector hears the sound as it arrives and the sound is heard that long after, so the first of a loud s is already turned down. It is a delay (the host compensates). |
-| **Presets** | Seven starting points (Init, Male Vocal, Female Vocal, Gentle Touch, Hard Sibilance, Broadcast Voice, Find the S). A preset sets every control; what it does not list goes back to its default. Find the s with LISTEN and move FREQ onto it first. |
+| **Male vocal** (`4–7 kHz`) / **Female vocal** (`6–10 kHz`), `WIDTH Q 1.5` | Enable **LISTEN** → press **FIND** (`1.5 s` scan across `4–10 kHz`) → switch **LISTEN** off → press **SET THRESH** (`1.5 s` scan, 1 undo step). |
+| **Relative** detection + `RANGE 8 dB` + `RATIO 2:1–4:1` | Compares band against `30 ms` broadband RMS so quiet verses and loud choruses get identical reduction (`5.09 dB` across `30 dB` level drop). |
+| **Split-band** vs **Wideband** (`RANGE 12`, vowel `300 Hz` + s `6.5 kHz`) | Split-band drops `6.5 kHz` by `-12.0 dB` while leaving `300 Hz` at `-0.00 dB`; Wideband ducks both `-12.0 dB`. |
+| **DELTA** on during sibilant phrases | Auditions `in − out` (overrides **LISTEN**); if vocal tone leaks in, raise `THRESH` or lower `RANGE`. |
+| **LOOK-AHEAD** `1–5 ms` on sharp `s` bursts | Delays audio (`48–240 samples` @ `48 kHz`, host-compensated) so the first `0.3 ms` peak drops from `-11.0 dBFS` to `-21.7 dBFS`. |
 
-The display shows the response of the band the detector hears and the reduction of the last eight seconds.
+> [!TIP]
+> Set `FREQ` (manually or with **FIND**) **before** running **SET THRESH**, because **SET THRESH** measures only at the current `FREQ` and `Detection` mode.
 
-## How it works
+> [!NOTE]
+> `Inf` holds the band at `THRESH`, while finite `RATIO` (`1 − 1/ratio`, `6 dB` soft knee, Giannoulis, Massberg & Reiss, JAES 2012) softens loud sibilants.
 
-1. **Detect.** Each channel goes through a constant-0-dB band-pass at FREQ and WIDTH (an RBJ biquad). Its peak envelope takes a peak at once and lets it fall over 2 ms (so the gain does not ripple
-   with the waveform); the louder channel decides, so both channels get one gain and the image does not move.
-2. **Level.** *Absolute:* the envelope in dB. *Relative:* the envelope in dB minus the level of the whole sound (a 30 ms mean square, read as the peak of a sine).
-3. **Reduction.** The overshoot over THRESH is multiplied by the slope `1 - 1/ratio` (RATIO), with a 6 dB soft knee of the same slope, up to RANGE. At Inf the slope is exactly 1: the band is held at the threshold, as the first release did. A one-pole follower (0.3 ms attack, RELEASE) smooths it; at rest (under 0.001 dB with nothing to reduce) it is let go to exactly 0.
-4. **Apply.** *Split-band:* `output = input - (1 - gain) x band`, so the band is turned down by the gain and the rest is not touched, and with a gain of exactly 1 the output is exactly the input. *Wideband:* `input x gain`.
-   LISTEN outputs the band.
+> [!IMPORTANT]
+> **LISTEN** and **DELTA** are monitoring modes (never saved as sound); switch both **off** before bouncing or exporting.
 
-## Measured (`NemesisTests`, 48 kHz)
+> [!WARNING]
+> Taking off `10 dB` or more risks a noticeable lisp (flagged in the bottom strip); switching **LOOK-AHEAD** while playing clears the delay ring (brief gap).
 
-- A sibilant (a 6.5 kHz tone) at -20 dBFS over a -30 dB threshold is turned down by 9.95 dB (the law: 10, it holds the band at the threshold); RANGE 6 dB stops the reduction at 6.00 dB.
-- RATIO: `reductionDb` of 10 dB over with slope 0.5 (2:1) is 5.00 dB, and with slope 1 (Inf) it is 10.00 dB. A sibilant 10 dB over a -30 dB threshold at 2:1 settles at 4.98 dB of reduction (the law: 5). At Inf the output is the default's, bit for bit, in split-band (the sibilant -12.0 dB) and in wideband (-11.9 dB), on noise with sibilant bursts.
-- Split-band: with a vowel (300 Hz, -12 dBFS) and a sibilant (6.5 kHz, -16 dBFS) the vowel changes by -0.00 dB and the sibilant by -12.0 dB (RANGE 12). Wideband: both by -12.0 dB.
-- A tone at 1.5 kHz as loud as the sibilant is not touched (-0.000 dB): the detector listens to the band.
-- DELTA: the output plus DELTA is the input to 1e-8 in split-band and wideband (the delta reaches 0.19 and 0.26 for a -12 dBFS sibilant); with nothing turned down it is exactly silent.
-- FIND: tones at 4.5, 6.2, 7.8 and 9.5 kHz are found at 4484, 6206, 7813 and 9497 Hz; a 7 kHz tone at -26 dBFS under a 300 Hz tone at 0 dBFS at 7011 Hz; noise with a hump at 5.6 kHz at 5574 Hz; a sound at -130 dBFS gives no answer.
-- Bypassed by the host, the sound is delayed by the reported look-ahead (an impulse at 7 is heard at 103 with 96 samples of latency).
-- LISTEN: the 6.5 kHz tone passes (-0.00 dB) and the 300 Hz tone is 31 dB down.
-- SET THRESH on a speech-like sound (a vowel at 300 Hz, -12 dBFS, and every 0.3 s a 120 ms s at 6.5 kHz: every fourth at -12 dBFS, the others at -20 and -24): THRESH -13.0 dBFS; the loud s is turned down by 1.40 dB, the quieter s and the vowel by 0.00 dB. RELATIVE: the same sound 30 dB quieter gets the same THRESH (-3.0 dB under the sound both times); ABSOLUTE moves by 30 dB (-43.0 against -13.0). A vowel alone and silence leave THRESH as it was; a reset in the middle of the pass answers "stopped".
-- Under the threshold the output is the input, bit for bit, in both modes; half a second after a loud sibilant the gain is back at exactly 1 and a quiet sound is the input, bit for bit.
-- RELEASE 50 ms: 14.8 dB at the end of a one-second sibilant, 38% of it (5.6 dB) 50 ms later, and gone after a second.
-- Relative detection: the same sound 30 dB quieter is turned down by the same amount (5.09 dB both). Absolute: 18.10 dB for the loud one and +0.000 dB for the quiet one.
-- LOOK-AHEAD 1 ms: with nothing to turn down the output is the input 48 samples later, bit for bit; in the first 0.3 ms of a -10 dBFS burst (wideband) the output peaks at -11.0 dBFS without it and -21.7 dBFS with it; a change of the setting while running moves the latency (240 samples for 5 ms).
-- A loud left and a quiet right get the same gain. The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit. NaN and infinity in the input are silence.
+> [!CAUTION]
+> Nemesis is **not a multi-band dynamic EQ** (use **Iris Prism**); use on isolated vocal/instrument tracks, since cymbals on a full bus trigger reduction too.
 
-## Limits
+## Reference
 
-- **FIND reads the sound that plays**, so play a passage with the s in it; it finds the strongest place of the whole 1.5 s (a loud vowel with energy above 4 kHz can win over a quiet s), and a very loud sound just under 4 kHz leaks a little into its lowest bin. Check the result with LISTEN.
-- **SET THRESH needs a passage with s in it, and several of them.** It takes the loudest 6% of the active sound, so with one s in 1.5 s THRESH lands on the loudest of the rest. It moves THRESH only, measured at the FREQ set now: set FREQ first (FIND). It is a gentle start: the 6 dB knee begins 3 dB under THRESH, so the first reduction is small (1.4 dB in the test). The change is one undo step of the processor's UndoManager; UNDO in the header takes it back, as does the host's undo.
-- **DELTA and LISTEN are monitoring**; switch them off before a bounce (a note says so).
-- **With LOOK-AHEAD off** the first 0.3 ms of a very loud s gets through before the attack closes; with it on the gain is already down (in split-band the band-pass itself takes about 70 microseconds to answer, so the very first cycle of a burst is still not turned down). LOOK-AHEAD delays the sound by its time (the host compensates); changing it while playing restarts the de-esser (a short gap).
-- **Taking off 10 dB or more makes a lisp.** Raise THRESH or lower RANGE. In wideband mode the whole voice ducks with the s.
-- **One band.** It cannot follow a voice whose s moves much in frequency; widen the band (a low Q) or use two instances. It is not a dynamic equaliser (Iris is).
-- **The detector reads the band, not "the s":** a cymbal or a hi-hat in the band is turned down too. Use it on the voice alone.
-- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+### Controls
 
-## Building
+| Control | Range / Options | Default | Purpose |
+|---|---|---|---|
+| **Freq** | `2.0 – 12.0 kHz` | `6.5 kHz` | Centre frequency of the detector (and cut band in Split-band) |
+| **Width** | `Q 0.50 – 5.00` | `Q 1.50` | Bandwidth of the band-pass filter (higher Q = narrower) |
+| **Thresh** | `-60.0 – 0.0 dB` | `-30.0 dB` | Absolute dBFS level, or Relative dB below broadband `30 ms` RMS |
+| **Range** | `0.0 – 24.0 dB` | `8.0 dB` | Maximum attenuation applied |
+| **Ratio** | `1.0:1 – Inf` | `Inf` | Slope above `THRESH` (`1 − 1/ratio`, `6 dB` soft knee); `Inf` holds at `THRESH` |
+| **Release** | `5 – 300 ms` | `40 ms` | Gain recovery time (`0.3 ms` fixed attack) |
+| **Mode** | `Split-band`, `Wideband` | `Split-band` | Duck only the sibilant band or the whole signal |
+| **Detection** | `Absolute`, `Relative` | `Absolute` | Level reference for `THRESH` |
+| **Look-ahead** | `Off`, `0.5 ms`, `1 ms`, `2 ms`, `5 ms` | `Off` | Audio delay so the detector reacts ahead of transients |
+| **Listen / Delta** | Toggles | `Off` | Audition detector band, or `in − out` (`DELTA` overrides `LISTEN`; presets turn `DELTA` off) |
+| **Find / Set Thresh** | Actions (`1.5 s` scans) | — | **FIND** (`LISTEN` on): peaks `4–10 kHz` (`17` Q-`10` bins); **SET THRESH** (header): loudest `6%` (1 undo step) |
+| **Undo / Redo / Presets** | `Cmd+Z` / `Shift+Cmd+Z` · `7` presets | `Init` | History (not saved with session); presets (*Init*, *Male Vocal*, *Female Vocal*, *Gentle Touch*, *Hard Sibilance*, *Broadcast Voice*, *Find the S*) |
 
-Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+### Signal flow
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target Nemesis_VST3 Nemesis_AU Nemesis_Standalone -j 10
+```text
+in ─┬─► [Look-ahead delay (0–5 ms)] ─────────────────────────────────────┬─► Mode:
+    │                                                                    │    Split-band: in - (1 - gain) × band
+    └─► [0 dB Band-pass (FREQ, WIDTH)] ─► [2 ms peak env] ─► [6 dB knee, │    Wideband:   in × gain
+                                       RATIO, RANGE, 0.3 ms atk / REL] ──┴─► [DELTA / LISTEN monitor] ─► out
+         (Relative subtracts 30 ms broadband MS; snaps to gain=1 < 0.001 dB)
 ```
 
-Building does **not** install the plugins; add `-DNEMESIS_INSTALL_AFTER_BUILD=ON` for that (macOS).
+### Measured (`NemesisTests`, `48 kHz`)
 
-## Development
+- **Threshold & Range:** `6.5 kHz` tone at `−20 dBFS` over `−30 dB` `THRESH` reduces by `9.95 dB` (law: `10`); `RANGE 6 dB` caps reduction at `6.00 dB`.
+- **Ratio:** `reductionDb` of `10 dB` overshoot at `2:1` (slope `0.5`) computes `5.00 dB` and settles at `4.98 dB`; `Inf` computes `10.00 dB` and matches the default output bit-for-bit in split-band (`−12.0 dB` sibilant) and wideband (`−11.9 dB`).
+- **Split-band vs Wideband:** Vowel (`300 Hz`, `−12 dBFS`) + sibilant (`6.5 kHz`, `−16 dBFS`) at `RANGE 12`: Split-band changes vowel by `-0.00 dB` and sibilant by `-12.0 dB`; Wideband changes both by `-12.0 dB`. A `1.5 kHz` tone as loud as the sibilant changes by `-0.000 dB`.
+- **Delta & Listen:** `output + DELTA == input` within `1e-8` (delta peaks `0.19` split-band, `0.26` wideband on a `−12 dBFS` sibilant; exact silence when idle). `LISTEN` passes `6.5 kHz` at `-0.00 dB` and attenuates `300 Hz` by `31 dB`.
+- **Find:** Tones at `4.5, 6.2, 7.8, 9.5 kHz` detected at `4484, 6206, 7813, 9497 Hz`; `7 kHz` at `−26 dBFS` under `0 dBFS` `300 Hz` detected at `7011 Hz`; noise hump at `5.6 kHz` at `5574 Hz`; `−130 dBFS` returns no answer (`−100 dBFS` gate).
+- **Set Thresh:** Speech test (`300 Hz` vowel at `−12 dBFS` + `120 ms` `6.5 kHz` bursts every `0.3 s` at `−12, −20, −24 dBFS`) lands at `THRESH -13.0 dBFS` (`1.40 dB` off loud s, `0.00 dB` off quieter s and vowel). Relative gives `-3.0 dB` under signal at both levels (`30 dB` drop); Absolute shifts `-43.0` vs `-13.0`. Vowel alone or silence leaves `THRESH` untouched; reset mid-pass answers `"stopped"`.
+- **Relative vs Absolute:** Same signal `30 dB` quieter gives `5.09 dB` reduction both times in Relative; `18.10 dB` vs `+0.000 dB` in Absolute.
+- **Release & Look-ahead:** `RELEASE 50 ms` decays `14.8 dB` (`1 s` sibilant) to `38%` (`5.6 dB`) after `50 ms` and `0` after `1 s`. `LOOK-AHEAD 1 ms` delays idle audio by exact `48` samples bit-for-bit (`96` samples on bypass at `2 ms` impulse `7 → 103`, `240` samples latency at `5 ms`), cutting the first `0.3 ms` peak of a `−10 dBFS` wideband burst from `-11.0 dBFS` to `-21.7 dBFS`.
+- **Transparency & Stability:** Below threshold (and `0.5 s` after loud sibilance), output is bit-for-bit identical to input. Linked across L/R, bit-identical across block sizes `1, 7, 64, 333, 512, 4096`; `NaN`/`Inf` inputs become silence.
+
+### Limits
+
+- **FIND reads what plays:** scans `1.5 s` for the strongest energy in `4–10 kHz` (loud upper harmonics on vowels can beat a quiet s, and strong `< 4 kHz` energy leaks slightly into the lowest bin—verify with **LISTEN**).
+- **SET THRESH needs several sibilants:** picks the loudest `6%` of active sound (`> -100 dBFS`, `≥ 10 dB` contrast, `≥ 100 ms` active) at the current `FREQ` (set `FREQ` first); the `6 dB` knee starts `3 dB` under `THRESH` for a gentle entry (`1.4 dB` in test). One undo step.
+- **DELTA and LISTEN are monitoring:** switch both off before bouncing.
+- **Look-ahead & band-pass settling:** with Look-ahead `Off`, the first `0.3 ms` of a loud `s` escapes before the attack closes; with Look-ahead `On`, split-band's band-pass still takes `~70 µs` to settle on the first cycle; changing Look-ahead mid-play clears the ring (short gap).
+- **10 dB+ reduction & Wideband:** cutting `≥ 10 dB` creates a lisp; Wideband ducks the entire vocal alongside the `s`.
+- **Single band & non-phoneme detection:** cannot track sibilance that shifts widely in frequency (widen `Q` or stack two instances, or use **Iris Prism**); cymbals/hi-hats in the band trigger reduction on buses.
+- **Validation scope:** built and verified on macOS (`VST3`, `AU`, `auval -v`, checked 2026-11-13); no macOS CI job and no `HostCheck`.
+
+## Build & develop
+
+Requires CMake 3.22+ and a C++20 compiler; JUCE is fetched from [cmake/Juce.cmake](../../cmake/Juce.cmake).
 
 ```bash
-cmake --build build --target NemesisTests && ./build/NemesisTests_artefacts/Release/NemesisTests            # DSP: no plugin, no GUI
-cmake --build build --target NemesisUiCheck && ./build/NemesisUiCheck_artefacts/Release/NemesisUiCheck      # the editor on the real processor
+# Recommended from repository root:
+scripts/build.sh nemesis              # configure, build & run NemesisTests + NemesisUiCheck
+scripts/showcase.sh nemesis           # regenerate docs/showcase.gif (requires ffmpeg)
+
+# Manual CMake from plugins/nemesis/:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target Nemesis_VST3 Nemesis_AU Nemesis_Standalone -j 10   # add -DNEMESIS_INSTALL_AFTER_BUILD=ON to install (macOS)
+
+cmake --build build --target NemesisTests && ./build/NemesisTests_artefacts/Release/NemesisTests
+cmake --build build --target NemesisUiCheck && ./build/NemesisUiCheck_artefacts/Release/NemesisUiCheck
 cmake --build build --target NemesisSnapshot && ./build/NemesisSnapshot_artefacts/Release/NemesisSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` is the output of `NemesisSnapshot` (arguments in the file's header), never edited by hand. See
-[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+`docs/screenshot.png` and `docs/showcase.gif` are generated by `NemesisSnapshot` (never edited by hand); see [CLAUDE.md](CLAUDE.md) for invariants.
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
-the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).

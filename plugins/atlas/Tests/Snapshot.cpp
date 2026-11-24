@@ -4,6 +4,7 @@
 // Renders the plugin editor to a PNG while feeding it a programme, so the reduction meters show real activity.
 //
 //   AtlasSnapshot <out.png> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N] [upward=BAND] [autot=BAND] [autor=BAND]
+//   AtlasSnapshot --frames <dir> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N] [upward=BAND] [autot=BAND] [autor=BAND]
 //
 //   bands=N   join bands from the top until N are left
 //   autot=N / autor=N   band N (from 1) on AUTO T (THRESH then 6 dB under its own level) / AUTO R
@@ -11,14 +12,17 @@
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
 #include <random>
+#include <string_view>
 
 int main (int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
     {
-        std::printf ("usage: AtlasSnapshot <out.png> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N] [upward=BAND] [autot=BAND] [autor=BAND]\n");
+        std::printf ("usage: AtlasSnapshot <out.png> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N] [upward=BAND] [autot=BAND] [autor=BAND]\n"
+                     "       AtlasSnapshot --frames <dir> [solo=MASK] [delta=MASK] [linear] [os=N] [bands=N] [upward=BAND] [autot=BAND] [autor=BAND]\n");
         return 2;
     }
+    const bool framesMode = std::string_view (argv[1]) == "--frames";
     juce::ScopedJuceInitialiser_GUI gui;
     AtlasProcessor proc;
     proc.setPlayConfigDetails (2, 2, 48000.0, 512);
@@ -37,7 +41,7 @@ int main (int argc, char** argv)
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
-    for (int i = 2; i < argc; ++i)
+    for (int i = framesMode ? 3 : 2; i < argc; ++i)
     {
         const juce::String arg (argv[i]);
         const int value = arg.fromFirstOccurrenceOf ("=", false, false).getIntValue();
@@ -56,6 +60,17 @@ int main (int argc, char** argv)
             while (atlas::layoutOf (proc.apvts).numBands > std::max (value, 1))
                 atlas::removeSplit (proc.apvts, atlas::layoutOf (proc.apvts).numBands - 2);
     }
+
+    auto& designed = ui::innerOf<AtlasEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    juce::File outDir;
+    if (framesMode)
+    {
+        const juce::String dirArg (argv[2]);
+        outDir = juce::File::isAbsolutePath (dirArg) ? juce::File (dirArg)
+                                                     : juce::File::getCurrentWorkingDirectory().getChildFile (dirArg);
+        outDir.createDirectory();
+    }
+    juce::PNGImageFormat png;
 
     // Pink-ish noise with a beat: something in every band, moving.
     std::mt19937 gen (7);
@@ -79,14 +94,32 @@ int main (int argc, char** argv)
         proc.processBlock (buffer, midi);
         if (block % 4 == 0)
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+
+        if (framesMode && block >= 480 && (block - 480) % 8 == 0)
+        {
+            const int frame = (block - 480) / 8;
+            const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
+            const juce::File out = outDir.getChildFile (juce::String::formatted ("frame_%03d.png", frame));
+            out.deleteFile();
+            juce::FileOutputStream stream (out);
+            if (! (stream.openedOk() && png.writeImageToStream (image, stream)))
+            {
+                std::printf ("could not write %s\n", out.getFullPathName().toRawUTF8());
+                return 1;
+            }
+        }
     }
 
-    auto& designed = ui::innerOf<AtlasEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    if (framesMode)
+    {
+        std::printf ("wrote 30 frames to %s\n", outDir.getFullPathName().toRawUTF8());
+        return 0;
+    }
+
     const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);
-    juce::PNGImageFormat png;
     const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
     std::printf ("%s %s\n", ok ? "wrote" : "could not write", out.getFullPathName().toRawUTF8());
     return ok ? 0 : 1;

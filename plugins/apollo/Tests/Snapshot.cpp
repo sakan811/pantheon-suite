@@ -4,6 +4,7 @@
 // Renders the plugin editor to a PNG with a curve worth looking at, over a programme for the analyser: a high-pass, a low shelf cut, a dip, two boosts, a notch at the top and a side-only band.
 //
 //   ApolloSnapshot <out.png> [linear] [match] [delta] [themis] [select=BAND]
+//   ApolloSnapshot --frames <dir> [linear] [match] [delta] [themis] [select=BAND]
 //
 //   match   GAIN MATCH on (the readout says what it applies)
 //   delta   DELTA on
@@ -11,14 +12,18 @@
 
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
+#include <string_view>
 
 int main (int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
     {
-        std::printf ("usage: ApolloSnapshot <out.png> [linear] [match] [delta] [themis] [select=BAND]\n");
+        std::printf ("usage: ApolloSnapshot <out.png> [linear] [match] [delta] [themis] [select=BAND]\n"
+                     "       ApolloSnapshot --frames <dir> [linear] [match] [delta] [themis] [select=BAND]\n");
         return 2;
     }
+    const bool framesMode = std::string_view (argv[1]) == "--frames";
+    const int firstOpt = framesMode ? 3 : 2;
     juce::ScopedJuceInitialiser_GUI gui;
     ApolloProcessor proc;
     proc.setPlayConfigDetails (2, 2, 48000.0, 512);
@@ -27,7 +32,7 @@ int main (int argc, char** argv)
     using namespace apollo;
     const auto set = [&] (const juce::String& id, float value) { setValue (proc.apvts, id, value); };
     bool themis = false, delta = false;
-    for (int i = 2; i < argc; ++i)
+    for (int i = firstOpt; i < argc; ++i)
     {
         const juce::String arg (argv[i]);
         if (arg == "linear")
@@ -90,7 +95,7 @@ int main (int argc, char** argv)
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
     auto& designed = ui::innerOf<ApolloEditor> (*editor);
-    for (int i = 2; i < argc; ++i)
+    for (int i = firstOpt; i < argc; ++i)
     {
         const juce::String arg (argv[i]);
         if (arg.startsWith ("select="))
@@ -127,6 +132,68 @@ int main (int argc, char** argv)
     designed.deltaButton.setToggleState (delta, juce::dontSendNotification);
     juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
     designed.showTypes();
+
+    if (framesMode)
+    {
+        const juce::String dirArg (argv[2]);
+        const juce::File outDir = juce::File::isAbsolutePath (dirArg)
+                                    ? juce::File (dirArg)
+                                    : juce::File::getCurrentWorkingDirectory().getChildFile (dirArg);
+        outDir.createDirectory();
+        juce::PNGImageFormat png;
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        unsigned seed = 54321u;
+        float lowpass = 0.0f, lowpass2 = 0.0f;
+
+        for (int frame = 0; frame < 30; ++frame)
+        {
+            const float phase = 6.2831853f * (float) frame / 30.0f;
+            if (! themis)
+                set (bandIds (3).gain, 3.5f + 2.5f * std::sin (phase));
+
+            for (int sub = 0; sub < 8; ++sub)
+            {
+                const int block = frame * 8 + sub;
+                for (int i = 0; i < 512; ++i)
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    const float white = (float) (seed >> 8) / (float) (1 << 24) * 2.0f - 1.0f;
+                    lowpass += 0.14f * (white - lowpass);
+                    lowpass2 += 0.5f * (lowpass - lowpass2);
+                    const int n = block * 512 + i;
+                    const float t = (float) n / 48000.0f;
+                    const float pulse = 0.35f + 0.65f * std::exp (-(float) (n % 12000) / 3000.0f);
+                    const float sweepHz = 180.0f * std::pow (12.0f, 0.5f - 0.5f * std::cos (6.2831853f * (float) block / 240.0f));
+                    float tone = 0.0f;
+                    for (int k = 1; k <= 8; ++k)
+                        tone += std::sin (6.2831853f * 82.0f * (float) k * t) / (float) k;
+                    const float lead = 0.14f * std::sin (6.2831853f * sweepHz * t);
+                    const float x = pulse * (0.045f * tone + 0.85f * lowpass2) + lead;
+                    buffer.setSample (0, i, x);
+                    buffer.setSample (1, i, 0.88f * x);
+                }
+                proc.processBlock (buffer, midi);
+                if (sub % 4 == 3)
+                {
+                    designed.view.tick();
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+                }
+            }
+
+            const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
+            const juce::File out = outDir.getChildFile (juce::String::formatted ("frame_%03d.png", frame));
+            out.deleteFile();
+            juce::FileOutputStream stream (out);
+            if (! (stream.openedOk() && png.writeImageToStream (image, stream)))
+            {
+                std::printf ("could not write %s\n", out.getFullPathName().toRawUTF8());
+                return 1;
+            }
+        }
+        std::printf ("wrote 30 frames to %s\n", outDir.getFullPathName().toRawUTF8());
+        return 0;
+    }
 
     const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);

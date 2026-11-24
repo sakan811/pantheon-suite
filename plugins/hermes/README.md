@@ -1,98 +1,147 @@
 # Hermes Level
 
-A **gain-staging and loudness tool** (VST3 + AU + Standalone) for mixing and mastering: a **trim** and a polarity, **listening checks** (mono, one channel, the sides, swapped), **loudness meters** as ITU-R BS.1770-4 and
-EBU R128 define them (momentary, short-term, integrated, loudness range) with a **true-peak** meter, and a **reference track** to compare with, **level-matched** to your sound so you judge the tone and not the level.
-It changes nothing but the level and what you listen to.
+A gain-staging, ITU-R BS.1770-4 / EBU R128 loudness, true-peak, and level-matched reference tool that changes nothing except level and what you monitor.
 
-## Name origin
+**Formats:** VST3 + AU + Standalone
 
-*Hermes* is the messenger and the god of measures and exchanges: he carries a thing from one place to another and says what it weighs. (CMake targets, namespaces and plugin codes use the short name "Hermes".)
+![Hermes Level Showcase](docs/showcase.gif)
 
-![Hermes Level](docs/screenshot.png)
+*Momentary (dim) and short-term (amber) loudness scrolling against the integrated line (teal), `-14 / -23 LUFS` targets, and the red true-peak alarm above `-1 dBTP`.*
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A programme with a loud middle and quiet ends, TRIM +2.5 dB, and a reference file loaded (-13.0 LUFS) with LEVEL MATCH on. The readings on the left are momentary and short-term loudness (each with the highest full-window reading since RESET beside its name), integrated loudness, the loudness range, and the true and sample peaks (red: over the limit); the graph is the last minute of loudness with -14 and -23 LUFS marked. Under the readings, AUTO TRIM is set to its -14 streaming target with the -1 dBTP ceiling off; TRIM 0 beside it sets TRIM back to 0 dB. At the top, UNDO / REDO (UNDO lit, REDO not) and the A / B pair (A lit). The strip warns that the true peak is over -1 dBTP. Regenerate with the command under "Development".*
+## Theme
 
-## What it does
+### Name origin
 
-| | |
+*Hermes* is the messenger and the god of measures and exchanges: he carries a thing from one place to another and says what it weighs. (CMake targets, namespaces, and plugin codes use the short name "Hermes".)
+
+### Core philosophy
+
+- **Measures, never shapes.** Changes nothing except `TRIM`, `POLARITY`, and what you listen to; idle output is bit-for-bit identical to the input with zero latency.
+- **Standards-faithful metering.** K-weighting comes from BS.1770 analog prototypes (within `0.006 dB` at any sample rate), fixed `0.1 LU` histograms (`-70` to `+10 LUFS`), and `8×` `64-tap` true peak shared with Aegis.
+- **Meters hear your track, not your check.** Readings sit after `TRIM` and `POLARITY` and keep measuring your full stereo mix even while checking Mono/Side/Left/Right/Swap or `REF (B)`.
+- **Honest reference matching.** `LEVEL MATCH` pairs your track's integrated loudness to a loaded reference (`±24 dB` cap) so you compare tone rather than loudness.
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
+
+## See it
+
+| View | Notes |
 |---|---|
-| **Trim** | -24 to +24 dB, 0 by default; **Polarity** inverts both channels. The meters read the sound after them. **AUTO TRIM** sets TRIM once, so that the integrated loudness reads the target chosen by **AUTO TRIM TO**: -14 (streaming), -16 (stereo podcast), -19 (mono podcast) or -23 LUFS (broadcast). It adds `target - integrated` to the current trim, within the range (so set TRIM back to 0 first to start from unity); nothing happens before the meter has read anything. With **-1 dBTP** on, it takes the smaller of that and the headroom to a true peak of -1 dBTP, and a note says when the peak is what stopped it. The targets are the figures of the sources in "Delivery targets" below. The choice and the ceiling are saved with the session and are not part of a preset. |
-| **Listen** | *Stereo* (as it is), *Mono* (`(L + R) / 2` in both: what a mono speaker plays), *Left* and *Right* (one channel in both), *Side* (`(L - R) / 2` in both: what differs between the channels), *Swap*. A check: the meters still read the whole sound. |
-| **Meters** | **Momentary** (400 ms) and **short-term** (3 s) loudness in LUFS, each with its **maximum** since RESET (EBU Tech 3341 asks for both; only full windows count); **integrated** loudness (gated, since RESET); **range** in LU; the **true peak** in dBTP and the sample peak in dBFS; and a graph of the last minute. **RESET** clears the integrated loudness, the range, the maxima and the peaks; **AUTO RESET** (off by default, saved with the session) does it each time the host starts playing. |
-| **Reference** | **LOAD** a track (WAV, AIFF, FLAC, OGG, MP3 where the system can read it; at most 10 minutes, kept in memory), **REF (B)** to hear it instead of your sound (A) with a 20 ms crossfade, **LEVEL MATCH** to bring it to the integrated loudness of your sound, **REF TRIM** (+-12 dB) to add to that, **RESTART**, and a click or drag on the progress bar to play from there. It loops, and plays on while you listen to A. The file's path is kept in the session. |
-| **Presets** | Eight listening setups (Normal, Mono Check, Side Only, Left Only, Right Only, Swap Check, Reference A/B, Reference As Is). A preset sets LISTEN, REF and LEVEL MATCH; TRIM, POLARITY, REF TRIM, AUTO RESET and the AUTO TRIM settings are kept. LISTEN and REF are saved with the session: choose Normal before a bounce. |
-| **Undo and A/B** | **UNDO / REDO** (Cmd+Z and Shift+Cmd+Z; Ctrl+Z and Ctrl+Y on other systems; while the editor has the keyboard focus) take back changes to the controls one step at a time: a change to a control, AUTO TRIM and a preset load are one step each, while loading a reference file is not. **A / B** holds two complete settings, keeping TRIM, POLARITY, REF TRIM and AUTO RESET as presets do: choosing B the first time copies A, and each switch after that keeps what you have set in the one you leave and loads the other, as one undo step; only the active slot is saved in the session, not the two settings (a reopened session's other slot starts empty). |
+| ![Hermes Level](docs/screenshot.png) | `TRIM +2.5 dB`, loaded `-13.0 LUFS` reference matched, red true-peak alarm, `-14/-23` history graph. |
 
-## How it works
+### UI colour legend
 
-1. **K-weighting**, as BS.1770: a high shelf of +4 dB around 1.68 kHz and a 2nd-order high-pass at 38 Hz, made for the session's sample rate from the standard's analog prototypes by the bilinear transform.
-2. **Blocks.** The weighted energy of both channels (weight 1.0 each) is summed over 100 ms sub-blocks. **Momentary** is the mean of the last four (400 ms, 75% overlap), **short-term** of the last thirty (3 s). Until a window is full (the first 0.4 s and 3 s after a RESET) it is the mean of the blocks heard so far, so the first readings are of a shorter stretch; only full windows count towards the integrated loudness and the range.
-3. **Integrated.** The 400 ms blocks over -70 LUFS (the absolute gate) are kept in a histogram of 0.1 LU bins (count and power); the mean power of those sets the relative gate, 10 LU under it; the integrated loudness is the mean
-   power of the blocks over that gate. **Range:** the same on the 3 s values, a relative gate of 20 LU, and the span from the 10th to the 95th percentile.
-4. **True peak** is read by `shared/dsp` TruePeak.h (an 8x, 64-tap windowed-sinc reader, the one Aegis detects with), on the sound after the trim.
-5. **The reference** is decoded whole, brought to the session's sample rate (Lagrange interpolation), made stereo if it is mono, and its integrated loudness measured by the same meter. LEVEL MATCH reads the sound's integrated
-   loudness every 64 samples and sets the reference's gain to `sound - reference` (at most 24 dB), smoothed over 5 ms.
+| Swatch | Hex | UI Element | Meaning |
+|---|---|---|---|
+| 🟡 | `#FFB347` | **Short-term** (`3 s`) graph trace, digital readouts, lit switches | `3 s` loudness trajectory and safe meter values (`colours::amber`) |
+| 🔵 | `#37E3C5` | **Integrated** loudness line, **Reference** seek/progress bar | Gated integrated loudness level and reference playback position (`colours::accent`) |
+| 🟢 | `#5FD68C` | `-14 LUFS` & `-23 LUFS` graph target lines | Streaming (`-14`) and EBU R128 broadcast (`-23`) reference marks (`colours::good`) |
+| 🔴 | `#EF4A3D` | **TRUE PEAK** / **SAMPLE PEAK** alarm values | Over limit (`TRUE PEAK > -1.0 dBTP` or `SAMPLE PEAK ≥ 0.0 dBFS`) (`colours::bad`) |
+| 🟠 | `#F2A33A` | Advice strip warning dots, missing-reference status | Active monitor (`LISTEN ≠ Stereo`, `REF` on/empty) or loudness/peak warning (`> -1 dBTP`, `> -9 LUFS`) (`colours::warn`) |
+| ⚫ | `#9F9680` | **Momentary** (`400 ms`) trace, `MAX` labels, advice info dots | Fast `400 ms` loudness trace and informational hints (`colours::dim`) |
+| ⬛ | `#090D0D` / `#1C2A29` | Recessed glass meter & graph panels, `10 LU` grid | Display glass (`colours::glass`) and graticule lines (`colours::glassGrid`) |
 
-## Delivery targets
+## Try it
 
-The targets AUTO TRIM offers, with the figures they follow (checked in 2026; a specification changes, so check the current one before a delivery):
+| Recipe / Setting | What you see, hear & measure |
+|---|---|
+| Play passage → pick `-14 Streaming` → **AUTO TRIM** (`-1 dBTP` off) | Adds `target - integrated` to `TRIM` in 1 undo step (`-26.7 LUFS` → `-14.00 LUFS`); hit **TRIM 0** first to start from unity. |
+| `-20 LUFS` (`-6 dBTP`) + **AUTO TRIM** (`-14`, `-1 dBTP` on) | Stops at `+5 dB` (`-1.00 dBTP`) instead of `+6 dB`; strip shows `"AUTO TRIM stopped at the -1 dBTP ceiling"`. |
+| **LOAD** reference (`≤ 10 min`) → **REF (B)** on + **LEVEL MATCH** on | `20 ms` clickless crossfade to looping reference (`5 ms` smoothed `sound - reference` match, `±24 dB` cap); meters still show your track. |
+| **LISTEN** = `Mono` / `Side` / `Left` / `Right` / `Swap` | Auditions `(L+R)/2`, `(L-R)/2`, one channel, or swapped channels; **True Peak** & loudness meters stay on full stereo input. |
+| **AUTO RESET** on (or **RESET** before section) | Clears integrated, range, `MAX` (`0.4 s` / `3 s` full windows), and peaks on host play; **UNDO / REDO** (`Cmd+Z`) & **A / B** compare setups. |
 
-- **-14 LUFS (streaming):** the playback level of the large streaming services, with a true peak of -1 dBTP advised, lower for very loud masters ([Spotify loudness normalisation](https://support.spotify.com/ca-en/artists/article/loudness-normalization/)).
-- **-16 LKFS (stereo podcast), ±1 dB, true peak -1 dBFS:** Apple's podcast audio requirements ([Apple Podcasts audio requirements](https://podcasters.apple.com/support/audio-requirements)). **-19 LKFS (mono podcast)** is the common figure for a mono programme, from third-party guidance, not from that page ([Auphonic](https://auphonic.com/blog/2020/06/09/loudness-normalization-mono-productions/)).
-- **-23 LUFS (broadcast), ±0.5 LU, true peak -1 dBTP:** EBU R128 and its measurement by ITU-R BS.1770 ([EBU R 128](https://tech-qual.ebu.ch/files/live/sites/tech/files/shared/r/r128v5_0.pdf)). ATSC A/85 (-24 LKFS, a true peak of -2 dBTP, for US television) is not offered.
+### Delivery targets (checked 2026)
 
-## Measured (`HermesTests`, 48 kHz)
+| Target | Standard & source | Notes |
+|---|---|---|
+| `-14 LUFS` (`-1 dBTP` advised) | [Spotify](https://support.spotify.com/ca-en/artists/article/loudness-normalization/) | Streaming playback level; lower advised for very loud masters |
+| `-16 LKFS ±1 dB` (`-1 dBFS` TP) | [Apple Podcasts](https://podcasters.apple.com/support/audio-requirements) | Stereo podcast requirement |
+| `-19 LKFS` | [Auphonic](https://auphonic.com/blog/2020/06/09/loudness-normalization-mono-productions/) | Common mono podcast figure (third-party guidance) |
+| `-23 LUFS ±0.5 LU` (`-1 dBTP`) | [EBU R128](https://tech-qual.ebu.ch/files/live/sites/tech/files/shared/r/r128v5_0.pdf) | Broadcast standard (`ATSC A/85` `-24 LKFS / -2 dBTP` is not offered) |
 
-- A stereo 1 kHz sine at -23 dBFS reads -23.04 LUFS integrated, momentary and short-term (EBU Tech 3341: -23.0 +-0.1); the same within 0.038 LU at 44.1, 88.2, 96 and 192 kHz.
-- The K-weighting follows the analog prototypes of the standard within 0.006 dB at 30, 100, 500 Hz, 1 and 4 kHz (-1.18 dB at 100 Hz, +3.92 dB at 4 kHz).
-- Gating: 10 s at -23, 5 s at -36 and 10 s at -23 read -23.10 LUFS; 10 s of sound and 10 s of silence read -23.10 (the blocks half over the edge are counted, as the standard has them).
-- A sine at -20 dBFS for 5 s then at -30 dBFS for 5 s: the maximum momentary and short-term both read -20.04 LUFS while the momentary reads -30.04; neither maximum shows anything until its window (0.4 s, 3 s) is full.
-- A step from silence to -20 dBFS: after 0.5 s the momentary reads -20.04 and the short-term -24.8; after 3 s the short-term reads -20.04.
-- Loudness range: 20 s at -20 and 20 s at -30 read 10.00 LU (EBU Tech 3342: 10 +-1); a steady tone reads under 0.3 LU.
-- True peak: a tone whose samples read -9.03 dBFS and whose true peak is -6.02 dBTP is read -5.93; band-limited noise 0.23 against 0.33 dBTP from a separate 128-tap reader: within 0.1 dB.
-- TRIM +6 dB is +6.00 dB; POLARITY, MONO, LEFT, RIGHT, SIDE and SWAP are exact (the formulas above, bit for bit); with nothing set the output is the input, bit for bit, with no delay.
-- The reference: a -14 dBFS sine reads -14.04 LUFS; with LEVEL MATCH the reference and a -26.7 LUFS sound are heard at the same loudness (the reference brought -12.7 dB); without it the reference is heard as it is (-14.04 LUFS);
-  REF TRIM +3 dB adds exactly +3.00 dB. Switching A and B four times in a tone gives no step over what the tone has (0.0131 against 0.0131): a crossfade, no click.
-- AUTO TRIM: a -26.7 LUFS sound trimmed by it and played again reads -14.00 LUFS. With the -1 dBTP ceiling, a -20 LUFS sound whose true peak is -6 dBTP gets +5 dB, not +6: the peak is what stops it. Twenty seconds of clicks at -6 dBFS (every 100 ms) read -36.73 LUFS, and with the ceiling on, AUTO TRIM sets +5.0 dB, and the true peak reads -1.00 dBTP after it. Each target is a plain loudness gain (`-19` is +1 dB from -20 LUFS, `-23` is -3 dB). Seeking to 50% of the reference puts it at 0.500 of the track, and a shorter reference swapped in while the position is past its end plays from inside it.
-- The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit, with a reference playing. NaN and infinity in the input are silence.
+> [!TIP]
+> Place Hermes at the **end** of your master chain (or at mix gain-staging points); presets (*Normal*, *Mono Check*, *Side Only*, *Left Only*, *Right Only*, *Swap Check*, *Reference A/B*, *Reference As Is*) switch monitoring while keeping `TRIM`, `POLARITY`, `REF TRIM`, `AUTO RESET`, and `AUTO TRIM` targets.
 
-## Limits
+> [!IMPORTANT]
+> **LISTEN** and **REF** are saved with the session—switch `LISTEN` back to `Stereo` (or preset *Normal*) and `REF` off before bouncing.
 
-- **AUTO TRIM with the -1 dBTP ceiling can stop short of its target**: it then sets the headroom and the strip says so ("AUTO TRIM stopped at the -1 dBTP ceiling"); it is a sound with peaks well above its loudness, not a louder master. Use Aegis to get the loudness and the peak together.
-- **The meters are not a limiter.** They say what to do (the true peak over -1 dBTP, the loudness over -9 LUFS); they do not do it. Use Aegis for the peak.
-- **The integrated loudness needs time**, and LEVEL MATCH needs the integrated loudness: until the meter has read a few seconds of sound there is nothing to match to (the reference is then heard as it is).
-  Press RESET at the start of a new passage.
-- **The true peak is read at 8x** within 0.1 dB of a separate reader; BS.1770 asks for 4x with 0.2 dB. It is the peak of the sound after the trim, and not of what is listened to.
-- **LISTEN and REF are parameters and are saved with the session**: set LISTEN back to Stereo and REF off before you bounce (a note reminds you).
-- **REF with no reference loaded plays your own sound**, and a note says to press LOAD. **POLARITY inverts both channels**: it sounds the same alone, but sums differently with other tracks.
-- **The quiet and flat notes are rules of thumb for a finished master.** Under -24 LUFS integrated (broadcast is -23, streaming about -14) and under 3 LU of loudness range the notes say the sound is quiet or flat; for a stem or a mix in progress that can be what you want.
-- **A reference is kept whole in memory** (at most 10 minutes; about 230 MB at 48 kHz). It is brought to the sample rate the session had when it was loaded; if the session's rate changes it is made again from the file.
-- **It reads the file again from its path** when a session is opened: if the file has moved, or the session was saved without a reference, it opens without one (the one loaded before is cleared).
-- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+> [!WARNING]
+> **Integrated** loudness and **LEVEL MATCH** need a few seconds of audio first; master notes (`< -24 LUFS` quiet, `< 3 LU` flat) are rules of thumb for finished masters, not stems.
 
-## Building
+> [!CAUTION]
+> Meters flag `TRUE PEAK > -1 dBTP` and `> -9 LUFS`, but Hermes **never limits** or shapes tone—use **Aegis** to control true peaks.
 
-Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+## Reference
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target Hermes_VST3 Hermes_AU Hermes_Standalone -j 10
+### Controls
+
+| Control | Range / Choices | Default | Role |
+|---|---|---|---|
+| **Trim / Trim 0** | `-24.0` to `+24.0 dB` / Action | `0.0 dB` | Pre-meter gain (`TRIM 0` resets to unity in 1 undo step) |
+| **Polarity** | `Off`, `On` | `Off` | Inverts both channels (identical alone, differs when summed) |
+| **Auto Trim / Target / -1 dBTP** | Action / `-14`, `-16`, `-19`, `-23` / `Off`, `On` | `-14 Streaming` / `Off` | One-shot `TRIM` to integrated target (optionally capped at `-1 dBTP`) |
+| **Listen** | `Stereo`, `Mono` `(L+R)/2`, `Left`, `Right`, `Side` `(L-R)/2`, `Swap` | `Stereo` | Monitoring check only (meters still read full stereo sound) |
+| **Reset / Auto Reset** | Action / `Off`, `On` | `Off` | Clears integrated, range, maxima & peaks (`Auto Reset` on host play) |
+| **Load / Restart / Seek bar** | File / Action / `0–100 %` | Empty | Loads reference (`WAV, AIFF, FLAC, OGG, MP3`, `≤ 10 min`), restarts loop, scrubs |
+| **REF (B) / Level Match / Ref Trim** | `Off`, `On` / `Off`, `On` / `-12.0` to `+12.0 dB` | `Off` / `On` / `0.0 dB` | Crossfades (`20 ms`) to reference matched to sound's integrated LUFS |
+| **Presets / Undo / A-B / Guide** | 8 presets, `Cmd+Z` / `Shift+Cmd+Z`, A/B | `Normal` / `A` | Monitoring presets, undo history (file loads excluded), `A/B` compare (slots unsaved), **GUIDE** |
+
+### Signal flow
+
+```text
+in ──► TRIM ──► [POLARITY] ─┬─► BS.1770 K-weighting (+4 dB @ 1.68 kHz shelf, 38 Hz 2nd-order HPF)
+                            │     └─► 100 ms blocks ─► 400 ms M (75% overlap) / 3 s S / 0.1 LU gated I (-70/-10) & LRA (-20, 10th-95th)
+                            ├─► 8× 64-tap windowed-sinc TruePeak.h + Sample Peak
+                            └─► [LISTEN matrix] ──► 20 ms A/B crossfade ◄── Reference (Lagrange resampled + 64-sample LEVEL MATCH + REF TRIM) ──► out
 ```
 
-Building does **not** install the plugins; add `-DHERMES_INSTALL_AFTER_BUILD=ON` for that (macOS).
+### Measured (`HermesTests`, 48 kHz)
 
-## Development
+- **BS.1770 / R128 loudness:** `1 kHz` stereo sine at `-23 dBFS` reads `-23.04 LUFS` integrated, momentary, and short-term (EBU Tech 3341: `-23.0 ± 0.1`); within `0.038 LU` at `44.1, 88.2, 96, 192 kHz`.
+- **K-weighting:** follows analog prototypes within `0.006 dB` at `30, 100, 500 Hz, 1, 4 kHz` (`-1.18 dB` at `100 Hz`, `+3.92 dB` at `4 kHz`).
+- **Gating:** `10 s` at `-23`, `5 s` at `-36`, `10 s` at `-23` reads `-23.10 LUFS`; `10 s` sound + `10 s` silence reads `-23.10 LUFS`.
+- **Maxima & step response:** `-20 dBFS` (`5 s`) then `-30 dBFS` (`5 s`) holds `MAX` M & S at `-20.04 LUFS` while M reads `-30.04` (silent until `0.4 s` / `3 s` full); silence → `-20 dBFS` reads M `-20.04`, S `-24.8` at `0.5 s` and S `-20.04` at `3 s`.
+- **Loudness range (EBU Tech 3342):** `20 s` at `-20` + `20 s` at `-30` reads `10.00 LU` (`10 ± 1`); steady tone `< 0.3 LU`.
+- **True peak:** `-9.03 dBFS` sample / `-6.02 dBTP` tone reads `-5.93 dBTP`; band-limited noise `0.23` vs `0.33 dBTP` from a separate `128-tap` reader (within `0.1 dB`; BS.1770 asks `4×` / `0.2 dB`).
+- **Gain, polarity & listen:** `TRIM +6 dB` = `+6.00 dB`; `POLARITY`, `MONO`, `LEFT`, `RIGHT`, `SIDE`, `SWAP` are bit-exact; idle output is bit-identical with zero delay.
+- **Reference & crossfade:** `-14 dBFS` sine reads `-14.04 LUFS`; `LEVEL MATCH` pairs it with a `-26.7 LUFS` sound (`-12.7 dB` gain); `REF TRIM +3 dB` = `+3.00 dB`; `4×` A/B switches in a tone show no step (`0.0131` vs `0.0131`); `50 %` seek = `0.500`; shorter swapped reference clamps cleanly.
+- **Auto Trim:** `-26.7 LUFS` → `-14.00 LUFS`; `-20 LUFS / -6 dBTP` with `-1 dBTP` cap → `+5 dB` (not `+6`); `20 s` clicks (`-6 dBFS` / `100 ms`, `-36.73 LUFS`) with cap → `+5.0 dB` → `-1.00 dBTP`; `-19` = `+1 dB` from `-20`, `-23` = `-3 dB`.
+- **Stability:** bit-identical across `1, 7, 64, 333, 512, 4096` samples with reference active; `NaN` and infinity inputs become silence.
+
+### Limits
+
+- **AUTO TRIM with `-1 dBTP` ceiling** stops short on peak-heavy material and reports `"AUTO TRIM stopped at the -1 dBTP ceiling"`; use **Aegis** to reach loudness and true-peak ceiling together.
+- **Meters are not a limiter:** they warn on `> -1 dBTP` and `> -9 LUFS` but do not attenuate peaks (use **Aegis**).
+- **Integrated loudness & LEVEL MATCH need time:** until a few seconds of audio play, there is nothing to match to (reference plays as is); press **RESET** on a new passage.
+- **True peak reads at 8×** (`0.1 dB` vs separate reader; BS.1770 specifies `4×` / `0.2 dB`) after `TRIM`, not after `LISTEN`.
+- **LISTEN and REF are saved parameters:** reset to `Stereo` and `REF Off` before bouncing (`REF` with no file loaded plays your own track and prompts **LOAD**).
+- **Polarity** inverts both channels: sounds identical alone, sums differently with other tracks.
+- **Quiet (`< -24 LUFS`) & flat (`< 3 LU`) notes** are rules of thumb for finished masters, not stems or works in progress.
+- **Reference RAM & resampling:** holds up to `10 min` whole in memory (`~230 MB` at `48 kHz`), resamples to the session rate on load, and rebuilds from file if the session rate changes.
+- **Reference path persistence:** reloads from its file path on session reopen; if moved or saved without one, the slot opens empty.
+- **Validation scope:** builds on macOS (`VST3`, `AU`, `auval -v` pass, checked 2026-11-13); no macOS CI job and no `HostCheck`.
+
+## Build & develop
+
+Requires CMake 3.22+ and a C++20 compiler; JUCE is fetched from [cmake/Juce.cmake](../../cmake/Juce.cmake).
 
 ```bash
-cmake --build build --target HermesTests && ./build/HermesTests_artefacts/Release/HermesTests            # DSP: no plugin, no GUI
-cmake --build build --target HermesUiCheck && ./build/HermesUiCheck_artefacts/Release/HermesUiCheck      # the editor on the real processor
+# Recommended from repository root:
+scripts/build.sh hermes               # configure, build & run HermesTests + HermesUiCheck
+scripts/showcase.sh hermes            # regenerate docs/showcase.gif (requires ffmpeg)
+
+# Manual CMake from plugins/hermes/:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target Hermes_VST3 Hermes_AU Hermes_Standalone -j 10   # add -DHERMES_INSTALL_AFTER_BUILD=ON to install (macOS)
+
+cmake --build build --target HermesTests && ./build/HermesTests_artefacts/Release/HermesTests
+cmake --build build --target HermesUiCheck && ./build/HermesUiCheck_artefacts/Release/HermesUiCheck
 cmake --build build --target HermesSnapshot && ./build/HermesSnapshot_artefacts/Release/HermesSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` is the output of `HermesSnapshot` (arguments in the file's header), never edited by hand. See
-[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+`docs/screenshot.png` is generated by `HermesSnapshot` (never edited by hand); see [CLAUDE.md](CLAUDE.md) for invariants.
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
-the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).

@@ -1,101 +1,147 @@
 # Aegis Ceiling
 
-A **true-peak limiter** (VST3 + AU + Standalone) for the last stage of a master: it raises the level and keeps every peak, **the peaks between the samples
-included**, under a ceiling, so a converter or a lossy codec after it cannot go over. It looks ahead and turns the sound down before a peak arrives
-(no click), and both channels share one gain, so the stereo image does not move.
+True-peak look-ahead limiter for mastering: raises loudness and holds every sample and inter-sample peak under the ceiling without stereo shift.
 
-## Name origin
+`VST3 + AU + Standalone`
 
-The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. (CMake targets, namespaces and plugin codes use the short name "Aegis".)
+![Aegis Ceiling Showcase](docs/showcase.gif)
 
-![Aegis Ceiling](docs/screenshot.png)
+*Live editor over a beat-driven programme: amber reduction trace over 9 s (`-18` to `0 dB`), IN/OUT bars in teal, and latched MAX / OUT PEAK readouts.*
 
-*Headless render of the editor (the hardware-style interface shared with the other plugins). A loud programme with a beat, GAIN +8 dB, CEILING -1.0 dBTP, RELEASE 100 ms, look-ahead 2 ms and TRUE PEAK on. The amber trace is the reduction over the last seconds (-5.7 dB now, down to about -10 dB on the peaks); OUT PEAK reads -1.0 dBTP, held until CLEAR, MAX REDUCTION -9.8 dB; the IN and OUT bars are on the right. In the header, beside the preset, are UNDO / REDO (UNDO lit after the GAIN change, REDO not) and the A / B pair (A lit, as on opening). AUTO GAIN is the one-shot button at the right of the second row of switches (it is not lit: it sets GAIN once, after four seconds of listening). The strip under the controls warns, once the limiter has taken off 6 dB or more, that it will sound squashed (it names the amount held, 10 dB here) and says what the look-ahead costs in delay. Regenerate with the command under "Development".*
+## Theme
 
-## What it does
+**Name origin:** The *aegis* is the shield of Zeus and Athena: what the blow cannot get through. (CMake targets, namespaces and plugin codes use the short name "Aegis".)
 
-| | |
+**Core philosophy:**
+- **True-peak ceiling first, transparent stereo always.** Reads 7 points between every two samples (8x, 64-tap windowed sinc) with look-ahead and one stereo-linked gain so peaks never sneak through and the image never shifts.
+- **Bit-exact when idle, guarded against bad input.** Audio below the ceiling passes delayed bit for bit, NaN and infinity become silence, and a final sample clamp backs up the gain math.
+- **Limiter, not compressor or loudness meter.** Reduction of `6 dB` or more sounds squashed and **Release** under `40 ms` distorts bass; compress upstream and meter BS.1770 loudness in [Themis](../themis/README.md) after it.
+- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
+- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
+
+## See it
+
+| View | Capture | What to look at |
+|---|---|---|
+| **Main Editor** | ![Aegis Ceiling](docs/screenshot.png) | Gain `+8 dB`, `-1.0 dBTP` ceiling: amber reduction hits `-9.8 dB` MAX; strip warns squashed. |
+
+**UI colour legend** — exact hex values from [`Hardware.h`](../../shared/ui/include/pantheon/ui/Hardware.h) (`AegisUi.h` sets `-18 dB` reduction depth and `-36 dBFS` bar floor):
+
+| Swatch | Hex | UI Element | Meaning |
+|---|---|---|---|
+| 🟡 | `#FFB347` | Reduction trace, `REDUCTION` / `MAX` / `OUT PEAK` read-outs, ceiling mark on `OUT` bar, lit switches (`TRUE PEAK`, `A / B`, `UNDO`), glass border | Active gain reduction (hanging from top over last 9 s), digital read-outs, ceiling threshold marker, and engaged controls |
+| 🔵 | `#37E3C5` | `IN` and `OUT` level bars | Live input and output peak levels (floor `-36 dBFS`) when below `0 dBFS` / ceiling |
+| 🔴 | `#EF4A3D` | `OUT PEAK` read-out & `OUT` / `IN` bar clipping | `OUT PEAK` exceeded the ceiling (held until **CLEAR** or ceiling/true-peak change), or `IN` level exceeded `0 dBFS` |
+| 🟠 | `#F2A33A` | Warning notes in bottom advice strip | Actionable warnings: `TRUE PEAK` off, `DELTA` or `MATCH` left on, ceiling above `-0.3 dBTP`, or `>= 6 dB` reduction |
+| ⚪ | `#EAE3D0` | Silkscreen labels & primary text | Control titles and bright text |
+| 🔘 | `#9F9680` | Secondary labels, inactive switches, info notes | Graticule labels, latency read-out, `CLEAR` / unlit buttons, and informational strip notes |
+
+## Try it
+
+| Recipe / Setting | What you see / hear / measure |
 |---|---|
-| **Gain** | 0 to +24 dB, 0 by default: how much the sound is raised before the ceiling. The reduction is what it takes to keep it under. |
-| **Ceiling** | -12 to 0 dBTP, -1 by default: the most the output reaches. With TRUE PEAK off it is in dBFS. |
-| **Release** | 10 ms to 1 s, 100 ms by default: how long the gain takes to come back 63% of the way after a peak. |
-| **Auto gain** | **AUTO GAIN** listens to the loudest part for four seconds and sets GAIN once, so that part takes about 3 dB off at the current CEILING. Beginners usually limit the loudest sections by 2 to 4 dB; more sounds squashed. It only sets GAIN, which you can move afterwards, and it is one UNDO step. If nothing was heard (silence) GAIN stays where it was, and the strip says so. |
-| **Look-ahead** | 0.5, 1, 2 (default) or 5 ms: how long before a peak the gain starts going down. Longer is smoother; it is also the delay. |
-| **Auto release** | Off by default (the gain always comes back at RELEASE). On: a short peak is let go sooner (a fifth of RELEASE, never under 2 ms), a reduction that has lasted about 4 dB for 150 ms or so is let go at RELEASE, which is then the slow end. Smoother on music with transients; the ceiling does not depend on it. |
-| **True peak** | On by default: the detector reads 7 points between every two samples (8x) with a 64-tap windowed sinc. Off: only the samples. |
-| **Presets** | Six starting points (Init, Streaming Master, Loud Master, Gentle Peak Catch, Broadcast Safe, Tracking Safety; the first three of the music ones have AUTO RELEASE on). A preset sets every control, GAIN included; what it does not list goes back to its default. Set GAIN with AUTO GAIN or by ear afterwards. |
-| **Delta** | Off by default. Listen to what the limiter takes away: the sound after GAIN minus the output, aligned by the latency (the delta plus the output is the delayed sound). If you hear the music and not only the peaks, the limiter is working too hard. Presets switch it off. |
-| **Match** | Off by default. Turns the output down to the loudness of the input (the RMS of both channels over about a second), so raising GAIN does not win an A/B only by being louder. It only turns down, so the ceiling holds; with the input quieter than the limited output it does nothing more than take GAIN back. Presets switch it off. |
-| **Paste** | **PASTE** takes the limiter setting that [Themis](../themis/README.md) copied from its master plan (COPY on the ceiling or the loudness item): it sets CEILING (and switches TRUE PEAK on, because a ceiling in dBTP needs it) and moves GAIN by the amount Themis measured, stopping at the ends of GAIN's range and saying so. Anything else on the clipboard changes nothing. |
-| **Undo and A/B** | **UNDO / REDO** (Cmd+Z and Shift+Cmd+Z while the editor has the keyboard focus; Ctrl on other systems) take back and redo changes to the controls, a preset and a PASTE included, each as one step. **A / B** holds two settings of every control except DELTA and MATCH, which are listening aids and stay as they are on a switch: choosing B the first time copies A; after that each switch keeps what you have set in the one you leave and loads the other, so the two can be compared while you listen. A switch is one undo step (the first, which only copies A into B, is not). Both come from the shared kit (`Undo.h`, `AbCompare.h`). |
+| `CEILING -1.0 dBTP`, `LOOK-AHEAD 2.0 ms`, `TRUE PEAK On`, press **AUTO GAIN** (4 s loudest section) | Sets **Gain** once (one undo step) so the loudest part takes ~`3 dB` off (`+8.00 dB` on `-6 dBFS` sine at `-1` ceiling). |
+| Toggle **MATCH** on during loudness pushes | Output attenuates to input RMS (~`1 s` window, never up) so raising **Gain** does not win A/B by being louder. |
+| Toggle **DELTA** on while limiting | Hears `(sound after Gain) - output` latency-aligned; if you hear music instead of transients, back off **Gain**. |
+| `TRUE PEAK Off` vs `On` on `fs/4` `+4.1 dBFS` off-sample tone | With it off, samples hold at `-1 dBFS` while true peak hits `+2.0 dBTP`; with it on, output stays at `-1.000 dBTP`. |
+| Copy ceiling/loudness item in [Themis](../themis/README.md), click **PASTE** | Sets **Ceiling**, forces **True Peak** on, and shifts **Gain** by Themis' measured change (clamped `0..+24 dB`) as one undo step. |
 
-The display is the reduction of the last nine seconds (hanging from the top, in dB), the number now, the input level, and **OUT PEAK**: the highest true peak that has left (read the way the detector reads, a bar beside IN with a mark at the ceiling), held until **CLEAR** or until CEILING or TRUE PEAK changes, red if it is ever over the ceiling. **MAX** under the reduction number is the most the limiter has taken off since then; click it to clear it alone. OUT PEAK reads the limiter's output before DELTA and MATCH.
+> [!TIP]
+> **Quick-start sweet spot:** Leave **TRUE PEAK** on, set **CEILING** to `-1.0 dBTP`, **LOOK-AHEAD** to `2.0 ms`, and press **AUTO GAIN** over 4 s of the loudest section for ~`2–4 dB` reduction.
 
-## How it works
+> [!NOTE]
+> **Look-ahead & latency:** **LOOK-AHEAD** (`0.5`, `1`, `2`, `5 ms`) plus the 32-sample true-peak detector equals **56, 80, 128, or 272 samples** of host-compensated delay at 48 kHz; changing it while playing restarts the limiter.
 
-1. **Detect.** The input, after GAIN, goes through the true-peak reader (a 64-tap, 8x interpolator, one for each channel); the larger of the two channels'
-   peaks gives the gain each moment needs: `ceiling / peak` when the peak is over, else 1. One gain for both channels.
-2. **Hold.** The smallest of the needs of the last `look-ahead + 1` samples (a monotonic queue, a few comparisons a sample) is kept, so the gain is already
-   down when the peak arrives, and stays down until it has passed.
-3. **Release.** The held gain falls at once and comes back exponentially, at RELEASE (never above the held value).
-4. **Smooth.** Two running means, each over about half the look-ahead, spread every fall over the look-ahead with a rounded shape. A mean never exceeds the
-   smallest value it covers, so the ceiling holds; the rounded shape is what keeps the gain from making new peaks between the samples.
-5. **Apply** to the sound, which has waited for look-ahead + the reader's delay (32 samples) in a delay line. A final clamp on the samples is the end of the
-   line (a counter says if it ever acted: in the tests it never does).
+> [!IMPORTANT]
+> **Fair A/B and listening checks:** Use **MATCH** (turns down only, ceiling holds) and **DELTA** to judge limiting cleanly without loudness bias.
 
-## Measured (`AegisTests`, 48 kHz)
+> [!WARNING]
+> **Before you bounce:** **DELTA** and **MATCH** are saved with the session (presets switch them off); turn both off and keep **TRUE PEAK** on before exporting.
 
-- The ceiling: over 2 s of a programme (band-limited noise in bursts, a bass note and lone full-scale clicks) driven 12 dB, with the ceiling at -0.3, -1 and -6 dB
-  and each look-ahead of 0.5, 2 and 5 ms: the sample peak is at the ceiling to 0.001 dB, the true peak (measured with a different reader: 8x, a 64-point Hann sinc)
-  is within 0.02 dB of it, and the final clamp never acts.
-- A tone at a quarter of the sample rate, 45 degrees off the samples (every sample reads 0.707 of the true peak), at +4.1 dBFS: with TRUE PEAK on the output is at -1.000 dBTP; with it
-  off the samples are held to -1 dBFS and the tone's true peak is +2.0 dBTP.
-- White noise up to Nyquist driven 12 dB (the worst case for any interpolator): true peak -0.99 dBTP with the ceiling at -1 (a 32-tap reader missed by 0.7 dB; this is why it has 64).
-- With nothing to limit the output is the input, delayed, bit for bit. The same output for blocks of 1, 7, 64, 333, 512 and 4096 samples, bit for bit.
-- AUTO GAIN on a steady 1 kHz sine at -6 dBFS (`Engine::detectorPeak`, then `autoGain()`): with CEILING -1 it sets GAIN to +8.00 dB and the loudest part then takes 3.00 dB off; with CEILING -6 it sets +3.00 dB, and the reduction is 3.00 dB again. A passage far under the ceiling is held at the top of GAIN (+24 dB) and reported as such; silence is not heard, so GAIN is left alone.
-- A step to full scale arrives at the ceiling (-6.00 dB for a ceiling of -6) at the sample it is heard, with the gain having come down over the look-ahead.
-- AUTO RELEASE (RELEASE 400 ms, a burst of 25 ms at 6 dB over the ceiling): 250 ms later the deficit of the gain is 0.064 with AUTO against 0.268 without; after 1 s of the same burst it is 0.264 against 0.268 (it releases at RELEASE). The ceiling test above also runs with AUTO on.
-- OUT PEAK against an independent reading of the output (8x, a 64-point Hann sinc): -1.000 and -0.998 dB with the ceiling at -1 (TRUE PEAK on); -1.000 and -1.000 with it off.
-- RELEASE 200 ms: 200 ms after a burst the deficit of the gain is 0.37 of what it was (1/e).
-- DELTA plus the output equals the sound after GAIN, aligned by the 128 samples of latency (largest difference 6e-8); DELTA of a sound that is not limited is silent. MATCH on a programme limited by 7 dB: the input reads -20.78 dB RMS, the limited output -13.37 dB, matched -20.74 dB; a plain +9 dB of GAIN with nothing to limit is taken back to within 0.01 dB. With both off the output is bit for bit what it was before they existed.
-- Bypassed by the host, the sound is delayed by the reported latency (an impulse at sample 10 is heard at 138 with 128 samples of latency), so the track does not jump against the rest of the mix.
-- Latency, as reported to the host: 56, 80, 128 and 272 samples for 0.5, 1, 2 and 5 ms (look-ahead + 32), an impulse is heard exactly that late.
-- A loud left and a quiet right keep their ratio (0.1000 in, 0.1000 out). NaN and infinity in the input are silence.
+> [!CAUTION]
+> **What Aegis is NOT for:** Taking off `>= 6 dB` sounds squashed and **RELEASE** `< 40 ms` distorts bass; compress upstream and put [Themis](../themis/README.md) after Aegis for LUFS.
 
-## Limits
+## Reference
 
-- **It limits; it does not compress.** More than about 6 dB of reduction sounds squashed, and a RELEASE under about 40 ms follows the bass and distorts it. Compress before it.
-- **The true peak is read at 8x.** That is the standard's 4x with a margin; a converter or a codec that reconstructs differently can still differ by a few hundredths of a dB. -1 dBTP is the usual ceiling for that reason.
-- **It delays the sound** by the look-ahead + 32 samples (the host compensates it); changing LOOK-AHEAD while playing restarts the limiter.
-- **AUTO GAIN divides out the GAIN in force at each moment, so moving GAIN while it listens (four seconds) can make the result too high; leave GAIN alone while it listens.**
-- **DELTA and MATCH are for listening** and are saved with the session; presets switch them off, and notes remind you to do so before a bounce. MATCH is a plain RMS, not a BS.1770 loudness (Hermes and Themis measure that).
-- **A / B slots and the undo history are not saved with the session.** Only which slot is active is saved; a session opened again has both slots empty and no undo history (the kit clears the history when a session is loaded). The first switch to B starts it as a copy of what is loaded.
-- It does not measure loudness and does not clip. Loudness is Themis' job: put Themis after it, read its plan, COPY the ceiling or loudness item and PASTE it here. Themis reads its true peak with the same 8x reader (`shared/dsp` TruePeak.h), so on the same signal it gives the same value as OUT PEAK.
-- It builds on macOS (VST3 and AU, run by hand on 2026-11-13) and `auval -v` passes for the AU; it is not in a macOS CI job, and it has no `HostCheck` (see "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
+### Controls
 
-## Building
+| Control | Range / Default | What it does |
+|---|---|---|
+| **Gain** | `0` to `+24 dB` / `0.0 dB` | Input gain before the detector and ceiling; reduction equals what is needed to keep output under **Ceiling**. |
+| **Ceiling** | `-12` to `0 dBTP` / `-1.0 dBTP` | Maximum output peak (`dBTP` with **True Peak** on; `dBFS` when off). |
+| **Release** | `10 ms` to `1.00 s` / `100 ms` | Exponential recovery time (63% back toward unity) after a peak passes. |
+| **Look-ahead** | `0.5`, `1.0`, `2.0`, `5.0 ms` / `2.0 ms` | How far ahead gain drops before a peak lands (`56`–`272` samples total latency at 48 kHz). |
+| **True Peak** | `On` / `Off` (`On`) | Enables 8x (64-tap windowed-sinc) inter-sample peak detection; off reads sample peaks only. |
+| **Auto Release** | `On` / `Off` (`Off`) | Short peaks release at `1/5` of **Release** (`>= 2 ms`); sustained reductions (`~4.4 dB` mean over `150 ms`) release at full **Release**. |
+| **Auto Gain** | One-shot button | Listens for 4 s and sets **Gain** once (one undo step) so the loudest part takes ~`3 dB` off at **Ceiling**; leaves **Gain** untouched on silence. |
+| **Delta** | `On` / `Off` (`Off`) | Outputs `(sound after Gain) - output`, latency-aligned, to audition removed peaks. |
+| **Match** | `On` / `Off` (`Off`) | Attenuates output to match input RMS (~1 s window) without ever exceeding the ceiling. |
+| **Paste** | Button | Reads a `limiter` hand-off from [Themis](../themis/README.md): sets **Ceiling**, enables **True Peak**, and shifts **Gain** by measured change. |
+| **Undo / Redo & A/B** | Header (`Cmd+Z` / `Shift+Cmd+Z`) | Parameter undo/redo (presets, Auto Gain, Paste included) and dual-slot A/B comparison (excludes **Delta** and **Match**; active slot only saved). |
+| **Presets** | 6 presets (`Init`) | *Init*, *Streaming Master*, *Loud Master*, *Gentle Peak Catch*, *Broadcast Safe*, *Tracking Safety* (music presets enable **Auto Release**; **Delta** & **Match** off). |
+| **Clear / Max** | Display buttons | **CLEAR** resets **OUT PEAK** and **MAX** (also on Ceiling/True Peak change); click **MAX** to clear max reduction alone. |
 
-Requires CMake 3.22 or newer and a C++20 compiler. JUCE is fetched by CMake (see [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+### Signal Flow
+
+```text
+input ─► Gain ─┬─► 8x True-Peak Detector (64-tap sinc, 32-sample delay) ─► ceiling / peak ─► Monotonic Queue Hold (look-ahead + 1)
+               │                                                                                    │
+               │                                                                                    ▼
+               └─► Delay Line (look-ahead + 32 samples) ────────────────────────► × Gain ◄── Release + 2x Running-Mean Smooth
+                                                                                     │
+                                                                                     ▼
+                                                                          Final Sample Clamp ─► Delta / Match ─► output
+```
+
+- **Stereo-linked detection:** Louder channel sets `ceiling / peak` (`1` below ceiling) across `look-ahead + 1` held samples, then two running means (~half look-ahead each) round the drop without re-creating inter-sample overs.
+- **Output metering:** **OUT PEAK** reads after the final clamp and before **Delta** / **Match** using the same 8x `TruePeakReader`.
+
+### Measured (`AegisTests`, 48 kHz)
+
+- **Ceiling accuracy:** Over 2 s programme (band-limited noise bursts, bass note, full-scale clicks) driven `+12 dB` at `-0.3`, `-1`, `-6 dB` ceilings and `0.5`, `2`, `5 ms` look-ahead: sample peak within `0.001 dB`, independent 8x 64-pt Hann-sinc check within `0.02 dB`, final clamp never acts.
+- **Inter-sample (`fs/4`, 45 deg off-sample, `+4.1 dBFS`):** Every sample is `0.707` of true peak; **True Peak** on holds `-1.000 dBTP`, off holds `-1 dBFS` while true peak reaches `+2.0 dBTP`.
+- **Nyquist-band noise (`+12 dB` drive, `-1 dB` ceiling):** True peak reads `-0.99 dBTP` (a 32-tap reader missed by `0.7 dB`, motivating 64 taps).
+- **Bit-exact & block-invariant:** Below ceiling equals delayed input bit for bit; identical bit-for-bit across block sizes `1`, `7`, `64`, `333`, `512`, `4096`.
+- **Auto Gain (`1 kHz` sine at `-6 dBFS`):** Sets `+8.00 dB` at `-1 dB` ceiling (`3.00 dB` cut) and `+3.00 dB` at `-6 dB` (`3.00 dB` cut); caps at `+24 dB` on quiet passages; silence leaves **Gain** untouched.
+- **Step & Release:** Full-scale step lands at `-6.00 dB` (for `-6 dB` ceiling) on exact sample; at `200 ms` Release, gain deficit is `0.37` (`1/e`) at `200 ms`.
+- **Auto Release (`400 ms` Release, `25 ms` burst `+6 dB`):** `250 ms` later, deficit is `0.064` with Auto vs `0.268` without; after `1 s` sustained burst, `0.264` vs `0.268`.
+- **OUT PEAK (`-1 dB` ceiling):** Reads `-1.000 dB` vs `-0.998 dB` on independent 8x Hann-sinc check (`True Peak` on), and `-1.000` / `-1.000` (`True Peak` off).
+- **Delta & Match:** `delta + output` equals post-Gain audio at `128` samples (max diff `6e-8`); unlimited Delta is silent. On `7 dB`-limited programme: input `-20.78 dB` RMS, limited `-13.37 dB`, matched `-20.74 dB`; plain `+9 dB` Gain matches within `0.01 dB`; both off = bit-identical.
+- **Bypass, latency & safety:** Host bypass delays by exact latency (impulse at sample `10` lands at `138` for `128` samples); reported latencies are `56`, `80`, `128`, `272` samples for `0.5`, `1`, `2`, `5 ms`. Stereo ratio preserved (`0.1000` in -> `0.1000` out); NaN/inf -> silence.
+
+### Limits
+
+- **Limits, does not compress:** Reduction `>= 6 dB` sounds squashed; **Release** `< 40 ms` distorts bass.
+- **8x true-peak margin:** Doubles ITU-R BS.1770 4x oversampling, yet external DACs/codecs can vary by a few hundredths of a dB—hence `-1 dBTP` default.
+- **Latency & switching:** Delays audio by `look-ahead + 32` samples (host-compensated); changing **Look-ahead** during playback restarts the limiter.
+- **Auto Gain:** Divides out active **Gain** over the 4 s listen—leave **Gain** untouched while listening.
+- **Listening aids & session state:** **Delta** and **Match** persist in sessions (presets switch off); **Match** uses plain RMS, not BS.1770 LUFS. A/B slot contents and undo history are not saved (active slot only saved; first switch to B copies loaded state).
+- **No loudness meter or clipper:** Put [Themis](../themis/README.md) after Aegis for LUFS and COPY/PASTE (shares `pdsp::TruePeakReader` so true peaks match **OUT PEAK**).
+- **Platform verification:** Builds on macOS (VST3 + AU, manually verified 2026-11-13) and passes `auval -v`; not in macOS CI yet and has no `HostCheck`.
+
+## Build & develop
+
+Requires CMake 3.22+ and a C++20 compiler (JUCE fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+
+```bash
+# Fast build & check from repository root (Ninja + ccache if installed)
+./scripts/build.sh aegis            # build & run AegisTests + AegisUiCheck
+./scripts/build.sh aegis all        # tests, ui, snap, vst3, au, app
+./scripts/showcase.sh aegis         # regenerate docs/showcase.gif (requires ffmpeg)
+```
+
+Manual CMake from `plugins/aegis/` (add `-DAEGIS_INSTALL_AFTER_BUILD=ON` on macOS to install):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target Aegis_VST3 Aegis_AU Aegis_Standalone -j 10
-```
-
-Building does **not** install the plugins; add `-DAEGIS_INSTALL_AFTER_BUILD=ON` for that (macOS).
-
-## Development
-
-```bash
-cmake --build build --target AegisTests && ./build/AegisTests_artefacts/Release/AegisTests            # DSP: no plugin, no GUI
-cmake --build build --target AegisUiCheck && ./build/AegisUiCheck_artefacts/Release/AegisUiCheck      # the editor on the real processor
+cmake --build build --target AegisTests && ./build/AegisTests_artefacts/Release/AegisTests
+cmake --build build --target AegisUiCheck && ./build/AegisUiCheck_artefacts/Release/AegisUiCheck
 cmake --build build --target AegisSnapshot && ./build/AegisSnapshot_artefacts/Release/AegisSnapshot docs/screenshot.png
 ```
 
-`docs/screenshot.png` is the output of `AegisSnapshot` (arguments in the file's header), never edited by hand. See
-[CLAUDE.md](CLAUDE.md) for the rules that keep the plugin correct.
+`docs/screenshot.png` and `docs/showcase.gif` are generated by `AegisSnapshot` / `scripts/showcase.sh` (never edited by hand). See [CLAUDE.md](CLAUDE.md) for invariants.
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks,
-the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).

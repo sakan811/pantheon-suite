@@ -4,6 +4,7 @@
 // Renders the plugin editor to a PNG: a lead vocal in a mix with a kick, a bass and a guitar, each fed a programme so the display shows real activity.
 //
 //   HestiaSnapshot <out.png> [delta] [alone] [sc] [window]
+//   HestiaSnapshot --frames <dir> [delta] [alone] [sc] [window]
 //
 //   window  the window as the host shows it (scaled to its default size), not the editor at the size it is drawn
 //   delta   DELTA on
@@ -13,6 +14,7 @@
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
 #include <random>
+#include <string_view>
 
 namespace
 {
@@ -21,14 +23,20 @@ constexpr double kFs = 48000.0;
 
 int main (int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
     {
-        std::printf ("usage: HestiaSnapshot <out.png> [delta] [alone] [sc] [window]\n");
+        std::printf ("usage: HestiaSnapshot <out.png> [delta] [alone] [sc] [window] | --frames <dir> [...]\n");
         return 2;
     }
+    const bool framesMode = argc >= 3 && std::string_view (argv[1]) == "--frames";
+    const auto resolvePath = [] (const char* p)
+    {
+        const juce::String s (p);
+        return juce::File::isAbsolutePath (s) ? juce::File (s) : juce::File::getCurrentWorkingDirectory().getChildFile (s);
+    };
     juce::ScopedJuceInitialiser_GUI gui;
     bool alone = false, delta = false, sc = false, window = false;
-    for (int i = 2; i < argc; ++i)
+    for (int i = framesMode ? 3 : 2; i < argc; ++i)
     {
         alone = alone || juce::String (argv[i]) == "alone";
         delta = delta || juce::String (argv[i]) == "delta";
@@ -69,6 +77,14 @@ int main (int argc, char** argv)
     editor->setVisible (true);
     if (delta)
         procs[0]->engine.deltaOn = true;
+
+    auto& designed = ui::innerOf<HestiaEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
+    const juce::File framesDir = framesMode ? resolvePath (argv[2]) : juce::File();
+    if (framesMode)
+        framesDir.createDirectory();
+    int frameIdx = 0;
+    bool framesOk = true;
+    juce::PNGImageFormat png;
 
     // A programme: a voice (harmonics on a moving pitch), a kick every beat, a bass line, a strummed guitar (noise through two poles).
     std::mt19937 gen (7);
@@ -137,16 +153,29 @@ int main (int argc, char** argv)
                 procs[(size_t) s]->processBlock (buffer, midi);
         }
         if (block % 4 == 0)
+        {
             juce::MessageManager::getInstance()->runDispatchLoopUntil (34);
+            if (framesMode && block >= 400 && frameIdx < 30)
+            {
+                const auto frame = window ? editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f) : designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
+                const auto f = framesDir.getChildFile (juce::String::formatted ("frame_%03d.png", frameIdx++));
+                f.deleteFile();
+                juce::FileOutputStream stream (f);
+                framesOk = framesOk && stream.openedOk() && png.writeImageToStream (frame, stream);
+            }
+        }
+    }
+    if (framesMode)
+    {
+        std::printf ("%s %d frames to %s\n", framesOk ? "wrote" : "could not write", frameIdx, framesDir.getFullPathName().toRawUTF8());
+        return framesOk && frameIdx == 30 ? 0 : 1;
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
 
-    auto& designed = ui::innerOf<HestiaEditor> (*editor); // the editor at the size it is drawn, not as the window scales it
     const auto image = window ? editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f) : designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
-    const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
+    const juce::File out = resolvePath (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);
-    juce::PNGImageFormat png;
     const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
     std::printf ("%s %s\n", ok ? "wrote" : "could not write", out.getFullPathName().toRawUTF8());
     return ok ? 0 : 1;

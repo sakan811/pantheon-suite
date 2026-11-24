@@ -4,18 +4,26 @@
 // Renders the plugin editor to a PNG while feeding it a programme (loud and quiet passages), with a reference loaded, so the readings and the graph show real activity.
 //
 //   HermesSnapshot <out.png>
+//   HermesSnapshot --frames <dir>
 
 #include "PluginEditor.h"
 #include <pantheon/ui/Scaled.h>
 #include <random>
+#include <string_view>
 
 int main (int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (std::string_view (argv[1]) == "--frames" && argc < 3))
     {
-        std::printf ("usage: HermesSnapshot <out.png>\n");
+        std::printf ("usage: HermesSnapshot <out.png> | --frames <dir>\n");
         return 2;
     }
+    const bool framesMode = argc >= 3 && std::string_view (argv[1]) == "--frames";
+    const auto resolvePath = [] (const char* p)
+    {
+        const juce::String s (p);
+        return juce::File::isAbsolutePath (s) ? juce::File (s) : juce::File::getCurrentWorkingDirectory().getChildFile (s);
+    };
     juce::ScopedJuceInitialiser_GUI gui;
     HermesProcessor proc;
     proc.setPlayConfigDetails (2, 2, 48000.0, 512);
@@ -44,6 +52,13 @@ int main (int argc, char** argv)
     designed.loadFile (file);
     hermes::setValue (proc.apvts, hermes::id::trim, 2.5f);
 
+    const juce::File framesDir = framesMode ? resolvePath (argv[2]) : juce::File();
+    if (framesMode)
+        framesDir.createDirectory();
+    int frameIdx = 0;
+    bool framesOk = true;
+    juce::PNGImageFormat png;
+
     // A programme that changes: a verse, a chorus that is louder and a bridge that is quiet, over 80 s of processed time (the readings run at the rate the processor is fed, not in real time).
     std::mt19937 gen (7);
     std::uniform_real_distribution<float> white (-1.0f, 1.0f);
@@ -67,15 +82,30 @@ int main (int argc, char** argv)
         proc.processBlock (buffer, midi);
         if (block % 9 == 0)
             designed.tickDisplay(); // a reading every 100 ms of the programme, as the timer takes them in real time
+        if (framesMode && block >= 1700 && (block - 1700) % 160 == 0 && frameIdx < 30)
+        {
+            designed.tickDisplay();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (16);
+            const auto frame = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
+            const auto f = framesDir.getChildFile (juce::String::formatted ("frame_%03d.png", frameIdx++));
+            f.deleteFile();
+            juce::FileOutputStream stream (f);
+            framesOk = framesOk && stream.openedOk() && png.writeImageToStream (frame, stream);
+        }
+    }
+    if (framesMode)
+    {
+        file.deleteFile();
+        std::printf ("%s %d frames to %s\n", framesOk ? "wrote" : "could not write", frameIdx, framesDir.getFullPathName().toRawUTF8());
+        return framesOk && frameIdx == 30 ? 0 : 1;
     }
     juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
 
     const auto image = designed.createComponentSnapshot (designed.getLocalBounds(), true, 1.5f);
     file.deleteFile();
-    const juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
+    const juce::File out = resolvePath (argv[1]);
     out.deleteFile();
     juce::FileOutputStream stream (out);
-    juce::PNGImageFormat png;
     const bool ok = stream.openedOk() && png.writeImageToStream (image, stream);
     std::printf ("%s %s\n", ok ? "wrote" : "could not write", out.getFullPathName().toRawUTF8());
     return ok ? 0 : 1;
