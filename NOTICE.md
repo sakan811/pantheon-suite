@@ -36,7 +36,7 @@ and apply to any binary you build.
 
 ## Third-party plugins hosted by Olympus
 
-*Status: pending the maintainer's decision. The licence review is still open; see [docs/daw-assessment.md](docs/daw-assessment.md).*
+*Status: pending the maintainer's decision. The licence review is still open.*
 
 Olympus Basic DAW (`apps/olympus`) hosts VST3 plugins and, on macOS, Audio Units, through the plugin host code of JUCE. It loads the
 plugins found on the machine it runs on, at run time, from the system's plugin folders and the folders the user chooses. Nothing of them is
