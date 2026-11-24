@@ -7,19 +7,7 @@ measured; this file is what you need to change it safely.
 
 ## Build and verify
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce.cmake, or third_party/JUCE at the repository root
-cmake --build build --target AtlasTests -j 10 && ./build/AtlasTests_artefacts/Release/AtlasTests
-cmake --build build --target Atlas_VST3 -j 10
-cmake --build build --target AtlasUiCheck && ./build/AtlasUiCheck_artefacts/Release/AtlasUiCheck
-cmake --build build --target AtlasSnapshot && ./build/AtlasSnapshot_artefacts/Release/AtlasSnapshot docs/screenshot.png solo=62 delta=8 os=1 upward=3 autot=4 autor=2
-```
-
-- Building the plugin targets does **not** install them (`ATLAS_INSTALL_AFTER_BUILD`, off by default).
-- `AtlasTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. There is no `HostCheck` yet and no macOS CI job; the plugin
-  was built on macOS by hand (VST3 and AU) and `auval -v` passes (2026-11-13; the repository's CLAUDE.md lists the rest under "Not yet in line").
-- Definition of done for a DSP change: `AtlasTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
 ## Layout
 
@@ -29,19 +17,17 @@ Source/DSP/        no GUI dependencies; covered by Tests/Tests.cpp
   LinearSplit.h      the linear-phase split: kernels from the crossovers, FFT overlap-save, the top band as the complement
   Learn.h            BandProfile: what LEARN makes of a band's level over time (THRESH, RATIO, ATTACK, RELEASE); LoudnessMatch: the OUTPUT that LEARN ALL sets; plain C++
   Engine.h           the whole signal path, the tick, oversampling, makeup and gain match, solo and delta, meters, latency
-Source/Advice.h      the notes of the strip under the bands and the GUIDE text; plain C++, no JUCE
 Source/Target.h      TARGET: the shifts of THRESH from a curve and the bands' typical levels; plain C++
-Source/Parameters.h  parameter layout, readParams(), layoutOf(), addSplit() / removeSplit()                 <- the single source of truth for parameters
-Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/BandView.h` is the display (spectrogram, band edges, PEAK / JUMPS)
+Source/Parameters.h  readParams(), layoutOf(), addSplit() / removeSplit()
+Source/UI/BandView.h the display (spectrogram, band edges, PEAK / JUMPS)
 ../../shared/dsp/    SpectrumIssues.h (`pdsp::SpectrumGrid`, `pdsp::IssueFinder`: plain C++, tested by AtlasTests [9]), SpectrumAnalyzer.h, AnalyzerTap.h
 ../../shared/ui/     Spectrogram.h (`ui::Spectrogram`: the ring of rows the display draws)
 ../../shared/dsp/    MusicBands.h (the six bands, `pdsp::BandSplitter`: the zero-latency split), Biquad.h
-Tests/               Tests.cpp (DSP), UiCheck.cpp (editor on the real processor), Snapshot.cpp (editor -> PNG), Check.h
 ```
 
 ## Rules that keep it correct
 
-**Real time.** `Engine::process` and everything under it must not allocate, lock or log. Everything is sized in `prepare()`: both
+**Setup & parameters.** Everything is sized in `prepare()`: both
 oversamplers of every band, the delay lines, the linear split for the sample rate. `readParams` is called per block and looks
 parameters up through the cached `bandIds()` table and the `juce::String` ids in `atlas::id`.
 
@@ -82,12 +68,12 @@ The crossovers stop at 40 Hz because the kernels (+-2048 samples at 48 kHz) cann
 
 **MIX** (`EngineParams::mix`, ramped per tick like the output gain, 1.0 exact) scales the difference a band adds in `runBand`, so 0 is the dry bands bit for bit; the dry bands are already aligned by `dry`. It is a session-wide control: presets keep it (`isGlobalParameter`).
 
-**Bypass.** `AtlasProcessor::processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay` (sized in `prepareToPlay` by `Engine::maxLatency()`, the largest any mode can report), or the track jumps early when the host bypasses the plugin. UiCheck pins it.
+**Bypass.** `pdsp::BypassDelay` is sized in `prepareToPlay` by `Engine::maxLatency()`, the largest any mode can report.
 
 **Learn and TO ALL.** `BandView::learnBand` (the JUMPS marker's listening and a strip's LEARN) and `copyDynamicsToAll` (Parameters.h). The listening is the engine's, in audio time: `Engine::learnStart` / `learnState` / `learnTake` (`BandView::learnAll` starts every band at once; a TARGET curve is compared in `Target.h` when all have answered; `Learned::typicalDb` is what it compares) (an atomic state per slot: idle, requested, listening, done, silent; the editor only asks and takes), fed once per tick in `control()` with the level `levelMeter` shows, into a `BandProfile` (`DSP/Learn.h`: a 1 dB histogram of the level for THRESH and RATIO, a zigzag with 6 dB hysteresis for the rise and fall times of ATTACK and RELEASE; the rules are in its header comment). It writes nothing to the audio and the editor sets the four parameters when the answer comes (a timeout of three listenings ends it when no audio runs). Test [15] pins it, including that the output is the same with it running. LEARN ALL (and TARGET, which uses it) then sets OUTPUT: `Engine::loudnessStart` / `loudnessTake` measure the input and the bands' sum before OUTPUT (solo and delta left out: `sumBuffer`, the output `loudLatency` samples late) over `BandProfile::kListenSeconds` with the learned settings in effect; `LoudnessMatch` (Learn.h) says why it measures rather than computes; `BandView::matchOutputStep` writes OUTPUT when it is taken, and leaves it when the window is silent or dropped. AtlasTests `testLoudness` and UiCheck's LEARN ALL section pin it. `addSplit` / `removeSplit` copy through `copyBands`, which reads every strip before writing any (a copy must not read a strip an earlier one wrote).
 
 **Latency** is `Engine::latencySamples` (linear split + oversampler + look-ahead), written on the audio thread in `configure()` when a tick sees a
-new mode, and reaches the host through `AtlasProcessor::handleAsyncUpdate` on the message thread; `prepareToPlay` passes the saved
+new mode; `prepareToPlay` passes the saved
 modes to `Engine::prepare` so the host hears the right latency before the first block. A mode switch clears the histories.
 
 **The beginner's note** (`freshAndUntouched` in `Advice.h`): a fresh instance is told to press LEARN ALL while every band's THRESH, RATIO, ATTACK and RELEASE are at their init values (`BandParams()`), LEARN ALL is not pressed and `AtlasProcessor::restored` is false (set in `setStateInformation`, so a saved session never gets it). While it shows, the per-band "THRESH is at the top" warnings are left out, because the strip shows two lines and they would hide it. Changing any of those four settings on any band removes it.
@@ -112,36 +98,20 @@ editor ends them in its destructor. Do not make them parameters. They fade over 
 **Gain match** compares the band's power after its compressor with before it (0.4 s one-pole each, per sample), limited to
 +-12 dB, recomputed per tick and ramped. It is measured before makeup, so MAKEUP adds to it.
 
-**Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`).
-
 **AUTO T and AUTO R.** `BandParams::autoThreshold` / `autoRelease` (`bN_autothr`, `bN_autorel`, version 5, off: the compressor as it was, bit for bit, which tests [2] and [6] pin). AUTO T: in `control()` the band's slow level (the power of the detector's loudest reading of each tick, averaged: `BandState::trackSq`, `kAutoThresholdSeconds`; a plain average until it is as long as that, gated by `kAutoSilenceDb`) plus THRESH is the threshold handed to `GainFollower::set` (`thresholdMeter` shows it); LEARN's answer is made relative to it (`learnStep`). AUTO R: `GainFollower::stepAuto` blends two release coefficients (`kAutoFast` / `kAutoSlow` x RELEASE) by a memory of how far down the gain has been (`BandState::memA` / `memB`, reset where the compressor is: idle, `configure`). Both live in the same per-tick / per-sample places as the rest: nothing is allocated. The histogram under a strip is `Engine::histogram` (counted per tick, taken out by the editor's timer).
 
-**Parameters.** Ids (`atlas::id`: `xo0` ... `xo4` and `xo0_on` ... `xo4_on` among them; `bandIds (i)`: `b1_on` ... `b6_match`) are stored in sessions and automation: never rename or
-remove one. All are `ParameterID` version 1 except `look` and each band's `listen` (version 2), each band's `dir` (version 3), `mix` (version 4) and each band's `autothr` and `autorel` (version 5) and each band's `knee` (version 6), all declared after everything else, so a host's list keeps its order; a new one needs a higher version, an entry in `readParams()` and a place in the editor.
-The order of `channelNames` is the order of `Channels`.
+**Parameters.** `atlas::id`: `xo0` ... `xo4` and `xo0_on` ... `xo4_on`; `bandIds (i)`: `b1_on` ... `b6_match`. All are `ParameterID` version 1 except `look` and each band's `listen` (version 2), each band's `dir` (version 3), `mix` (version 4), each band's `autothr` and `autorel` (version 5), and each band's `knee` (version 6), all declared after everything else so a host's list keeps its order. The order of `channelNames` is the order of `Channels`.
 
 ## DRY: where each thing lives
 
 - the six bands, their names, default edges and the zero-latency splitter -> `shared/dsp` MusicBands.h (shared: run the other plugins' tests too)
-- parameter ranges, defaults, choice lists -> `Parameters.h` (the editor reads the items from the parameters); the defaults of a band -> `BandParams`
+- the defaults of a band -> `BandParams`
 - which signals a channel mode runs -> `usesMidSide` / `runsFirst` / `runsSecond` / `isLinked` in `Compressor.h`
-- what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor fills `AdviceInput` (`adviceInput()`) and draws the notes with `ui::drawNoteStrip`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's Advice section, and at most `ui::kMaxNoteChars` characters
 - the look-ahead choices -> `kLookaheadMs` / `lookaheadSamples()` in `Engine.h` (the parameter's names, the engine and the editor read them); the presets and what each is for -> `presets()` in `Parameters.h` (`Preset::purpose` is the tooltip; `isGlobalParameter()` says what a preset keeps)
 - the order of the crossovers -> `orderedCrossovers()` in `Engine.h` (the engine and the editor's labels use it)
-- the plugin's name -> `ATLAS_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/AtlasUi.h` (`UiCheck` checks they agree)
-- every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls
 
 ## Gotchas already paid for
 
-- A single tone's reduction measured on the whole output is less than the band's (its neighbours carry part of it): tests
-  that check the law solo the band (`runSolo`).
-- A tone inside a band is lower than on the whole signal (100 Hz is 3 dB down in a 70 to 160 Hz band): anything that sets a
-  threshold has to read the band, not the input.
-- `ui::Choice` and `ui::Toggle` are bound to one parameter for good, so every strip owns its controls (`AtlasEditor::Strip`).
-- In an editor constructor call `setSize()` **last**.
-- `createEditor()` returns a `ui::ScaledEditor<AtlasEditor>` (shared/ui Scaled.h), not the editor: the window opens at 100% and scales. Tests and snapshots reach the editor with `ui::innerOf<AtlasEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
-
-## Conventions
-
-As in the other plugins: Allman braces, a space before call parentheses, `juce::` qualified in headers; comments explain *why*;
-claims in the README are backed by a test; commit by topic and end commit messages with the Co-Authored-By trailer.
+- A single tone's reduction measured on the whole output is less than the band's (its neighbours carry part of it): tests that check the law solo the band (`runSolo`).
+- A tone inside a band is lower than on the whole signal (100 Hz is 3 dB down in a 70 to 160 Hz band): anything that sets a threshold has to read the band, not the input.
+- Every strip owns its `ui::Choice` / `ui::Toggle` controls (`AtlasEditor::Strip`).

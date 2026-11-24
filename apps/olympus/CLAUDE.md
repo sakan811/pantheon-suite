@@ -1,24 +1,14 @@
 # CLAUDE.md
 
-Olympus Basic DAW: a JUCE standalone app (macOS, builds on Linux for CI) that holds a timeline of clips on tracks (with a tempo map, markers, a loop and undo), a chain of plugins on each track, and writes the stems out; plus an MCP server over the same
-session so an agent can place the chains. See `README.md` for what it does; this file is what you need to change it safely. It is an **app**, so it lives in `apps/`; the dependency rule of the root CLAUDE.md
-applies (`apps/*` -> `shared/*`, never a plugin or another app). It **hosts** plugins, but only at run time: it loads VST3 bundles (and Audio Units on macOS) that its scan finds, and links none of their code, so no dependency on `plugins/*` exists in
-CMake. Third-party plugins are scanned at run time; that was decided by the user. The one place it knows about the suite's own plugins is `suiteNames()` in `Source/Catalog.h` (their product
-names), which a test compares with every `plugins/*/CMakeLists.txt`, and which the "suite only" setting (`scanSuiteOnly`) keeps.
+Olympus Basic DAW: a JUCE standalone app (macOS, builds on Linux for CI) that holds a timeline of clips on tracks (with a tempo map, markers, a loop and undo), a chain of plugins on each track, and writes the stems out; plus an MCP server over the same session so an agent can place the chains. See [README.md](README.md) for what it does, and [../../CLAUDE.md](../../CLAUDE.md) (`## Layout and dependency direction`) for the runtime-only plugin hosting, `suiteNames()`, and `scanSuiteOnly` rules.
 
 ## Build and verify
 
-```bash
-scripts/build.sh olympus                 # OlympusTests + OlympusUiCheck, built and run
-scripts/build.sh olympus snap            # docs/screenshot.png and docs/screenshot-record.png (the pictures the README embeds)
-scripts/build.sh olympus app             # the window;  scripts/build.sh olympus OlympusMcp  # the server
-OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests     # also hosts a real built plugin (VST3)
-```
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-- Definition of done: both checks pass, the screenshot is regenerated and looked at when the window changed, and the README's claims (tool count, targets, behaviour) still match. A change in `shared/ui` means building every plugin and app.
-- `OlympusTests` and `OlympusUiCheck` need no built plugin and no audio device: plugins are `test::GainPlugin` (`Tests/TestPlugin.h`, a gain with two presets and an optional latency). Anything that touches the
-  real hosting path (scan, load, state, render of an actual plugin) is the `OLYMPUS_PLUGIN_DIR` check: run it by hand after touching `Catalog.h` and say so.
-- `UiCheck` runs headless with no display: it replaces `makeEditorWindow` so no native window is opened (a native window under a bare X server aborts the process). JUCE's `Button::triggerClick` acts asynchronously: use `press()` there.
+- `OlympusMcp` is the MCP server target; `OLYMPUS_PLUGIN_DIR=$PWD/plugins/hermes/build scripts/build.sh olympus tests` runs the real plugin hosting check (run it by hand after touching `Catalog.h`).
+- `OlympusTests` and `OlympusUiCheck` need no built plugin and no audio device: plugins are `test::GainPlugin` (`Tests/TestPlugin.h`, a gain with two presets and an optional latency).
+- `UiCheck` runs headless with no display: it replaces `makeEditorWindow` so no native window is opened (a native window under a bare X server aborts the process).
 - There is no listening test. Real-time playback, the audio device and the plugin editors in their own windows are checked by a person on the Mac; say so in the commit.
 
 ## Layout
@@ -33,7 +23,6 @@ Source/Record.h       Recorder (one 32-bit float WAV per armed track, written by
 Source/Mcp.h          the MCP server: JSON-RPC lines in and out, the 38 tools (undo and redo among them), parameters by id/name/index
 Source/Analyze.h      DSP mixing & mastering analysis (BS.1770-4 LUFS, true peak, LRA, crest/PLR, 1/6-oct tonal balance vs target curve, resonance rings, harshness, stereo/mono compatibility, inter-track masking, recommendations)
 Source/Settings.h     plugin folders, scanSuiteOnly, the last project and the last render's choice (bits, stems), in one file shared by the window and the server; the plugin cache, the scan's pedal and the safe-start pedals sit beside it
-Source/Advice.h       the GUIDE text and the notes at the foot (rules only; the kit draws them)
 Source/Main.cpp       the app and its 16:10 window;  Source/McpMain.cpp  the server's main
 Source/UI/MainComponent.h / .cpp  the window: the project buttons (+ MIDI, Import audio, etc.), the transport bar and the top bar's device line, the master section (MASTER fader, stereo meter, peak read-out and CLIP, row C left of the device line), the MONITOR strip under the header (one button per monitor plugin, '+', CORRECTION, the latency; its editors are keyed by Slot* as a track's, track -1 is the monitor chain); the audio device's callback (`DeviceCallback`: the inputs to the recorder, the transport `Source` to the outputs), REC and the takes, the AUDIO dialog and the IN menu, the actions, the keys, the FX menu of a track; owns `Editor editor`, `ArrangeView arrange`, and `PianoRollView pianoRoll`
 Source/UI/Arrange.h / .cpp  ArrangeView, the arrangement in the window's body: track headers (name, FX, X, M, S, AUTO, target, pan, fader, meter), ruler, loop and marker lanes, clip and automation lanes, the playhead; its drags go through Editor gestures
@@ -62,8 +51,7 @@ Tests/                Tests.cpp (session, render, project, server, the Editor's 
 - **Plugins are created and edited on the message thread.** The window and the server run on it. `runRenderJob` closes the tracks' plugin windows, stops the transport and calls `session.prepare(true)` on the message thread before its progress window's worker starts, and restores `session.prepare(false)` when it finishes; `OfflineScope` in `Session::renderStems` is a no-op when `session.offline` is already true.
 - **A start that died is not repeated.** The monitor chain and the last project are loaded between two pedal files (`monitor-load.pedal`, `project-load.pedal`, Settings.h): a pedal found at start is removed and that load is skipped, the file is left untouched, and a note says so. `loadSkippedMonitorChain` (PLUGINS) reads the chain again with the pedal around it.
 - **A plugin's latency change is followed on the window's timer.** Its listener (`LatencyWatch`, one per session, removed by each slot before its instance goes) only sets a flag; the timer calls `updateLatencies`. The MCP server has no timer and does not follow it.
-- **Everything is drawn from the kit** (`shared/ui`): `LampButton` exists only because the kit's look-and-feel lights every switch in one colour; if the kit grows per-button colours, use them and delete it. The window is 16:10 (`kDesignWidth` a multiple of 8).
-- **Adding a plugin to the suite** means adding its product name to `suiteNames()` (a test fails until you do).
+- `LampButton` exists only because `shared/ui`'s look-and-feel lights every switch in one colour; if the kit grows per-button colours, use them and delete it.
 - **Every timeline edit goes through `Editor`** (`Source/Edit.h`): tracks, plugins, chains, clips, track gain, pan, mute, solo and name, the master, tempo, time signature, loop, metronome, markers, snap and grid. It takes the session lock, refuses a bad argument with a reason and changes nothing, and pushes one undo step per change (structural track/plugin changes store XML snapshots and call `onBeforeStructureChange` before restoring); a `Gesture` makes a drag one step. Snap and grid are saved (and restored with structural steps) but are not undone on their own. Nothing else writes those fields: the window, the arrangement and the server all call `Editor`.
 - **The audio callback has its own copy of the transport** (`MainComponent::Source`: the position, the loop, the end of the audio, all atomics). `syncTransport` copies the loop and the end from the session; it is called by every change that moves them (`refreshNow`, the loop, the arrangement's `onStructure`), never by the 30 Hz timer (except when a plugin reports a new latency, which moves the end of the audio), because the callback's try-lock would otherwise miss a block now and then. A block is cut at the loop's end (`processBlock` is never called across it), and playing stops at the end of the audio unless the loop is on, a take is recording, or click-only free-run is active (`clickOnly`: `metronomeOn && endOfAudio <= 0`). `renderAudioBlock` runs the same code for the checks.
 - **Every plugin is stereo, or it is refused.** `Session::configure` switches off every bus but the main pair (a sidechain), and `runsStereo` checks the result: a plugin that cannot take two channels in and out is refused on a track or the monitor chain with the reason (`makeSlot`), and a project or monitor chain that holds one keeps it as an unusable slot with its state. Each track's `scratch` is sized to its chain in `updateLatenciesLocked`; the monitor chain runs on a copy in `monitorScratch` of at least two channels.

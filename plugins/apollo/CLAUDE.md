@@ -5,21 +5,9 @@ does and what has been measured; this file is what you need to change it safely.
 
 ## Build and verify
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce.cmake, or third_party/JUCE at the repository root
-cmake --build build --target ApolloTests -j 10 && ./build/ApolloTests_artefacts/Release/ApolloTests
-cmake --build build --target Apollo_VST3 -j 10
-cmake --build build --target ApolloUiCheck && ./build/ApolloUiCheck_artefacts/Release/ApolloUiCheck
-cmake --build build --target ApolloSnapshot && ./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/screenshot.png match select=4
-./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/themis.png themis select=2      # what PASTE does with Themis' Copy EQ
-./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/delta.png delta linear select=4
-```
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-- Building the plugin targets does **not** install them (`APOLLO_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh apollo` is the way to build and check (see the repository's CLAUDE.md).
-- `ApolloTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it (the FFT is its own), so the DSP tests also compile
-  with `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`.
-- Definition of done for a DSP change: `ApolloTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes and the three images in `docs/` (all embedded in the README, with captions) are regenerated and looked at, and the captions still say what they show.
+- `Source/DSP` has no JUCE in it (the FFT is its own) and supports standalone `g++` DSP tests (see Gotchas for `-ffast-math`).
 
 ## Layout
 
@@ -27,11 +15,8 @@ cmake --build build --target ApolloSnapshot && ./build/ApolloSnapshot_artefacts/
 Source/DSP/Bands.h         BandParams, Section (the filter of a band), isIdentity(), responseDb()  <- the curve the editor draws and the filter the engine runs
 Source/DSP/LinearPhase.h   Fft, LinearSizes, Convolver (the kernel from the magnitude, FFT overlap-save, the exact delay for the idle case)
 Source/DSP/Engine.h        the signal path, the tick, the smoothing, Mid/Side, the phase mode, latency, GAIN MATCH, DELTA
-Source/Presets.h           the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
-Source/Advice.h            the notes of the strip under the bands and the GUIDE text; plain C++
-Source/Parameters.h        parameter layout, bandIds(), defaultBand(), readParams(), pasteBands() (PASTE)  <- the single source of truth for parameters
-Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); `UI/CurveView.h` is the display and its nodes
-Tests/                     Tests.cpp (DSP), UiCheck.cpp (editor on the real processor), Snapshot.cpp (editor -> PNG), Check.h
+Source/Parameters.h        bandIds(), defaultBand(), readParams(), pasteBands() (PASTE)
+Source/UI/CurveView.h      the display and its nodes
 ```
 
 ## Rules that keep it correct
@@ -51,7 +36,7 @@ with the same coefficients; a Mid or Side band uses the first only. Both are red
 right from the filtered mid and the side: with the filter at 0 dB the sum would not be the input.
 
 **Linear phase: sizes in samples, resolution in hertz.** `linearSizesFor (fs)` doubles the frame (4096 at 48 kHz, up to 16384) until a bin is about 12 Hz, with the hop an eighth of it; the kernel is
-`frame - hop + 1` taps. The latency is `(frame + hop) / 2`: the kernel's delay `(frame - hop) / 2` plus the hop the output waits for. It is reported through `ApolloProcessor::handleAsyncUpdate`.
+`frame - hop + 1` taps. The latency is `(frame + hop) / 2`: the kernel's delay `(frame - hop) / 2` plus the hop the output waits for.
 The kernel is remade at most once a hop (`sinceDesign`): four FFTs of the frame. The magnitude is read from the same `Section::powerAt` as the curve, on a table of cosines made in `prepare()`.
 
 **Linear phase runs on mid and side.** Left and right go to `(L + R) / 2` and `(L - R) / 2`, each through its own kernel (the bands that reach it: Stereo and Mid for the mid; Stereo and Side for the side),
@@ -70,42 +55,25 @@ curve's +-18 dB. A change to `SpectrumAnalyzer.h` is checked here by `ApolloUiCh
 
 **LISTEN is `Engine::listen`, an atomic like `delta`.** The band (0 to 7, or -1) whose region is heard alone, through a band-pass at its frequency and Q placed after the bands and GAIN MATCH, before OUTPUT. The display's LISTEN button (`CurveView::setListen`, which follows `select()`) sets it through `onListen`; the editor's destructor ends it; it shows in the notes. Double-clicking empty glass calls `CurveView::addBandAt` (first free bell slot, `slotOrder`). Every change of a parameter from the display that is not a drag goes through `setWithGesture`.
 
-**Bypass keeps the latency.** `processBlockBypassed` delays the audio by `getLatencySamples()` through `pdsp::BypassDelay` (prepared for the longest latency, `linearSizesFor (fs).latency()`); `ApolloUiCheck` pins it.
+**Bypass.** `pdsp::BypassDelay` is prepared for the longest latency (`linearSizesFor (fs).latency()`).
 
 **Linear-phase magnitudes are clamped at 0.** `Convolver::design` clamps each band's `powerAt` at 0 before the fade's fractional power (`pow (p, mix)`, NaN for a negative `p`; `std::max (NaN, 0)` is NaN too, so the clamp has to come first) and takes `sqrt (max (power, 0))`: a notch on a bin's exact frequency sums to a hair below 0 and its root was NaN (tests [6] for the fade, [10] for `mix` 1).
 
-**Real time.** `Engine::process` allocates and locks nothing; everything is sized in `prepare()` (the FFT tables, the rings, the kernels). A change of phase mode restarts the equaliser (`configure()`).
+**Setup.** Everything is sized in `prepare()` (the FFT tables, the rings, the kernels). A change of phase mode restarts the equaliser (`configure()`).
 
-**Bad samples.** NaN and infinity are replaced by 0 on the way in.
+**Undo.** A gesture that moves several parameters opens its step first with `ui::beginUndoStep`: a preset (`setCurrentProgram`), PASTE, `clearBands`, a node drag (`CurveView::mouseDown`), a double-click on empty glass (`addBandAt`), a wheel step, Delete. A new gesture that changes more than one parameter needs one too, or it merges into the step before it.
 
-**Undo.** The processor owns `juce::UndoManager undo`, declared before `apvts` and handed to it (`shared/ui` `Undo.h`, opt-in). A gesture that moves several parameters opens its step first with `ui::beginUndoStep`: a preset (`setCurrentProgram`), PASTE, `clearBands`, a node drag (`CurveView::mouseDown`), a double-click on empty glass (`addBandAt`), a wheel step, Delete. A new gesture that changes more than one parameter needs one too, or it merges into the step before it.
+**A / B and presets.** `ab` (`ui::AbCompare`) and `Programs` use `apollo::keepsParameter`, so PHASE, OUTPUT, GAIN MATCH and PASTE AMOUNT stay as they are across a switch and across a preset. `ui::AbButtons` sit in the row above the display, after CLEAR ALL.
 
-**A / B** is `ui::AbCompare` `ab`, declared after `apvts` with `apollo::keepsParameter`, so PHASE, OUTPUT, GAIN MATCH and PASTE AMOUNT stay as they are across a switch (as across a preset). A switch to a slot that has settings is one undo step; the active slot is saved as `abSlot` (a session without it opens on A), the two slots are not. The buttons are `ui::AbButtons` in the row above the display, after CLEAR ALL.
-
-**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
-(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
-
-**Parameters.** Ids (`apollo::id`, `bandIds (i)`: `b1_on` ... `b8_target`) are stored in sessions and automation: never rename or remove one, nor reorder the choice lists (`typeNames`, `targetNames`, `slopeNames`,
-`phaseNames` follow the enums). All are `ParameterID` version 1 except `match` (version 2, off: a session saved before it sounds as it did; a preset keeps it) and `pasteAmount` (version 2, 100 %, not automatable; a preset keeps it); a new one needs a higher version, an entry in `readParams()` (or in `pasteBands` when only PASTE reads it) and a place in the editor.
+**Parameters.** `apollo::id`, `bandIds (i)` (`b1_on` ... `b8_target`); never reorder the choice lists (`typeNames`, `targetNames`, `slopeNames`, `phaseNames` follow the enums). All are `ParameterID` version 1 except `match` (version 2, off: a session saved before it sounds as it did; a preset keeps it) and `pasteAmount` (version 2, 100 %, not automatable, read only by `pasteBands`; a preset keeps it).
 
 ## DRY: where each thing lives
 
 - band types, targets, slopes and what a type has (`hasGain`, `hasSlope`) -> `Bands.h`; the names the user reads -> `Parameters.h`
 - the response of the EQ -> `responseDb()` in `Bands.h` (the editor's curve, the tests)
 - band helpers that change several bands (`clearBands`, `pasteBands`) -> `Parameters.h`; the CLEAR ALL button in `PluginEditor.cpp` only calls `clearBands`; Delete / Backspace is `CurveView::keyPressed` (it switches the selected band off through `setWithGesture`, moves the selection and ends LISTEN itself)
-- what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
-  section, and at most `ui::kMaxNoteChars` characters
-- the plugin's name -> `APOLLO_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/ApolloUi.h` (`UiCheck` checks they agree)
-- every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls (the curve and its nodes are drawn on `ui::hw` glass)
 
 ## Gotchas already paid for
 
-- `ui::Choice` and `ui::Toggle` are bound to one parameter for good, so every strip owns its controls (`ApolloEditor::Strip`); the strip shows the ones its type uses (`showTypes()`).
-- In an editor constructor call `setSize()` **last**.
-- `createEditor()` returns a `ui::ScaledEditor<ApolloEditor>`, not the editor: tests and snapshots reach it with `ui::innerOf<ApolloEditor> (*processor.createEditor())`.
+- Every strip owns its `ui::Choice` / `ui::Toggle` controls (`ApolloEditor::Strip`); the strip shows the ones its type uses (`showTypes()`).
 - Building the test with `-O3 -march=native -ffast-math` *together* breaks the linear-phase comparison (the NaN tests and the FFT's rounding do not survive fast-math); each flag on its own passes. Not a supported build.
-
-## Conventions
-
-As in the other plugins: Allman braces, a space before call parentheses, `juce::` qualified in headers; comments explain *why*; claims in the README are backed by a test; commit by topic and end commit messages with the
-Co-Authored-By trailer.

@@ -4,19 +4,9 @@ Dionysus Warmth: a JUCE saturator (VST3 / AU / Standalone): six curves, bias, to
 
 ## Build and verify
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce.cmake, or third_party/JUCE at the repository root
-cmake --build build --target DionysusTests -j 10 && ./build/DionysusTests_artefacts/Release/DionysusTests
-cmake --build build --target Dionysus_VST3 -j 10
-cmake --build build --target DionysusUiCheck && ./build/DionysusUiCheck_artefacts/Release/DionysusUiCheck
-cmake --build build --target DionysusSnapshot && ./build/DionysusSnapshot_artefacts/Release/DionysusSnapshot docs/screenshot.png
-```
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-- Building the plugin targets does **not** install them (`DIONYSUS_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh dionysus` is the way to build and check (see the repository's CLAUDE.md).
-- `DionysusTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
-  `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
-- Definition of done for a DSP change: `DionysusTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
+- `Source/DSP` has no JUCE in it (supports standalone `g++` DSP tests).
 
 ## Layout
 
@@ -24,11 +14,6 @@ cmake --build build --target DionysusSnapshot && ./build/DionysusSnapshot_artefa
 Source/DSP/Shapes.h        the curves, saturate() (curve + bias), harmonicsDb() (what the editor shows), compensation() (AUTO GAIN), the antiderivatives and saturateAdaa() (ADAA, 1x)   <- one source for the engine, the display and the tests
 Source/DSP/Oversampler.h   HalfbandStage (one doubling), Oversampler (the chain of one channel), oversamplingLatency()
 Source/DSP/Engine.h        the signal path: drive, the oversampler around the curve, DC block, tone, the delayed dry sound, mix, output
-Source/Presets.h           the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
-Source/Advice.h            the notes of the strip under the controls and the GUIDE text; plain C++
-Source/Parameters.h        parameter layout, readParams()                       <- the single source of truth for parameters
-Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`)
-Tests/                     Tests.cpp (DSP), UiCheck.cpp (editor on the real processor), Snapshot.cpp (editor -> PNG), Check.h
 ```
 
 ## Rules that keep it correct
@@ -54,34 +39,17 @@ whenever either is in use (`dcOn`) and is reset while it is not. `compensation()
 
 **DELTA is `Engine::delta`, an atomic the editor sets, not a parameter**: never saved, ended by the editor's destructor, shown in the notes. The output is `result - dry` (the dry sound being the ring's, delayed like the output).
 
-**Bypass keeps the latency.** `processBlockBypassed` delays the audio by `getLatencySamples()` through `pdsp::BypassDelay` (prepared for `kMaxLatency`); `DionysusUiCheck` pins it.
+**Bypass.** `pdsp::BypassDelay` is prepared for `kMaxLatency`.
 
-**Real time.** `Engine::process` allocates and locks nothing; everything is a fixed array or sized in `prepare()` (`configure()` allocates nothing, so a change of oversampling on the audio thread is safe; a change of oversampling restarts the saturator and is reported through `DionysusProcessor::handleAsyncUpdate`).
-**Bad samples:** NaN and infinity are replaced by 0 on the way in.
+**Setup.** Everything is a fixed array or sized in `prepare()` (`configure()` allocates nothing, so changing oversampling on the audio thread is safe and restarts the saturator).
 
-**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
-(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
-
-**Parameters.** Ids (`dionysus::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `lowcut`, version 2, and `adaa`, version 3 (Off: a session saved before either sounds as it did; a preset that does not list one leaves it Off); a new one needs a higher version, an entry in `readParams()` and a place in the editor.
-The order of `shapeNames` is the order of `Shape`; of `oversamplingNames`, the index of `kOversamplingFactor`.
+**Parameters.** `dionysus::id`: all are `ParameterID` version 1 except `lowcut`, version 2, and `adaa`, version 3 (Off: a session saved before either sounds as it did; a preset that does not list one leaves it Off). The order of `shapeNames` is the order of `Shape`; of `oversamplingNames`, the index of `kOversamplingFactor`.
 
 ## DRY: where each thing lives
 
 - the curves and their names for the user -> `Shapes.h` (`shape()`), `Parameters.h` (`shapeNames`); the harmonics and the AUTO GAIN factor -> `Shapes.h`
 - the oversampling factors and latencies -> `Oversampler.h`
-- parameter ranges, defaults, choice lists -> `Parameters.h` (the editor reads the items from the parameters)
-- what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
-  section, and at most `ui::kMaxNoteChars` characters
-- the plugin's name -> `DIONYSUS_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/DionysusUi.h` (`UiCheck` checks they agree)
-- every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls
 
 ## Gotchas already paid for
 
 - Test aliasing with a harmonic far above Nyquist (a 7 kHz sine's 5th, 35 kHz), not one just above (a 9 kHz sine's 3rd, 27 kHz, sits in the half-band's transition band and is only 38 dB down at 8x).
-- `ui::Choice` and `ui::Toggle` are bound to one parameter for good. In an editor constructor call `setSize()` **last**.
-- `createEditor()` returns a `ui::ScaledEditor<DionysusEditor>`, not the editor: tests and snapshots reach it with `ui::innerOf<DionysusEditor> (*processor.createEditor())`.
-
-## Conventions
-
-As in the other plugins: Allman braces, a space before call parentheses, `juce::` qualified in headers; comments explain *why*; claims in the README are backed by a test; commit by topic and end commit messages with the
-Co-Authored-By trailer.

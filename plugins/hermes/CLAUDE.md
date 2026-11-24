@@ -4,19 +4,9 @@ Hermes Level: a JUCE gain-staging and loudness tool (VST3 / AU / Standalone): tr
 
 ## Build and verify
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce.cmake, or third_party/JUCE at the repository root
-cmake --build build --target HermesTests -j 10 && ./build/HermesTests_artefacts/Release/HermesTests
-cmake --build build --target Hermes_VST3 -j 10
-cmake --build build --target HermesUiCheck && ./build/HermesUiCheck_artefacts/Release/HermesUiCheck
-cmake --build build --target HermesSnapshot && ./build/HermesSnapshot_artefacts/Release/HermesSnapshot docs/screenshot.png
-```
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-- Building the plugin targets does **not** install them (`HERMES_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh hermes` is the way to build and check (see the repository's CLAUDE.md).
-- `HermesTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
-  `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
-- Definition of done for a DSP change: `HermesTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
+- `Source/DSP` has no JUCE in it (supports standalone `g++` DSP tests).
 
 ## Layout
 
@@ -24,11 +14,8 @@ cmake --build build --target HermesSnapshot && ./build/HermesSnapshot_artefacts/
 Source/DSP/Loudness.h  no GUI, no JUCE: K-weighting for any rate, LoudnessMeter (momentary, short-term, integrated, range from fixed histograms)
 Source/DSP/Engine.h    the trim, the listening modes, the meters, the reference (Reference, the A/B crossfade, the level match); covered by Tests/Tests.cpp
 ../../shared/dsp/      TruePeak.h (`pdsp::TruePeakReader`: the 8x, 64-tap reader; shared with Aegis, so run AegisTests too when you change it)
-Source/Presets.h       the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
-Source/Advice.h        the notes of the strip under the controls and the GUIDE text; plain C++
-Source/Parameters.h    parameter layout, readParams()                       <- the single source of truth for parameters
-Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper (it also decodes the reference file) and editor (the look is `shared/ui`)
-Tests/                 Tests.cpp (DSP), UiCheck.cpp (editor on the real processor; it writes WAV files and loads them), Snapshot.cpp (editor -> PNG), Check.h
+Source/Plugin*.{h,cpp} decodes the reference file
+Tests/UiCheck.cpp      writes WAV files and loads them
 ```
 
 ## Rules that keep it correct
@@ -55,33 +42,13 @@ and a seek (`seekReference`, a fraction) are flags the audio thread takes (`rest
 **State.** The reference's path is a property of the state (`refPath`), not a parameter; a state with no `refPath`, or whose file is gone, clears the reference (`clearReference`); a processor given a state with a file loads it again with `callAsync` through a `WeakReference` (the processor may be gone by then), and
 `prepareToPlay` loads it again if the sample rate changed.
 
-**Undo and A/B.** The processor declares `juce::UndoManager undo` before `apvts` and hands it over (`&undo`), so every control change is one undo step; `setCurrentProgram` begins a step first, so a preset load is one UNDO step. `ab` (`ui::AbCompare`) is declared after `apvts`; its active slot is saved in the state as `abSlot`, and a session without it opens on slot 0. The two slots are not saved (a session opens with both empty). Both are the kit's (`Undo.h`, `AbCompare.h`).
-
-**Real time.** `Engine::process` allocates and locks nothing (the histograms are fixed arrays). **Bad samples:** NaN and infinity are replaced by 0 on the way in.
-
-**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
-(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
-
-**Parameters.** Ids (`hermes::id`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `reset_play` (AUTO RESET, version 2, off: the processor clears the meters on the rising edge of the host's `isPlaying`; `keepsParameter` keeps it through presets) and `auto_target` and `auto_peak` (the AUTO TRIM target and peak ceiling; AUTO TRIM adds to the current TRIM, so TRIM 0 is where a fresh run starts, version 2, at the old behaviour: -14 and off, so an older session opens as it was). A new one needs a higher version, an entry in `readParams()` and a place in the editor.
-The order of `listenNames` is the order of `Listen`.
+**Parameters.** `hermes::id`: all are `ParameterID` version 1 except `reset_play` (AUTO RESET, version 2, off: the processor clears the meters on the rising edge of the host's `isPlaying`; `keepsParameter` keeps it through presets) and `auto_target` and `auto_peak` (the AUTO TRIM target and peak ceiling; AUTO TRIM adds to the current TRIM, so TRIM 0 is where a fresh run starts, version 2, at the old behaviour: -14 and off, so an older session opens as it was). The order of `listenNames` is the order of `Listen`.
 
 ## DRY: where each thing lives
 
 - loudness and K-weighting -> `Loudness.h`; the true peak -> `shared/dsp` TruePeak.h
-- parameter ranges, defaults, choice lists -> `Parameters.h` (the editor reads the items from the parameters)
-- what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
-  section, and at most `ui::kMaxNoteChars` characters
-- the plugin's name -> `HERMES_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/HermesUi.h` (`UiCheck` checks they agree)
-- every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls (the readings and the graph are drawn on `ui::hw` glass)
 
 ## Gotchas already paid for
 
 - A test helper that takes the signal by value and returns it processed has to have its result used (`auto out = run (...)`): two tests of the reference measured the input and passed for the wrong reason until they were made to fail.
 - Loading a reference from a test needs a `juce::AudioFormatManager` with `registerBasicFormats()` (the processor has one); the audio formats module is in the plugin's and the checks' link lines.
-- `ui::Choice` and `ui::Toggle` are bound to one parameter for good. In an editor constructor call `setSize()` **last**.
-- `createEditor()` returns a `ui::ScaledEditor<HermesEditor>`, not the editor: tests and snapshots reach it with `ui::innerOf<HermesEditor> (*processor.createEditor())`.
-
-## Conventions
-
-As in the other plugins: Allman braces, a space before call parentheses, `juce::` qualified in headers; comments explain *why*; claims in the README are backed by a test; commit by topic and end commit messages with the
-Co-Authored-By trailer.
