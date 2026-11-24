@@ -10,7 +10,7 @@ An offline pitch editor for solo vocals with Viterbi pitch tracking, piano-roll 
 
 ## Theme
 
-**Name origin:** *Orpheus* is the singer of Greek myth, whose voice moved stones and rivers; here it is the voice that gets moved onto the note. (CMake targets and namespaces use the short name `Orpheus`. It is an app, not a plugin: it lives in `apps/`, not `plugins/`.)
+**Name origin:** *Orpheus* is the mythic singer whose voice moved stones and rivers; *Pitch Editor* is the offline, note-by-note vocal workspace where each sung note is inspected and moved onto pitch. (CMake targets and namespaces use the short name `Orpheus`. It is an app, not a plugin: it lives in `apps/`, not `plugins/`.)
 
 ### Core philosophy
 
@@ -19,8 +19,6 @@ An offline pitch editor for solo vocals with Viterbi pitch tracking, piano-roll 
 - **Your voice stays your voice.** Grains of the original are re-spaced, not resampled, so the vowel colour stays where it was, and consonants and breaths are never touched. A note you did not edit is **bit-for-bit the original**, so editing one word cannot harm the rest of the take.
 - **Non-destructive.** The audio is never changed; an edit is a list of numbers per note. Undo keeps the last 200 steps, a project file keeps the edit, and **ORIGINAL** plays the untouched recording at the same position at any moment.
 - **One voice at a time.** It is built for a clean solo vocal (or any monophonic line: a bass, a horn) and says so. Chords and backing-vocal stacks are not what it is for.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -31,6 +29,8 @@ An offline pitch editor for solo vocals with Viterbi pitch tracking, piano-roll 
 
 ### UI colour legend
 
+See [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes.
+
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
 | 🩵 | `#37E3C5` | Corrected note blobs & pitch trace | Snapped/edited notes and resulting target pitch curve (`colours::accent`) |
@@ -38,16 +38,10 @@ An offline pitch editor for solo vocals with Viterbi pitch tracking, piano-roll 
 | 🟢 | `#5FD68C` | In-tune note blobs | Within `8 cents` of the chosen scale (`colours::good`) |
 | 🟠 | `#F2A33A` | Slightly off-pitch blobs & foot warning strip | `8–25 cents` from scale; amber notes for `ORIGINAL`, unsaved edits, or `> 5 st` shifts (`colours::warn`) |
 | 🔴 | `#EF4A3D` | Out-of-tune blobs & `OUT PEAK` overload | `> 25 cents` from scale; `OUT PEAK` red when output exceeds `0 dB` (`colours::bad`) |
-| ⚪ | `#EAE3D0` | Faceplate labels, cent readouts, selected outline | Engraved silkscreen text, `"A3 +12ct"` labels, and active note outline (`colours::text`) |
 
 ## Try it
 
-### Quick launch
-
-```bash
-./scripts/open.sh orpheus
-./scripts/open.sh orpheus path/to/vocals.wav
-```
+See [Quick launch](../../README.md#quick-launch) to build and run Orpheus (optionally passing a `.orpheus` project or `.wav` audio file).
 
 | Workflow | Action / Setting | What you see / hear / measure |
 |---|---|---|
@@ -118,21 +112,18 @@ Measured by `Tests/Tests.cpp` and `Tests/UiCheck.cpp` on a synthetic two-formant
 
 ## Build & develop
 
-Requires CMake, Xcode (clang + macOS SDK), and `ffmpeg` (for `showcase.sh`). JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake) (or place checkout in `third_party/JUCE`). See [CLAUDE.md](CLAUDE.md).
+See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, [Quick launch](../../README.md#quick-launch) to run the app, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```bash
-./scripts/open.sh orpheus                 # build if needed and launch
-./scripts/open.sh orpheus take.wav        # launch with recording
 scripts/build.sh orpheus                  # OrpheusTests and OrpheusUiCheck
 scripts/build.sh orpheus snap             # docs/screenshot.png and docs/corrected.png
 scripts/showcase.sh orpheus               # regenerate docs/showcase.gif
 scripts/build.sh orpheus app              # Orpheus.app
 ```
 
-Plain CMake (from `apps/orpheus`, setting `SDKROOT` if Command Line Tools' SDK is picked first):
+Plain CMake (from `apps/orpheus`):
 
 ```bash
-export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target Orpheus -j 10 && open build/Orpheus_artefacts/Release/Orpheus.app
 cmake --build build --target OrpheusTests -j 10 && ./build/OrpheusTests_artefacts/Release/OrpheusTests
@@ -144,4 +135,4 @@ cmake --build build --target OrpheusSnapshot -j 10
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).

@@ -10,14 +10,12 @@ Eight-band parametric equaliser for mixing and mastering with Minimum or Linear 
 
 ## Theme
 
-**Name origin:** *Apollo* is the god of music and of harmony: of things in proportion. (CMake targets, namespaces and plugin codes use the short name "Apollo".)
+**Name origin:** *Apollo* is the god of music, proportion, and measure; *Curve* is the frequency response shape sculpted by its eight parametric bands. (CMake targets, namespaces, and plugin codes use the short name "Apollo".)
 
 **Core philosophy:**
 - **Proportion in phase and tone.** Eight bands switch between zero-latency **Minimum** phase and zero-phase-shift **Linear** phase, routing Stereo, Mid, or Side via difference addition so untouched audio stays untouched.
 - **Bit-exact idle, click-free bypasses.** Bands off or under `0.005 dB` exit the chain bit-exact (even under FMA), disabled bands fade out before removal, and NaN/inf inputs become silence.
 - **Static EQ with honest limits.** Performs no dynamic modulation (use [Iris Prism](../iris/README.md) for dynamic/match EQ); Linear phase resolves ~`12 Hz` (`48.0 ms` delay, softer below `60 Hz`) and narrow high-Q Minimum boosts ring.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -27,16 +25,15 @@ Eight-band parametric equaliser for mixing and mastering with Minimum or Linear 
 | **Paste from Themis** | ![Paste from Themis](docs/themis.png) | PASTE fills free bands and draws the dashed teal Themis reference curve behind the analyser. |
 | **Linear Phase + Delta** | ![Delta](docs/delta.png) | Linear phase (`48.0 ms` delay) with DELTA on: bright trace shows only output minus input. |
 
-**UI colour legend** — exact hex values from [`Hardware.h`](../../shared/ui/include/pantheon/ui/Hardware.h) (`ApolloUi.h` assigns each band HSV hue `fromHSV(fmod(0.08 + 0.125 * band, 1), 0.6, 0.95)`):
+**UI colour legend** — see [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes (`ApolloUi.h` assigns each band HSV hue `fromHSV(fmod(0.08 + 0.125 * band, 1), 0.6, 0.95)`):
 
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
 | 🟡 | `#FFB347` | Composite Stereo/Mid EQ curve, `GAIN MATCH` gain readout, lit `LISTEN` / `DELTA` / `A / B` / `UNDO` buttons | Combined filter magnitude actually running on Stereo/Mid; active monitoring & loudness compensation |
 | 🔵 | `#37E3C5` | Side EQ curve, dashed Themis reference curve, `ANALYZER` button & `TARGET` pill | Side-channel filter response (shown when any band targets Mid/Side), pasted Themis target shape, and analyser toggle |
-| ⚪ | `#EAE3D0` | Selected node outer ring, post-EQ analyser trace, silkscreen labels | Currently selected band (`#1–8`) and live spectrum *after* the EQ |
-| 🔘 | `#9F9680` | Pre-EQ analyser trace, disabled band labels, latency & grid labels, info strip notes | Live spectrum *before* the EQ, bypassed band strips, and `Delay` / informational readouts |
+| ⚪ | `#EAE3D0` | Selected node outer ring, post-EQ analyser trace | Currently selected band (`#1–8`) and live spectrum *after* the EQ |
+| 🔘 | `#9F9680` | Pre-EQ analyser trace, disabled band labels | Live spectrum *before* the EQ and bypassed band strips |
 | 🟠 | `#F2A33A` | Warning notes in bottom advice strip | Active `DELTA` or `LISTEN` monitor warning, single-band boosts `>= 9 dB`, or overlapping octave boosts `>= 12 dB` |
-| 🔴 | `#EF4A3D` | Shared kit error state (unused in steady EQ glass) | Reserved for error/clip alerts in the shared kit |
 
 ## Try it
 
@@ -117,17 +114,17 @@ input ─► Phase ───┤
 - **Gain Match is RMS-based:** Slow unweighted full-band RMS (~`0.6 s`, `±12 dB` cap) tracks sections rather than notes; verify by ear and **DELTA**.
 - **PASTE is not live match-EQ:** Imports Themis' bands and static reference curve rather than matching live audio (use [Iris Prism](../iris/README.md) for live match/dynamic EQ); L/R-only Iris bands and Hephaestus fill bands are skipped.
 - **Static EQ & visual analyser:** No dynamics; `8192`-pt FFT (`90 dB` scale, `4.5 dB/oct` tilt) is visual only (tilt shifts levels) and runs only while open (`ANALYZER` toggles it, saved in session).
-- **Platform verification:** Builds on macOS (VST3 + AU, manually verified 2026-11-13) and passes `auval -v`; not in macOS CI yet and has no `HostCheck`.
+- **Platform verification:** See [CI & platform status](../../CLAUDE.md#not-yet-in-line).
 
 ## Build & develop
 
-Requires CMake 3.22+ and a C++20 compiler (JUCE fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake)).
+See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```bash
-# Fast build & check from repository root (Ninja + ccache if installed)
+# Fast build & check from repository root
 ./scripts/build.sh apollo           # build & run ApolloTests + ApolloUiCheck
 ./scripts/build.sh apollo all       # tests, ui, snap, vst3, au, app
-./scripts/showcase.sh apollo        # regenerate docs/showcase.gif (requires ffmpeg)
+./scripts/showcase.sh apollo        # regenerate docs/showcase.gif
 ```
 
 Manual CMake from `plugins/apollo/` (add `-DAPOLLO_INSTALL_AFTER_BUILD=ON` on macOS to install):
@@ -142,8 +139,6 @@ cmake --build build --target ApolloSnapshot && ./build/ApolloSnapshot_artefacts/
 ./build/ApolloSnapshot_artefacts/Release/ApolloSnapshot docs/delta.png delta linear select=4
 ```
 
-Images in `docs/` are generated by `ApolloSnapshot` / `scripts/showcase.sh` (never edited by hand). See [CLAUDE.md](CLAUDE.md) for invariants.
-
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, the source-only policy), [CONTRIBUTING.md](../../CONTRIBUTING.md) and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).

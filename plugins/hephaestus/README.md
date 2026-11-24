@@ -20,8 +20,6 @@ Six-band mastering harmonic forge that either saturates inside a band or adaptiv
 - **Fill what is missing, not what is already there.** Harmonic Fill measures the *input* above the band and adds only the shortfall against **Amount**—open-loop, with no feedback to destabilise.
 - **Exact where it can be, honest where it cannot.** Unit-energy H2–H5 weights (`Warm` Chebyshev, `Clean` phase-locked sines, `Octave` STFT partials) and `double` ADAA inside oversampling; every claim is test-measured and heuristics live in Limits.
 - **Made for judging, with mastering tools in reach.** **Delta**, **Gain Match**, **Mid/Side**, latency-compensated **Mix**, and live input-vs-output FFT prevent mistaking loudness for better.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -31,16 +29,14 @@ Six-band mastering harmonic forge that either saturates inside a band or adaptiv
 
 ### UI colour legend
 
+See [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes.
+
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
 | 🟡 | `#FFB347` | **Saturate** band frame, `HARMONICS ADDED` zone, mode button, active chip, off-screen `SOLO: BAND` alert | Band-passed waveshaper difference summed onto latency-matched dry (`colours::amber`) |
 | 🔵 | `#37E3C5` | **Harmonic Fill** band frame, `HARMONICS ADDED` & `ADAPT LISTENS HERE` zones, mode button, active chip | Adaptive H2–H5 generator (`colours::accent`) |
-| ⚪ | `#EAE3D0` | Output spectrum trace & fill, active main-band solo switch, primary labels | Processed output spectrum and active text (`colours::text`) |
-| ⚫ | `#9F9680` | Input spectrum trace & fill, info notes under band knobs, secondary text | Pre-processing input trace and informational hints (`colours::dim`) |
-| 🟢 | `#5FD68C` | **IN / OUT** level meters (`≤ -6 dBFS`) | Healthy headroom (`colours::good`) |
-| 🟠 | `#F2A33A` | **IN / OUT** level meters (`-6` to `-0.5 dBFS`), advice warning dots | Approaching full scale or active configuration warning (`colours::warn`) |
-| 🔴 | `#EF4A3D` | **IN / OUT** level meters (`> -0.5 dBFS`) | Peak near/at `0 dBFS` clipping (`colours::bad`) |
-| ⬛ | `#090D0D` / `#1C2A29` | Spectrum & meter glass, FFT graticule | Recessed glass display (`colours::glass`) and grid (`colours::glassGrid`) |
+| ⚪ | `#EAE3D0` | Output spectrum trace & fill, active main-band solo switch | Processed output spectrum (`colours::text`) |
+| ⚫ | `#9F9680` | Input spectrum trace & fill | Pre-processing input trace (`colours::dim`) |
 
 ## Try it
 
@@ -140,15 +136,14 @@ in ──► gain ─┬─ dry (delayed by latency) ─────────
 
 ## Build & develop
 
-Source-only (**VST3 + AU + Standalone**, macOS universal `arm64 + x86_64`). Requires CMake and Xcode; JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake) (or `third_party/JUCE`).
+Source-only (**VST3 + AU + Standalone**, macOS universal `arm64 + x86_64`). See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```bash
 # Recommended from repository root:
 scripts/build.sh hephaestus           # configure, build & run HephaestusTests + HephaestusUiCheck
-scripts/showcase.sh hephaestus        # regenerate docs/showcase.gif (requires ffmpeg)
+scripts/showcase.sh hephaestus        # regenerate docs/showcase.gif
 
 # Manual CMake from plugins/hephaestus/:
-export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target Hephaestus_VST3 Hephaestus_AU Hephaestus_Standalone   # installs to ~/Library/Audio/Plug-Ins/{VST3,Components}
 auval -v aufx Hphs Hpha
@@ -176,4 +171,4 @@ CI in [.github/workflows](../../.github/workflows) does not build or test Hephae
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, distribution terms), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md). Provided "as is", without warranty; macOS quarantines unsigned copies (`xattr -cr "Hephaestus Forge.vst3"` clears it for personal use).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).

@@ -20,8 +20,6 @@ Natural-sounding pitch correction for solo vocals that snaps a voice to a key wh
 - **Your voice stays your voice.** PSOLA re-spaces grains rather than resampling, so formants stay put and unvoiced consonants and breaths pass untouched; *Formant* is `0` unless moved.
 - **One voice at a time.** Built for a clean solo vocal and honest about it—not for chords, backing-vocal stacks, or full mixes.
 - **A fixed, honest delay.** A `46 ms` look-ahead lets the pitch track be known before re-synthesis; latency is fixed, host-reported, and kept by **Bypass**.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -31,14 +29,13 @@ Natural-sounding pitch correction for solo vocals that snaps a voice to a key wh
 
 ### UI colour legend
 
+See [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes (`pitchcolours::*` in `HarmoniaUi.h`).
+
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
 | 🟡 | `#FFB347` | Sung pitch trace, live chip input, singing key outline, **LATENCY** readout | Raw detected vocal pitch (`pitchcolours::sung`) and digital read-outs / lit switches (`colours::amber`) |
 | 🔵 | `#37E3C5` | Corrected pitch trace, allowed pitch lanes, lit piano keys | Corrected output pitch (`pitchcolours::corrected`), target lane highlight, and allowed scale notes (`colours::accent`) |
 | 🟠 | `#F2A33A` | **BYPASS** active lamp, advice strip warning dots | Bypass engaged (original vocal delayed by 46 ms) or active configuration warnings (`colours::warn`) |
-| ⚪ | `#EAE3D0` | C-octave & allowed note labels, active black-key text | Primary silkscreen labels (`colours::text`) |
-| ⚫ | `#9F9680` | Advice strip info dots, blocked note labels, secondary captions | Informational notes and muted axis text (`colours::dim`) |
-| ⬛ | `#090D0D` / `#1C2A29` | Recessed pitch glass & grid lines | Pitch roll background (`colours::glass`) and semitone/octave graticule (`colours::glassGrid`) |
 
 ## Try it
 
@@ -126,12 +123,12 @@ in ──► 46 ms look-ahead ──┬──► YIN detect (~24 kHz LP copy, fu
 
 ## Build & develop
 
-Source-only (**VST3 + AU + Standalone**, macOS universal `arm64 + x86_64`). Requires CMake and Xcode (`clang` + macOS SDK); JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake).
+Source-only (**VST3 + AU + Standalone**, macOS universal `arm64 + x86_64`). See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, and [CLAUDE.md](CLAUDE.md) for invariants.
 
 ```sh
 # From repository root:
 scripts/build.sh harmonia             # build and run DSP + UI checks
-scripts/showcase.sh harmonia          # regenerate docs/showcase.gif (requires ffmpeg)
+scripts/showcase.sh harmonia          # regenerate docs/showcase.gif
 
 # From plugins/harmonia/:
 scripts/build.sh                      # configure, build VST3 + AU + Standalone, install, ad-hoc sign
@@ -161,4 +158,4 @@ CI in [.github/workflows](../../.github/workflows) does not build or test Harmon
 
 ## Licence
 
-AGPL-3.0-or-later, source only. See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md) (third-party software, trademarks, distribution terms), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md). Provided "as is", without warranty; macOS quarantines unsigned copies (`xattr -cr "Harmonia Pitch.vst3"` clears it for personal use).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).

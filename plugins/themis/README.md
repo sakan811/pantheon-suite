@@ -18,8 +18,6 @@ A mastering check suite in one plugin that weighs tonal balance, translation, ph
 - **One exception, for listening only.** Solo/Mute audition and **COMPARE** (`STREAM ON` / `REF`) act only while engaged, stay bit-exact when idle, never save, and skip offline renders.
 - **Tells you what to do, from measurements only.** **MASTER PLAN** ranks faults worst-first with measured amounts and *why* tooltips, stating plainly where thresholds are rules of thumb.
 - **Everything a mastering check needs, in one place.** Every readout, graph, and overlay reads one FFT and one band grid in a single editor.
-- **Analog look, digital brain.** Studio-hardware interface drawn entirely from code by the shared kit ([shared/ui](../../shared/ui)); no image, font or sound files ship.
-- **Free, public, source only.** The repository holds the code, not a download, under the AGPL-3.0-or-later (see [NOTICE](../../NOTICE.md)).
 
 ## See it
 
@@ -31,6 +29,8 @@ A mastering check suite in one plugin that weighs tonal balance, translation, ph
 
 ### UI colour legend
 
+See [root UI colour legend](../../README.md#ui-colour-legend-hardwareh) for shared `Hardware.h` hex codes (`ThemisUi.h` defines `palette::*` and `#f06a5e`).
+
 | Swatch | Hex | UI Element | Meaning |
 |---|---|---|---|
 | 🟢 | `#5fd68c` | `OK` / `CLEAR` lamps, green tonal/mono-fold segments, `on target` / `typical` / `balanced` zones | Within target/safe rule-of-thumb limits (`colours::good`) |
@@ -38,7 +38,7 @@ A mastering check suite in one plugin that weighs tonal balance, translation, ph
 | 🔴 | `#ef4a3d` / `#f06a5e` | `FIX` / `FAULTS` lamps (`#ef4a3d`), `FIX` label text (`#f06a5e`, 4.72:1 contrast), `M`ute buttons, `OUTPUT ALTERED` outline, `CLIPPING` & `> 0 dB` zone | Objective fault, clipping/over-`0 dBTP`, mute, or altered output warning |
 | 🩵 | `#37e3c5` | Target median & tolerance band, Stereo vectorscope trace, Spectrogram mid-ramp | Reference target envelope (`colours::accent`) and stereo goniometer phosphor |
 | 🟡 | `#ffb347` | LCD readouts, `HOLD CURVE` / `COPY ALL` / `SNAP` / `HEAR` lit buttons, `CREST PER BAND` values, Spectrogram upper ramp | Digital numbers, active plan chips, and upper spectrogram intensity (`colours::amber`) |
-| ⚪ | `#eae3d0` / `#9f9680` | `HOLD CURVE` ghost, `TILT` & `ALL` dashed lines, `FUND vs HARM`, vectorscope needle, bright spectrogram peaks | Held reference trace, broadband slope/sum, and silkscreen text |
+| ⚪ | `#eae3d0` / `#9f9680` | `HOLD CURVE` ghost, `TILT` & `ALL` dashed lines, `FUND vs HARM`, vectorscope needle, bright spectrogram peaks | Held reference trace, broadband slope/sum, and scope/spectrogram markers |
 | 🔵 | `#3987e5` | Graph series: `LOW`, `MID`, `LEFT`, `SAMPLE PEAK`, `SHORT-TERM`, `FUND`; `dynamic` & `harmonic-rich` zones | Categorical graph slot 1 (`palette::blue`) |
 | 🟠 | `#d95926` | Graph series: `LOW-MID`, `SIDE`, `RIGHT`, `TRUE PEAK`, `HARMONICS` | Categorical graph slot 2 (`palette::orange`) |
 | 🟢 | `#199e70` | Graph series: `HIGH-MID`, `CREST`, `PITCH` | Categorical graph slot 3 (`palette::aqua`) |
@@ -109,7 +109,7 @@ in ─┬─► [Lock-free ring] ──► (Background FFT thread: 16384-pt @ 48
 
 ## Build & develop
 
-Requires CMake 3.22+, a C++20 compiler, and `ffmpeg` (for `showcase.sh`). JUCE is fetched via [cmake/Juce.cmake](../../cmake/Juce.cmake). See [CLAUDE.md](CLAUDE.md) and [.github/workflows/build.yml](../../.github/workflows/build.yml).
+See [root Build & develop](../../README.md#build--develop) for shared prerequisites and image-generation rules, [CLAUDE.md](CLAUDE.md) for invariants, and [.github/workflows/build.yml](../../.github/workflows/build.yml) for CI.
 
 ```bash
 scripts/build.sh themis ThemisSmoke     # build & run smoke check
@@ -137,4 +137,4 @@ auval -v aufx Thms Thmi
 
 ## Licence
 
-AGPL-3.0-or-later, source only, no warranty (`xattr -cr "Themis Verdict.vst3"` clears macOS quarantine for personal use). See [LICENSE](../../LICENSE), [NOTICE.md](../../NOTICE.md), [CONTRIBUTING.md](../../CONTRIBUTING.md), and [SECURITY.md](../../SECURITY.md).
+AGPL-3.0-or-later, source only — see [root Licence](../../README.md#licence) and [NOTICE](../../NOTICE.md).
