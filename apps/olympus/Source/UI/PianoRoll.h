@@ -66,6 +66,11 @@ public:
     juce::String lengthTextForTest() const { return lengthLabel.getText(); }
     void setScaleForTest (int scaleIndex);
     int activeScaleForTest() const { return activeScaleIndex; }
+    void setScaleLockForTest (bool lock);
+    bool isScaleLockForTest() const { return scaleLock; }
+    void setGhostNotesForTest (bool show);
+    bool isGhostNotesForTest() const { return showGhostNotes; }
+    int ghostNotesCountForTest() const;
     void runToolsActionForTest (int actionId);
 
     void paint (juce::Graphics& g) override;
@@ -120,6 +125,8 @@ private:
     std::vector<int> marqueeInitialSelection;
     std::vector<MidiNote> copiedNotes;
     int activeScaleIndex = 0;
+    bool scaleLock = false;
+    bool showGhostNotes = false;
     int lastVelX = 0;
     int lastVel = 100;
     int previewPitch = -1;
@@ -157,6 +164,8 @@ private:
     void showScaleMenu();
     void showToolsMenu (juce::Component* target, juce::Point<int> localPoint);
     void applyScaleIndex (int index);
+    int snapPitchToScale (int pitch) const;
+    int stepPitchInScale (int pitch, int direction) const;
     void runToolsAction (int actionId);
     void selectAllNotes();
     void duplicateSelectedNotes();
