@@ -4590,6 +4590,60 @@ int main()
         juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
     }
 
+    // [56] Piano Roll Scale Lock, Ghost Notes, Swing & Tools
+    {
+        std::printf ("[56] Piano Roll Scale Lock, Ghost Notes, Swing & Tools\n");
+        const auto dir56 = tempFolder().getChildFile ("piano-roll-56");
+        dir56.deleteRecursively();
+        dir56.createDirectory();
+        auto w = makeWindow (true, dir56.getChildFile ("settings.xml"));
+        w->setSize (1200, 750);
+        w->resized();
+
+        juce::String err;
+        w->editor.addMidiTrack ("Lead");
+        w->editor.addMidiTrack ("Bass");
+        const auto c0 = w->editor.addMidiClip (0, 0, 192000, "LeadClip", err);
+        juce::ignoreUnused (c0);
+        w->editor.addMidiClip (1, 0, 192000, "BassClip", err);
+        w->editor.addMidiNote (1, 0, 0.0, 2.0, 48, 100, err);
+
+        w->refreshNow();
+        w->arrange.mouseDoubleClick (mouseAt (w->arrange, w->arrange.midiClipBounds ({ 0, 0 }).getCentre()));
+        w->resized();
+        auto& pr = w->pianoRoll;
+
+        // Ghost notes from track 1
+        pr.setGhostNotesForTest (true);
+        test::check (pr.isGhostNotesForTest() && pr.ghostNotesCountForTest() == 1,
+                     "PianoRoll collects overlapping ghost notes from other MIDI tracks");
+
+        // Scale Lock (C Major = 1) snaps keyboard transpose up from C4 (60) to D4 (62)
+        pr.setScaleForTest (1);
+        pr.setScaleLockForTest (true);
+        pr.addNoteForTest (0.0, 1.0, 60, 100);
+        pr.keyPressed (juce::KeyPress (juce::KeyPress::upKey));
+        test::check (w->session.tracks[0]->midiClips[0].notes[0].pitch == 62,
+                     "Scale Lock upKey steps C4 to D4 in C Major");
+
+        // Tools: Invert Pitch, Reverse Timing, Remove Overlaps, Quantize Swing
+        pr.addNoteForTest (0.5, 1.0, 67, 100);
+        pr.runToolsActionForTest (8); // Select All
+        pr.runToolsActionForTest (11); // Invert Pitch (62 <-> 67)
+        test::check (w->session.tracks[0]->midiClips[0].notes[0].pitch == 67
+                     && w->session.tracks[0]->midiClips[0].notes[1].pitch == 62,
+                     "Tools Invert Pitch mirrors selected notes");
+        pr.runToolsActionForTest (12); // Reverse Timing
+        pr.runToolsActionForTest (10); // Remove Overlaps
+        pr.runToolsActionForTest (9);  // Quantize Swing 50%
+
+        const auto prImg = pr.createComponentSnapshot (pr.getLocalBounds());
+        test::check (prImg.isValid(), "PianoRoll with Scale Lock and Ghost Notes paints cleanly");
+
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
     tempFolder().deleteRecursively();
     return test::finish ("OlympusUiCheck");
 }

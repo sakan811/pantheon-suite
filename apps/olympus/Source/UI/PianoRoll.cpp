@@ -87,6 +87,7 @@ struct PianoRollSnapshot
     bool trackArmed = false;
     juce::String trackName;
     MidiClip clip;
+    std::vector<MidiNote> ghostNotes;
     double rate = kFallbackRate;
     TempoMap tempo;
     Grid grid = Grid::Quarter;
@@ -264,6 +265,33 @@ std::shared_ptr<const PianoRollSnapshot> PianoRollView::snapshotPtr() const
         s->trackName = t.name;
         s->clip = t.midiClips[(size_t) targetRef.clip];
 
+        if (s->clip.length > 0 && s->tempo.sampleRate > 0.0)
+        {
+            const double activeStartBeat = s->tempo.samplesToBeats ((double) s->clip.start);
+            const double activeLenBeats = juce::jmax (0.25, s->tempo.samplesToBeats ((double) s->clip.end()) - activeStartBeat);
+            for (int ti = 0; ti < (int) session.tracks.size(); ++ti)
+            {
+                if (ti == targetRef.track)
+                    continue;
+                const auto& ot = *session.tracks[(size_t) ti];
+                if (! ot.isMidi || ot.mute)
+                    continue;
+                for (const auto& mc : ot.midiClips)
+                {
+                    if (mc.mute || mc.length <= 0 || mc.end() <= s->clip.start || mc.start >= s->clip.end())
+                        continue;
+                    const double offsetBeats = s->tempo.samplesToBeats ((double) mc.start) - activeStartBeat;
+                    for (const auto& gn : mc.notes)
+                    {
+                        MidiNote copy = gn;
+                        copy.startBeat += offsetBeats;
+                        if (copy.startBeat + copy.durationBeats > 0.0 && copy.startBeat < activeLenBeats)
+                            s->ghostNotes.push_back (copy);
+                    }
+                }
+            }
+        }
+
         lastSnapshot = s;
         lastSnapshotRevision = session.revision.load (std::memory_order_acquire);
         lastSnapshotRef = targetRef;
@@ -365,7 +393,10 @@ void PianoRollView::showGridMenu()
 void PianoRollView::applyScaleIndex (int index)
 {
     activeScaleIndex = juce::jlimit (0, kNumScales - 1, index);
-    scaleButton.setButtonText (activeScaleIndex == 0 ? juce::String ("Scale") : juce::String (kScales[activeScaleIndex].name));
+    if (activeScaleIndex == 0)
+        scaleButton.setButtonText ("Scale");
+    else
+        scaleButton.setButtonText (juce::String (kScales[activeScaleIndex].name) + (scaleLock ? " *" : ""));
     repaint();
 }
 
@@ -374,15 +405,77 @@ void PianoRollView::setScaleForTest (int scaleIndex)
     applyScaleIndex (scaleIndex);
 }
 
+void PianoRollView::setScaleLockForTest (bool lock)
+{
+    scaleLock = lock;
+    applyScaleIndex (activeScaleIndex);
+}
+
+void PianoRollView::setGhostNotesForTest (bool show)
+{
+    showGhostNotes = show;
+    repaint();
+}
+
+int PianoRollView::ghostNotesCountForTest() const
+{
+    const auto sp = snapshotPtr();
+    return (int) sp->ghostNotes.size();
+}
+
+int PianoRollView::snapPitchToScale (int pitch) const
+{
+    const int p = juce::jlimit (0, 127, pitch);
+    if (! scaleLock || activeScaleIndex <= 0)
+        return p;
+    const unsigned mask = kScales[juce::jlimit (0, kNumScales - 1, activeScaleIndex)].mask;
+    if (mask == 0u)
+        return p;
+    for (int d = 0; d <= 11; ++d)
+    {
+        if (p + d <= 127 && (mask & (1u << (((p + d) % 12 + 12) % 12))) != 0u)
+            return p + d;
+        if (d > 0 && p - d >= 0 && (mask & (1u << (((p - d) % 12 + 12) % 12))) != 0u)
+            return p - d;
+    }
+    return p;
+}
+
+int PianoRollView::stepPitchInScale (int pitch, int direction) const
+{
+    const int p = juce::jlimit (0, 127, pitch);
+    if (! scaleLock || activeScaleIndex <= 0 || direction == 0)
+        return juce::jlimit (0, 127, p + direction);
+    const unsigned mask = kScales[juce::jlimit (0, kNumScales - 1, activeScaleIndex)].mask;
+    if (mask == 0u)
+        return juce::jlimit (0, 127, p + direction);
+    const int step = direction > 0 ? 1 : -1;
+    for (int cand = p + step; cand >= 0 && cand <= 127; cand += step)
+    {
+        const int pc = ((cand % 12) + 12) % 12;
+        if ((mask & (1u << pc)) != 0u)
+            return cand;
+    }
+    return p;
+}
+
 void PianoRollView::showScaleMenu()
 {
     juce::PopupMenu menu;
+    menu.addItem (100, "Scale Lock (Snap Pitches)", true, scaleLock);
+    menu.addSeparator();
     for (int i = 0; i < kNumScales; ++i)
         menu.addItem (i + 1, kScales[i].name, true, activeScaleIndex == i);
     juce::Component::SafePointer<PianoRollView> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&scaleButton), [safe] (int result)
     {
         if (safe == nullptr || result <= 0) return;
+        if (result == 100)
+        {
+            safe->scaleLock = ! safe->scaleLock;
+            safe->applyScaleIndex (safe->activeScaleIndex);
+            return;
+        }
         safe->applyScaleIndex (result - 1);
     });
 }
@@ -529,6 +622,30 @@ void PianoRollView::runToolsAction (int actionId)
         case 8:
             selectAllNotes();
             break;
+        case 9:
+            if (! editor.quantizeMidiNotes (targetRef.track, targetRef.clip, selectedNotes, sp->grid, 1.0, 0.5, error))
+                report (error);
+            edited();
+            break;
+        case 10:
+            if (! editor.removeOverlapsMidiNotes (targetRef.track, targetRef.clip, selectedNotes, error))
+                report (error);
+            edited();
+            break;
+        case 11:
+            if (! editor.invertMidiNotes (targetRef.track, targetRef.clip, selectedNotes, error))
+                report (error);
+            edited();
+            break;
+        case 12:
+            if (! editor.reverseMidiNotes (targetRef.track, targetRef.clip, selectedNotes, error))
+                report (error);
+            edited();
+            break;
+        case 13:
+            showGhostNotes = ! showGhostNotes;
+            repaint();
+            break;
         default:
             break;
     }
@@ -545,15 +662,21 @@ void PianoRollView::showToolsMenu (juce::Component* target, juce::Point<int> loc
     juce::PopupMenu menu;
     menu.addItem (1, "Quantize 100%");
     menu.addItem (2, "Quantize 50%");
+    menu.addItem (9, "Quantize Swing 50%");
     menu.addSeparator();
     menu.addItem (3, "Legato (Trim & Extend)");
+    menu.addItem (10, "Remove Overlaps");
     menu.addItem (4, "Humanize");
     menu.addSeparator();
     menu.addItem (5, "Transpose +1 Oct");
     menu.addItem (6, "Transpose -1 Oct");
+    menu.addItem (11, "Invert Pitch");
+    menu.addItem (12, "Reverse Timing");
     menu.addSeparator();
     menu.addItem (7, "Duplicate", ! selectedNotes.empty());
     menu.addItem (8, "Select All");
+    menu.addSeparator();
+    menu.addItem (13, "Ghost Notes", true, showGhostNotes);
 
     auto opts = juce::PopupMenu::Options();
     if (target != nullptr)
@@ -836,6 +959,11 @@ void PianoRollView::paint (juce::Graphics& g)
                     g.setColour (colours::accent.withAlpha (0.045f));
                     g.fillRect (grid.getX(), y, grid.getWidth(), kRowHeight);
                 }
+                else
+                {
+                    g.setColour (colours::background.darker (0.65f).withAlpha (0.45f));
+                    g.fillRect (grid.getX(), y, grid.getWidth(), kRowHeight);
+                }
             }
             g.setColour ((p % 12 == 0) ? colours::panelEdge.withAlpha (0.85f) : colours::glassGrid.withAlpha (0.45f));
             g.drawHorizontalLine (y + kRowHeight - 1, (float) grid.getX(), (float) grid.getRight());
@@ -872,6 +1000,22 @@ void PianoRollView::paint (juce::Graphics& g)
             const bool isBeat = std::abs (b - std::round (b)) < 1.0e-6;
             g.setColour (colours::dim.withAlpha (isBar ? 0.42f : isBeat ? 0.24f : 0.11f));
             g.drawVerticalLine (x, (float) grid.getY(), (float) grid.getBottom());
+        }
+
+        // Ghost notes from other MIDI tracks
+        if (s.valid && showGhostNotes)
+        {
+            for (const auto& gn : s.ghostNotes)
+            {
+                const auto nr = noteRect (gn);
+                if (nr.getRight() < grid.getX() || nr.getX() > grid.getRight()
+                    || nr.getBottom() < grid.getY() || nr.getY() > grid.getBottom())
+                    continue;
+                g.setColour (colours::dim.withAlpha (0.14f));
+                g.fillRoundedRectangle (nr.toFloat(), 2.0f);
+                g.setColour (colours::dim.withAlpha (0.35f));
+                g.drawRoundedRectangle (nr.toFloat().reduced (0.5f), 2.0f, 1.0f);
+            }
         }
 
         // Notes
@@ -1117,7 +1261,7 @@ void PianoRollView::mouseDoubleClick (const juce::MouseEvent& e)
     double beat = juce::jmax (0.0, xToBeat (p.x));
     if (sp->snapOn)
         beat = juce::jmax (0.0, std::floor (beat / step + TempoMap::kGridEps) * step);
-    const int pitch = yToPitch (p.y);
+    const int pitch = snapPitchToScale (yToPitch (p.y));
     juce::String error;
     const int idx = editor.addMidiNote (targetRef.track, targetRef.clip, beat, step, pitch, 100, error);
     if (idx >= 0)
@@ -1205,6 +1349,37 @@ void PianoRollView::mouseDown (const juce::MouseEvent& e)
         const int hit = hitNoteAt (*sp, p);
         if (hit >= 0)
         {
+            if (e.mods.isAltDown())
+            {
+                const auto& n = sp->clip.notes[(size_t) hit];
+                const double step = juce::jmax (0.125, sp->tempo.gridBeats (sp->grid));
+                double splitBeat = juce::jmax (0.0, xToBeat (p.x));
+                if (sp->snapOn)
+                    splitBeat = std::floor (splitBeat / step + 0.5 + TempoMap::kGridEps) * step;
+                if (splitBeat > n.startBeat + 0.05 && splitBeat < n.startBeat + n.durationBeats - 0.05)
+                {
+                    const double firstDur = splitBeat - n.startBeat;
+                    const double secondDur = (n.startBeat + n.durationBeats) - splitBeat;
+                    beginGesture ("Split MIDI note");
+                    juce::String error;
+                    if (editor.resizeMidiNote (targetRef.track, targetRef.clip, hit, firstDur, error))
+                    {
+                        const int newIdx = editor.addMidiNote (targetRef.track, targetRef.clip, splitBeat, secondDur,
+                                                               n.pitch, n.velocity, n.channel, error);
+                        if (newIdx >= 0)
+                            selectedNotes = { newIdx };
+                        else
+                            report (error);
+                    }
+                    else
+                    {
+                        report (error);
+                    }
+                    endGesture();
+                    edited();
+                }
+                return;
+            }
             if (e.mods.isShiftDown())
                 toggleSelection (hit);
             else if (! isSelected (hit))
@@ -1307,7 +1482,7 @@ void PianoRollView::mouseDrag (const juce::MouseEvent& e)
         const double targetStart = sp->snapOn
             ? juce::jmax (0.0, std::floor (rawStart / step + 0.5 + TempoMap::kGridEps) * step)
             : rawStart;
-        const int targetPitch = juce::jlimit (0, 127, origPitch + rawDeltaPitch);
+        const int targetPitch = snapPitchToScale (origPitch + rawDeltaPitch);
         double deltaBeats = targetStart - origStartBeat;
         int deltaPitch = targetPitch - origPitch;
         if (! origNotes.empty())
@@ -1532,10 +1707,30 @@ bool PianoRollView::keyPressed (const juce::KeyPress& key)
             return false;
         if (selectedNotes.empty())
             return true;
-        const int semitones = (code == juce::KeyPress::upKey ? 1 : -1) * (mods.isShiftDown() ? 12 : 1);
+        const int dir = (code == juce::KeyPress::upKey ? 1 : -1);
         juce::String error;
-        if (! editor.transposeMidiNotes (targetRef.track, targetRef.clip, selectedNotes, semitones, error))
-            report (error);
+        if (scaleLock && activeScaleIndex > 0 && ! mods.isShiftDown())
+        {
+            const auto sp = snapshotPtr();
+            if (! sp->valid) return false;
+            beginGesture ("Transpose MIDI notes in scale");
+            for (int idx : selectedNotes)
+            {
+                if (! juce::isPositiveAndBelow (idx, (int) sp->clip.notes.size()))
+                    continue;
+                const auto& n = sp->clip.notes[(size_t) idx];
+                const int nextPitch = stepPitchInScale (n.pitch, dir);
+                if (nextPitch != n.pitch && ! editor.moveMidiNote (targetRef.track, targetRef.clip, idx, n.startBeat, nextPitch, error))
+                    report (error);
+            }
+            endGesture();
+        }
+        else
+        {
+            const int semitones = dir * (mods.isShiftDown() ? 12 : 1);
+            if (! editor.transposeMidiNotes (targetRef.track, targetRef.clip, selectedNotes, semitones, error))
+                report (error);
+        }
         edited();
         return true;
     }
