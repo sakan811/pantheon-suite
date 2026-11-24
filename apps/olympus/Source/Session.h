@@ -1875,41 +1875,54 @@ public:
                                    juce::int64 start, int n, juce::MidiBuffer& dest,
                                    bool triggerSpanning = false, const BasicSynth* activeSynth = nullptr)
     {
-        if (n <= 0 || map.sampleRate <= 0.0)
+        if (n <= 0 || ! std::isfinite (map.sampleRate) || map.sampleRate <= 0.0)
             return;
-        for (const auto& mc : midiClips)
+
+        auto forEachValidNote = [&] (auto&& fn)
         {
-            if (mc.mute || mc.length <= 0)
-                continue;
-            const double clipStartBeats = map.samplesToBeats ((double) mc.start);
-            const juce::int64 clipEnd = mc.end();
-            for (const auto& note : mc.notes)
+            for (const auto& mc : midiClips)
             {
-                if (! std::isfinite (note.startBeat) || ! std::isfinite (note.durationBeats)
-                    || note.durationBeats <= 0.0 || note.velocity <= 0)
+                if (mc.mute || mc.length <= 0)
                     continue;
-                const double onS = map.beatsToSamples (clipStartBeats + note.startBeat);
-                const double offS = map.beatsToSamples (clipStartBeats + note.startBeat + note.durationBeats);
-                if (! std::isfinite (onS) || ! std::isfinite (offS) || onS >= (double) clipEnd || offS <= (double) mc.start)
-                    continue;
-                const juce::int64 onSample = onS <= (double) mc.start ? mc.start : (juce::int64) std::llround (onS);
-                const juce::int64 offSample = offS >= (double) clipEnd ? clipEnd : (juce::int64) std::llround (offS);
-                if (onSample >= clipEnd || offSample <= onSample)
-                    continue;
-                const int ch = juce::jlimit (1, 16, note.channel);
-                const int pitch = juce::jlimit (0, 127, note.pitch);
-                const juce::uint8 vel = (juce::uint8) juce::jlimit (1, 127, note.velocity);
-
-                if (onSample >= start && onSample < start + n)
-                    dest.addEvent (juce::MidiMessage::noteOn (ch, pitch, vel), (int) (onSample - start));
-                else if (triggerSpanning && onSample < start && offSample > start
-                         && (activeSynth == nullptr || ! activeSynth->isNoteActive (ch, pitch)))
-                    dest.addEvent (juce::MidiMessage::noteOn (ch, pitch, vel), 0);
-
-                if (offSample >= start && offSample < start + n)
-                    dest.addEvent (juce::MidiMessage::noteOff (ch, pitch), (int) (offSample - start));
+                const double clipStartBeats = map.samplesToBeats ((double) mc.start);
+                const juce::int64 clipEnd = mc.end();
+                for (const auto& note : mc.notes)
+                {
+                    if (! std::isfinite (note.startBeat) || ! std::isfinite (note.durationBeats)
+                        || note.durationBeats <= 0.0 || note.velocity <= 0)
+                        continue;
+                    const double onS = map.beatsToSamples (clipStartBeats + note.startBeat);
+                    const double offS = map.beatsToSamples (clipStartBeats + note.startBeat + note.durationBeats);
+                    if (! std::isfinite (onS) || ! std::isfinite (offS) || onS >= (double) clipEnd || offS <= (double) mc.start)
+                        continue;
+                    const juce::int64 onSample = onS <= (double) mc.start ? mc.start : (juce::int64) std::llround (onS);
+                    const juce::int64 offSample = offS >= (double) clipEnd ? clipEnd : (juce::int64) std::llround (offS);
+                    if (onSample >= clipEnd || offSample <= onSample)
+                        continue;
+                    const int ch = juce::jlimit (1, 16, note.channel);
+                    const int pitch = juce::jlimit (0, 127, note.pitch);
+                    const juce::uint8 vel = (juce::uint8) juce::jlimit (1, 127, note.velocity);
+                    fn (onSample, offSample, ch, pitch, vel);
+                }
             }
-        }
+        };
+
+        // Pass 1: emit all noteOff events in [start, start + n) before any noteOn at the same sample offset.
+        forEachValidNote ([&] (juce::int64, juce::int64 offSample, int ch, int pitch, juce::uint8)
+        {
+            if (offSample >= start && offSample < start + n)
+                dest.addEvent (juce::MidiMessage::noteOff (ch, pitch), (int) (offSample - start));
+        });
+
+        // Pass 2: emit all noteOn (and spanning) events in [start, start + n).
+        forEachValidNote ([&] (juce::int64 onSample, juce::int64 offSample, int ch, int pitch, juce::uint8 vel)
+        {
+            if (onSample >= start && onSample < start + n)
+                dest.addEvent (juce::MidiMessage::noteOn (ch, pitch, vel), (int) (onSample - start));
+            else if (triggerSpanning && onSample < start && offSample > start
+                     && (activeSynth == nullptr || ! activeSynth->isNoteActive (ch, pitch)))
+                dest.addEvent (juce::MidiMessage::noteOn (ch, pitch, vel), 0);
+        });
     }
 
     static void appendLiveMidiSlice (const juce::MidiBuffer& live, int offset, int count, juce::MidiBuffer& dest)
