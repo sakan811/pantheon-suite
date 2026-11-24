@@ -7,24 +7,10 @@ you need to change it safely.
 
 ## Build and verify
 
-```bash
-# Required on this machine: the Command Line Tools ship an SDK that Xcode's linker cannot read.
-export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # fetches JUCE (version in cmake/Juce.cmake; or uses third_party/JUCE at the repository root)
-cmake --build build --target HephaestusTests -j 10 && ./build/HephaestusTests_artefacts/Release/HephaestusTests
-cmake --build build --target Hephaestus_VST3 Hephaestus_AU Hephaestus_Standalone -j 10
-cmake --build build --target HephaestusUiCheck && ./build/HephaestusUiCheck_artefacts/Release/HephaestusUiCheck
-cmake --build build --target HephaestusHostCheck && ./build/HephaestusHostCheck_artefacts/Release/HephaestusHostCheck "$HOME/Library/Audio/Plug-Ins/VST3/Hephaestus Forge.vst3"
-cmake --build build --target HephaestusSnapshot && ./build/HephaestusSnapshot_artefacts/Release/HephaestusSnapshot docs/screenshot.png "808 Sub Fill" sub 2
-auval -v aufx Hphs Hpha                             # Apple's AU validator
-```
-
-- Building the plugin targets **installs** them to `~/Library/Audio/Plug-Ins/{VST3,Components}` (`COPY_PLUGIN_AFTER_BUILD`; listed under "Not yet in line" in the repository's [CLAUDE.md](../../CLAUDE.md)).
-- `HephaestusTests`, `UiCheck`, `HostCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `HephaestusTests` needs no GUI.
-- Definition of done for any DSP change: `HephaestusTests` passes **and** the README numbers still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes, and `HostCheck` + `auval` after rebuilding the plugin.
-- pluginval is not available (the sandbox blocks running the downloaded binary); `HostCheck` + `auval` are the substitutes.
+- After rebuilding the plugin, also run `HephaestusHostCheck` on the installed VST3 bundle and `auval -v aufx Hphs Hpha` (`pluginval` is not available in the sandbox).
+- Note: `COPY_PLUGIN_AFTER_BUILD TRUE` is unconditional (see `## Not yet in line` in [../../CLAUDE.md](../../CLAUDE.md)).
 
 ## Layout
 
@@ -37,23 +23,19 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   PartialTracker.h   the Clean fill's note follower: pitch bank + one integrator per channel + confidence gate (see "Clean fill" below)
   OctaveGenerator.h  the Octave fill: STFT peak synthesis, N - 1 samples of latency (see "Octave fill" below)
   Engine.h           BandParams, latency alignment, band mixing, M/S, gain match, delta, meters, analyzer taps
-../../shared/dsp/       Biquad.h (double-precision biquads, Butterworth, Bandpass pair), AnalyzerTap.h (lock-free sample FIFOs, audio thread -> editor) and
-                     SpectrumAnalyzer.h (EQ-style FFT analyzer, GUI-free so its calibration is testable; test [10]) and MusicBands.h (the six main bands and their splitter, the band solo strip; test [12b]), namespace `pdsp`, shared with Iris (and Themis)
-Source/Advice.h      the notes under the band's knobs (warnings that a setting does not suit its job) and the GUIDE text; plain C++, no JUCE
-Source/Parameters.h  parameter layout, presets, readParams(), band helpers, legacy migration  <- the single source of truth for parameters
+../../shared/dsp/  Biquad.h, AnalyzerTap.h, SpectrumAnalyzer.h (calibration pinned by test [10]), MusicBands.h (band solo strip; test [12b]), namespace `pdsp`, shared with Iris (and Themis)
+Source/Parameters.h  presets, band helpers, legacy migration
 Source/UserPresets.h the user's own presets: one XML file each (0..1 values by id, all but the session-wide ones) in `UserPresets::defaultFolder()`; the processor owns one, tests point it at a temp folder
-Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/HephaestusUi.h` holds what is Hephaestus' own)
-Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse drags, slots, legacy sessions), HostCheck.cpp (loads the VST3),
-                     Snapshot.cpp (editor -> PNG), Check.h, TestSignals.h
+Source/UI/HephaestusUi.h  words and mode colours
+Tests/               HostCheck.cpp (loads the VST3), TestSignals.h
 ```
 
 ## Rules that keep it correct
 
-**Real time.** `Engine::process` and everything under it must not allocate, lock, or log. Buffers are sized in
-`prepare()`. `setLatencySamples` is only called from the message thread (`AsyncUpdater` in the processor).
+**Setup.** Buffers are sized in `prepare()`.
 
 **Latency.** Every path that is summed with another must pass through an `IntDelay` set to the oversampling
-latency (`dryDelay`, `fundDelay`, `bypassDelay`). If you add a path, align it and extend test [2]/[8]. The latency is `std::atomic` in `Engine` (the audio thread sets it, the message thread reads it), the processor asks for `setLatencySamples` once per change (`requestedLatency`), reports it as the tail (`getTailLengthSeconds`) and delays a host-bypassed block by it (`processBlockBypassed`, `pdsp::BypassDelay` sized with `Engine::getMaxLatency()`: UiCheck pins it).
+latency (`dryDelay`, `fundDelay`, `bypassDelay`). If you add a path, align it and extend test [2]/[8]. The latency is `std::atomic` in `Engine` (the audio thread sets it, the message thread reads it), the processor asks for `setLatencySamples` once per change (`requestedLatency`) and reports it as the tail (`getTailLengthSeconds`); `pdsp::BypassDelay` is sized with `Engine::getMaxLatency()`.
 
 **Saturate bands add their distortion; they never replace the signal.** `Saturator::process` writes only what the
 shapers add (`shapeBlock<Curve, false>`), and `Engine` sums that onto the clean, `bypassDelay`-aligned input. That
@@ -73,7 +55,7 @@ glide towards their target so dragging doesn't zipper.
 
 **Band solo is monitoring, not state.** `Engine::monitor` (atomics: band, and BAND or ADDS) is not a parameter, so a host cannot record or restore it, and the editor clears it in its destructor. It replaces the output (Mix and Delta) just before the output gain and fades over 10 ms; released, the output is the plain output bit for bit (test [12]). ADDS takes each band's own contribution from where it is made (`Saturator::process`'s `soloOut`, `runFillBand`'s capture) and lines the fill's up with `soloDelay`; the bands keep running while one is soloed, so nothing jumps on release. BAND is a band-pass over `effectiveRange` of the delayed dry signal. The band solo strip (`Monitor::regions`, a mask over `pdsp::bands`, the six main bands of music shared with Themis and Iris) runs after it, on whatever is heard and before the output gain, through the shared `pdsp::BandSplitter` (all six sum flat; it fades like the band solo and starts from clean filters; released, the output is bit for bit the plain output, test [12b]); the editor's strip lines each switch up with its band on the display's axis.
 
-**Bad samples.** An inf or NaN in the input is replaced by silence at the top of `Engine::process`, before anything reads the buffer: the band filters, the fill's envelopes and `matchGainFor` each keep one for good (the output used to stay NaN until the plugin was reloaded, while the meters, which skip such samples, looked fine). Test [9b] feeds them through every kind of band; a new path with memory needs no guard of its own as long as it reads the buffer after that loop.
+**Bad samples.** Non-finite inputs are zeroed at the top of `Engine::process` (test [9b]); a new path with memory needs no guard of its own as long as it reads the buffer after that loop.
 
 **Fundamental engine.** Harmonic weights are exact only while the normalised amplitude `a` is ~1 (the k-th Chebyshev
 harmonic scales as `a^k`), so the envelope release is deliberately slow (`6 / lo`). Shortening it costs accuracy at
@@ -93,19 +75,13 @@ the reach, the time constants or the weights, re-run it and update the README nu
 
 **Clean fill and a moving edge.** `FundamentalEngine::updateCoefficients` calls `PartialTracker::setup` every block while a band edge glides; `setup` keeps the pitch the tracker has locked to (it only clamps it into the new range) and centres it only the first time or at a new sample rate. Re-centring it each block lost the note while an edge was dragged (test [5g], the moving-edge case).
 
-**Undo, A/B and presets.** The processor owns a `juce::UndoManager` (`undo`) handed to the APVTS, and a `ui::AbCompare` (`ab`); a gesture of the plugin's own that moves several parameters (a preset, adding, duplicating or removing a band, a drag on the display) calls `ui::beginUndoStep` first so it is one step; `applyPreset` and `UserPresets::apply` write each parameter once with its final value, never "all defaults, then the preset". User presets are files in the user's folder; the processor keeps only the name of the one chosen (`userPreset` in the state).
+**Undo, A/B and presets.** A gesture of the plugin's own that moves several parameters (a preset, adding, duplicating or removing a band, a drag on the display) calls `ui::beginUndoStep` first so it is one step; `applyPreset` and `UserPresets::apply` write each parameter once with its final value, never "all defaults, then the preset" (Hephaestus owns its own preset code rather than `shared/ui/Presets.h`). User presets are files in the user's folder; the processor keeps only the name of the one chosen (`userPreset` in the state).
 
-**Parameters.** Global IDs in `hep::id` are stored in sessions and automation: never rename or remove one. Band ids come
-from `bandIds (i)` (`b1_lo` ... `b6_rebuild`) and are equally permanent. A new parameter needs a `ParameterID` version
-(bands use 2), an entry in `readParams()`, and (if it has a knob) a row in the editor's `knobSpecs` / `bandKnobSpecs`.
-Session-wide controls go in `isGlobalParameter()` so presets leave them alone. The very first layout (three fixed
-bands + one bass engine, ids `driveLow`, `fundLo`, ...) is gone; `migrateLegacyState()` turns such a session into bands,
-and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look band parameters up through the cached
-`bandIds()` table.
+**Parameters.** `hep::id` and `bandIds (i)` (`b1_lo` ... `b6_rebuild`). Band parameters use `ParameterID` version 2; `bN_character` uses version 3. Session-wide controls go in `isGlobalParameter()` so presets leave them alone. `migrateLegacyState()` turns the very first layout (three fixed bands + one bass engine: `driveLow`, `fundLo`, ...) into bands, and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look band parameters up through the cached `bandIds()` table.
 
 ## DRY: where each thing lives (change it there only)
 
-- parameter ranges, defaults, choice lists, "off" thresholds -> `Parameters.h` (the editor reads combo items from the parameter)
+- "off" thresholds -> `Parameters.h`
 - how a fill band makes its harmonics (Warm / Clean / Octave) -> its `bN_character` parameter (`BandIds::character`, a choice, version 3), read into `Params::character` by `readParams()`; whether it asks for the octave latency -> `usesOctave()` in `Engine.h` (the processor passes it to `Engine::prepare`); the editor's selector is re-bound to the selected fill band in `refreshBandPanel()` and is not a knob slot (the six slots are full)
 - per-band parameter ids -> `bandIds()`; adding / removing a band and switching its mode -> `addBand`, `removeBand`, `setBandMode`
   (the spectrum menu, the double-click menu and the band panel buttons all call these; Delete / Backspace in the spectrum calls
@@ -115,22 +91,16 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
 - where a band really sits (minimum width, the 2 kHz fill limit), where its harmonics land (the zone the display shades) and which harmonics
   fit below Nyquist -> `effectiveRange()` / `harmonicSpan()` / `highestHarmonic()` / `harmonicReach()` (the adaptive measurement region) in `Band.h`
   (engine, spectrum view and tests all call them; test [5f] pins the span against measured energy)
-- the plugin's name ("Hephaestus Forge") -> `HEPHAESTUS_PLUGIN_NAME` in `CMakeLists.txt`, which reaches the code as `JucePlugin_Name`; the nameplate's two words are `hep::gui::kProjectWord` / `kPluginWord` in `UI/HephaestusUi.h` (`UiCheck` checks they agree)
-- what the plugin warns about (DELTA or a solo on, AMOUNT off, Octave on bass, Clean on mids, Rebuild, heavy Drive...) and what the GUIDE button says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor only fills `AdviceInput` from the parameters (`adviceInput()`) and draws what comes back. A note restates a limit the README's Limitations measured: a new note needs its number there, a test in UiCheck's Advice section, and at most `ui::kMaxNoteChars` characters
-- what a preset is for (its tooltip) -> `Preset::purpose` in `Parameters.h`, one line each; UiCheck fails a preset without one
+- what a preset is for (its tooltip) -> `Preset::purpose` in `Parameters.h`, one line each; `UiCheck` fails a preset without one
 - band colours -> `hep::gui::forMode()` in `UI/HephaestusUi.h`
-- every pixel of the interface and the parameter-bound controls (panels, glass, lamps, knobs, selectors, switches, fonts, the palette) -> `shared/ui`, shared with the other plugins (see the repository's [CLAUDE.md](../../CLAUDE.md)); the editor calls it and does not draw its own
 - knob id / caption / tooltip / panel membership -> `knobSpecs` and `panelSpecs` (character, master) and `bandKnobSpecs` (the six slots that follow the selected band) in `PluginEditor.cpp`
 - log-frequency axis -> `ui::FreqAxis` in `shared/ui` (`SpectrumView.h` only aliases it)
 - test signals and `check()` -> `Tests/TestSignals.h`, `Tests/Check.h`
 
 ## Gotchas already paid for
 
-- `createEditor()` returns a `ui::ScaledEditor<HephaestusEditor>` (shared/ui Scaled.h), not the editor: the window opens at 100% and scales. Tests and snapshots reach the editor with `ui::innerOf<HephaestusEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
-- In an editor constructor call `setSize()` **last**; `resized()` runs inside it and only positions controls that exist.
 - A hosted VST3's parameters are wrapper objects: find them by name, not `dynamic_cast<RangedAudioParameter*>`.
   Its editor is a native view, so editor screenshots must instantiate `HephaestusProcessor` directly (`Snapshot.cpp`).
-- `runDispatchLoopUntil` needs `JUCE_MODAL_LOOPS_PERMITTED=1` in the test targets.
 - The analyzer uses Hann, so an off-bin sine can read up to 1.42 dB low (scalloping). That is expected, not a bug.
 - `Component::hitTest (int, int)` is virtual: don't name a one-argument helper `hitTest` (it hides it and the plugin's
   warning flags reject that). Don't name a local `range` inside `SpectrumView` either; it shadows the analyzer setting.
@@ -141,10 +111,3 @@ and `UiCheck` covers it. Never build a `juce::String` on the audio thread: look 
   silently flip it). Symptom: audio undelayed and latency "stuck" at whatever it was before. The same randomising leaves the plugin's own **Delta** and **Mix** wherever the last draw put them, so the latency section sets Delta, Gain Match and Mix by name, and every band's Character to Warm (an Octave band adds its generator's latency), before measuring, and the state round trip gives a stepped parameter (the wrapper's Program included) one of its own steps (`randomValue`): both failed after the Clean switch added six parameters, with a plugin that was fine, until they were made independent of the draw.
 - A hosted VST3 wraps state in its own chunk, so `HostCheck` cannot feed it a hand-built session; legacy-session
   tests go through `HephaestusProcessor` directly (`UiCheck`).
-
-## Conventions
-
-- Match the surrounding JUCE style: Allman braces, a space before call parentheses, `juce::` qualified in headers.
-- Comments explain *why* (a measured failure, a constraint), not what the code does.
-- Claims in the README must be backed by a test or a measurement; re-run the suite and update the numbers.
-- Commit by topic (DSP / plugin / UI / tests / docs / build); end commit messages with the Co-Authored-By trailer.

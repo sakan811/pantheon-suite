@@ -4,30 +4,17 @@ Castor Pair: a JUCE stereo imager (VST3 / AU / Standalone): the width of the sid
 
 ## Build and verify
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce.cmake, or third_party/JUCE at the repository root
-cmake --build build --target CastorTests -j 10 && ./build/CastorTests_artefacts/Release/CastorTests
-cmake --build build --target Castor_VST3 -j 10
-cmake --build build --target CastorUiCheck && ./build/CastorUiCheck_artefacts/Release/CastorUiCheck
-cmake --build build --target CastorSnapshot && ./build/CastorSnapshot_artefacts/Release/CastorSnapshot docs/screenshot.png
-```
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-- Building the plugin targets does **not** install them (`CASTOR_INSTALL_AFTER_BUILD`, off by default; a build folder configured with it ON does: check the cache). `scripts/build.sh castor` is the way to build and check (see the repository's CLAUDE.md).
-- `CastorTests`, `UiCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `Source/DSP` has no JUCE in it, so the DSP tests also compile with
-  `g++ -std=c++20 -O2 -I../../shared/dsp/include -ISource -ITests Tests/Tests.cpp` (a quick loop); run them also with `-O3 -march=native` and with `-O3 -ffast-math`, each on its own.
-- Definition of done for a DSP change: `CastorTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes and `docs/screenshot.png` is regenerated and looked at.
+- `Source/DSP` has no JUCE in it (supports standalone `g++` DSP tests).
 
 ## Layout
 
 ```
 Source/DSP/Engine.h  no GUI, no JUCE: the width of each band (pdsp::BandSplitter), the crossfade, mid / side / mono below / balance / output, the correlation; covered by Tests/Tests.cpp
-Source/Presets.h     the presets (settings, names, one-line purposes); the mechanism is `shared/ui/.../Presets.h`
-Source/Advice.h      the notes of the strip under the controls and the GUIDE text; plain C++
-Source/Parameters.h  parameter layout, readParams()                       <- the single source of truth for parameters
-Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`); the processor feeds `tapOut` (a `pdsp::StereoTap`) for the goniometer
+Source/Parameters.h  readParams(), pasteFromThemis()
+Source/Plugin*.{h,cpp}  feeds `tapOut` (`pdsp::StereoTap`) for the goniometer
 ../../shared/dsp/    MusicBands.h (the six bands and `pdsp::BandSplitter`)
-Tests/               Tests.cpp (DSP), UiCheck.cpp (editor on the real processor), Snapshot.cpp (editor -> PNG), Check.h
 ```
 
 ## Rules that keep it correct
@@ -46,32 +33,17 @@ neutral, so `l = l0 + 0 + 0`. MIX (`mixGain`, smoothed over 10 ms, snapped to it
 
 **LISTEN is applied by the processor, after the goniometer's tap** (`applyListen`: Mono and Side put one signal in both channels), so the cloud and the correlation read the sound and not the check; on a mono bus it is not applied and BALANCE is set to 0 before the engine (it would only turn the one channel down). `correlationMin` is the lowest per-block reading since the editor last took it; the editor keeps the minimum (`minHold`) and clears it on the MIN button.
 
-**Real time.** `Engine::process` allocates and locks nothing. The goniometer is fed by the processor through the shared lock-free `pdsp::StereoTap`; nothing of it runs on the audio thread except the push.
-**Bad samples:** NaN and infinity are replaced by 0 on the way in.
+**Goniometer.** Fed by the processor through the shared lock-free `pdsp::StereoTap`; nothing of it runs on the audio thread except the push.
 
-**Presets** are `ui::Preset`s in `Source/Presets.h` (the settings as real values, a name, a one-line purpose of at most 140 characters); the processor's `ui::Programs` applies them (every parameter that the plugin's `keepsParameter` does not claim goes back to its default first, so a preset does not inherit the last one) and keeps the chosen index in the session's state
-(`program`); the editor's `ui::PresetBox` lists them and `sync()`s with the host. A new parameter needs thinking about in each preset: it goes back to its default unless the preset lists it. UiCheck pins that every preset applies, what one specific preset sets, what is kept, and that the box fits the header.
+**PASTE.** `pasteFromThemis` in `Parameters.h` reads the `width` line of `pdsp::link` (`shared/dsp/BandLink.h`) that Themis writes for a width item, and the side `lowcut` band (`place=side`) of the low-end mono item, which sets MONO BELOW to its frequency (clamped to the range; its slope is not read). Every band the width line names and MONO BELOW are set in one undo step (`ui::beginUndoStep`), the others are left alone, and text with neither changes nothing and says so in the strip. The width line has no `amount` key (`encodeWidth` / `decodeWidth`), so each band's percent is taken as it is. A lowcut on the stereo is not MONO BELOW.
 
-**Undo and PASTE.** The processor declares `juce::UndoManager undo` before `apvts` (`ui::UndoButtons` in the header; every control change is one UNDO step, and a preset is one step too). PASTE (`pasteFromThemis` in `Parameters.h`) reads the `width` line of `pdsp::link` that Themis writes for a width item, and the side `lowcut` band (`place=side`) of the low-end mono item, which sets MONO BELOW to its frequency (clamped to the range; its slope is not read). Every band the width line names and MONO BELOW are set in one undo step, the others are left alone, and text with neither changes nothing and says so in the strip. The width line has no `amount` key (`encodeWidth` / `decodeWidth` in `shared/dsp/BandLink.h`), so each band's percent is taken as it is. A lowcut on the stereo is not MONO BELOW.
-
-**Parameters.** Ids (`castor::id`: `width1` ... `width6`, `mid`, `side`, `mono`, `balance`, `out`, `listen`, `mix`) are stored in sessions and automation: never rename or remove one. All are `ParameterID` version 1 except `listen` (version 2, Stereo: a session saved before it opens as it did; presets reset it, it is not kept) and `mix` (version 3, 100%: presets set it back to 100%); a new one
-needs a higher version, an entry in `readParams()` and a place in the editor. The width ids follow the order of `pdsp::bands::kBands`.
+**Parameters.** `castor::id`: `width1` ... `width6` (following `pdsp::bands::kBands` order), `mid`, `side`, `mono`, `balance`, `out`, `listen`, `mix`. All are `ParameterID` version 1 except `listen` (version 2, Stereo: a session saved before it opens as it did; presets reset it, it is not kept) and `mix` (version 3, 100%: presets set it back to 100%).
 
 ## DRY: where each thing lives
 
 - the six bands, their names, edges and the splitter -> `shared/dsp` MusicBands.h (shared: run the other plugins' tests too); the width knobs take their names and tooltips from it
-- parameter ranges, defaults -> `Parameters.h`
-- what the plugin warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`. A note restates a limit the README's Limits documents: a new one needs it there, a test in UiCheck's notes
-  section, and at most `ui::kMaxNoteChars` characters
-- the plugin's name -> `CASTOR_PLUGIN_NAME` in `CMakeLists.txt`; the nameplate's two words -> `UI/CastorUi.h` (`UiCheck` checks they agree)
-- every pixel of the interface -> `shared/ui`; the editor calls it and does not draw its own controls (the goniometer and the width bars are drawn on `ui::hw` glass; `drawWidthGlass` reads the six widths through `readParams`, a picture of the knobs and nothing measured)
+- `drawWidthGlass` -> reads the six widths through `readParams` (a picture of the knobs and nothing measured)
 
 ## Gotchas already paid for
 
-- In an editor constructor call `setSize()` **last**.
-- `createEditor()` returns a `ui::ScaledEditor<CastorEditor>`, not the editor: tests and snapshots reach it with `ui::innerOf<CastorEditor> (*processor.createEditor())`. A snapshot has to call `tickDisplay()` for the goniometer to get samples.
-
-## Conventions
-
-As in the other plugins: Allman braces, a space before call parentheses, `juce::` qualified in headers; comments explain *why*; claims in the README are backed by a test; commit by topic and end commit messages with the
-Co-Authored-By trailer.
+- A snapshot has to call `tickDisplay()` for the goniometer to get samples.

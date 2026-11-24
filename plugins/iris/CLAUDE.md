@@ -6,26 +6,9 @@ regions. See `README.md` for what it does and what has been measured; this file 
 
 ## Build and verify
 
-```bash
-# Required on this machine: the Command Line Tools ship an SDK that Xcode's linker cannot read.
-export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce.cmake, or third_party/JUCE at the repository root
-cmake --build build --target IrisTests -j 10 && ./build/IrisTests_artefacts/Release/IrisTests
-cmake --build build --target Iris_VST3 Iris_AU Iris_Standalone -j 10
-cmake --build build --target IrisUiCheck && ./build/IrisUiCheck_artefacts/Release/IrisUiCheck
-cmake --build build --target IrisHostCheck && ./build/IrisHostCheck_artefacts/Release/IrisHostCheck "build/Iris_artefacts/Release/VST3/Iris Prism.vst3"
-cmake --build build --target IrisSnapshot && ./build/IrisSnapshot_artefacts/Release/IrisSnapshot docs/screenshot.png "Mono Bass, Wide Air" band=2
-auval -v aufx Irsp Irsa                             # Apple's AU validator; the AU has to be installed (copy it, run, remove it)
-```
-
-- Building the plugin targets does **not** install them (`IRIS_INSTALL_AFTER_BUILD`, off by default); the check tools read the
-  bundles from `build/`.
-- `IrisTests`, `UiCheck`, `HostCheck` and `Snapshot` are `EXCLUDE_FROM_ALL`; build them by name. `IrisTests` needs no GUI.
-- Definition of done for a DSP change: `IrisTests` passes **and** the numbers the README quotes still match its output.
-- Definition of done for a UI or parameter change: `UiCheck` passes, the screenshots in `docs/` are regenerated and looked at
-  (commands in the README), and `HostCheck` + `auval` after rebuilding the plugin.
-- pluginval is not available; `HostCheck` + `auval` are the substitutes.
+- After rebuilding the plugin, also run `IrisHostCheck` on `build/Iris_artefacts/Release/VST3/Iris Prism.vst3` and `auval -v aufx Irsp Irsa` (`pluginval` is not available).
 
 ## Layout
 
@@ -41,17 +24,15 @@ Source/DSP/        no GUI dependencies; everything here is covered by Tests/Test
   Saturator.h        Shaper: three curves, residual ADAA, DC block
   Crossover.h        RegionSplitter (the shared pdsp::BandSplitter: six regions, flat sum), regionName()
   Engine.h           the whole signal path, the tick, solo, delta, gain match, meters, analyzer taps
-Source/Advice.h      the notes of the strip under the panels (warnings that a setting does not suit its job or that what is heard is not the track) and the GUIDE text; plain C++, no JUCE
-Source/Parameters.h  parameter layout, presets, readParams(), band helpers                       <- the single source of truth for parameters
-Source/Plugin*.{h,cpp}, Source/UI/   JUCE wrapper and editor (the look is `shared/ui`; `UI/IrisUi.h` holds what is Iris' own; `UI/EqView.h` is the display)
+Source/Parameters.h  presets, band helpers
+Source/UI/           `UI/IrisUi.h` (Iris' own words/colours), `UI/EqView.h` (display)
 ../../shared/dsp/    Biquad.h (with the EQ designs), AnalyzerTap.h, SpectrumAnalyzer.h, BandLink.h (PASTE), MusicBands.h (the six bands and their splitter): shared with Hephaestus and Themis, namespace `pdsp`
-Tests/               Tests.cpp (DSP), UiCheck.cpp (mouse events, editor panels), HostCheck.cpp (loads the VST3), Snapshot.cpp (editor -> PNG),
-                     Check.h, TestSignals.h
+Tests/               HostCheck.cpp (loads the VST3), TestSignals.h
 ```
 
 ## Rules that keep it correct
 
-**Real time.** `Engine::process` and everything under it must not allocate, lock or log. `readParams` is called per block: look
+**Parameters & buffers.** `readParams` is called per block: look
 parameters up through the cached `bandIds()` table and the `juce::String` ids in `iris::id` (a `const char*` would build a
 `String` on the audio thread). Zero Latency needs no buffers of its own; the linear modes' are sized once in `prepare()` (below).
 
@@ -59,8 +40,8 @@ parameters up through the cached `bandIds()` table and the `juce::String` ids in
 minimum-phase biquads in series. In the two linear modes (`linear`, `linearHq`; `LinearSpec` in `LinearPhase.h`) the bands are not run: `Engine::runLinear`
 feeds the input to `LinearFilter`, which hands back the sound `latencySamples` (= half + hop) late, together with the input delayed by the same amount (it replaces
 `dryL`/`dryR`, so Delta and Gain Match stay aligned) and the soloed band's curve. The latency is `Engine::latencySamples` (an atomic the audio thread writes when
-`control()` sees a new mode) and reaches the host through `IrisProcessor::handleAsyncUpdate` from the message thread, as Hephaestus does with its oversampling; `prepareToPlay`
-passes the saved mode to `Engine::prepare` so the host hears the right latency before the first block. The sizes scale with the sample rate (`sizeScaleFor`: x2 over 50 kHz, x4 over 100 kHz; `linearSpec (mode, rate)`, `latencyFor (mode, rate)`, defaults 48 kHz), so 44.1 / 48 kHz are unchanged. `IrisProcessor::processBlockBypassed` delays the main bus by `getLatencySamples()` with `pdsp::BypassDelay`, sized by `maxLatencyFor (rate)` in `prepareToPlay` (UiCheck pins it). Rules:
+`control()` sees a new mode); `prepareToPlay`
+passes the saved mode to `Engine::prepare` so the host hears the right latency before the first block. The sizes scale with the sample rate (`sizeScaleFor`: x2 over 50 kHz, x4 over 100 kHz; `linearSpec (mode, rate)`, `latencyFor (mode, rate)`, defaults 48 kHz), so 44.1 / 48 kHz are unchanged. `pdsp::BypassDelay` is sized by `maxLatencyFor (rate)` in `prepareToPlay`. Rules:
 - **No allocation after `prepare()`.** `LinearFilter::prepare` sizes everything for the larger mode; a switch only clears and re-points (`start`).
 - **Hops are counted in samples from the start**, like the tick, and a hop is a multiple of the tick (256, 1024), so the output is the same for any host block (test [15]).
   The kernels are rebuilt at a hop only if something moved (`kernelsDirty`, set wherever a filter is reconfigured, a band fades, starts or stops, or the mode changes);
@@ -104,8 +85,7 @@ AUTO (`bN_auto`, `AutoTimes` in `Dynamics.h`) replaces the two knobs with times 
 **Sat.** The shaper works on the residual of the curve (`f(u) - u`) of the band's difference, with ADAA on that residual, and the
 residual is added to the untouched difference (`Shaper`). Do not "simplify" this to plain ADAA on the signal: it low-passes it.
 Only boosting bands saturate (`BandState::saturating`: effective gain > 0.05 dB); a cut that got shallower with level would be wrong.
-`Drive` moves the knee, so with a boost far above the knee the boost itself is limited: that is the behaviour, not a bug (README, "How
-Sat works"). The tube curve is asymmetric, so its residual is DC-blocked. Everything in the shaper is `double`.
+`Drive` moves the knee, so with a boost far above the knee the boost itself is limited: that is the behaviour, not a bug (README, `### Signal flow & phase modes`). The tube curve is asymmetric, so its residual is DC-blocked. Everything in the shaper is `double`.
 
 **Low-frequency filters are `double`** (`pdsp::Biquad`): poles near z = 1 do not survive single precision at tens of Hz.
 
@@ -143,59 +123,25 @@ analyzers on the editor's timer: nothing runs on the audio thread, they need the
 **Paste.** `pasteBands` in `Parameters.h` turns the text other plugins copy (`pdsp::link`, `shared/dsp/BandLink.h`) into bands; the
 placement order there is the same as `Placement`'s. A harmonic-fill band is skipped (it is Hephaestus'). Each gain is multiplied by PASTE AMOUNT (`pasteAmount` / 100, read inside `pasteBands`; 100 % is exact, so it is bit for bit the old paste); frequency and width are not. A `curve` line in the same text is the reference (`pasteReference`).
 
-**Bad samples.** An inf or NaN in the input is replaced by silence on the way in (`segment`): an IIR filter keeps a NaN for good.
-
-**Parameters.** Global ids (`iris::id`, `phase` included: version 3; `pasteAmount`, PASTE AMOUNT: version 2, session-wide, read only by `pasteBands`, so it has no `readParams` entry) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`, and `b1_listen` ... `b8_listen`, version 4, then `b1_auto` ... `b8_auto`, version 5 (default off so old sessions keep their times; `addBand` switches it on), declared after all the others so the first layout keeps its order in a host's list) are stored in sessions and automation: never
-rename or remove one. A new parameter needs a `ParameterID` version above 1 (every parameter in the first layout is 1), an entry in
-`readParams()` and, if it has a control, a place in the editor. Session-wide controls go in `isGlobalParameter()` so presets leave them
-alone. JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arrive as 0.000002: anything that has to be exactly zero
-(the output gain does) needs a tolerance, never `==`.
+**Parameters.** Global ids (`iris::id`, `phase` included: version 3; `pasteAmount`, PASTE AMOUNT: version 2, session-wide, read only by `pasteBands`, so it has no `readParams` entry) and band ids (`bandIds (i)`: `b1_on` ... `b8_release`, `b1_listen` ... `b8_listen`, version 4, and `b1_auto` ... `b8_auto`, version 5, default off so old sessions keep their times while `addBand` switches it on, declared after all the others so the first layout keeps its order in a host's list). Session-wide controls go in `isGlobalParameter()` so presets leave them alone (Iris owns its own preset code rather than `shared/ui/Presets.h`). JUCE snaps a 0.1-step float parameter to a float grid, so "0.0" can arrive as 0.000002: anything that has to be exactly zero (the output gain does) needs a tolerance, never `==`.
 
 ## DRY: where each thing lives (change it there only)
 
-- parameter ranges, defaults, choice lists (`typeNames`, `placeNames`, ...) -> `Parameters.h` (the editor reads the
-  items from the parameters); the crossover defaults -> `defaultCrossoverHz` in `DSP/Band.h` (`Parameters.h` and the engine use it)
-- per-band parameter ids -> `bandIds()`; adding, removing and clearing bands -> `addBand`, `removeBand`, `clearBands` (the display's double-click, its menu, Delete and
-  Backspace, and the ADD BAND / REMOVE / CLEAR ALL buttons all call them; a solo on a band that goes off ends with it: `EqView::keyPressed` ends it
-  at once, every other way of removing a band (REMOVE, the menu, CLEAR ALL, UNDO) is caught by `EqView::timerCallback`)
+- crossover defaults -> `defaultCrossoverHz` in `DSP/Band.h` (`Parameters.h` and the engine use it)
+- per-band parameter ids -> `bandIds()`; adding, removing and clearing bands -> `addBand`, `removeBand`, `clearBands` (the display's double-click, its menu, Delete and Backspace, and the ADD BAND / REMOVE / CLEAR ALL buttons all call them; a solo on a band that goes off ends with it: `EqView::keyPressed` ends it at once, every other way of removing a band — REMOVE, the menu, CLEAR ALL, UNDO — is caught by `EqView::timerCallback`)
 - which channels a placement touches -> `touchesLeft` / `touchesRight` / `touchesMid` / `touchesSide` in `Band.h`
 - the curve of a band -> `BandFilter` (the engine runs it, the display draws it through `magnitudeAt`, the linear modes sample it with `powerAt`, the tests measure it: all agree)
-- the phase mode's latency and sizes -> `LinearSpec` / `latencyFor()` in `DSP/LinearPhase.h` (the README, the editor and the tests read them; the choice list is `phaseNames` in `Parameters.h`)
-- the plugin's name ("Iris Prism") -> `IRIS_PLUGIN_NAME` in `CMakeLists.txt`, which reaches the code as `JucePlugin_Name`; the nameplate's
-  two words are `iris::gui::kProjectWord` / `kPluginWord` in `UI/IrisUi.h` (`UiCheck` checks they agree)
-- what the plugin warns about (DELTA or a solo on, SAT in a linear mode, a Side bass boost, a big boost without GAIN MATCH...) and what GUIDE says -> `adviceFor()` and `guideText()` in `Source/Advice.h`; the editor only fills `AdviceInput` (`adviceInput()`) and draws what comes back with `ui::drawNoteStrip`. A note restates a limit the README documents: a new note needs it there, a test in UiCheck's Advice section, and at most `ui::kMaxNoteChars` characters
+- the phase mode's latency and sizes -> `LinearSpec` / `latencyFor()` in `DSP/LinearPhase.h` (`phaseNames` in `Parameters.h`)
 - placement colours -> `iris::gui::forPlacement()` in `UI/IrisUi.h`
-- every pixel of the interface and the parameter-bound controls -> `shared/ui`, shared with the other plugins (see the repository's
-  [CLAUDE.md](../../CLAUDE.md)); the editor calls it and does not draw its own. The log-frequency axis is `ui::FreqAxis`.
-- biquad designs, the analyzer -> `shared/dsp`, shared with Hephaestus: a change there is a change for both (run `HephaestusTests` too); `Biquad::powerAt` was added for the linear modes
+- log-frequency axis -> `ui::FreqAxis` in `shared/ui`; biquad designs & analyzer -> `shared/dsp` (shared with Hephaestus: run `HephaestusTests` too; `Biquad::powerAt` was added for the linear modes)
 - test signals and `check()` -> `Tests/TestSignals.h`, `Tests/Check.h`
 
 ## Gotchas already paid for
 
-- `createEditor()` returns a `ui::ScaledEditor<IrisEditor>` (shared/ui Scaled.h), not the editor: the window opens at 100% and scales. Tests and snapshots reach the editor with `ui::innerOf<IrisEditor> (*processor.createEditor())`; the editor's own size is its design size, the one it sets in its constructor.
-- In an editor constructor call `setSize()` **last**; `resized()` runs inside it and only positions controls that exist.
-- A choice (`ui::Choice`) or a switch (`ui::Toggle`) is bound to one parameter for good; a knob (`ui::Knob`) can be re-bound. That is why
-  each band has its own type / placement / slope / dynamic-mode box and dynamic switch (only the selected band's is shown) while the
-  knobs are shared and re-bound in `refreshBandPanel()`. The panel is driven by `bandSignature()` polled from the timer (selection, which
-  bands exist, their types, whether they are dynamic): add state that changes what it shows to the signature.
-- A hosted VST3's parameters are wrapper objects: find them by name, not `dynamic_cast<RangedAudioParameter*>`. Its editor is a native
-  view, so editor screenshots instantiate `IrisProcessor` directly (`Snapshot.cpp`).
-- In `HostCheck`, change the bus layout with `setBusesLayout` (and put it back), never with `setPlayConfigDetails` alone: the plugin's buses
-  stay as they were, the host then sends the wrong number of channels, and JUCE's own wrapper overruns its scratch buffer. Symptom: a
-  crash with a different backtrace every time, in whatever allocates next (the FFT setup, `Desktop::Desktop`, a `ValueTree` destructor).
-  Apple's Guard Malloc (`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`) names the real site.
-- `HostCheck` randomises every wrapper parameter, the host's own **Bypass** included; clear it before anything that measures audio.
-  Its `test::failures` is global, so one early failure also fails the later "all of them" checks: read the first `[FAIL]`.
-- `runDispatchLoopUntil` needs `JUCE_MODAL_LOOPS_PERMITTED=1` in the test targets.
+- `ui::Choice` and `ui::Toggle` are bound to one parameter for good, while `ui::Knob` can be re-bound: each band has its own type / placement / slope / dynamic-mode box and dynamic switch (only the selected band's is shown) while the knobs are shared and re-bound in `refreshBandPanel()`. The panel is driven by `bandSignature()` polled from the timer (selection, which bands exist, their types, whether they are dynamic): add state that changes what it shows to the signature.
+- A hosted VST3's parameters are wrapper objects: find them by name, not `dynamic_cast<RangedAudioParameter*>`. Its editor is a native view, so editor screenshots instantiate `IrisProcessor` directly (`Snapshot.cpp`).
+- In `HostCheck`, change the bus layout with `setBusesLayout` (and put it back), never with `setPlayConfigDetails` alone: the plugin's buses stay as they were, the host then sends the wrong number of channels, and JUCE's own wrapper overruns its scratch buffer. Symptom: a crash with a different backtrace every time, in whatever allocates next (the FFT setup, `Desktop::Desktop`, a `ValueTree` destructor). Apple's Guard Malloc (`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`) names the real site.
+- `HostCheck` randomises every wrapper parameter, the host's own **Bypass** included; clear it before anything that measures audio. Its `test::failures` is global, so one early failure also fails the later "all of them" checks: read the first `[FAIL]`.
 - `Component::hitTest (int, int)` is virtual: don't name a one-argument helper `hitTest`. The warning flags reject hiding it.
-- The digital filters are the analogue ones with the frequency axis warped (bilinear transform): a test that expects the analogue
-  attenuation near Nyquist is wrong; use the prewarped formula (test [3]).
-- A bell's contribution `H - 1` is not small far from its centre: it has phase, so a +6 dB Q = 1 bell still adds about -12 dB of the
-  signal two octaves away. Test the *curve solo* of a band with a narrow bell, or far away.
-
-## Conventions
-
-- Match the surrounding JUCE style: Allman braces, a space before call parentheses, `juce::` qualified in headers.
-- Comments explain *why* (a measured failure, a constraint), not what the code does.
-- Claims in the README must be backed by a test or a measurement; re-run the suite and update the numbers.
-- Commit by topic (DSP / plugin / UI / tests / docs / build); end commit messages with the Co-Authored-By trailer.
+- The digital filters are the analogue ones with the frequency axis warped (bilinear transform): a test that expects the analogue attenuation near Nyquist is wrong; use the prewarped formula (test [3]).
+- A bell's contribution `H - 1` is not small far from its centre: it has phase, so a +6 dB Q = 1 bell still adds about -12 dB of the signal two octaves away. Test the *curve solo* of a band with a narrow bell, or far away.

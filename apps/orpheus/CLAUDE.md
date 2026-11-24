@@ -1,28 +1,13 @@
 # CLAUDE.md
 
 Orpheus Pitch Editor: a JUCE standalone app (macOS) that edits the pitch of a solo vocal offline, note by note. It reads a recording, finds the
-notes, lets the user move them, and rebuilds the audio with pitch-synchronous overlap-add. See `README.md` for what it does and what has been measured; this
-file is what you need to change it safely. It is an **app**, so it lives in `apps/`; the dependency rule of the root CLAUDE.md applies to it as to a plugin
-(`apps/*` -> `shared/*`, never the reverse, never to a plugin). It uses `shared/ui` and none of `shared/dsp`.
+notes, lets the user move them, and rebuilds the audio with pitch-synchronous overlap-add. See [README.md](README.md) for what it does and what has been measured, and [../../CLAUDE.md](../../CLAUDE.md) (`## Layout and dependency direction`) for the app dependency rule; it uses `shared/ui` and none of `shared/dsp`.
 
 ## Build and verify
 
-```bash
-# Required on this machine: the Command Line Tools ship an SDK that Xcode's linker cannot read (also for plain clang++ in a scratch file).
-export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+Build, test and snapshot commands live in [README.md](README.md) (`## Build & develop`); shared defaults and `scripts/build.sh` live in [../../CLAUDE.md](../../CLAUDE.md) (`## Building and checking`, `## Module conventions & defaults`).
 
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release     # JUCE: version in cmake/Juce.cmake, or third_party/JUCE at the repository root
-cmake --build build --target OrpheusTests -j 10 && ./build/OrpheusTests_artefacts/Release/OrpheusTests
-cmake --build build --target OrpheusUiCheck -j 10 && ./build/OrpheusUiCheck_artefacts/Release/OrpheusUiCheck
-cmake --build build --target Orpheus -j 10
-cmake --build build --target OrpheusSnapshot && ./build/OrpheusSnapshot_artefacts/Release/OrpheusSnapshot docs/screenshot.png select=3
-```
-
-- `Source/Dsp/` is plain C++ (no JUCE), so `Tests/Tests.cpp` also compiles with a bare `clang++ -std=c++20 -O2 -ISource -ITests Tests/Tests.cpp` (with `SDKROOT` set):
-  much faster than CMake when iterating on the signal processing.
-- `OrpheusTests`, `OrpheusUiCheck` and `OrpheusSnapshot` are `EXCLUDE_FROM_ALL`; build them by name.
-- Definition of done for a DSP change: `OrpheusTests` passes **and** the numbers the README quotes still match its output. For a UI change: `OrpheusUiCheck`
-  passes and the screenshots in `docs/` are regenerated and looked at. A change to `shared/ui` (this app added `ValueKnob.h`) means building every plugin too.
+- `Source/Dsp/` is plain C++ (no JUCE and no `shared/dsp`), so `Tests/Tests.cpp` supports standalone compilation via `g++ -std=c++20 -O2 -ISource -ITests Tests/Tests.cpp` for fast iteration.
 - There is no listening test in the suite. Anything that depends on how it *sounds* (a different grain window, a different crossfade) has to be heard by a person; say so in the commit.
 
 ## Layout
@@ -39,10 +24,9 @@ Source/Dsp/          no JUCE; everything here is covered by Tests/Tests.cpp
   Psola.h             findMarks (once per file), render (the stretches an edit touches), matchLoudness, applyGain
 Source/Session.h     the recording and everything done to it: audio, contour, marks, notes, key, plan, output, undo, "unsaved" (dirty), project XML, fingerprint, WAV export, output peak, the voice ranges
 Source/Playback.h    the audio-thread reader of the session (corrected / original, loop, reference tone)
-Source/UI/           Advice.h (the notes of the strip at the foot and the GUIDE text; plain C++, no JUCE), OrpheusUi.h (words, note text, verdict colours), PitchRoll.h (the display and its mouse), MainComponent.{h,cpp} (window, panels, keys, files, analysis thread), Recent.h (the list of recent files), Navigator.h (the navigator bar under the display)
-Source/Main.cpp      the application and its window
-../../shared/ui/     the look (and ValueKnob.h, the knob for a value that is not a plugin parameter, added for this app)
-Tests/               Tests.cpp (DSP and what the engine refuses), UiCheck.cpp (session, player, window), Snapshot.cpp (window -> PNG), TestSignals.h (the synthetic singer), Check.h
+Source/UI/           OrpheusUi.h (words, note text, verdict colours), PitchRoll.h (the display and its mouse), MainComponent.{h,cpp} (window, panels, keys, files, analysis thread), Recent.h (the list of recent files), Navigator.h (the navigator bar under the display)
+../../shared/ui/     ValueKnob.h (the knob for a value that is not a plugin parameter, added for this app)
+Tests/               TestSignals.h (the synthetic singer)
 ```
 
 ## Rules that keep it correct
@@ -107,17 +91,16 @@ so. Notes that are each off in their own way give a "reference" that is only rou
 
 - scale list and masks, key snapping, the grid offset of a reference tuning -> `Scales.h` (the combo boxes, the display's rows and the engine all read it)
 - the planned pitch of a frame, TRANSITION's window included -> `Plan::build` (the display draws `plan.outMidi`, the renderer spaces marks by it, the tests measure against it)
-- what the app warns about and what GUIDE says -> `adviceFor()` and `guideText()` in `UI/Advice.h`; `MainComponent::adviceInput()` fills it and `ui::drawNoteStrip` draws it. The window's size is `MainComponent::kDesignWidth/Height` (the strip is part of it: tests and the snapshot use it too)
+- the window's size -> `MainComponent::kDesignWidth/Height` (the strip is part of it: tests and the snapshot use it too)
 - the A4 range (the Tuning knob, a loaded project) -> `kMinA4Hz` / `kMaxA4Hz` in `Scales.h`; the voice ranges -> `analysisSettingsFor` in `Session.h`
 - how a note is written ("A3 +12ct"), the time, the verdict colours -> `UI/OrpheusUi.h`
-- the project's two words ("Orpheus", "Pitch Editor") -> `kProjectWord` / `kSecondWord` in `UI/OrpheusUi.h`
-- every pixel of the interface and the knobs -> `shared/ui`; `PitchRoll` is the display (like Iris' `EqView`) and draws with the kit's colours and glass
+- `PitchRoll` display -> draws with `shared/ui` colours and glass (like Iris' `EqView`)
 - the synthetic singer, and the phrase the screenshots show -> `Tests/TestSignals.h`
 
 ## Gotchas already paid for
 
 - `juce::String (x, 0)` is "as many decimals as it takes", not none: use `numberText()` (it printed "-33.9989ct").
-- `juce::Font::getStringWidth` is gone in the JUCE that cmake/Juce.cmake pins: `textWidth()` in `OrpheusUi.h`.
+- `juce::Font::getStringWidth` is gone in the JUCE that `cmake/Juce.cmake` pins: `textWidth()` in `OrpheusUi.h`.
 - `HardwareLookAndFeel` finds the lit colour of a button on the look and feel, not on the button, so `button.setColour (buttonOnColourId, ...)` does nothing: every lit switch is amber.
 - `Button::setToggleState (x, sendNotification)` runs `onClick`; the key handlers rely on it. A `ComboBox` is different: `sendNotification` is *asynchronous* there, so a check that needs `onChange` now uses `sendNotificationSync`.
 - `AlertWindow::showOkCancelBox` with a callback gives 1 for the first button and 0 for the second; the window's `ask` hides it. Anything that would open a dialog in a check goes through `ask` / `reportError`.
@@ -125,14 +108,5 @@ so. Notes that are each off in their own way give a "reference" that is only rou
   (`Drag::toggleOff`). Doing it on press made a fine drag of a selected note impossible.
 - Mouse positions are whole pixels: a drag of half a row cannot be exactly half a semitone. Tests allow for it.
 - A slider with a step rounds what it is given: the SHIFT knob shows whole cents, so `shiftKnob.getValue()` is within half a cent of the note's shift.
-- In an editor constructor call `setSize()` last (`MainComponent` does): `resized()` runs inside it and only positions controls that exist.
 - `AudioTransportSource` stops itself at the end of the source and resamples to the device; `Playback` keeps its own position (`Playback::position()`), which is what the display and the clock read.
 - Screenshots need no display (`createComponentSnapshot`); a running app cannot be captured in the sandbox this was written in.
-
-## Conventions
-
-- Match the surrounding JUCE style: Allman braces, a space before call parentheses, `juce::` qualified in headers.
-- Comments explain *why* (a measured failure, a constraint), not what the code does.
-- Claims in the README must be backed by a test or a measurement; re-run the suite and update the numbers. Things measured by hand are labelled as such.
-- Do not name other companies' products in the UI or in source comments (see the root CLAUDE.md).
-- Commit by topic (DSP / app / UI / tests / docs / build); end commit messages with the Co-Authored-By trailer.
