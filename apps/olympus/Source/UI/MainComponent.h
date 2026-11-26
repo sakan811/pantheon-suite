@@ -470,6 +470,8 @@ private:
     void showError (const juce::String& message);
     void chooseAndOpen();
     void chooseAndImport();
+    void locateMissingAudio (ClipRef ref);
+    void rescanMissingAudio();
     void chooseFolder();
     void chooseAndRender();
     void chooseAndExport();

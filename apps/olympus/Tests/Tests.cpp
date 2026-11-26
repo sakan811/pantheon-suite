@@ -6170,6 +6170,80 @@ static void trackInstrumentSlotChecks()
     dir.deleteRecursively();
 }
 
+void missingAudioRelinkChecks()
+{
+    std::printf ("[68] Missing audio rescan, findAudioFileByName, and relinkMissingAudio (with undo/redo)\n");
+    const auto root = tempFolder().getChildFile ("relink-68");
+    root.deleteRecursively();
+    root.createDirectory();
+    const auto projDir = root.getChildFile ("1 Project");
+    const auto mastersDir = root.getChildFile ("2 Masters");
+    const auto hiddenDir = root.getChildFile (".hidden");
+    projDir.createDirectory();
+    mastersDir.createDirectory();
+    hiddenDir.createDirectory();
+
+    const auto hiddenWav = makeWav ("relink-68/.hidden/secret.wav", 48000.0, 2, 4800, 0.4f, 440.0);
+    const auto movedWav = makeWav ("relink-68/2 Masters/stem.wav", 48000.0, 2, 12000, 0.5f, 220.0);
+    const auto shortWav = makeWav ("relink-68/2 Masters/short.wav", 48000.0, 2, 4000, 0.5f, 330.0);
+    juce::ignoreUnused (hiddenWav);
+
+    test::check (Session::findAudioFileByName ("secret.wav", root) == juce::File(),
+                 "findAudioFileByName skips hidden directories");
+    test::check (Session::findAudioFileByName ("stem.wav", root) == movedWav,
+                 "findAudioFileByName finds moved WAV in sibling folder");
+    test::check (Session::findAudioFileByName ("stem.wav", root, 0) == juce::File(),
+                 "findAudioFileByName respects maxDepth=0");
+
+    // Save a project referencing projDir/stem.wav, then delete it so it's missing on load
+    const auto origWav = makeWav ("relink-68/1 Project/stem.wav", 48000.0, 2, 12000, 0.5f, 220.0);
+    const auto projFile = projDir.getChildFile ("test.olympus");
+    juce::String err;
+    {
+        Session s;
+        test::check (s.addTrack (origWav, "Stem", err) >= 0, "added track with original wav");
+        test::check (s.save (projFile, err), "saved project");
+    }
+    origWav.deleteFile();
+
+    // Test Editor::relinkMissingAudio + undo/redo (including length clamping with shorter file)
+    {
+        Session s;
+        test::check (s.load (projFile, err), "loaded project with missing audio");
+        test::check (s.hasMissingAudio(), "hasMissingAudio is true after load");
+        Editor ed (s);
+        int relinked = 0;
+        test::check (ed.relinkMissingAudio (origWav, shortWav, relinked, err) && relinked == 1,
+                     "Editor::relinkMissingAudio relinks missing clip");
+        test::check (! s.hasMissingAudio() && s.tracks[0]->clips[0].audio != nullptr
+                     && s.tracks[0]->clips[0].file == shortWav
+                     && s.tracks[0]->clips[0].length == 4000
+                     && s.dirty,
+                     "relinkMissingAudio updates file/audio, clamps length, marks dirty");
+        test::check (ed.undo() && s.hasMissingAudio() && s.tracks[0]->clips[0].audio == nullptr
+                     && s.tracks[0]->clips[0].length == 12000,
+                     "undo restores missing audio clip state");
+        test::check (ed.redo() && ! s.hasMissingAudio() && s.tracks[0]->clips[0].file == shortWav,
+                     "redo reapplies relink");
+    }
+
+    // Test Editor::rescanMissingAudio finding movedWav in sibling folder "2 Masters/"
+    {
+        Session s;
+        test::check (s.load (projFile, err), "loaded project for rescan test");
+        Editor ed (s);
+        const int count = ed.rescanMissingAudio (root, err);
+        test::check (count == 1 && ! s.hasMissingAudio()
+                     && s.tracks[0]->clips[0].file == movedWav
+                     && s.tracks[0]->clips[0].audio != nullptr,
+                     "Editor::rescanMissingAudio finds and relinks moved WAV in sibling folder");
+        test::check (ed.undo() && s.hasMissingAudio(), "rescanMissingAudio undo restores missing state");
+        test::check (ed.redo() && ! s.hasMissingAudio(), "rescanMissingAudio redo reapplies relink");
+    }
+
+    root.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -6241,6 +6315,7 @@ int main()
     trackFreezeChecks();
     busSendSidechainChecks();
     trackInstrumentSlotChecks();
+    missingAudioRelinkChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

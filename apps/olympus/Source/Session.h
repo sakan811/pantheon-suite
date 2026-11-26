@@ -3370,6 +3370,173 @@ public:
         return back;
     }
 
+    bool hasMissingAudio() const
+    {
+        const juce::ScopedLock sl (lock);
+        for (const auto& t : tracks)
+            for (const auto& c : t->clips)
+                if (c.audio == nullptr)
+                    return true;
+        return false;
+    }
+
+    static juce::File findAudioFileByName (const juce::String& fileName, const juce::File& searchRoot, int maxDepth = 3)
+    {
+        if (fileName.isEmpty() || ! searchRoot.isDirectory() || maxDepth < 0)
+            return {};
+        for (const auto& f : searchRoot.findChildFiles (juce::File::findFiles, false))
+        {
+            if (f.existsAsFile() && f.getFileName() == fileName)
+                return f;
+        }
+        if (maxDepth > 0)
+        {
+            for (const auto& d : searchRoot.findChildFiles (juce::File::findDirectories, false))
+            {
+                if (d.getFileName().startsWithChar ('.'))
+                    continue;
+                auto found = findAudioFileByName (fileName, d, maxDepth - 1);
+                if (found != juce::File())
+                    return found;
+            }
+        }
+        return {};
+    }
+
+    std::shared_ptr<const juce::AudioBuffer<float>> loadPooledLocked (const juce::File& file, juce::String& error)
+    {
+        double targetRate = sampleRate > 0.0 ? sampleRate : 0.0;
+        auto buf = pooledAudio (file, targetRate, error);
+        if (buf != nullptr && sampleRate <= 0.0 && targetRate > 0.0)
+        {
+            setSampleRateLocked (targetRate);
+            prepareLocked (false);
+        }
+        return buf;
+    }
+
+    void finishRelinkLocked()
+    {
+        updateLatenciesLocked();
+    }
+
+    static void relinkClipLocked (Clip& clip, const juce::File& newFile, std::shared_ptr<const juce::AudioBuffer<float>> buf)
+    {
+        if (buf == nullptr)
+            return;
+        const juce::int64 source = (juce::int64) buf->getNumSamples();
+        clip.file = newFile;
+        clip.audio = std::move (buf);
+        clip.offset = juce::jlimit ((juce::int64) 0, source, clip.offset);
+        clip.length = juce::jlimit ((juce::int64) 0, source - clip.offset, clip.length);
+        clip.fadeIn = juce::jlimit ((juce::int64) 0, clip.length, clip.fadeIn);
+        clip.fadeOut = juce::jmin (juce::jlimit ((juce::int64) 0, clip.length, clip.fadeOut), clip.length - clip.fadeIn);
+    }
+
+    int rescanMissingAudioLocked (const juce::File& searchRoot, juce::String& error)
+    {
+        if (! searchRoot.isDirectory())
+        {
+            error = "Folder does not exist.";
+            return 0;
+        }
+        int relinked = 0;
+        std::map<juce::String, juce::File> foundByName;
+        for (auto& t : tracks)
+        {
+            for (auto& c : t->clips)
+            {
+                if (c.audio != nullptr)
+                    continue;
+                const auto fileName = c.file.getFileName();
+                if (fileName.isEmpty())
+                    continue;
+                auto it = foundByName.find (fileName);
+                if (it == foundByName.end())
+                    it = foundByName.emplace (fileName, findAudioFileByName (fileName, searchRoot)).first;
+                if (it->second == juce::File())
+                    continue;
+                juce::String loadErr;
+                auto buf = loadPooledLocked (it->second, loadErr);
+                if (buf == nullptr)
+                {
+                    if (error.isEmpty())
+                        error = loadErr;
+                    continue;
+                }
+                relinkClipLocked (c, it->second, std::move (buf));
+                ++relinked;
+            }
+        }
+        if (relinked > 0)
+        {
+            updateLatenciesLocked();
+            publishPlaybackSnapshotLocked();
+            bumpRevision();
+        }
+        return relinked;
+    }
+
+    int rescanMissingAudio (const juce::File& searchRoot, juce::String& error)
+    {
+        const juce::ScopedLock sl (lock);
+        const int relinked = rescanMissingAudioLocked (searchRoot, error);
+        if (relinked > 0)
+            pruneResolvedAudioWarningsLocked();
+        return relinked;
+    }
+
+    void pruneResolvedAudioWarningsLocked()
+    {
+        juce::StringArray stillMissingNames;
+        for (const auto& t : tracks)
+            for (const auto& c : t->clips)
+                if (c.audio == nullptr && c.file.getFileName().isNotEmpty())
+                    stillMissingNames.addIfNotAlreadyThere (c.file.getFileName());
+
+        static const char* const kAudioErrorSuffixes[] = {
+            " contains no audio.",
+            " has an invalid sample rate.",
+            " is too long to load.",
+            " is longer than two hours.",
+            " is truncated or corrupt.",
+            " is too long to resample."
+        };
+        static const juce::String kCannotReadPrefix ("Cannot read the audio file ");
+
+        for (int i = warnings.size() - 1; i >= 0; --i)
+        {
+            const auto& w = warnings[i];
+            if (! w.startsWith ("Track '"))
+                continue;
+            const int sep = w.indexOf (7, "': ");
+            if (sep < 0)
+                continue;
+            const auto problem = w.substring (sep + 3);
+            juce::String warningFileName;
+            if (problem.startsWith (kCannotReadPrefix))
+            {
+                const auto path = problem.substring (kCannotReadPrefix.length());
+                warningFileName = path.fromLastOccurrenceOf ("/", false, false).fromLastOccurrenceOf ("\\", false, false);
+            }
+            else
+            {
+                for (const char* suffix : kAudioErrorSuffixes)
+                {
+                    if (problem.endsWith (suffix))
+                    {
+                        warningFileName = problem.dropLastCharacters ((int) std::strlen (suffix));
+                        break;
+                    }
+                }
+            }
+            if (warningFileName.isEmpty())
+                continue;
+            if (! stillMissingNames.contains (warningFileName))
+                warnings.remove (i);
+        }
+    }
+
 private:
     juce::AudioFormatManager formats;
     juce::AudioBuffer<float> masterScratch;  // masterChain's view of a block (channels x kBlockSize), sized here, never in the callback

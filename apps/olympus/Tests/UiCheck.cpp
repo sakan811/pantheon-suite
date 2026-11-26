@@ -4644,6 +4644,66 @@ int main()
         juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
     }
 
+    // [57] Missing audio auto-rescan on openProject and editor.rescanMissingAudio
+    {
+        std::printf ("[57] Missing audio auto-rescan on openProject and editor.rescanMissingAudio\n");
+        const auto dir57 = tempFolder().getChildFile ("relink-57");
+        dir57.deleteRecursively();
+        const auto projDir = dir57.getChildFile ("1 Project");
+        const auto mastersDir = dir57.getChildFile ("2 Masters");
+        projDir.createDirectory();
+        mastersDir.createDirectory();
+
+        const auto srcWav = makeWav ("relink57-lead.wav");
+        const auto projLead = projDir.getChildFile ("lead.wav");
+        const auto projGhost = projDir.getChildFile ("ghost.wav");
+        srcWav.copyFileTo (projLead);
+        srcWav.copyFileTo (projGhost);
+
+        const auto projFile = projDir.getChildFile ("proj.olympus");
+        juce::String err;
+        {
+            Session s;
+            s.addTrack (projLead, "Lead", err);
+            s.addTrack (projGhost, "Ghost", err);
+            test::check (s.save (projFile, err), "saved project for auto-rescan UI check");
+        }
+
+        const auto movedLead = mastersDir.getChildFile ("lead.wav");
+        projLead.moveFileTo (movedLead);
+        projGhost.deleteFile();
+
+        auto w = makeWindow (true, dir57.getChildFile ("settings.xml"));
+        w->setSize (1200, 750);
+        w->resized();
+
+        const auto errBefore = gErrors.size();
+        test::check (w->openProject (projFile), "openProject succeeds with partial missing audio");
+        test::check (w->session.tracks.size() == 2
+                     && w->session.tracks[0]->clips[0].audio != nullptr
+                     && w->session.tracks[0]->clips[0].file == movedLead,
+                     "openProject auto-relinks moved WAV from sibling folder 2 Masters/");
+        test::check (w->session.hasMissingAudio() && ! w->session.dirty,
+                     "remaining missing WAV keeps hasMissingAudio true and auto-rescan does not mark dirty");
+        test::check (w->session.warnings.size() == 1 && w->session.warnings[0].contains ("ghost.wav"),
+                     "resolved lead.wav warning is pruned while ghost.wav warning remains");
+        test::check (gErrors.size() == errBefore + 1
+                     && gErrors.back().contains ("Tip: Right-click any MISSING AUDIO clip to locate its file or rescan a folder."),
+                     "openProject notes include right-click tip when missing audio remains");
+
+        const auto movedGhost = mastersDir.getChildFile ("ghost.wav");
+        srcWav.copyFileTo (movedGhost);
+        const int rescanned = w->editor.rescanMissingAudio (dir57, err);
+        test::check (rescanned == 1 && ! w->session.hasMissingAudio()
+                     && w->session.tracks[1]->clips[0].audio != nullptr
+                     && w->session.tracks[1]->clips[0].file == movedGhost
+                     && w->session.dirty,
+                     "editor.rescanMissingAudio relinks remaining missing WAV and updates hasMissingAudio");
+
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
     tempFolder().deleteRecursively();
     return test::finish ("OlympusUiCheck");
 }

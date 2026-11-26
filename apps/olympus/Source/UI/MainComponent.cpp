@@ -492,6 +492,8 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.reportError = [this] (const juce::String& message) { showError (message); };
     arrange.onInputMenu = [this] (int track) { showInputMenu (track); };
     arrange.onInstrumentMenu = [this] (int track) { showInstrumentMenu (track); };
+    arrange.onLocateMissingAudio = [this] (ClipRef ref) { locateMissingAudio (ref); };
+    arrange.onRescanMissingAudio = [this] { rescanMissingAudio(); };
     arrange.onOpenMidiClip = [this] (MidiClipRef ref)
     {
         if (mixer.isVisible())
@@ -1511,6 +1513,15 @@ bool MainComponent::openProject (const juce::File& file)
         showError (error);
         return false;
     }
+    if (session.hasMissingAudio())
+    {
+        const auto searchRoot = file.getParentDirectory().getParentDirectory();
+        if (searchRoot.isDirectory())
+        {
+            juce::String rescanErr;
+            session.rescanMissingAudio (searchRoot, rescanErr);
+        }
+    }
     lastEditorHash = 0;
     loadedProjectMtime = file.getLastModificationTime();
     editor.clearUndo();
@@ -1531,7 +1542,12 @@ bool MainComponent::openProject (const juce::File& file)
     arrange.zoomToFit();
     arrange.repaint();
     if (session.warnings.size() > 0)
-        showError ("Opened with notes:\n\n" + session.warnings.joinIntoString ("\n"));
+    {
+        auto msg = "Opened with notes:\n\n" + session.warnings.joinIntoString ("\n");
+        if (session.hasMissingAudio())
+            msg += "\n\nTip: Right-click any MISSING AUDIO clip to locate its file or rescan a folder.";
+        showError (msg);
+    }
     return true;
 }
 
@@ -1854,6 +1870,64 @@ void MainComponent::chooseAndImport()
                               juce::StringArray files;
                               for (auto& f : fc.getResults()) files.add (f.getFullPathName());
                               finishCb (files);
+                          });
+}
+
+void MainComponent::locateMissingAudio (ClipRef ref)
+{
+    if (refuseWhileBusy()) return;
+    dialogOpen = true;
+    const auto startDir = session.projectFile != juce::File()
+                              ? session.projectFile.getParentDirectory()
+                              : juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    chooser = std::make_unique<juce::FileChooser> ("Locate missing audio...", startDir, kAudioWildcard);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [safe = juce::Component::SafePointer<MainComponent> (this), ref] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr) return;
+                              safe->dialogOpen = false;
+                              const auto chosen = fc.getResult();
+                              if (chosen == juce::File()) return;
+                              juce::String error;
+                              if (! safe->editor.relinkClipAudio (ref.track, ref.clip, chosen, error))
+                              {
+                                  safe->showError (error);
+                                  return;
+                              }
+                              safe->refreshNow();
+                              safe->arrange.repaint();
+                          });
+}
+
+void MainComponent::rescanMissingAudio()
+{
+    if (refuseWhileBusy()) return;
+    dialogOpen = true;
+    const auto parentDir = session.projectFile != juce::File() ? session.projectFile.getParentDirectory().getParentDirectory() : juce::File();
+    const auto startDir = parentDir.isDirectory()
+                              ? parentDir
+                              : (session.projectFile != juce::File()
+                                     ? session.projectFile.getParentDirectory()
+                                     : juce::File::getSpecialLocation (juce::File::userMusicDirectory));
+    chooser = std::make_unique<juce::FileChooser> ("Choose folder to rescan for missing audio", startDir);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [safe = juce::Component::SafePointer<MainComponent> (this)] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr) return;
+                              safe->dialogOpen = false;
+                              const auto folder = fc.getResult();
+                              if (folder == juce::File()) return;
+                              juce::String error;
+                              const int relinked = safe->editor.rescanMissingAudio (folder, error);
+                              if (relinked > 0)
+                              {
+                                  safe->refreshNow();
+                                  safe->arrange.repaint();
+                              }
+                              else
+                              {
+                                  safe->showError (error.isNotEmpty() ? error : "No missing audio files matched in " + folder.getFullPathName() + ".");
+                              }
                           });
 }
 
