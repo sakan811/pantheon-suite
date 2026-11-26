@@ -72,6 +72,9 @@ public:
     std::function<void (int track)> onInputMenu;
     // The INST button of a MIDI track: the window shows the track's instrument menu and picker.
     std::function<void (int track)> onInstrumentMenu;
+    // Right-click menu on a MISSING AUDIO clip: locate its file or rescan a folder for missing audio.
+    std::function<void (ClipRef)> onLocateMissingAudio;
+    std::function<void()> onRescanMissingAudio;
     // The input a track records, the peak it reads from that input (linear; reading resets it), and whether the meters show it: the
     // window sets these (the view knows no device). An armed track's meter shows its input when showInputLevels is on.
     std::function<float (int track)> inputLevel;

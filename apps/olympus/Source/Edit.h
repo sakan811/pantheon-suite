@@ -569,6 +569,34 @@ public:
         return true;
     }
 
+    bool relinkMissingAudio (const juce::File& oldFile, const juce::File& newFile, int& relinkedCount, juce::String& error)
+    {
+        return relinkClipOrMatching (-1, -1, oldFile, newFile, relinkedCount, error);
+    }
+
+    bool relinkClipAudio (int track, int clip, const juce::File& newFile, juce::String& error)
+    {
+        int relinkedCount = 0;
+        juce::File oldFile;
+        {
+            const juce::ScopedLock sl (session.lock);
+            Clip* c = clipAt (track, clip, error);
+            if (c == nullptr) return false;
+            oldFile = c->file;
+        }
+        return relinkClipOrMatching (track, clip, oldFile, newFile, relinkedCount, error);
+    }
+
+    int rescanMissingAudio (const juce::File& searchRoot, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        auto before = captureIfNeeded();
+        const int relinked = session.rescanMissingAudioLocked (searchRoot, error);
+        if (relinked > 0)
+            record (before, "Rescan missing audio");
+        return relinked;
+    }
+
     // ---- MIDI clips and notes -------------------------------------------------------------------------------------------------
     MidiClipRef addMidiClip (int track, juce::int64 start, juce::int64 length, const juce::String& name, juce::String& error)
     {
@@ -1777,6 +1805,75 @@ private:
     EditState gestureBefore;
     int gestureTracks = 0;
     juce::String gestureLabel;
+
+    bool relinkClipOrMatching (int track, int clip, const juce::File& oldFile, const juce::File& newFile, int& relinkedCount, juce::String& error)
+    {
+        relinkedCount = 0;
+        if (! newFile.existsAsFile())
+        {
+            error = newFile.getFileName() + " could not be found.";
+            return false;
+        }
+        const juce::ScopedLock sl (session.lock);
+        Clip* target = nullptr;
+        if (track >= 0)
+        {
+            target = clipAt (track, clip, error);
+            if (target == nullptr)
+                return false;
+        }
+        if (target == nullptr)
+        {
+            bool hasMatch = false;
+            if (oldFile != juce::File())
+            {
+                for (const auto& t : session.tracks)
+                {
+                    for (const auto& c : t->clips)
+                    {
+                        if (c.audio == nullptr && c.file == oldFile)
+                        {
+                            hasMatch = true;
+                            break;
+                        }
+                    }
+                    if (hasMatch)
+                        break;
+                }
+            }
+            if (! hasMatch)
+            {
+                error = "No matching missing audio clip was found.";
+                return false;
+            }
+        }
+        auto before = captureIfNeeded();
+        auto buf = session.loadPooledLocked (newFile, error);
+        if (buf == nullptr)
+            return false;
+        auto applyRelink = [&] (Clip& c)
+        {
+            Session::relinkClipLocked (c, newFile, buf);
+            ++relinkedCount;
+        };
+        if (oldFile != juce::File())
+        {
+            for (auto& t : session.tracks)
+                for (auto& c : t->clips)
+                    if (c.audio == nullptr && c.file == oldFile)
+                        applyRelink (c);
+        }
+        if (relinkedCount == 0 && target != nullptr)
+            applyRelink (*target);
+        if (relinkedCount == 0)
+        {
+            error = "No matching missing audio clip was found.";
+            return false;
+        }
+        session.finishRelinkLocked();
+        record (before, "Locate audio");
+        return true;
+    }
 
     std::optional<EditState> captureIfNeeded() const
     {

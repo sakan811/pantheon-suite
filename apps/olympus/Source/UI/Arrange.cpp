@@ -2884,6 +2884,12 @@ void ArrangeView::clipMenu (ClipRef ref)
     const auto& c = s.tracks[(size_t) ref.track].clips[(size_t) ref.clip];
 
     juce::PopupMenu menu;
+    if (c.audio == nullptr)
+    {
+        menu.addItem (12, "Locate audio file...");
+        menu.addItem (13, "Rescan folder for missing audio...");
+        menu.addSeparator();
+    }
     menu.addItem (1, "Split at playhead");
     menu.addItem (2, "Duplicate");
     menu.addItem (3, "Copy");
@@ -3090,6 +3096,12 @@ void ArrangeView::clipAction (ClipRef ref, int action)
         case 11:
             if (! editor.setClipFades (ref.track, ref.clip, 0, 0, error)) report (error);
             break;
+        case 12:
+            if (onLocateMissingAudio) onLocateMissingAudio (ref);
+            return;
+        case 13:
+            if (onRescanMissingAudio) onRescanMissingAudio();
+            return;
         default:
             return;
     }
