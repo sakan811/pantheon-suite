@@ -4,6 +4,7 @@
 // Headless checks of the session, the render, the project file and the MCP server, with plugins made in code (TestPlugin.h).
 // Set OLYMPUS_PLUGIN_DIR to a folder with built plugin bundles to add the check against the real ones.
 
+#include "AutoWrite.h"
 #include "Analyze.h"
 #include "Advice.h"
 #include "Check.h"
@@ -15,6 +16,7 @@
 #include "TestPlugin.h"
 
 #include <atomic>
+#include <cstring>
 #include <chrono>
 #include <limits>
 #include <sstream>
@@ -414,7 +416,7 @@ void mcpChecks()
     juce::var list;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}", list);
     const auto tools = server.handle (list)["result"]["tools"];
-    test::check (tools.size() == 38 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
+    test::check (tools.size() == 48 && tools[0]["inputSchema"]["type"].toString() == "object", test::fmt ("tools/list: %d tools, each with a schema", (int) tools.size()));
 
     juce::var note;
     juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", note);
@@ -560,7 +562,7 @@ void mcpTimelineChecks()
                            "add_marker", "remove_marker", "set_loop", "set_master" })
         for (auto& t : *tools.getArray())
             if (t["name"].toString() == n) ++known;
-    test::check (tools.size() == 38 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
+    test::check (tools.size() == 48 && known == 12, test::fmt ("tools/list: %d tools, %d of the 12 timeline tools among them", (int) tools.size(), known));
 
     // clips
     test::check (! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":1}")) && s.tracks[0]->clips.size() == 2 && s.tracks[0]->clips[1].start == 48000,
@@ -675,7 +677,7 @@ void clipChecks()
     c.fadeOut = 200;
     t.clips.push_back (c);
     juce::AudioBuffer<float> dest (2, 1000);
-    Session::mixClips (t, 0, 1000, dest);
+    Session::mixClips (t, 0, 1000, dest, false, 0);
     const float g = juce::Decibels::decibelsToGain (-6.0f) * 0.5f;
     const auto at = [&dest] (int i) { return dest.getSample (0, i); };
     test::check (at (0) == 0.0f, "a clip starts from silence (its fade in)");
@@ -694,7 +696,7 @@ void clipChecks()
     b.length = 100;
     u.clips = { a, b };
     juce::AudioBuffer<float> sum (2, 200);
-    Session::mixClips (u, 0, 200, sum);
+    Session::mixClips (u, 0, 200, sum, false, 0);
     test::check (close (sum.getSample (0, 25), 0.25) && close (sum.getSample (0, 75), 0.75) && close (sum.getSample (0, 125), 0.5) && sum.getSample (0, 160) == 0.0f,
                  "two overlapping clips sum, and each stops at its end");
 
@@ -710,7 +712,7 @@ void clipChecks()
     r.length = 50;
     v.clips.push_back (r);
     juce::AudioBuffer<float> window (2, 80);
-    Session::mixClips (v, 90, 80, window);
+    Session::mixClips (v, 90, 80, window, false, 0);
     test::check (window.getSample (0, 9) == 0.0f && close (window.getSample (0, 10), 0.3) && close (window.getSample (0, 59), 0.349) && window.getSample (0, 60) == 0.0f,
                  "a clip plays from its offset, for its own length, at its place on the timeline");
 
@@ -844,7 +846,7 @@ void legacyChecks()
     test::check (clip.start == 0 && clip.offset == 0 && clip.length == 24000 && clip.audio != nullptr && clip.file == wav,
                  "the clip covers the whole file, from sample 0");
     test::check (close (s.tracks[0]->gainDb, -2.0) && s.tracks[0]->chain.size() == 1 && s.warnings.isEmpty(), "the fader and the chain are read as before");
-    test::check (s.save (dir.getChildFile ("new.olympus"), err), "and it is saved as version 3");
+    test::check (s.save (dir.getChildFile ("new.olympus"), err), "and it is saved as version 4");
 }
 
 void missingAudioChecks()
@@ -1000,7 +1002,7 @@ void describeChecks()
 juce::AudioBuffer<float> mixOf (Session& s, int track, juce::int64 from, int n)
 {
     juce::AudioBuffer<float> b (2, n);
-    Session::mixClips (*s.tracks[(size_t) track], from, n, b);
+    Session::mixClips (*s.tracks[(size_t) track], from, n, b, false, 0);
     return b;
 }
 
@@ -4346,7 +4348,7 @@ void midiAndSnapshotChecks()
             test::check (s.save (projFile, err), "save project v3: " + err);
         }
         const auto xml = juce::parseXML (projFile);
-        test::check (xml != nullptr && xml->getIntAttribute ("version") == 3, "saved XML has version=3");
+        test::check (xml != nullptr && xml->getIntAttribute ("version") == 4, "saved XML has version=4");
 
         Session loaded;
         test::check (loaded.load (projFile, err), "load project v3: " + err);
@@ -5824,11 +5826,11 @@ void busSendSidechainChecks()
         const auto wavPathA = dcA.getFullPathName().replace ("\\", "\\\\");
         const auto wavPathB = dcB.getFullPathName().replace ("\\", "\\\\");
 
-        // Tool count stays at 38
+        // Tool count is 44
         juce::var listReq;
         juce::JSON::parse ("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", listReq);
         const auto tools = server.handle (listReq)["result"]["tools"];
-        test::check (tools.size() == 38, test::fmt ("MCP tool count stays 38 (got %d)", (int) tools.size()));
+        test::check (tools.size() == 48, test::fmt ("MCP tool count is 48 (got %d)", (int) tools.size()));
 
         test::check (! failed (call ("add_track", "{\"file\":\"" + wavPathA + "\",\"name\":\"Pad\"}")), "MCP add_track audio");
         test::check (! failed (call ("add_track", "{\"file\":\"" + wavPathB + "\",\"name\":\"Kick\"}")), "MCP add_track kick");
@@ -6244,6 +6246,1910 @@ void missingAudioRelinkChecks()
     root.deleteRecursively();
 }
 
+// [69] Standard MIDI Files (F1): the round trip, the type 1 layout, the file's tempo, SMPTE and missing-file refusals, the undo of an
+// import, and the MCP tools import_midi and export_midi.
+void midiFileChecks()
+{
+    std::printf ("[69] Standard MIDI Files: round trip, a clip's notes cut at its end, type 1 layout, use_file_tempo, SMPTE and missing-file refusals, undo and redo of an import, MCP import_midi and export_midi\n");
+    const auto dir = tempFolder().getChildFile ("midi-69");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    juce::String err;
+
+    // round trip: pitches, velocities, channels and beats (to 1/960) survive export and import
+    const auto roundTrip = dir.getChildFile ("roundtrip.mid");
+    {
+        Session s;
+        Editor ed (s);
+        const int t = ed.addMidiTrack ("Lead");
+        const auto mc = ed.addMidiClip (t, 0, 48000 * 8, "Clip", err);
+        ed.addMidiNote (t, mc.clip, 0.0, 1.0, 60, 100, 1, err);
+        ed.addMidiNote (t, mc.clip, 1.5, 0.25, 64, 64, 2, err);
+        ed.addMidiNote (t, mc.clip, 3.0, 2.0, 67, 127, 1, err);
+        test::check (ed.exportMidi (roundTrip, t, -1, err) && roundTrip.existsAsFile(), "export_midi writes the MIDI clip's file");
+
+        Session s2;
+        Editor ed2 (s2);
+        std::vector<int> made;
+        test::check (ed2.importMidiFile (roundTrip, 0, -1, false, err, &made) && made.size() == 1, "importMidiFile makes one track for the one file track");
+        const auto& notes = s2.tracks[(size_t) made[0]]->midiClips[0].notes;
+        const double tol = 1.0 / 960.0 + 1e-9;
+        const bool same = notes.size() == 3
+                          && std::abs (notes[0].startBeat - 0.0) <= tol && std::abs (notes[0].durationBeats - 1.0) <= tol
+                          && notes[0].pitch == 60 && notes[0].velocity == 100 && notes[0].channel == 1
+                          && std::abs (notes[1].startBeat - 1.5) <= tol && std::abs (notes[1].durationBeats - 0.25) <= tol
+                          && notes[1].pitch == 64 && notes[1].velocity == 64 && notes[1].channel == 2
+                          && std::abs (notes[2].startBeat - 3.0) <= tol && std::abs (notes[2].durationBeats - 2.0) <= tol
+                          && notes[2].pitch == 67 && notes[2].velocity == 127 && notes[2].channel == 1;
+        test::check (same, "round trip keeps beats (to 1/960), pitches, velocities and channels");
+    }
+
+    // a clip that starts after bar 1: its notes are cut at the clip's end in absolute beats, and a note after the end is dropped
+    {
+        Session s;
+        Editor ed (s);
+        const int t = ed.addMidiTrack ("Late");
+        // beat 16 at 120 bpm, 4 beats long, in the session's own rate (a MIDI track sets 44.1 kHz)
+        const auto start = (juce::int64) std::llround (s.tempo.beatsToSamples (16.0));
+        const auto length = (juce::int64) std::llround (s.tempo.beatsToSamples (20.0)) - start;
+        const auto mc = ed.addMidiClip (t, start, length, {}, err);
+        ed.addMidiNote (t, mc.clip, 3.0, 2.0, 60, 100, 1, err);      // absolute 19 to 21: cut at the clip's end (20)
+        ed.addMidiNote (t, mc.clip, 4.5, 0.5, 62, 100, 1, err);      // absolute 20.5: after the end, dropped
+        const auto clipFile = dir.getChildFile ("clip-offset.mid");
+        test::check (ed.exportMidi (clipFile, -1, -1, err) && clipFile.existsAsFile(), "export of the song writes the offset clip's notes");
+        std::vector<ImportedMidiTrack> tracks;
+        double bpm = 0.0;
+        int num = 0, den = 0;
+        juce::String reason;
+        const double tolBeat = 1.0 / 960.0 + 1e-9;
+        const bool cut = readMidiFile (clipFile, tracks, bpm, num, den, reason) && tracks.size() == 1 && tracks[0].notes.size() == 1
+                         && std::abs (tracks[0].notes[0].startBeat - 19.0) <= tolBeat
+                         && std::abs (tracks[0].notes[0].durationBeats - 1.0) <= tolBeat;
+        test::check (cut, "a note crossing a clip's end is cut there (absolute beat 19, 1 beat) and the note after it is dropped");
+    }
+
+    // type 1 with a tempo track first: two MIDI tracks write 3 tracks
+    const auto two = dir.getChildFile ("two.mid");
+    {
+        Session s;
+        Editor ed (s);
+        for (const auto* name : { "A", "B" })
+        {
+            const int t = ed.addMidiTrack (name);
+            const auto mc = ed.addMidiClip (t, 0, 48000 * 4, {}, err);
+            ed.addMidiNote (t, mc.clip, 0.0, 1.0, 48, 90, 1, err);
+        }
+        test::check (ed.exportMidi (two, -1, -1, err), "export_midi of every MIDI track writes one file");
+        juce::MidiFile mf;
+        juce::FileInputStream in (two);
+        int type = -1;
+        test::check (in.openedOk() && mf.readFrom (in, false, &type) && type == 1 && mf.getNumTracks() == 3,
+                     "two tracks export as a type 1 file with 3 tracks (tempo track + 2)");
+    }
+
+    // use_file_tempo: the file's first tempo and time signature become the session's, in the same step
+    const auto tempoFile = dir.getChildFile ("tempo.mid");
+    {
+        Session s;
+        Editor ed (s);
+        const int t = ed.addMidiTrack ("T");
+        ed.setTempo (0.0, 90.0, err);
+        ed.setSignature (3, 4);
+        const auto mc = ed.addMidiClip (t, 0, 48000 * 4, {}, err);
+        ed.addMidiNote (t, mc.clip, 0.0, 1.0, 60, 100, 1, err);
+        test::check (ed.exportMidi (tempoFile, t, -1, err), "export_midi writes a file at 90 bpm, 3/4");
+    }
+    {
+        Session s;
+        Editor ed (s);
+        test::check (ed.importMidiFile (tempoFile, 0, -1, true, err), "importMidiFile with use_file_tempo succeeds");
+        test::check (std::abs (s.tempo.bpmAtBeat (0.0) - 90.0) < 0.001 && s.tempo.numerator == 3 && s.tempo.denominator == 4,
+                     "use_file_tempo sets the session to 90 bpm and 3/4");
+        test::check (ed.undo() && std::abs (s.tempo.bpmAtBeat (0.0) - 120.0) < 1e-9 && s.tempo.numerator == 4 && s.tempo.denominator == 4,
+                     "undo of the import also restores the tempo and the time signature");
+    }
+
+    // an SMPTE file is refused with the reason; a missing file is refused
+    const auto smpte = dir.getChildFile ("smpte.mid");
+    {
+        juce::MidiFile mf;
+        mf.setSmpteTimeFormat (25, 40);
+        juce::MidiMessageSequence seq;
+        seq.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0.0);
+        seq.addEvent (juce::MidiMessage::noteOff (1, 60), 40.0);
+        mf.addTrack (seq);
+        juce::FileOutputStream out (smpte);
+        const bool written = mf.writeTo (out);
+        out.flush();
+        test::check (out.openedOk() && written, "an SMPTE test file is written");
+    }
+    {
+        std::vector<ImportedMidiTrack> tracks;
+        double bpm = 0.0;
+        int num = 0, den = 0;
+        juce::String reason;
+        test::check (! readMidiFile (smpte, tracks, bpm, num, den, reason) && reason == juce::String (kSmpteRefusal) && tracks.empty(),
+                     "an SMPTE file is refused with the exact reason");
+        Session s;
+        Editor ed (s);
+        test::check (! ed.importMidiFile (smpte, 0, -1, false, err) && err == juce::String (kSmpteRefusal) && s.tracks.empty(),
+                     "importMidiFile refuses an SMPTE file and changes nothing");
+        test::check (! ed.importMidiFile (dir.getChildFile ("missing.mid"), 0, -1, false, err) && err.isNotEmpty() && s.tracks.empty(),
+                     "importMidiFile refuses a missing file and changes nothing");
+    }
+
+    // one undo step per import: undo removes the new tracks, redo brings them back
+    {
+        Session s;
+        Editor ed (s);
+        test::check (ed.importMidiFile (two, 0, -1, false, err) && s.tracks.size() == 2 && s.tracks[0]->isMidi,
+                     "importMidiFile of the 2-track file makes its two MIDI tracks");
+        test::check (ed.undo() && s.tracks.empty(), "undo removes the imported tracks");
+        test::check (ed.redo() && s.tracks.size() == 2, "redo brings the imported tracks back");
+    }
+
+    // the MCP tools
+    {
+        Session s;
+        McpServer server (s);
+        const auto wav = makeWav ("midi-69/audio.wav", 48000.0, 2, 4800, 0.5f, 440.0);
+        test::check (s.addTrack (wav, "Audio", err), "an audio track to refuse MIDI on");
+        const auto path = two.getFullPathName().replace ("\\", "\\\\");
+        const auto ok = toolCall (server, "import_midi", "{\"path\":\"" + path + "\"}");
+        test::check (! ok["isError"], "import_midi succeeds on a MIDI file");
+        const auto bad = toolCall (server, "import_midi", "{\"path\":\"" + path + "\",\"track\":\"9\"}");
+        test::check (bool (bad["isError"]) && toolText (bad).isNotEmpty(), "import_midi refuses a track that does not exist");
+        const auto audioTrack = toolCall (server, "import_midi", "{\"path\":\"" + path + "\",\"track\":\"0\"}");
+        test::check (bool (audioTrack["isError"]), "import_midi refuses a track that is not a MIDI track");
+        const auto exportBad = toolCall (server, "export_midi", "{\"path\":\"" + dir.getChildFile ("bad.mid").getFullPathName().replace ("\\", "\\\\") + "\",\"track\":\"0\"}");
+        test::check (bool (exportBad["isError"]), "export_midi refuses a non-MIDI track");
+        const auto exportOk = toolCall (server, "export_midi", "{\"path\":\"" + dir.getChildFile ("mcp.mid").getFullPathName().replace ("\\", "\\\\") + "\"}");
+        test::check (! exportOk["isError"] && dir.getChildFile ("mcp.mid").existsAsFile(), "export_midi writes every MIDI track");
+    }
+
+    dir.deleteRecursively();
+}
+
+// [70] Track colour, polarity (Ø), groups (relative gain, mute/solo/arm links, alone), VCA faders: the polarity null in the three paths,
+// the VCA level in the three paths and on an automated volume lane, the XML round trip and the out-of-range group, each Editor edit's
+// undo and redo, and the MCP tools
+namespace {
+// The largest sample of the first `blocks` blocks processBlock makes (the snapshot path when the lock is held by another thread).
+float playbackPeak (Session& s, int blocks = 8)
+{
+    float peak = 0.0f;
+    for (int b = 0; b < blocks; ++b)
+    {
+        juce::AudioBuffer<float> out (2, 512);
+        s.processBlock (out, (juce::int64) b * 512);
+        peak = juce::jmax (peak, out.getMagnitude (0, 0, 512), out.getMagnitude (1, 0, 512));
+    }
+    return peak;
+}
+
+// Runs `fn` while another thread holds the session's lock, so the playback path must read its PlaybackSnapshot.
+template <typename Fn>
+void whileLockHeld (Session& s, Fn fn)
+{
+    std::atomic<bool> held { false }, release { false };
+    std::thread holder ([&s, &held, &release]
+    {
+        const juce::ScopedLock sl (s.lock);
+        held = true;
+        while (! release.load())
+            std::this_thread::sleep_for (std::chrono::milliseconds (1));
+    });
+    while (! held.load())
+        std::this_thread::sleep_for (std::chrono::milliseconds (1));
+    fn();
+    release = true;
+    holder.join();
+}
+}
+
+void trackColourGroupChecks()
+{
+    std::printf ("[70] Track colour, polarity, groups (relative gain, links, alone), VCA, XML round trip, undo and redo, MCP colour/polarity/group and group tools\n");
+    tempFolder().getChildFile ("colour-group").createDirectory();
+    const auto dir = tempFolder().getChildFile ("colour-group");
+    juce::String err;
+    const auto sine = makeWav ("colour-group/sine.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+    const auto dc = makeWav ("colour-group/dc.wav", 48000.0, 2, 1024, 0.5f, 0.0, 0, 32);
+    // a constant 0.5 across the file (makeWav's DC is only from impulses): the level reads exactly
+    {
+        dc.deleteFile();
+        juce::AudioBuffer<float> buf (2, 48000);
+        for (int ch = 0; ch < 2; ++ch)
+            juce::FloatVectorOperations::fill (buf.getWritePointer (ch), 0.5f, 48000);
+        std::unique_ptr<juce::OutputStream> os (dc.createOutputStream());
+        juce::WavAudioFormat wav;
+        auto writer = wav.createWriterFor (os, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+        writer->writeFromAudioSampleBuffer (buf, 0, 48000);
+    }
+
+    // 1. polarity null: a track and its copy with Ø on sum to silence, in the render, processBlock and the snapshot path
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (sine, "A", err) && ed.addTrack (sine, "B", err), "polarity: two copies of one sine");
+        test::check (ed.setTrackPolarity (1, true, err) && s.tracks[1]->polarity && ! s.tracks[0]->polarity, "polarity: Ø is set on the copy only");
+
+        RenderOptions o;
+        o.folder = dir.getChildFile ("null");
+        RenderResult r;
+        test::check (s.renderStems (o, r, err), "polarity: render works: " + err);
+        test::check (r.mixPeakDb < -120.0, "polarity: the render of a track and its inverted copy is silent (mix peak " + juce::String (r.mixPeakDb) + " dB)");
+        const auto a = readWav (o.folder.getChildFile ("01-A.wav"));
+        const auto b = readWav (o.folder.getChildFile ("02-B.wav"));
+        float worst = 0.0f;
+        for (int ch = 0; ch < 2 && a.getNumSamples() == b.getNumSamples(); ++ch)
+            for (int i = 0; i < a.getNumSamples(); ++i)
+                worst = juce::jmax (worst, std::abs (a.getSample (ch, i) + b.getSample (ch, i)));
+        test::check (a.getNumSamples() > 0 && worst < 1e-6f, "polarity: the inverted stem is the negated stem sample by sample");
+
+        test::check (playbackPeak (s) < 1e-6f, "polarity: processBlock sums the pair to silence");
+        float snapPeak = 1.0f;
+        whileLockHeld (s, [&] { snapPeak = playbackPeak (s); });
+        test::check (snapPeak < 1e-6f, "polarity: processBlockFromSnapshot sums the pair to silence");
+        test::check (ed.setTrackPolarity (1, false, err) && playbackPeak (s) > 0.1f, "polarity: off again, the copy is heard");
+    }
+
+    // 2. relative gain: the members of an active gain link move by the same dB step, the step limited so no member leaves -100..+12
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (sine, "L", err) && ed.addTrack (sine, "R", err), "gain link: two tracks");
+        test::check (ed.setTrackGain (0, -6.0f, err) && ed.setTrackGain (1, 0.0f, err), "gain link: members at -6 and 0");
+        const int g = ed.addGroup ("Pair", err);
+        test::check (g == 0 && ed.setTrackGroup (0, 0, err) && ed.setTrackGroup (1, 0, err), "gain link: a group holds both");
+        test::check (ed.setTrackGain (0, -3.0f, err) && std::abs (s.tracks[0]->gainDb + 3.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb - 3.0f) < 1e-4f,
+                     "gain link: -6 and 0 moved by +3 end at -3 and +3");
+        test::check (ed.setTrackGain (1, 15.0f, err) && std::abs (s.tracks[0]->gainDb - 6.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb - 12.0f) < 1e-4f,
+                     "gain link: +15 on the 0 dB member is limited to +12: the members end at +6 and +12");
+        test::check (ed.setTrackGain (0, -100.0f, err) && std::abs (s.tracks[0]->gainDb + 100.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb + 94.0f) < 1e-4f,
+                     "gain link: a drop of the quieter member to -100 moves the other by -106, to -94");
+        test::check (ed.setTrackGain (0, 6.0f, err, true) && std::abs (s.tracks[0]->gainDb - 6.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb + 94.0f) < 1e-4f,
+                     "gain link: alone moves one member only");
+        // without the link: a plain set
+        test::check (ed.setGroup (0, [&] { auto v = s.groups[0]; v.gain = false; return v; }(), err) && ed.setTrackGain (0, -1.0f, err)
+                         && std::abs (s.tracks[0]->gainDb + 1.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb + 94.0f) < 1e-4f,
+                     "gain link: a group whose gain link is off does not link the faders");
+    }
+
+    // 2b. a silent member (-100) does not hold the group's fall: it stays silent, and the others move
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (sine, "Sil", err) && ed.addTrack (sine, "Full", err), "silent link: two tracks");
+        test::check (ed.setTrackGain (0, -100.0f, err) && ed.setTrackGain (1, 0.0f, err), "silent link: members at -100 and 0");
+        const int g = ed.addGroup ("Pair", err);
+        test::check (g == 0 && ed.setTrackGroup (0, 0, err) && ed.setTrackGroup (1, 0, err), "silent link: a group holds both");
+        test::check (ed.setTrackGain (1, -6.0f, err) && std::abs (s.tracks[0]->gainDb + 100.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb + 6.0f) < 1e-4f,
+                     "silent link: -6 on the 0 dB member leaves the silent one at -100 and the other at -6");
+        test::check (ed.setTrackGain (1, -3.0f, err) && std::abs (s.tracks[0]->gainDb + 97.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb + 3.0f) < 1e-4f,
+                     "silent link: +3 raises the silent member by 3 (to -97) and the other to -3");
+        test::check (ed.setTrackGain (0, -100.0f, err) && ed.setTrackGain (1, -100.0f, err) && ed.setTrackGain (1, -120.0f, err)
+                         && std::abs (s.tracks[0]->gainDb + 100.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb + 100.0f) < 1e-4f,
+                     "silent link: with both at -100, a fall changes nothing");
+    }
+
+    // 3. mute, solo and arm links; an inactive group links nothing; alone moves one member
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (sine, "A", err) && ed.addTrack (sine, "B", err) && ed.addTrack (sine, "C", err), "links: three tracks");
+        const int g = ed.addGroup ("Trio", err);
+        test::check (g == 0 && ed.setTrackGroup (0, 0, err) && ed.setTrackGroup (1, 0, err), "links: A and B in a group, C in none");
+        test::check (ed.setTrackMute (0, true, err) && s.tracks[0]->mute && s.tracks[1]->mute && ! s.tracks[2]->mute, "links: mute reaches every member, not C");
+        test::check (ed.setTrackMute (1, false, err, true) && ! s.tracks[1]->mute && s.tracks[0]->mute, "links: alone unmutes one member");
+        test::check (ed.setTrackSolo (1, true, err) && s.tracks[0]->solo && s.tracks[1]->solo && ! s.tracks[2]->solo, "links: solo reaches every member");
+        test::check (s.setTrackArm (0, true, err) && s.tracks[1]->armed && ! s.tracks[2]->armed, "links: arm reaches every member");
+        test::check (s.setTrackArm (1, false, err, true) && s.tracks[0]->armed && ! s.tracks[1]->armed, "links: arm alone disarms one member");
+        auto off = s.groups[0];
+        off.active = false;
+        test::check (ed.setGroup (0, off, err) && ed.setTrackMute (2, true, err) && ed.setTrackMute (0, false, err) && ! s.tracks[0]->mute && s.tracks[2]->mute,
+                     "links: an inactive group links nothing");
+    }
+
+    // 4. VCA: a group's offset is added to its members' faders and volume lanes, in render, processBlock and the snapshot path
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (dc, "Dc", err), "VCA: a DC track");
+        const float expected = 0.5f * 0.5f; // the level of the DC track at -6.0206 dB
+        const int g = ed.addGroup ("Bus", err);
+        test::check (g == 0 && ed.setTrackGroup (0, 0, err), "VCA: the track is in a group");
+        test::check (ed.setGroupVca (0, -6.0206f, err) && std::abs (s.groups[0].vcaDb + 6.0206f) < 1e-4f, "VCA: the group's offset is -6.0206 dB");
+
+        RenderOptions o;
+        o.folder = dir.getChildFile ("vca");
+        RenderResult r;
+        test::check (s.renderStems (o, r, err), "VCA: render works: " + err);
+        const auto stem = readWav (o.folder.getChildFile ("01-Dc.wav"));
+        test::check (stem.getNumSamples() > 100 && std::abs (stem.getSample (0, 100) - expected) < 1e-4f,
+                     "VCA: the render halves the DC level (" + juce::String (stem.getSample (0, 100)) + ")");
+        test::check (std::abs (playbackPeak (s, 1) - expected) < 1e-4f, "VCA: processBlock halves the level");
+        float snapPeak = 0.0f;
+        whileLockHeld (s, [&] { snapPeak = playbackPeak (s, 1); });
+        test::check (std::abs (snapPeak - expected) < 1e-4f, "VCA: processBlockFromSnapshot halves the level");
+
+        // a volume lane: the offset is on top of the lane's value, so the lane's level is halved too
+        ed.setGroupVca (0, 0.0f, err);
+        test::check (ed.addAutomationPoint (0, "volume", 0, dbToAutoNorm (0.0f), AutoCurveType::Linear, err) >= 0
+                         && ed.addAutomationPoint (0, "volume", 48000, dbToAutoNorm (0.0f), AutoCurveType::Linear, err) >= 0,
+                     "VCA: a volume lane at 0 dB is added");
+        const float laneLevel = playbackPeak (s, 1);
+        test::check (std::abs (laneLevel - 0.5f) < 1e-4f, "VCA: a volume lane at 0 dB leaves the DC level (" + juce::String (laneLevel) + ")");
+        test::check (ed.setGroupVca (0, -6.0206f, err) && std::abs (playbackPeak (s, 1) - 0.25f) < 1e-4f,
+                     "VCA: the offset also halves a track with an automated volume lane");
+        whileLockHeld (s, [&] { snapPeak = playbackPeak (s, 1); });
+        test::check (std::abs (snapPeak - 0.25f) < 1e-4f, "VCA: the automated lane is halved on the snapshot path too");
+        test::check (ed.setGroupVca (0, 50.0f, err) && std::abs (s.groups[0].vcaDb - 12.0f) < 1e-6f
+                         && ed.setGroupVca (0, -500.0f, err) && std::abs (s.groups[0].vcaDb + 100.0f) < 1e-6f,
+                     "VCA: the offset is clamped to -100..+12");
+    }
+
+    // 5. XML round trip of colour, polarity, group and the groups; an out-of-range group on load is -1 with a warning
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (sine, "Lead", err) && ed.addTrack (sine, "Pad", err), "xml: two tracks");
+        test::check (ed.setTrackColour (0, 0xFFFF8800u, err) && ed.setTrackPolarity (0, true, err), "xml: a colour and Ø on track 0");
+        test::check (ed.addGroup ("Drums", err) == 0 && ed.addGroup ("Vox", err) == 1, "xml: two groups");
+        test::check (ed.setTrackGroup (0, 1, err) && ed.setGroup (1, [&] { auto v = s.groups[1]; v.colour = 0xFF00AA00u; v.active = false; v.arm = false; return v; }(), err)
+                         && ed.setGroupVca (1, -6.0f, err), "xml: track 0 in group 1, which is green, inactive, arm unlinked, at -6 dB");
+        const auto projFile = dir.getChildFile ("roundtrip.olympus");
+        test::check (s.save (projFile, err), "xml: save works: " + err);
+
+        Session loaded;
+        test::check (loaded.load (projFile, err) && loaded.warnings.isEmpty(), "xml: the project loads without warnings");
+        test::check (loaded.tracks.size() == 2 && loaded.tracks[0]->colour == 0xFFFF8800u && loaded.tracks[0]->polarity
+                         && loaded.tracks[0]->group == 1 && loaded.tracks[1]->colour == 0 && ! loaded.tracks[1]->polarity && loaded.tracks[1]->group == -1,
+                     "xml: colour, polarity and group of each track come back (auto is 0)");
+        test::check (loaded.groups.size() == 2 && loaded.groups[1].name == "Vox" && loaded.groups[1].colour == 0xFF00AA00u && ! loaded.groups[1].active
+                         && ! loaded.groups[1].arm && loaded.groups[1].gain && std::abs (loaded.groups[1].vcaDb + 6.0f) < 1e-4f,
+                     "xml: the groups come back with name, colour, links and VCA offset");
+
+        const auto xml = loaded.toXml (projFile);
+        test::check (xml != nullptr && xml->getChildByName ("Groups") != nullptr && xml->getChildByName ("Groups")->getNumChildElements() == 2
+                         && xml->getChildByName ("Track") != nullptr && xml->getChildByName ("Track")->getStringAttribute ("colour") == "FFFF8800",
+                     "xml: <Groups> holds two <Group>, and the colour is hex text");
+
+        // a colour that is not hex and a group index past the end are reported; the group becomes -1
+        auto bad = std::make_unique<juce::XmlElement> (*xml);
+        bad->getChildByName ("Track")->setAttribute ("group", 7);
+        bad->getChildByName ("Track")->setAttribute ("colour", "not-a-colour");
+        Session oor;
+        test::check (oor.restoreEditXml (*bad) && oor.tracks[0]->group == -1 && oor.tracks[0]->colour == 0,
+                     "xml: a group index out of range on load becomes -1 and a bad colour becomes automatic");
+        juce::StringArray problems;
+        Session oor2;
+        test::check (oor2.restoreEditXml (*bad, &problems) && problems.size() >= 2 && problems.joinIntoString ("\n").contains ("group 7")
+                         && problems.joinIntoString ("\n").contains ("not hex"),
+                     "xml: the out-of-range group and the bad colour are both reported");
+    }
+
+    // 6. undo and redo of each Editor edit
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        test::check (ed.addTrack (sine, "U1", err) && ed.addTrack (sine, "U2", err), "undo: two tracks");
+        // colour
+        test::check (ed.setTrackColour (0, 0xFF112233u, err) && s.tracks[0]->colour == 0xFF112233u, "undo: colour set");
+        test::check (ed.undo() && s.tracks[0]->colour == 0 && ed.redo() && s.tracks[0]->colour == 0xFF112233u, "undo: colour undone and redone");
+        // polarity
+        test::check (ed.setTrackPolarity (0, true, err) && ed.undo() && ! s.tracks[0]->polarity && ed.redo() && s.tracks[0]->polarity,
+                     "undo: polarity undone and redone");
+        // add group, then its track membership
+        test::check (ed.addGroup ("G", err) == 0 && s.groups.size() == 1, "undo: group added");
+        test::check (ed.undo() && s.groups.empty() && ed.redo() && s.groups.size() == 1, "undo: add group undone and redone");
+        test::check (ed.setTrackGroup (0, 0, err) && ed.undo() && s.tracks[0]->group == -1 && ed.redo() && s.tracks[0]->group == 0,
+                     "undo: track group undone and redone");
+        // edit group
+        auto edited = s.groups[0];
+        edited.name = "Renamed";
+        test::check (ed.setGroup (0, edited, err) && s.groups[0].name == "Renamed" && ed.undo() && s.groups[0].name == "G" && ed.redo()
+                         && s.groups[0].name == "Renamed", "undo: group edit undone and redone");
+        // VCA drag: one gesture is one step
+        {
+            Editor::Gesture drag (ed, "Group VCA");
+            test::check (ed.setGroupVca (0, -3.0f, err) && ed.setGroupVca (0, -6.0f, err) && ed.setGroupVca (0, -9.0f, err), "undo: a VCA drag runs");
+        }
+        test::check (std::abs (s.groups[0].vcaDb + 9.0f) < 1e-4f && ed.undo() && std::abs (s.groups[0].vcaDb) < 1e-4f && ed.redo()
+                         && std::abs (s.groups[0].vcaDb + 9.0f) < 1e-4f, "undo: one VCA drag is one undo step");
+        // a linked gain change is one step over the members
+        test::check (ed.setTrackGroup (1, 0, err) && ed.setTrackGain (0, -4.0f, err) && std::abs (s.tracks[1]->gainDb + 4.0f) < 1e-4f,
+                     "undo: a linked gain change moves both members");
+        test::check (ed.setTrackGain (1, -10.0f, err) && ed.undo() && std::abs (s.tracks[0]->gainDb + 4.0f) < 1e-4f && std::abs (s.tracks[1]->gainDb + 4.0f) < 1e-4f,
+                     "undo: a linked gain change is undone on every member");
+        // remove group: members go to none, and undo puts them back
+        test::check (ed.setTrackGroup (1, 0, err) && ed.removeGroup (0, err) && s.groups.empty() && s.tracks[0]->group == -1 && s.tracks[1]->group == -1,
+                     "undo: remove group leaves its members in no group");
+        test::check (ed.undo() && s.groups.size() == 1 && s.tracks[0]->group == 0 && s.tracks[1]->group == 0 && ed.redo() && s.groups.empty(),
+                     "undo: remove group undone and redone");
+        // refusals change nothing
+        juce::String e;
+        test::check (! ed.setTrackColour (9, 0, e) && ! ed.setTrackGroup (0, 3, e) && ! ed.removeGroup (4, e) && ! ed.setGroupVca (5, 0.0f, e)
+                         && ! ed.setGroup (0, TrackGroup {}, e) && ed.addGroup ("  ", e) == -1,
+                     "undo: a bad track, group index, or empty name is refused with a reason");
+    }
+
+    // 7. the MCP tools: colour, polarity and group of set_track, and the group tools, each with a refusal
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String e;
+        s.addTrack (sine, "M", e);
+        McpServer server (s);
+        const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+        const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+
+        test::check (! failed (call ("set_track", "{\"track\":\"0\",\"colour\":\"#FF8800\"}")) && s.tracks[0]->colour == 0xFFFF8800u,
+                     "mcp: set_track colour \"#FF8800\" sets the track colour");
+        test::check (toolText (call ("project_info", "{}")).contains ("#FF8800"), "mcp: describe lists the colour");
+        test::check (! failed (call ("set_track", "{\"track\":\"0\",\"colour\":\"auto\"}")) && s.tracks[0]->colour == 0,
+                     "mcp: set_track colour \"auto\" clears it");
+        test::check (failed (call ("set_track", "{\"track\":\"0\",\"colour\":\"red\"}")) && s.tracks[0]->colour == 0,
+                     "mcp: set_track refuses a colour that is not hex, and changes nothing");
+        test::check (! failed (call ("set_track", "{\"track\":\"0\",\"polarity\":true}")) && s.tracks[0]->polarity, "mcp: set_track polarity on");
+        test::check (failed (call ("set_track", "{\"track\":\"0\",\"group\":2}")) && s.tracks[0]->group == -1, "mcp: set_track refuses a group index that is not there");
+        test::check (failed (call ("set_track", "{\"track\":\"0\",\"colour\":\"#00FF00\",\"group\":99}")) && s.tracks[0]->colour == 0 && s.tracks[0]->group == -1,
+                     "mcp: set_track with a valid colour and a group that is not there is refused, and the colour is unchanged");
+        test::check (failed (call ("set_track", "{\"track\":\"0\",\"frozen\":true,\"colour\":\"red\"}")) && ! s.tracks[0]->frozen,
+                     "mcp: set_track with freeze true and a bad colour is refused, and the track is not frozen");
+
+        test::check (! failed (call ("add_group", "{\"name\":\"Kit\",\"links\":{\"mute\":false}}")) && s.groups.size() == 1
+                         && s.groups[0].name == "Kit" && ! s.groups[0].mute && s.groups[0].gain,
+                     "mcp: add_group makes a group with the links given");
+        test::check (failed (call ("add_group", "{\"name\":\"\"}")) && s.groups.size() == 1, "mcp: add_group refuses an empty name");
+        test::check (! failed (call ("set_track", "{\"track\":\"0\",\"group\":0}")) && s.tracks[0]->group == 0, "mcp: set_track group 0 puts the track in it");
+        test::check (! failed (call ("set_group", "{\"group\":0,\"vca_db\":-6,\"colour\":\"#00FF00\",\"active\":true}"))
+                         && std::abs (s.groups[0].vcaDb + 6.0f) < 1e-4f && s.groups[0].colour == 0xFF00FF00u,
+                     "mcp: set_group sets the VCA offset and colour");
+        test::check (failed (call ("set_group", "{\"group\":0,\"colour\":\"blue\"}")) && s.groups[0].colour == 0xFF00FF00u,
+                     "mcp: set_group refuses a bad colour and changes nothing");
+        test::check (failed (call ("set_group", "{\"group\":4,\"name\":\"x\"}")) && s.groups.size() == 1, "mcp: set_group refuses a group that is not there");
+        test::check (! failed (call ("remove_group", "{\"group\":0}")) && s.groups.empty() && s.tracks[0]->group == -1,
+                     "mcp: remove_group removes it and its member is in no group");
+        test::check (failed (call ("remove_group", "{\"group\":0}")), "mcp: remove_group refuses a group that is not there");
+    }
+
+    dir.deleteRecursively();
+}
+
+// [71] Layered clips (F3): the layer rule and the order of new clips, the cover of an upper clip and its equal-power edges, the crossfade
+// length, the clip gain line through a trim and a split, layered off as the plain sum, a version 3 file as layered off and a version 4 file
+// round trip, a version 5 file refused, each new edit's undo, the three mix paths agreeing, and the MCP tools set_clip (gain_envelope,
+// layer) and set_layering
+namespace {
+// A WAV of two channels at 48 kHz with a constant `value` on both: a clip's audio in the tests that go through the Editor.
+juce::File layerWav (const juce::String& name, int length, float value)
+{
+    juce::AudioBuffer<float> buf (2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        juce::FloatVectorOperations::fill (buf.getWritePointer (ch), value, length);
+    auto file = tempFolder().getChildFile (name);
+    file.deleteFile();
+    std::unique_ptr<juce::OutputStream> os (file.createOutputStream());
+    juce::WavAudioFormat wav;
+    auto writer = wav.createWriterFor (os, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+    writer->writeFromAudioSampleBuffer (buf, 0, length);
+    return file;
+}
+
+// Stereo audio with `left` on channel 0 and `right` on channel 1: with one clip on each side, the two channels show the lower clip's cover
+// and the upper clip's edge separately, so the power sum can be read off them.
+std::shared_ptr<const juce::AudioBuffer<float>> layerSplit (int length, float left, float right)
+{
+    auto b = std::make_shared<juce::AudioBuffer<float>> (2, length);
+    juce::FloatVectorOperations::fill (b->getWritePointer (0), left, length);
+    juce::FloatVectorOperations::fill (b->getWritePointer (1), right, length);
+    return b;
+}
+
+Clip layerClip (std::shared_ptr<const juce::AudioBuffer<float>> audio, juce::int64 start, juce::int64 length, int layer,
+                juce::int64 fadeIn = 0, juce::int64 fadeOut = 0)
+{
+    Clip c;
+    c.audio = std::move (audio);
+    c.start = start;
+    c.length = length;
+    c.layer = layer;
+    c.fadeIn = fadeIn;
+    c.fadeOut = fadeOut;
+    return c;
+}
+
+// The mix of `clips` over [0, n), as the session's paths make it.
+juce::AudioBuffer<float> layerMix (const std::vector<Clip>& clips, int n, bool layered, int crossfade)
+{
+    juce::AudioBuffer<float> out (2, n);
+    Session::mixClipList (clips, 0, n, out, layered, crossfade);
+    return out;
+}
+
+// The largest difference between two buffers over `n` samples, both channels.
+float layerDiff (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b, int from, int n)
+{
+    float worst = 0.0f;
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = from; i < from + n; ++i)
+            worst = juce::jmax (worst, std::abs (a.getSample (ch, i) - b.getSample (ch, i)));
+    return worst;
+}
+}
+
+void layeredClipChecks()
+{
+    std::printf ("[71] Layered clips (F3): the layer rule and new clips on top, the cover and equal-power edges, the crossfade length, the gain line through trim and split, layered off as the sum, v3 and v4 files, v5 refused, undo of each new edit, the three mix paths agree, MCP set_clip gain_envelope and layer, set_layering\n");
+    juce::String err;
+    const int crossfade = 480; // 10 ms at 48 kHz
+
+    // 1. layered off is the plain sum: the same samples as the clips mixed one by one and added (the bytes of version 3 and older)
+    {
+        Clip a = layerClip (constantAudio (100, 0.25f), 0, 100, 0, 10, 0);
+        a.gainDb = -6.0f;
+        Clip b = layerClip (constantAudio (100, 0.5f), 50, 100, 1, 0, 20);
+        const std::vector<Clip> both { a, b };
+        const auto whole = layerMix (both, 200, false, 0);
+        juce::AudioBuffer<float> parts (2, 200);
+        parts.clear();
+        for (const auto& c : both)
+        {
+            juce::AudioBuffer<float> one (2, 200);
+            Session::mixClipList (std::vector<Clip> { c }, 0, 200, one, false, 0);
+            parts.addFrom (0, 0, one, 0, 0, 200);
+            parts.addFrom (1, 0, one, 1, 0, 200);
+        }
+        test::check (std::memcmp (whole.getReadPointer (0), parts.getReadPointer (0), 200 * sizeof (float)) == 0
+                         && std::memcmp (whole.getReadPointer (1), parts.getReadPointer (1), 200 * sizeof (float)) == 0,
+                     "layered off: the two overlapping clips are the plain sum, byte for byte");
+        // no overlap at all: layered on is the same bytes as layered off
+        const std::vector<Clip> apart { layerClip (constantAudio (100, 0.25f), 0, 100, 0, 10, 20), layerClip (constantAudio (100, 0.5f), 150, 100, 1) };
+        test::check (std::memcmp (layerMix (apart, 300, true, crossfade).getReadPointer (0), layerMix (apart, 300, false, 0).getReadPointer (0), 300 * sizeof (float)) == 0,
+                     "layered on with nothing overlapping: the same bytes as layered off");
+    }
+
+    // 2. an upper clip inside a lower one: 1.0 under its middle and outside it; across its edges the lower clip (left channel) and the upper
+    //    clip's edge (right channel) keep the power: left^2 + right^2 = 1
+    {
+        const std::vector<Clip> dc { layerClip (constantAudio (9600, 1.0f), 0, 9600, 0), layerClip (constantAudio (4800, 1.0f), 2400, 4800, 1) };
+        const auto mix = layerMix (dc, 9600, true, crossfade);
+        test::check (close (mix.getSample (0, 4800), 1.0) && close (mix.getSample (1, 4800), 1.0), "upper inside lower: 1.0 under the upper clip's middle");
+        test::check (close (mix.getSample (0, 100), 1.0) && close (mix.getSample (0, 9000), 1.0), "upper inside lower: 1.0 outside the upper clip");
+        const std::vector<Clip> split { layerClip (layerSplit (9600, 1.0f, 0.0f), 0, 9600, 0), layerClip (layerSplit (4800, 0.0f, 1.0f), 2400, 4800, 1) };
+        const auto edges = layerMix (split, 9600, true, crossfade);
+        float worstPower = 0.0f;
+        for (const int p : { 0, 60, 120, 240, 360, 479 })
+        {
+            const double l = edges.getSample (0, 2400 + p), r = edges.getSample (1, 2400 + p);
+            worstPower = juce::jmax (worstPower, (float) std::abs (l * l + r * r - 1.0));
+        }
+        for (const int k : { 1, 60, 120, 240, 360, 479 }) // the end edge, from the upper clip's end (timeline 7200) back
+        {
+            const double l = edges.getSample (0, 7200 - k), r = edges.getSample (1, 7200 - k);
+            worstPower = juce::jmax (worstPower, (float) std::abs (l * l + r * r - 1.0));
+        }
+        test::check (worstPower < 1e-4f, test::fmt ("the edges of an upper clip cross over at constant power (worst |L^2 + R^2 - 1| = %.6f)", worstPower));
+        test::check (close (edges.getSample (1, 4800), 1.0) && close (edges.getSample (0, 4800), 0.0), "the upper clip's middle: the lower clip is silent under it");
+    }
+
+    // 3. the crossfade length: an upper clip with a 1 s fade in crosses over over 1 s, not over the 10 ms setting
+    {
+        const std::vector<Clip> longFade { layerClip (layerSplit (300000, 1.0f, 0.0f), 0, 300000, 0),
+                                           layerClip (layerSplit (192000, 0.0f, 1.0f), 96000, 192000, 1, 48000, 0) };
+        const auto mix = layerMix (longFade, 300000, true, crossfade);
+        test::check (close (mix.getSample (0, 96000 + 24000), std::cos (juce::MathConstants<double>::pi / 4.0)),
+                     "a 1 s fade in: the lower clip is cos (pi/4) halfway through the 1 s crossfade");
+        test::check (close (mix.getSample (0, 96000 + 12000), std::cos (juce::MathConstants<double>::pi / 8.0)), "and cos (pi/8) a quarter of the way in");
+        const std::vector<Clip> shortFade { layerClip (layerSplit (300000, 1.0f, 0.0f), 0, 300000, 0), layerClip (layerSplit (192000, 0.0f, 1.0f), 96000, 192000, 1) };
+        test::check (close (layerMix (shortFade, 300000, true, crossfade).getSample (0, 96000 + 24000), 0.0),
+                     "with no fade of its own the 10 ms crossfade is all there is: the lower clip is silent halfway in");
+    }
+
+    // 4. a muted upper clip and an upper clip whose audio is missing do not cover
+    {
+        Clip muted = layerClip (layerSplit (4800, 0.0f, 1.0f), 2400, 4800, 1);
+        muted.mute = true;
+        const std::vector<Clip> withMuted { layerClip (constantAudio (9600, 1.0f), 0, 9600, 0), muted };
+        test::check (close (layerMix (withMuted, 9600, true, crossfade).getSample (0, 4800), 1.0), "a muted upper clip does not cover the one under it");
+        Clip gone = layerClip (nullptr, 2400, 4800, 1);
+        const std::vector<Clip> withGone { layerClip (constantAudio (9600, 1.0f), 0, 9600, 0), gone };
+        test::check (close (layerMix (withGone, 9600, true, crossfade).getSample (0, 4800), 1.0), "an upper clip with no audio does not cover");
+    }
+
+    // 5. equal layers: the later index is on top
+    {
+        const std::vector<Clip> tie { layerClip (layerSplit (1000, 1.0f, 0.0f), 0, 1000, 0), layerClip (layerSplit (1000, 0.0f, 1.0f), 0, 1000, 0) };
+        const auto mix = layerMix (tie, 1000, true, crossfade);
+        test::check (close (mix.getSample (0, 500), 0.0) && close (mix.getSample (1, 500), 1.0), "equal layers: the clip with the later index is on top");
+    }
+
+    // 6. the clip gain line: 0 dB at the start and -6.0206 dB at the end give -3.01 dB in the middle; trim and split keep the line on the audio
+    Session s;
+    test::addTestPlugins (s.catalog);
+    Editor ed (s);
+    const auto dc = layerWav ("layer-dc.wav", 9600, 1.0f);
+    test::check (ed.addTrack (dc, "G", err), "gain line: a track of 9600 samples at 1.0");
+    test::check (s.layered && s.crossfadeMs == 10 && s.crossfadeSamples == 480, "a new project is layered, with a 10 ms crossfade of 480 samples at 48 kHz");
+    test::check (ed.addClipGainPoint (0, 0, 0, 0.0f, err) == 0 && ed.addClipGainPoint (0, 0, 9600, -6.0206f, err) == 1, "gain line: two points added, in order");
+    {
+        const auto mid = layerMix (s.tracks[0]->clips, 9600, s.layered, s.crossfadeSamples);
+        const double db = juce::Decibels::gainToDecibels ((double) mid.getSample (0, 4800));
+        test::check (std::abs (db + 3.01) < 0.05, test::fmt ("gain line: the midpoint is -3.01 dB +- 0.05 (got %.4f dB)", db));
+    }
+    const auto before = layerMix (s.tracks[0]->clips, 9600, s.layered, s.crossfadeSamples);
+    test::check (ed.trimStart (0, 0, 2400, err) && s.tracks[0]->clips[0].start == 2400 && s.tracks[0]->clips[0].offset == 2400,
+                 "gain line: the clip is trimmed at its start");
+    const auto trimmed = layerMix (s.tracks[0]->clips, 9600, s.layered, s.crossfadeSamples);
+    test::check (layerDiff (before, trimmed, 2400, 7200) < 1e-6f, "gain line: after the trim the same audio has the same gain, sample for sample");
+    test::check (ed.splitClip (0, 0, 5000, err).valid() && s.tracks[0]->clips.size() == 2, "gain line: the clip is split at 5000");
+    test::check (s.tracks[0]->clips[0].gainEnv.size() == 2 && s.tracks[0]->clips[1].gainEnv.size() == 2, "gain line: both halves keep the line");
+    const auto split = layerMix (s.tracks[0]->clips, 9600, s.layered, s.crossfadeSamples);
+    test::check (layerDiff (trimmed, split, 2400, 7200) < 1e-6f, "gain line: the split halves play what the clip played");
+
+    // 7. the layers of new clips: a clip added to a track goes on top, a split's right half keeps its layer, a duplicate, a paste and a move go on top
+    {
+        Session t;
+        test::addTestPlugins (t.catalog);
+        Editor et (t);
+        test::check (et.addTrack (dc, "L", err) && t.tracks[0]->clips[0].layer == 0, "layers: the first clip of a track is layer 0");
+        test::check (et.addClip (0, dc, 4800, 0, 0, err).valid() && t.tracks[0]->clips[1].layer == 1, "layers: an added clip goes on top (layer 1)");
+        test::check (et.splitClip (0, 1, 6000, err).valid() && t.tracks[0]->clips[2].layer == 1, "layers: the right half of a split keeps the layer");
+        test::check (et.duplicateClip (0, 0, err).valid() && t.tracks[0]->clips[3].layer == 2, "layers: a duplicate goes on top");
+        test::check (et.copyClip (ClipRef { 0, 0 }, err) && et.pasteClip (0, 20000, err).valid() && t.tracks[0]->clips[4].layer == 3, "layers: a paste goes on top");
+        test::check (et.addEmptyTrack ("M") == 1 && et.moveClipToTrack (0, 0, 1, 0, err).valid() && t.tracks[1]->clips[0].layer == 0,
+                     "layers: a clip moved to an empty track is its layer 0");
+        test::check (et.raiseClipToTop (0, 0, err) && t.tracks[0]->clips[0].layer == 4, "layers: raise to top puts the clip above the rest");
+        test::check (et.lowerClipToBottom (0, 0, err) && t.tracks[0]->clips[0].layer < t.tracks[0]->clips[1].layer, "layers: lower to bottom puts it under the others");
+    }
+
+    // 8. undo and redo of each new edit
+    {
+        Session u;
+        test::addTestPlugins (u.catalog);
+        Editor eu (u);
+        test::check (eu.addTrack (dc, "U", err) && eu.addClip (0, dc, 4800, 0, 0, err).valid(), "undo: two clips on a track");
+        const int layerBefore = u.tracks[0]->clips[0].layer;
+        test::check (eu.raiseClipToTop (0, 0, err) && u.tracks[0]->clips[0].layer != layerBefore && eu.undo() && u.tracks[0]->clips[0].layer == layerBefore,
+                     "undo: raise to top is undone");
+        test::check (eu.lowerClipToBottom (0, 1, err) && eu.undo() && u.tracks[0]->clips[1].layer == 1, "undo: lower to bottom is undone");
+        test::check (eu.setLayered (false) && ! u.layered && eu.undo() && u.layered, "undo: layered off is undone (and layered on again)");
+        test::check (eu.setCrossfadeMs (50, err) && u.crossfadeSamples == 2400 && eu.undo() && u.crossfadeMs == 10 && u.crossfadeSamples == 480,
+                     "undo: the crossfade length is undone");
+        test::check (eu.addClipGainPoint (0, 0, 100, -3.0f, err) == 0 && u.tracks[0]->clips[0].gainEnv.size() == 1 && eu.undo()
+                         && u.tracks[0]->clips[0].gainEnv.empty(), "undo: a gain point added is taken off");
+        eu.addClipGainPoint (0, 0, 100, -3.0f, err);
+        eu.addClipGainPoint (0, 0, 400, -9.0f, err);
+        test::check (eu.undo() && u.tracks[0]->clips[0].gainEnv.size() == 1, "undo: the second gain point is taken off");
+        test::check (eu.moveClipGainPoint (0, 0, 0, 500, -6.0f, err) == 0 && u.tracks[0]->clips[0].gainEnv[0].at == 500 && eu.undo()
+                         && u.tracks[0]->clips[0].gainEnv[0].at == 100, "undo: a gain point moved is put back");
+        test::check (eu.removeClipGainPoint (0, 0, 0, err) && u.tracks[0]->clips[0].gainEnv.empty() && eu.undo() && u.tracks[0]->clips[0].gainEnv.size() == 1,
+                     "undo: a gain point removed is put back");
+        test::check (eu.clearClipGain (0, 0, err) && u.tracks[0]->clips[0].gainEnv.empty() && eu.undo() && u.tracks[0]->clips[0].gainEnv.size() == 1,
+                     "undo: a cleared gain line is put back");
+        test::check (eu.redo() && u.tracks[0]->clips[0].gainEnv.empty(), "redo: a cleared gain line is cleared again");
+    }
+
+    // 9. a version 4 project keeps the layers, the layered flag, the crossfade and the gain line; a version 3 file loads layered off; 5 is refused
+    {
+        Session p;
+        test::addTestPlugins (p.catalog);
+        Editor ep (p);
+        test::check (ep.addTrack (dc, "P", err) && ep.addClip (0, dc, 4800, 0, 0, err).valid(), "project: two clips");
+        test::check (ep.setCrossfadeMs (25, err) && ep.addClipGainPoint (0, 1, 100, -4.0f, err) == 0, "project: a crossfade of 25 ms and a gain point");
+        test::check (ep.setLayered (false) && ep.setLayered (true), "project: layered switched off and on again");
+        tempFolder().getChildFile ("layer-proj").createDirectory();
+        const auto v4 = tempFolder().getChildFile ("layer-proj").getChildFile ("v4.olympus");
+        test::check (p.save (v4, err), "project: saved as version 4");
+        Session r;
+        test::check (r.load (v4, err) && r.layered && r.crossfadeMs == 25 && r.crossfadeSamples == 1200, "v4: loads layered, with its 25 ms crossfade: " + err);
+        test::check (r.tracks[0]->clips.size() == 2 && r.tracks[0]->clips[1].layer == 1 && r.tracks[0]->clips[1].gainEnv.size() == 1
+                         && std::abs (r.tracks[0]->clips[1].gainEnv[0].db + 4.0f) < 1e-4f && r.tracks[0]->clips[1].gainEnv[0].at == 100,
+                     "v4: the layers and the gain line are read back");
+
+        // version 3: the same file with the version-4 attributes taken off; the layers fall back to the clip index, layered off
+        auto xml = juce::parseXML (v4);
+        test::check (xml != nullptr, "v3: the v4 file parses");
+        if (xml != nullptr)
+        {
+            xml->setAttribute ("version", 3);
+            xml->removeAttribute ("layered");
+            xml->removeAttribute ("crossfadeMs");
+            for (auto* track : xml->getChildWithTagNameIterator ("Track"))
+                for (auto* clip : track->getChildWithTagNameIterator ("Clip"))
+                    clip->removeAttribute ("layer");
+            const auto v3 = tempFolder().getChildFile ("layer-proj").getChildFile ("v3.olympus");
+            xml->writeTo (v3);
+            Session o;
+            test::check (o.load (v3, err) && ! o.layered && o.tracks[0]->clips[0].layer == 0 && o.tracks[0]->clips[1].layer == 1,
+                         "v3: loads with layered off, each clip on the layer of its index");
+            const auto summed = layerMix (o.tracks[0]->clips, 9600, o.layered, o.crossfadeSamples);
+            const auto plain = layerMix (o.tracks[0]->clips, 9600, false, 0);
+            test::check (layerDiff (summed, plain, 0, 9600) == 0.0f, "v3: the clips are summed, as they were");
+            xml->setAttribute ("version", 5);
+            xml->writeTo (v3);
+            Session f;
+            test::check (! f.load (v3, err) && err.contains ("newer"), "version 5 is refused: " + err);
+        }
+    }
+
+    // 10. the three mix paths agree within 1e-6 on a layered overlap with a gain line: render, processBlock and the snapshot path
+    {
+        Session m;
+        test::addTestPlugins (m.catalog);
+        Editor em (m);
+        const auto lower = layerWav ("layer-lower.wav", 20000, 0.5f);
+        const auto upper = layerWav ("layer-upper.wav", 6000, 1.0f);
+        test::check (em.addTrack (lower, "Lower", err) && em.addClip (0, upper, 4000, 0, 0, err).valid(), "paths: a lower clip and an upper clip over it");
+        test::check (em.addClipGainPoint (0, 1, 0, 0.0f, err) == 0 && em.addClipGainPoint (0, 1, 6000, -12.0f, err) == 1, "paths: the upper clip has a gain line");
+        RenderOptions o;
+        o.folder = tempFolder().getChildFile ("layer-render");
+        o.writeStems = false;
+        RenderResult r;
+        err.clear();
+        test::check (m.renderStems (o, r, err), "paths: the render works: " + err);
+        const auto rendered = readWav (o.folder.getChildFile ("mix.wav"));
+        const int n = juce::jmin (rendered.getNumSamples(), 24000);
+        test::check (n > 8000, "paths: the render has the overlap in it");
+        juce::AudioBuffer<float> live (2, n);
+        for (int b = 0; b * 512 < n; ++b)
+        {
+            juce::AudioBuffer<float> out (2, 512);
+            m.processBlock (out, (juce::int64) b * 512);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 512 && b * 512 + i < n; ++i)
+                    live.setSample (ch, b * 512 + i, out.getSample (ch, i));
+        }
+        juce::AudioBuffer<float> snap (2, n);
+        whileLockHeld (m, [&]
+        {
+            for (int b = 0; b * 512 < n; ++b)
+            {
+                juce::AudioBuffer<float> out (2, 512);
+                m.processBlock (out, (juce::int64) b * 512);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < 512 && b * 512 + i < n; ++i)
+                        snap.setSample (ch, b * 512 + i, out.getSample (ch, i));
+            }
+        });
+        const auto renderedHead = [&] { juce::AudioBuffer<float> h (2, n); for (int ch = 0; ch < 2; ++ch) h.copyFrom (ch, 0, rendered, ch, 0, n); return h; }();
+        test::check (layerDiff (renderedHead, live, 0, n) < 1e-6f, test::fmt ("paths: render and processBlock agree (worst %.2g)", layerDiff (renderedHead, live, 0, n)));
+        test::check (layerDiff (live, snap, 0, n) < 1e-6f, test::fmt ("paths: processBlock and the snapshot path agree (worst %.2g)", layerDiff (live, snap, 0, n)));
+        test::check (close (renderedHead.getSample (0, 7000), juce::Decibels::decibelsToGain (-6.0f)),
+                     "paths: the upper clip's middle is its own gain line (-6 dB at source 3000), with the lower clip silent under it");
+    }
+
+    // 11. MCP: set_clip's gain_envelope and layer (each with a refusal), set_layering (each with a refusal)
+    {
+        Session c;
+        test::addTestPlugins (c.catalog);
+        McpServer server (c);
+        const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+        const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+        const auto path = dc.getFullPathName().replace ("\\", "\\\\");
+        test::check (! failed (call ("add_track", "{\"file\":\"" + path + "\",\"name\":\"M\"}")) && ! failed (call ("add_clip", "{\"track\":0,\"file\":\"" + path + "\",\"start_seconds\":0.1}")),
+                     "mcp: a track with two clips, the second at 0.1 s");
+        test::check (! failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_envelope\":[[0,0],[0.1,-6.0206]]}")) && c.tracks[0]->clips[0].gainEnv.size() == 2
+                         && c.tracks[0]->clips[0].gainEnv[1].at == 4800 && std::abs (c.tracks[0]->clips[0].gainEnv[1].db + 6.0206f) < 1e-3f,
+                     "mcp: set_clip gain_envelope sets the line, its seconds read as source samples at 48 kHz");
+        test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_envelope\":[[0,99]]}")) && c.tracks[0]->clips[0].gainEnv.size() == 2,
+                     "mcp: a gain_envelope point above +12 dB is refused and the line is kept");
+        test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_envelope\":[[-1,0]]}")), "mcp: a point before the clip's start is refused");
+        test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_envelope\":[[0]]}")), "mcp: a point that is not [seconds, db] is refused");
+        test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_envelope\":\"loud\"}")), "mcp: a gain_envelope that is not an array is refused");
+        test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_envelope\":[[10,0]]}")) && c.tracks[0]->clips[0].gainEnv.size() == 2,
+                     "mcp: a point past the clip's end is refused and nothing changes");
+        test::check (! failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"gain_envelope\":[]}")) && c.tracks[0]->clips[0].gainEnv.empty(), "mcp: [] clears the gain line");
+        test::check (! failed (call ("set_clip", "{\"track\":0,\"clip\":1,\"layer\":\"top\"}")) && c.tracks[0]->clips[1].layer == 1,
+                     "mcp: layer top on the clip already on top leaves its layer");
+        test::check (! failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"layer\":\"top\"}")) && c.tracks[0]->clips[0].layer == 2, "mcp: layer top raises the clip");
+        test::check (! failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"layer\":\"bottom\"}")) && c.tracks[0]->clips[0].layer < c.tracks[0]->clips[1].layer,
+                     "mcp: layer bottom lowers it");
+        test::check (failed (call ("set_clip", "{\"track\":0,\"clip\":0,\"layer\":\"middle\"}")), "mcp: a layer other than top or bottom is refused");
+        test::check (! failed (call ("set_layering", "{\"layered\":false,\"crossfade_ms\":25}")) && ! c.layered && c.crossfadeMs == 25 && c.crossfadeSamples == 1200,
+                     "mcp: set_layering turns layered off and sets a 25 ms crossfade");
+        test::check (! failed (call ("set_layering", "{\"layered\":true}")) && c.layered && c.crossfadeMs == 25, "mcp: set_layering on again, the crossfade kept");
+        test::check (failed (call ("set_layering", "{}")) && failed (call ("set_layering", "{\"crossfade_ms\":5000}")) && failed (call ("set_layering", "{\"layered\":\"yes\"}")),
+                     "mcp: set_layering with nothing, a crossfade above 2000 ms or a layered that is not a boolean is refused");
+        test::check (c.layered && c.crossfadeMs == 25, "mcp: the refusals changed nothing");
+    }
+
+    // 7. a rate change moves the gain line with the audio: its points are source samples (0 dB at 0, -12 dB at the end of one second at 48 kHz)
+    {
+        Session r;
+        test::addTestPlugins (r.catalog);
+        Editor re (r);
+        const auto w = layerWav ("layer-rate.wav", 48000, 1.0f);
+        test::check (re.addTrack (w, "Rate", err) && r.sampleRate == 48000.0, "rate: a track of one second at 48 kHz");
+        test::check (re.addClipGainPoint (0, 0, 0, 0.0f, err) == 0 && re.addClipGainPoint (0, 0, 48000, -12.0f, err) == 1,
+                     "rate: gain points at source 0 (0 dB) and 48000 (-12 dB)");
+        test::check (r.adoptRate (96000.0, err) && r.tracks[0]->clips[0].gainEnv.size() == 2
+                         && r.tracks[0]->clips[0].gainEnv[0].at == 0 && r.tracks[0]->clips[0].gainEnv[1].at == 96000,
+                     "rate: the gain points follow the audio to 96 kHz (at 0 and 96000)");
+        const double mid = Session::gainLineDbAt (r.tracks[0]->clips[0].gainEnv, 48000);
+        test::check (std::abs (mid + 6.0) < 0.05, test::fmt ("rate: the midpoint of the audio is -6 dB +- 0.05 (got %.4f dB)", mid));
+    }
+}
+
+// [73] Punch (F5): Editor::setPunch's refusals and undo, the XML round trip and the rate scale, a take trimmed to the punch range at the stop
+// (the spec's numbers, and the takes that end before the punch-in or start after the punch-out), and MCP set_punch with its refusals
+void punchChecks()
+{
+    std::printf ("[73] Punch (F5): setPunch refuses end <= start, a negative start and layered off (the reason); one undo; the XML round trip; the rate scale; a take trimmed to the punch at the stop; a take before or after the punch is not placed and named; MCP set_punch and its refusal\n");
+    const juce::String needLayers (juce::CharPointer_UTF8 ("Punch needs layered clips (Project \xE2\x96\xB8 Layered clips): a punched take must replace what lies under it."));
+    juce::String err;
+    {
+        Session s;
+        s.addEmptyTrack ("P");
+        Editor ed (s);
+        test::check (! ed.setPunch (true, 48000, 48000, err) && err == "Punch end must be after punch start.", "setPunch: an end equal to the start is refused, with the reason: " + err);
+        test::check (! ed.setPunch (true, 96000, 48000, err) && ! s.punchOn, "setPunch: an end before the start is refused and nothing changes");
+        test::check (! ed.setPunch (true, -1, 48000, err) && err == "Punch start cannot be negative.", "setPunch: a negative start is refused, with the reason");
+        test::check (ed.setLayered (false) && ! s.layered, "the session is not layered for the next check");
+        const bool refusedLayers = ! ed.setPunch (true, 48000, 96000, err);
+        test::check (refusedLayers && err == needLayers && ! s.punchOn, "setPunch on a session that is not layered is refused with the exact reason");
+        test::check (ed.setPunch (false, 48000, 96000, err) && ! s.punchOn && s.punchStart == 48000 && s.punchEnd == 96000, "turning the punch off is allowed without layers and keeps the range");
+        test::check (ed.setLayered (true) && ed.setPunch (true, 48000, 96000, err) && s.punchOn && s.punchStart == 48000 && s.punchEnd == 96000,
+                     "with layers on the punch is set");
+        test::check (ed.undoLabel() == "Punch" && ed.undo() && ! s.punchOn && s.punchStart == 48000 && s.punchEnd == 96000,
+                     "one undo step takes the punch on again off, and gives back the range the step before had");
+        test::check (ed.redo() && s.punchOn && s.punchEnd == 96000, "redo brings it back");
+        test::check (ed.setLayered (false) && ! s.punchOn, "switching layers off takes the punch off in the same step");
+    }
+    {
+        // the XML round trip: the attributes next to the loop's, and a file that is not layered loads with the punch off
+        const auto file = tempFolder().getChildFile ("punch73/song.olympus");
+        file.getParentDirectory().createDirectory();
+        {
+            Session s;
+            s.addEmptyTrack ("P");
+            s.punchOn = true;
+            s.punchStart = 48000;
+            s.punchEnd = 96000;
+            test::check (s.save (file, err), "a project with a punch is saved");
+        }
+        Session t;
+        test::check (t.load (file, err) && t.punchOn && t.punchStart == 48000 && t.punchEnd == 96000, "the punch is back after a load");
+        const auto xml = t.toXml (file.getParentDirectory());
+        test::check (xml != nullptr && xml->getBoolAttribute ("punchOn") && xml->getStringAttribute ("punchStart") == "48000" && xml->getStringAttribute ("punchEnd") == "96000",
+                     "the punch is written as project attributes");
+        Session u;
+        u.addEmptyTrack ("P");
+        u.layered = false;
+        u.punchOn = true;
+        u.punchStart = 48000;
+        u.punchEnd = 96000;
+        test::check (u.save (file, err) && u.load (file, err) && ! u.punchOn && u.punchStart == 48000, "a file that is not layered loads with the punch off");
+    }
+    {
+        // the rate scale: the punch points move with the loop when the session's rate changes
+        Session s;
+        test::check (s.adoptRate (48000.0, err), "the session takes 48 kHz");
+        s.addEmptyTrack ("R");
+        s.punchOn = true;
+        s.punchStart = 48000;
+        s.punchEnd = 96000;
+        test::check (s.adoptRate (96000.0, err) && s.punchStart == 96000 && s.punchEnd == 192000, "adoptRate 48000 to 96000 doubles the punch points");
+    }
+    {
+        // the spec's numbers: a 4 s take at 48 kHz recorded from 0 with 100 samples of latency, punch 1 s to 2 s
+        Session s;
+        s.addEmptyTrack ("P");
+        Editor ed (s);
+        const auto take = makeWav ("punch73/four-seconds.wav", 48000.0, 2, 192000, 0.5f, 440.0);
+        const std::pair<juce::int64, juce::int64> punch { 48000, 96000 };
+        std::vector<ClipRef> placed;
+        test::check (finishRecording ({ { 0, take, 192000 } }, 0, 100, ed, err, &placed, &punch) && s.tracks[0]->clips.size() == 1,
+                     "the take is placed with the punch");
+        const auto& c = s.tracks[0]->clips[0];
+        test::check (c.start == 48000 && c.length == 48000 && c.offset == 48100, "the clip starts at 48000, is 48000 long, and its offset is 48100");
+        test::check (ed.undoLabel() == "Record" && ed.undo() && s.tracks[0]->clips.empty(), "the punched take is one undo step");
+    }
+    {
+        // a take that ends before the punch-in is not placed and is named; a take that starts after the punch-out likewise; the rest are placed
+        Session s;
+        s.addEmptyTrack ("Early");
+        s.addEmptyTrack ("Live");
+        s.addEmptyTrack ("Late");
+        Editor ed (s);
+        const auto early = makeWav ("punch73/early.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+        const auto live = makeWav ("punch73/live.wav", 48000.0, 2, 192000, 0.5f, 440.0);
+        const auto late = makeWav ("punch73/late.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+        const std::pair<juce::int64, juce::int64> punch { 96000, 144000 };
+        const std::vector<Recorder::Finished> takes { { 0, early, 48000 }, { 1, live, 192000 }, { 2, late, 48000 } };
+        test::check (! finishRecording (takes, 0, 0, ed, err, nullptr, &punch), "not every take is placed");
+        test::check (err.contains ("ended before the punch-in") && err.contains ("early.wav"), "the take that ends before the punch-in is named: " + err);
+        test::check (s.tracks[0]->clips.empty() && s.tracks[2]->clips.empty() && s.tracks[1]->clips.size() == 1
+                     && s.tracks[1]->clips[0].start == 96000 && s.tracks[1]->clips[0].length == 48000 && s.tracks[1]->clips[0].offset == 96000,
+                     "the take that spans the punch is trimmed to it; the other two are not placed");
+        const std::vector<Recorder::Finished> after { { 2, late, 48000 } };
+        s.tracks[1]->clips.clear();
+        test::check (! finishRecording (after, 200000, 0, ed, err, nullptr, &punch) && err.contains ("started after the punch-out") && s.tracks[2]->clips.empty(),
+                     "a take that starts after the punch-out is not placed and is named: " + err);
+    }
+    {
+        // MCP set_punch: validated before any change; its refusals are error results with the reason
+        Session s;
+        s.addEmptyTrack ("M");
+        McpServer server (s);
+        const auto call = [&server] (const char* tool, const juce::String& args) { return toolCall (server, tool, args); };
+        const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+        test::check (s.adoptRate (48000.0, err), "the MCP session takes 48 kHz, so seconds can be placed");
+        const auto first = call ("set_punch", "{\"start_seconds\":1,\"end_seconds\":2}");
+        test::check (! failed (first) && s.punchOn && s.punchStart == 48000 && s.punchEnd == 96000,
+                     "set_punch: one to two seconds, on by default");
+        const auto bad = call ("set_punch", "{\"start_seconds\":2,\"end_seconds\":1}");
+        test::check (failed (bad) && toolText (bad).contains ("must be after") && s.punchStart == 48000 && s.punchEnd == 96000,
+                     "set_punch: an end before the start is an error result and changes nothing");
+        test::check (failed (call ("set_punch", "{\"start_seconds\":1,\"end_beats\":2,\"start_beats\":1}")), "set_punch: two positions for one edge is an error");
+        s.layered = false;
+        const auto refused = call ("set_punch", "{\"start_beats\":0,\"end_beats\":4}");
+        test::check (failed (refused) && toolText (refused).contains ("layered clips") && s.punchStart == 48000,
+                     "set_punch on a session that is not layered is an error result with the reason, and nothing changes");
+        test::check (! failed (call ("set_punch", "{\"on\":false,\"start_seconds\":0.5,\"end_seconds\":1.5}")) && ! s.punchOn && s.punchStart == 24000,
+                     "set_punch with on false sets the range without layers");
+    }
+}
+
+// [72] Automation modes (F4): Write, Touch, Latch and their passes through AutomationWriter, one undo step per pass, the overriding lanes in
+// the three mixing paths, the plugin listener, the XML mode and the MCP tool
+void automationModeChecks()
+{
+    std::printf ("[72] Automation modes (F4): Write, Touch and Latch passes, the thinning and guards, a backwards seek, one undo per pass, Write becomes Touch, overriding lanes in processBlock and the plugin path, the plugin listener, mode in XML, the MCP tool\n");
+    const auto dir = tempFolder().getChildFile ("automation-72");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto wav = makeWav ("auto72-a.wav", 48000.0, 2, 48000, 0.5f, 440.0);
+    const auto lanePoints = [] (const Session& s, const juce::String& target) -> std::vector<AutoPoint>
+    {
+        for (const auto& l : s.tracks[0]->automation)
+            if (l.targetId == target) return l.points;
+        return {};
+    };
+    const auto valueAt = [] (const Session& s, const juce::String& target, juce::int64 at)
+    {
+        for (const auto& l : s.tracks[0]->automation)
+            if (l.targetId == target) return l.evaluateAt (at);
+        return -1.0f;
+    };
+    const auto hasPoint = [] (const std::vector<AutoPoint>& pts, juce::int64 at)
+    {
+        for (const auto& p : pts)
+            if (p.sample == at) return true;
+        return false;
+    };
+    const auto ramp = [] (juce::int64 p) { return 0.2f + 0.6f * (float) p / 96000.0f; };
+
+    // 1. Write over a ramp at 48 kHz: ticks every 1600 samples from 0 to 96000, the fader rising from 0.2 to 0.8
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Ramp", err), "add track for the Write ramp: " + err);
+        test::check (ed.addAutomationPoint (0, "volume", 0, 0.1f, AutoCurveType::Linear, err) == 0, "a point before the pass at 0");
+        test::check (ed.setAutomationMode (0, "volume", AutoMode::Write, err), "set Write: " + err);
+        AutomationWriter w (s, ed);
+        w.tick (0, false);
+        for (juce::int64 p = 0; p <= 96000; p += 1600)
+        {
+            if (p > 0)
+            {
+                s.tracks[0]->gainDb = autoNormToDb (ramp (p));
+                w.tick (p, true);
+            }
+            else
+            {
+                w.tick (p, false); // the transport at 0, not playing yet: the pass starts at the first played tick
+            }
+        }
+        s.tracks[0]->gainDb = autoNormToDb (ramp (96000));
+        w.tick (97600, false); // the stop
+        const auto pts = lanePoints (s, "volume");
+        int inPass = 0;
+        for (const auto& p : pts)
+            if (p.sample >= 1599 && p.sample <= 98400) ++inPass;
+        test::check (inPass <= 4 && inPass >= 2, test::fmt ("Write ramp leaves at most 4 points after thinning: %d", inPass));
+        test::check (hasPoint (pts, 0) && std::abs (valueAt (s, "volume", 0) - 0.1f) < 1e-4f, "points before the pass are kept");
+        test::check (hasPoint (pts, 1599) && std::abs (valueAt (s, "volume", 1599) - 0.1f) < 1e-3f, "the start guard point is present (one sample before the pass, the old value)");
+        test::check (hasPoint (pts, 98400) && std::abs (valueAt (s, "volume", 98400) - 0.1f) < 1e-3f, "the tail guard point is present (50 ms after the last sample, the old value)");
+        test::check (std::abs (valueAt (s, "volume", 96000) - 0.8f) < 2e-3f && std::abs (valueAt (s, "volume", 48000) - 0.5f) < 2e-3f,
+                     "the written ramp follows the fader");
+        test::check (! w.isWriting (0, "volume") && ! s.tracks[0]->automation[0].overriding, "the lane plays again after the stop");
+    }
+
+    // 2. Touch writes only between begin and end; the old curve stays elsewhere
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Touch", err), "add track for Touch");
+        test::check (ed.addAutomationPoint (0, "volume", 0, 0.5f, AutoCurveType::Linear, err) == 0 && ed.addAutomationPoint (0, "volume", 200000, 0.5f, AutoCurveType::Linear, err) == 1,
+                     "the old curve: 0.5 at 0 and 200000");
+        ed.setAutomationMode (0, "volume", AutoMode::Touch, err);
+        AutomationWriter w (s, ed);
+        w.tick (0, true);
+        w.tick (1600, true);
+        w.tick (3200, true);
+        test::check (! w.isWriting (0, "volume") && lanePoints (s, "volume").size() == 2, "a Touch lane that is not held writes nothing");
+        w.begin (0, "volume");
+        for (juce::int64 p = 4800; p <= 6400; p += 1600)
+        {
+            s.tracks[0]->gainDb = autoNormToDb (0.8f);
+            w.tick (p, true);
+        }
+        test::check (w.isWriting (0, "volume") && std::abs (valueAt (s, "volume", 4800) - 0.8f) < 2e-3f, "a held Touch lane writes the control's value");
+        w.end (0, "volume");
+        test::check (! w.isWriting (0, "volume"), "the segment ends at the release");
+        s.tracks[0]->gainDb = autoNormToDb (0.2f);
+        for (juce::int64 p = 8000; p <= 16000; p += 1600)
+            w.tick (p, true);
+        test::check (std::abs (valueAt (s, "volume", 12000) - 0.5f) < 2e-3f && std::abs (valueAt (s, "volume", 9600) - 0.5f) < 2e-3f,
+                     "after the release the old curve is back and nothing is written");
+        test::check (std::abs (valueAt (s, "volume", 5000) - 0.8f) < 2e-3f, "what was written between begin and end is kept");
+    }
+
+    // 3. Latch: from the first touch until the stop, holding the last value
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Latch", err), "add track for Latch");
+        ed.addAutomationPoint (0, "volume", 0, 0.5f, AutoCurveType::Linear, err);
+        ed.addAutomationPoint (0, "volume", 200000, 0.5f, AutoCurveType::Linear, err);
+        ed.setAutomationMode (0, "volume", AutoMode::Latch, err);
+        AutomationWriter w (s, ed);
+        w.tick (0, true);
+        test::check (! w.isWriting (0, "volume"), "Latch does not write before the first touch");
+        s.tracks[0]->gainDb = autoNormToDb (0.7f);
+        w.begin (0, "volume");
+        w.tick (1600, true);
+        w.tick (3200, true);
+        w.end (0, "volume");
+        w.tick (4800, true);
+        w.tick (6400, true);
+        test::check (w.isWriting (0, "volume") && std::abs (valueAt (s, "volume", 6400) - 0.7f) < 2e-3f, "Latch keeps writing after the release, the last value");
+        w.tick (8000, false);
+        test::check (! w.isWriting (0, "volume") && std::abs (valueAt (s, "volume", 4800) - 0.7f) < 2e-3f, "Latch holds the last value up to the stop");
+        test::check (s.tracks[0]->automation[0].mode == AutoMode::Latch, "Latch stays Latch after the stop");
+    }
+
+    // 4. A backwards position splits the segment: a guard at the new start and a tail at the old end
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Split", err), "add track for the split");
+        ed.addAutomationPoint (0, "volume", 0, 0.5f, AutoCurveType::Linear, err);
+        ed.addAutomationPoint (0, "volume", 200000, 0.5f, AutoCurveType::Linear, err);
+        ed.setAutomationMode (0, "volume", AutoMode::Write, err);
+        AutomationWriter w (s, ed);
+        s.tracks[0]->gainDb = autoNormToDb (0.6f);
+        w.tick (0, false);
+        for (juce::int64 p = 1600; p <= 40000; p += 1600)
+            w.tick (p, true);
+        w.tick (10000, true); // a seek back: the first segment ends at 40000
+        for (juce::int64 p = 11600; p <= 30000; p += 1600)
+            w.tick (p, true);
+        w.tick (32000, false);
+        const auto pts = lanePoints (s, "volume");
+        test::check (hasPoint (pts, 42400) && hasPoint (pts, 9999), "a backwards position ends the first segment (tail 42400) and starts a new one (guard 9999)");
+        // the second run's last tick is 29200, so its tail guard is 2400 samples later (31600)
+        test::check (hasPoint (pts, 31600) && std::abs (valueAt (s, "volume", 20000) - 0.6f) < 2e-3f, "the second segment is written and ends with its own tail");
+    }
+
+    // 5. One undo restores the lane exactly; 6. Write becomes Touch after the pass, and a second pass does not overwrite
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Undo", err), "add track for the undo");
+        ed.addAutomationPoint (0, "volume", 0, 0.1f, AutoCurveType::Linear, err);
+        ed.addAutomationPoint (0, "volume", 200000, 0.1f, AutoCurveType::Linear, err);
+        ed.setAutomationMode (0, "volume", AutoMode::Write, err);
+        ed.clearUndo();
+        const auto before = s.tracks[0]->automation;
+        AutomationWriter w (s, ed);
+        w.tick (0, false);
+        for (juce::int64 p = 1600; p <= 48000; p += 1600)
+        {
+            s.tracks[0]->gainDb = autoNormToDb (ramp (p));
+            w.tick (p, true);
+        }
+        w.tick (49600, false);
+        test::check (s.tracks[0]->automation[0].mode == AutoMode::Touch, "Write becomes Touch after the pass");
+        test::check (s.tracks[0]->automation[0].points.size() > before[0].points.size() || s.tracks[0]->automation[0].points.size() >= 3,
+                     "the pass wrote points");
+        const auto afterPass = s.tracks[0]->automation[0].points;
+        for (juce::int64 p = 50000; p <= 60000; p += 1600)
+            w.tick (p, true);
+        w.tick (61600, false);
+        test::check (s.tracks[0]->automation[0].points.size() == afterPass.size(), "a second pass does not overwrite a Touch lane that is not held");
+        test::check (ed.undo() && s.tracks[0]->automation.size() == before.size() && s.tracks[0]->automation[0].mode == AutoMode::Write
+                     && s.tracks[0]->automation[0].points.size() == before[0].points.size()
+                     && ! s.tracks[0]->automation[0].overriding && ! ed.canUndo(),
+                     "one undo restores the lane exactly (mode and points), and the pass is one step");
+        bool same = true;
+        for (size_t i = 0; i < before[0].points.size() && same; ++i)
+            same = before[0].points[i].sample == s.tracks[0]->automation[0].points[i].sample
+                   && std::abs (before[0].points[i].value - s.tracks[0]->automation[0].points[i].value) < 1e-6f;
+        test::check (same, "the restored points are those before the pass");
+    }
+
+    // 7. An overriding volume lane plays the fader: a DC of 1.0 at 0 dB through a lane at -12 dB
+    {
+        const auto dcWav = dir.getChildFile ("dc.wav");
+        {
+            juce::AudioBuffer<float> b (2, 2048);
+            b.clear();
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 2048; ++i)
+                    b.setSample (ch, i, 1.0f);
+            std::unique_ptr<juce::OutputStream> stream (dcWav.createOutputStream());
+            juce::WavAudioFormat wavFormat;
+            auto writer = wavFormat.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+            writer->writeFromAudioSampleBuffer (b, 0, 2048);
+        }
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (dcWav, "Override", err), "add the DC track");
+        ed.addAutomationPoint (0, "volume", 0, dbToAutoNorm (-12.0f), AutoCurveType::Linear, err);
+        ed.addAutomationPoint (0, "volume", 511, dbToAutoNorm (-12.0f), AutoCurveType::Linear, err);
+        juce::AudioBuffer<float> out (2, 512);
+        s.processBlock (out, 0);
+        test::check (std::abs (out.getSample (0, 100) - 0.2512f) < 0.002f, "a lane at -12 dB plays -12 dB");
+        test::check (ed.setAutomationOverriding (0, "volume", true), "mark the lane overriding");
+        s.processBlock (out, 512);
+        test::check (std::abs (out.getSample (0, 100) - 1.0f) < 1e-4f && std::abs (out.getSample (1, 100) - 1.0f) < 1e-4f,
+                     "an overriding volume lane plays the fader value (1.0 at 0 dB)");
+        s.tracks[0]->gainDb = -6.0f;
+        s.processBlock (out, 1024);
+        test::check (std::abs (out.getSample (0, 100) - 0.5012f) < 0.002f, "the overriding lane follows the fader (-6 dB)");
+        test::check (ed.setAutomationOverriding (0, "volume", false) && ! s.tracks[0]->automation[0].overriding, "the mark is cleared");
+    }
+
+    // 8. An overriding plugin lane is not applied: the parameter keeps the value set by hand
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Plugin", err), "add track for the plugin lane");
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "add Test Gain for the plugin lane");
+        ed.addAutomationPoint (0, "plugin:0:0", 0, 0.25f, AutoCurveType::Linear, err);
+        ed.addAutomationPoint (0, "plugin:0:0", 511, 0.25f, AutoCurveType::Linear, err);
+        juce::AudioBuffer<float> out (2, 512);
+        s.processBlock (out, 0);
+        auto* param = s.tracks[0]->chain[0]->instance->getParameters()[0];
+        test::check (std::abs (param->getValue() - 0.25f) < 1e-4f, "a plugin lane sets its parameter");
+        param->setValueNotifyingHost (0.6f);
+        test::check (ed.setAutomationOverriding (0, "plugin:0:0", true), "mark the plugin lane overriding");
+        s.processBlock (out, 512);
+        test::check (std::abs (param->getValue() - 0.6f) < 1e-4f, "an overriding plugin lane is not applied: the hand value stays");
+        ed.setAutomationOverriding (0, "plugin:0:0", false);
+    }
+
+    // 9. The plugin listener: a gesture of a plugin's control is written by the next tick (begin and end in one tick)
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Listen", err), "add track for the listener");
+        test::check (s.addPlugin (0, "Test Gain", -1, err), "add Test Gain for the listener");
+        test::check (ed.setAutomationMode (0, "plugin:0:0", AutoMode::Touch, err), "set Touch on the plugin lane");
+        AutomationWriter w (s, ed);
+        auto* param = s.tracks[0]->chain[0]->instance->getParameters()[0];
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (0.6f);
+        param->endChangeGesture();
+        w.tick (4800, true);
+        test::check (std::abs (valueAt (s, "plugin:0:0", 4800) - 0.6f) < 2e-3f && ! lanePoints (s, "plugin:0:0").empty(),
+                     "a plugin control gesture is written by the tick after it");
+        w.tick (6400, true);
+        test::check (! w.isWriting (0, "plugin:0:0"), "the plugin's segment ends with the gesture");
+        // the listener of a slot added after another: a plugin that is removed takes its listener with it (no dangling pointer)
+        test::check (s.removePlugin (0, 0, err) && s.tracks[0]->chain.empty(), "the slot with its listener is removed: " + err);
+    }
+
+    // 10. XML keeps the mode; a file without it reads as Read
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Xml", err), "add track for the XML mode");
+        ed.addAutomationPoint (0, "volume", 0, 0.5f, AutoCurveType::Linear, err);
+        ed.setAutomationMode (0, "volume", AutoMode::Touch, err);
+        const auto file = dir.getChildFile ("mode.olympus");
+        const auto xml = s.toXml (file);
+        auto* track = xml != nullptr ? xml->getChildByName ("Track") : nullptr;
+        auto* lane = track != nullptr ? track->getChildByName ("AutomationLane") : nullptr;
+        test::check (lane != nullptr && lane->getStringAttribute ("mode") == "touch", "the lane's XML carries mode=\"touch\"");
+        test::check (s.save (file, err), "save the project with the mode: " + err);
+        {
+            Session loaded;
+            test::addTestPlugins (loaded.catalog);
+            test::check (loaded.load (file, err) && loaded.tracks[0]->automation[0].mode == AutoMode::Touch, "load keeps the mode");
+        }
+        if (lane != nullptr)
+            lane->removeAttribute ("mode");
+        const auto bare = dir.getChildFile ("bare.olympus");
+        test::check (xml != nullptr && xml->writeTo (bare), "write a file without the mode attribute");
+        {
+            Session loaded;
+            test::addTestPlugins (loaded.catalog);
+            test::check (loaded.load (bare, err) && loaded.tracks[0]->automation[0].mode == AutoMode::Read, "a lane without mode reads as Read");
+        }
+    }
+
+    // 11. The MCP tool: set_automation_mode sets the mode; a bad mode is refused with the reason and changes nothing
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        juce::String err;
+        test::check (s.addTrack (wav, "Mcp", err), "add track for the MCP tool");
+        McpServer server (s);
+        const auto ok = toolCall (server, "set_automation_mode", "{\"track\":0,\"target\":\"volume\",\"mode\":\"latch\"}");
+        test::check (! (bool) ok["isError"] && s.tracks[0]->automation.size() == 1 && s.tracks[0]->automation[0].mode == AutoMode::Latch,
+                     "set_automation_mode sets Latch on the volume lane");
+        const auto bad = toolCall (server, "set_automation_mode", "{\"track\":0,\"target\":\"volume\",\"mode\":\"fade\"}");
+        test::check ((bool) bad["isError"] && toolText (bad).contains ("read, touch, latch or write") && s.tracks[0]->automation[0].mode == AutoMode::Latch,
+                     "a bad mode is refused with the reason and changes nothing");
+    }
+
+    // 12. A track removed during a Write pass ends the pass: no lane of the track that now has its index is overriding, and its points stay
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Gone", err) && s.addTrack (wav, "Kept", err), "two tracks for the removal: " + err);
+        test::check (ed.addAutomationPoint (1, "volume", 0, 0.5f, AutoCurveType::Linear, err) == 0, "a point on track 1 before the pass");
+        test::check (ed.setAutomationMode (1, "volume", AutoMode::Write, err), "set Write on track 1: " + err);
+        AutomationWriter w (s, ed);
+        w.tick (0, false);
+        w.tick (1600, true);
+        w.tick (3200, true);
+        test::check (w.isWriting (1, "volume") && s.tracks[1]->automation[0].overriding, "the Write pass on track 1 is writing");
+        test::check (ed.removeTrack (0, err), "remove track 0 during the pass: " + err);
+        const auto before = lanePoints (s, "volume");
+        w.tick (4800, true);
+        bool anyOverriding = false;
+        for (const auto& l : s.tracks[0]->automation)
+            anyOverriding = anyOverriding || l.overriding;
+        const auto after = lanePoints (s, "volume");
+        bool same = before.size() == after.size();
+        for (size_t i = 0; same && i < before.size(); ++i)
+            same = before[i].sample == after[i].sample && before[i].value == after[i].value;
+        test::check (! anyOverriding, "after the removal no lane of track 0 (formerly track 1) is overriding");
+        test::check (same, "the points of track 0 are unchanged by the next tick");
+    }
+
+    // 13. A Touch lane held while the transport plays is overriding at once, before the next tick; a lane that no segment opened for plays again at the next tick
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Hold", err), "add track for the held lane: " + err);
+        test::check (ed.addAutomationPoint (0, "volume", 0, 0.5f, AutoCurveType::Linear, err) == 0, "a point before the hold");
+        test::check (ed.setAutomationMode (0, "volume", AutoMode::Touch, err), "set Touch: " + err);
+        AutomationWriter w (s, ed);
+        w.tick (0, true);
+        w.begin (0, "volume");
+        test::check (s.tracks[0]->automation[0].overriding, "a held Touch lane is overriding at once, before the next tick");
+        w.end (0, "volume");
+        w.tick (1600, true);
+        test::check (! s.tracks[0]->automation[0].overriding, "a lane no segment opened for plays again at the next tick");
+    }
+
+    // 14. While a render runs the writer does nothing: a held Touch lane writes no point and is not overriding
+    {
+        Session s;
+        test::addTestPlugins (s.catalog);
+        Editor ed (s);
+        juce::String err;
+        test::check (s.addTrack (wav, "Busy", err), "add track for the render check: " + err);
+        test::check (ed.addAutomationPoint (0, "volume", 0, 0.5f, AutoCurveType::Linear, err) == 0, "a point before the render");
+        test::check (ed.setAutomationMode (0, "volume", AutoMode::Touch, err), "set Touch: " + err);
+        AutomationWriter w (s, ed);
+        w.tick (0, false);
+        const auto before = lanePoints (s, "volume");
+        s.renderBusy = true;
+        w.begin (0, "volume");
+        w.tick (1600, true);
+        w.tick (3200, true);
+        const auto after = lanePoints (s, "volume");
+        test::check (after.size() == before.size() && ! s.tracks[0]->automation[0].overriding && ! w.isWriting (0, "volume"),
+                     "while a render runs the writer writes nothing and no lane is overriding");
+        s.renderBusy = false;
+    }
+}
+
+// [74] Software input monitoring (F6): Editor::setTrackMonitor refuses a bus and a MIDI track, is one undo step, and drives the flag that the
+// callback reads; the XML attribute (absent is off); describe(); MCP set_track's monitor with a refusal that changes nothing; and a render writes
+// a monitoring track's clips, never its input
+void monitoringChecks()
+{
+    std::printf ("[74] Software input monitoring (F6): setTrackMonitor refuses a bus and a MIDI track, is one undo step, keeps anyMonitoring, the XML attribute (absent is off), describe(), MCP set_track monitor with its refusal, and a render writes the clips of a monitoring track\n");
+    juce::String err;
+    {
+        // the Editor setter: refusals, one undo step, and the flag the audio callback reads
+        Session s;
+        s.addEmptyTrack ("Mic");
+        const int bus = s.addBusTrack ("Bus", err);
+        const int midi = s.addMidiTrack ("Keys");
+        s.setTrackArm (0, true, err);
+        Editor ed (s);
+        test::check (! ed.setTrackMonitor (bus, MonitorMode::In, err) && err.contains ("no input to monitor"), "a bus track has no input to monitor: refused with the reason");
+        test::check (! ed.setTrackMonitor (midi, MonitorMode::Auto, err) && err.contains ("no input to monitor"), "a MIDI track is refused too");
+        test::check (! ed.setTrackMonitor (7, MonitorMode::In, err) && err == "No track 7", "a track that does not exist is refused");
+        test::check (! s.anyMonitoring.load(), "a refused setter changes no flag");
+        test::check (ed.setTrackMonitor (0, MonitorMode::Auto, err) && s.tracks[0]->monitor == MonitorMode::Auto, "an armed audio track takes Auto");
+        test::check (s.anyMonitoring.load(), "anyMonitoring is on while an armed track monitors");
+        test::check (ed.setTrackMonitor (0, MonitorMode::In, err) && s.tracks[0]->monitor == MonitorMode::In, "and In");
+        test::check (ed.undoLabel() == "Input monitoring" && ed.undo() && s.tracks[0]->monitor == MonitorMode::Auto,
+                     "one undo step gives back the mode before it");
+        test::check (ed.undo() && s.tracks[0]->monitor == MonitorMode::Off && ! s.anyMonitoring.load(), "undo again gives back Off, and the flag goes off");
+        test::check (ed.redo() && ed.redo() && s.tracks[0]->monitor == MonitorMode::In && s.anyMonitoring.load(), "redo brings In back and the flag with it");
+        test::check (s.setTrackArm (0, false, err) && ! s.anyMonitoring.load(), "disarming the track turns the flag off, so the callback hands over no inputs");
+    }
+    {
+        // the XML attribute: written as off, auto or in; an absent one loads as off (a project from before F6)
+        const auto dir = tempFolder().getChildFile ("monitor74");
+        dir.deleteRecursively();
+        dir.createDirectory();
+        const auto file = dir.getChildFile ("song.olympus");
+        {
+            Session s;
+            s.addEmptyTrack ("Mic");
+            s.setTrackArm (0, true, err);
+            Editor ed (s);
+            test::check (ed.setTrackMonitor (0, MonitorMode::In, err), "the mode is set before the save");
+            test::check (s.save (file, err), "a project with a monitoring track is saved");
+        }
+        Session t;
+        test::check (t.load (file, err) && t.tracks[0]->monitor == MonitorMode::In && t.anyMonitoring.load(), "the mode is back after a load, and the flag with it");
+        const auto xml = t.toXml (dir);
+        test::check (xml != nullptr && xml->getChildByName ("Track") != nullptr && xml->getChildByName ("Track")->getStringAttribute ("monitor") == "in",
+                     "the track carries monitor=\"in\"");
+        auto old = t.toXml (dir);
+        for (auto* e : old->getChildWithTagNameIterator ("Track"))
+            e->removeAttribute ("monitor");
+        Session u;
+        test::check (u.restoreEditXml (*old) && u.tracks[0]->monitor == MonitorMode::Off && ! u.anyMonitoring.load(),
+                     "a track with no monitor attribute loads as off");
+        const auto desc = t.describe();
+        test::check (desc["tracks"][0]["monitor"].toString() == "in", "describe() shows the mode as off, auto or in");
+    }
+    {
+        // MCP set_track: the value is validated before anything changes; a bus or a MIDI track is refused
+        Session s;
+        s.addEmptyTrack ("Mic");
+        s.addBusTrack ("Bus", err);
+        McpServer server (s);
+        const auto failed = [] (const juce::var& r) { return (bool) r["isError"]; };
+        test::check (! failed (toolCall (server, "set_track", "{\"track\":0,\"monitor\":\"auto\"}")) && s.tracks[0]->monitor == MonitorMode::Auto,
+                     "set_track monitor auto is set");
+        const auto loud = toolCall (server, "set_track", "{\"track\":0,\"monitor\":\"loud\"}");
+        test::check (failed (loud) && toolText (loud).contains ("'monitor' must be") && s.tracks[0]->monitor == MonitorMode::Auto,
+                     "set_track monitor \"loud\" is refused with the reason, and the mode stays");
+        const auto mixed = toolCall (server, "set_track", "{\"track\":0,\"gain_db\":-3,\"monitor\":\"loud\"}");
+        test::check (failed (mixed) && s.tracks[0]->gainDb == 0.0f, "a refused monitor refuses the whole call: the fader does not move");
+        test::check (failed (toolCall (server, "set_track", "{\"track\":1,\"monitor\":\"in\"}")), "a bus track is refused for monitor, with the reason");
+        const auto good = toolCall (server, "set_track", "{\"track\":0,\"monitor\":\"in\"}");
+        test::check (! failed (good) && s.tracks[0]->monitor == MonitorMode::In && toolJson (good)["tracks"][0]["monitor"].toString() == "in",
+                     "set_track monitor in is set and describe() shows it");
+    }
+    {
+        // a render never monitors: a monitoring track writes its clips, at their level
+        Session s;
+        tempFolder().getChildFile ("mon74").createDirectory();
+        test::check (s.addTrack (makeWav ("mon74/tone.wav", 48000.0, 2, 48000, 0.3f, 440.0), "Mic", err), "a track with a 0.3 tone is added");
+        s.setTrackArm (0, true, err);
+        Editor ed (s);
+        test::check (ed.setTrackMonitor (0, MonitorMode::In, err), "the track monitors In");
+        RenderOptions o;
+        o.folder = tempFolder().getChildFile ("mon74-render");
+        RenderResult r;
+        test::check (s.renderStems (o, r, err) && r.stems.size() == 1, "the render runs: " + err);
+        test::check (r.stems.size() == 1 && r.stems[0].peakDb > -90.0, "the monitoring track's stem is the clips, not silence");
+        test::check (r.stems.size() == 1 && std::abs (r.stems[0].peakDb - (-10.46)) < 0.5, test::fmt ("and at the clip's level, 0.3 (-10.5 dB): got %.2f dB", r.stems.size() == 1 ? r.stems[0].peakDb : 0.0));
+    }
+    {
+        // a frozen track never monitors: its live input is silence in the stopped pass, and its frozen audio is not played then either
+        tempFolder().getChildFile ("mon74f").createDirectory();
+        Session s;
+        test::check (s.addTrack (makeWav ("mon74f/imp.wav", 48000.0, 2, 4800, 0.25f, 0.0, 100, 32), "Mic", err), "a frozen-check track with an impulse is added");
+        s.setTrackArm (0, true, err);
+        Editor ed (s);
+        test::check (ed.setTrackMonitor (0, MonitorMode::In, err), "the track monitors In");
+        std::vector<float> live (256, 0.5f);
+        const float* byInput[Recorder::kMaxInputs] {};
+        byInput[0] = live.data();
+        s.setLiveInputs (byInput, Recorder::kMaxInputs, 256);
+        juce::AudioBuffer<float> before (2, 256);
+        s.processMonitoringOnly (before, 0);
+        test::check (before.getMagnitude (0, 0, 256) > 0.1f, "control: the armed track monitors the 0.5 DC input in the stopped pass");
+        test::check (ed.freezeTrack (0, tempFolder().getChildFile ("mon74f-frozen.wav"), err) && s.tracks[0]->frozen, "the track is frozen");
+        juce::AudioBuffer<float> after (2, 256);
+        after.clear();
+        s.processMonitoringOnly (after, 0);
+        test::check (after.getMagnitude (0, 0, 256) == 0.0f && after.getMagnitude (1, 0, 256) == 0.0f,
+                     "a frozen track never monitors: silence in the stopped pass, its frozen audio included");
+        s.setLiveInputs (nullptr, 0, 0);
+    }
+}
+
+// [75] MIDI input recording (F7): MidiFifo's timestamps become offsets; MidiRecorder keeps 32768 events and counts the rest; a hardware note
+// played through the input FIFO while a take records becomes a clip at the stop (120 bpm, 48 kHz: a note at beat 1 lasting one beat), a held
+// note ends at the stop, the playback latency moves it, undo takes the clip out, and the piano roll's preview is not recorded
+namespace
+{
+struct PlayedMidi
+{
+    juce::int64 at = 0;
+    std::uint8_t status = 0, d1 = 0, d2 = 0;
+};
+
+// Feeds the input FIFO the way the device does: each event is pushed just before the 512-sample block that holds it, with its offset in that
+// block (no time, so the offset is used as it is), and the blocks run from 0 until `total` samples have played.
+void playInputBlocks (Session& s, const std::vector<PlayedMidi>& played, juce::int64 total)
+{
+    juce::AudioBuffer<float> out (2, 512);
+    for (juce::int64 blockStart = 0; blockStart < total; blockStart += 512)
+    {
+        for (const auto& p : played)
+            if (p.at >= blockStart && p.at < blockStart + 512)
+                s.inputMidiFifo.push (MidiFifo::MidiEvent { p.status, p.d1, p.d2, (int) (p.at - blockStart), 0.0 });
+        s.processBlock (out, blockStart);
+    }
+}
+// A channel-1 note event or a sustain (CC 64) event of a take, at a timeline sample (the events of a recorded take)
+MidiRecorder::Event ev7 (juce::int64 at, int status, int d1, int d2)
+{
+    MidiRecorder::Event e;
+    e.position = at;
+    e.bytes[0] = (std::uint8_t) status;
+    e.bytes[1] = (std::uint8_t) d1;
+    e.bytes[2] = (std::uint8_t) d2;
+    e.size = 3;
+    return e;
+}
+
+MidiRecorder::Event ev7c (juce::int64 at, int controller, int value)
+{
+    return ev7 (at, 0xB0, controller, value);
+}
+} // namespace
+
+void midiInputChecks()
+{
+    std::printf ("[75] MIDI input recording (F7): MidiFifo's timestamp to offset, MidiRecorder's ring and overflow, a note through the input FIFO while a take records is one clip at the stop, a held note ends at the stop, the playback latency, undo, the piano roll preview is not recorded, the punch range keeps and cuts the notes, a note before the latency is dropped, and the sustain pedal holds a note\n");
+    juce::String err;
+
+    // 1. MidiFifo: an event with a time is placed by its age in the block; without a time its offset is kept; the old drain is the same as before
+    {
+        MidiFifo f;
+        const double now = 5000.0;
+        f.push (MidiFifo::MidiEvent { 0x90, 60, 100, 0, 4990.0 });   // 10 ms old: 480 samples before the block's end at 48 kHz
+        f.push (MidiFifo::MidiEvent { 0x90, 61, 100, 7, 0.0 });      // no time: its offset
+        f.push (MidiFifo::MidiEvent { 0x90, 62, 100, 0, 1000.0 });   // far too old: the start of the block
+        f.push (MidiFifo::MidiEvent { 0x90, 63, 100, 0, 5005.0 });   // from after the block's end: the last sample
+        juce::MidiBuffer b;
+        test::check (f.drain (b, 512, 48000.0, now) == 4, "drain with a time hands over all four events");
+        std::map<int, int> at;
+        for (const auto m : b)
+            at[m.data[1]] = m.samplePosition;
+        test::check (at[60] == 32 && at[61] == 7 && at[62] == 0 && at[63] == 511,
+                     test::fmt ("timed events are placed by age: 60 at %d (32), 61 at %d (7), 62 at %d (0), 63 at %d (511)",
+                                at[60], at[61], at[62], at[63]));
+
+        MidiFifo g;
+        g.push (0x90, 64, 100, 12);
+        juce::MidiBuffer old;
+        test::check (g.drain (old, 512) == 1 && old.getFirstEventTime() == 12, "the old drain keeps an event's offset");
+    }
+
+    // 2. MidiRecorder: the ring keeps what is pushed while it records, counts what it has no room for, and nothing when stopped
+    {
+        MidiRecorder r;
+        r.push (0, (const std::uint8_t*) "\x90\x40\x64", 3);
+        std::vector<MidiRecorder::Event> none;
+        r.start();
+        r.stop();
+        r.drainAll (none);
+        test::check (none.empty(), "a push while the recorder is stopped keeps nothing");
+
+        r.start();
+        for (int i = 0; i < MidiRecorder::kCapacity + 1; ++i)
+        {
+            const std::uint8_t msg[3] = { 0x90, (std::uint8_t) (i & 0x7F), 100 };
+            r.push (i, msg, 3);
+        }
+        test::check (r.lostEvents() == 1, test::fmt ("32769 events into 32768 slots: 1 lost (got %d)", (int) r.lostEvents()));
+        r.stop();
+        std::vector<MidiRecorder::Event> out;
+        r.drainAll (out);
+        test::check (out.size() == (size_t) MidiRecorder::kCapacity && out.front().position == 0
+                         && out.back().position == MidiRecorder::kCapacity - 1 && out.front().size == 3 && out.front().bytes[0] == 0x90,
+                     "the ring hands back the first 32768 events in order, with their bytes");
+    }
+
+    // 3. The spec's note: 120 bpm, 48 kHz, no latency. C4 on at sample 24000 and off at 48000 is one clip with one note at beat 1 lasting one
+    // beat, velocity kept; the clip is in one undo step with the take (the Editor gesture) and undo takes it out
+    {
+        Session s;
+        s.adoptRate (48000.0, err);
+        const int t = s.addMidiTrack ("Keys");
+        test::check (s.setTrackArm (t, true, err), "the MIDI track is armed");
+        s.midiRecorder.start();
+        playInputBlocks (s, { { 24000, 0x90, 60, 100 }, { 48000, 0x80, 60, 0 } }, 49152);
+        s.midiRecorder.stop();
+        std::vector<MidiRecorder::Event> events;
+        s.midiRecorder.drainAll (events);
+        test::check (events.size() == 2 && events[0].position == 24000 && events[1].position == 48000,
+                     test::fmt ("the input's note on and off are captured at their samples (%d events)", (int) events.size()));
+
+        Editor ed (s);
+        {
+            Editor::Gesture take (ed, "Record");
+            test::check (finishMidiRecording (events, 49152, 0, { t }, s.tempo, ed, err) && err.isEmpty(), "the take becomes its MIDI clip: " + err);
+        }
+        const auto& clips = s.tracks[(size_t) t]->midiClips;
+        test::check (clips.size() == 1, "one MIDI clip on the track");
+        if (clips.size() == 1)
+        {
+            const auto& n = clips[0].notes;
+            test::check (n.size() == 1 && std::abs (n[0].startBeat - 1.0) < 1e-4 && std::abs (n[0].durationBeats - 1.0) < 1e-4
+                             && n[0].pitch == 60 && n[0].velocity == 100,
+                         test::fmt ("one note at beat 1.0 lasting 1.0 beat, velocity 100 (got %zu notes)", n.size()));
+            test::check (clips[0].start == 0 && clips[0].length == 96000, "the clip starts at 0 and runs to the bar after the note-off's bar (96000 samples)");
+        }
+        test::check (ed.undo() && s.tracks[(size_t) t]->midiClips.empty(), "one undo takes the MIDI clip out");
+        test::check (ed.redo() && s.tracks[(size_t) t]->midiClips.size() == 1, "and redo brings it back");
+    }
+
+    // 4. A note still held at the stop ends there (the transport's position), and the latency moves the note earlier by its samples
+    {
+        Session s;
+        s.adoptRate (48000.0, err);
+        const int t = s.addMidiTrack ("Keys");
+        s.setTrackArm (t, true, err);
+        s.midiRecorder.start();
+        playInputBlocks (s, { { 24000, 0x90, 60, 100 } }, 36864);
+        s.midiRecorder.stop();
+        std::vector<MidiRecorder::Event> events;
+        s.midiRecorder.drainAll (events);
+        const auto held = buildRecordedMidi (events, 36000, 0, s.tempo);
+        test::check (held.notes.size() == 1 && std::abs (held.notes[0].durationBeats - 0.5) < 1e-4,
+                     test::fmt ("a held note ends at the stop (36000): 0.5 beats (got %.4f)", held.notes.empty() ? -1.0 : held.notes[0].durationBeats));
+
+        const auto late = buildRecordedMidi (events, 49152, 480, s.tempo);
+        test::check (late.notes.size() == 1 && std::abs (late.notes[0].startBeat - 0.98) < 1e-4,
+                     test::fmt ("a latency of 480 samples moves the note 480 samples earlier: beat 0.98 (got %.5f)", late.notes.empty() ? -1.0 : late.notes[0].startBeat));
+    }
+
+    // 5. The piano roll's preview is not a hardware note: it plays, and the take keeps nothing of it
+    {
+        Session s;
+        s.adoptRate (48000.0, err);
+        const int t = s.addMidiTrack ("Keys");
+        s.setTrackArm (t, true, err);
+        s.midiRecorder.start();
+        s.liveMidiFifo.push (0x90, 60, 110, 0);
+        juce::AudioBuffer<float> out (2, 512);
+        s.processBlock (out, 0);
+        s.midiRecorder.stop();
+        std::vector<MidiRecorder::Event> events;
+        s.midiRecorder.drainAll (events);
+        test::check (events.empty(), "the piano roll's preview is not recorded");
+        test::check (out.getMagnitude (0, 0, 512) > 0.001f, "and it still plays through the armed track");
+    }
+
+    // 6. Punch: a MIDI take keeps only the notes that start inside the punch range, and a note running past the punch-out is cut there
+    {
+        Session s;
+        s.adoptRate (48000.0, err);
+        const auto ev = [] (juce::int64 at, int a, int b, int c, int size)
+        {
+            MidiRecorder::Event e;
+            e.position = at;
+            e.bytes[0] = (std::uint8_t) a;
+            e.bytes[1] = (std::uint8_t) b;
+            e.bytes[2] = (std::uint8_t) c;
+            e.size = (std::uint8_t) size;
+            return e;
+        };
+        const std::vector<MidiRecorder::Event> notes3 { ev (24000, 0x90, 60, 100, 3), ev (36000, 0x80, 60, 0, 3),
+                                                        ev (72000, 0x90, 62, 100, 3), ev (84000, 0x80, 62, 0, 3),
+                                                        ev (120000, 0x90, 64, 100, 3), ev (132000, 0x80, 64, 0, 3) };
+        const std::pair<juce::int64, juce::int64> punch { 48000, 96000 };
+        const auto kept = buildRecordedMidi (notes3, 150000, 0, s.tempo, &punch);
+        test::check (kept.notes.size() == 1 && kept.notes[0].pitch == 62 && std::abs (kept.notes[0].startBeat - 3.0) < 1e-4,
+                     test::fmt ("punch 1 s to 2 s keeps only the 1.5 s note (got %zu notes)", kept.notes.size()));
+        test::check (kept.notes.size() == 1 && kept.length > 0 && kept.start <= 72000 && kept.start + kept.length >= 84000,
+                     "the clip's bounds come from the kept note");
+
+        const std::vector<MidiRecorder::Event> cut { ev (91200, 0x90, 60, 100, 3), ev (115200, 0x80, 60, 0, 3) };
+        const auto cutNotes = buildRecordedMidi (cut, 150000, 0, s.tempo, &punch);
+        test::check (cutNotes.notes.size() == 1 && std::abs (cutNotes.notes[0].durationBeats - 0.2) < 1e-4,
+                     test::fmt ("a note at 1.9 s lasting 0.5 s is cut to end at 2.0 s: 0.2 beats (got %.4f)", cutNotes.notes.empty() ? -1.0 : cutNotes.notes[0].durationBeats));
+    }
+
+    // 7. Latency: a note that starts before the latency is dropped, not moved to 0; the others keep their shift
+    {
+        Session s;
+        s.adoptRate (48000.0, err);
+        const std::vector<MidiRecorder::Event> early { ev7 (100, 0x90, 60, 100), ev7 (3000, 0x80, 60, 0), ev7 (2000, 0x90, 62, 100), ev7 (4000, 0x80, 62, 0) };
+        const auto shifted = buildRecordedMidi (early, 49152, 480, s.tempo);
+        test::check (shifted.notes.size() == 1 && shifted.notes[0].pitch == 62 && std::abs (shifted.notes[0].startBeat - 1520.0 / 24000.0) < 1e-4,
+                     test::fmt ("a note before the latency (sample 100, latency 480) is dropped and the next moves to 1520 (got %zu notes)", shifted.notes.size()));
+    }
+
+    // 8. Sustain pedal: a note released while CC 64 is down ends at the pedal up
+    {
+        Session s;
+        s.adoptRate (48000.0, err);
+        const std::vector<MidiRecorder::Event> pedalled { ev7 (0, 0x90, 60, 100), ev7 (12000, 0x80, 60, 0), ev7c (6000, 64, 127), ev7c (36000, 64, 0) };
+        const auto held = buildRecordedMidi (pedalled, 49152, 0, s.tempo);
+        test::check (held.notes.size() == 1 && std::abs (held.notes[0].durationBeats - 1.5) < 1e-4,
+                     test::fmt ("a note held by the pedal lasts to the pedal up (36000): 1.5 beats (got %.4f)", held.notes.empty() ? -1.0 : held.notes[0].durationBeats));
+
+        const std::vector<MidiRecorder::Event> replayed { ev7 (0, 0x90, 60, 100), ev7 (12000, 0x80, 60, 0), ev7c (6000, 64, 127), ev7 (24000, 0x90, 60, 100),
+                                                          ev7 (30000, 0x80, 60, 0), ev7c (36000, 64, 0) };
+        const auto again = buildRecordedMidi (replayed, 49152, 0, s.tempo);
+        test::check (again.notes.size() == 2 && std::abs (again.notes[0].durationBeats - 1.0) < 1e-4 && std::abs (again.notes[1].durationBeats - 0.5) < 1e-4,
+                     test::fmt ("the same key played again ends the held note (1.0 beat), the next lasts to the pedal up (0.5 beat) (got %zu notes)", again.notes.size()));
+    }
+}
+
+// [76] Loop recording (F8): loopPasses gives the spec's passes (and with a latency, the shifted ones), a short pass is dropped; finishRecording
+// puts each pass as a layered clip of one take group (the last pass on top), and each pass reads the file where the formula says; the top pass
+// plays; compTake comps a range of a take and promoteTake puts a take on top, both one undo step each; the XML round trip of the take fields and
+// the TAKES flag; a MIDI loop take's notes in arrival order, one held across the wrap; MCP comp_take and promote_take with their refusals
+namespace
+{
+// A ramp file: sample i of both channels is i / 1e6, as 32-bit float (each pass of a loop take can be told apart by its value)
+juce::File makeRamp76 (const juce::String& name, int length)
+{
+    juce::AudioBuffer<float> b (2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i)
+            b.setSample (ch, i, (float) i / 1.0e6f);
+    auto file = tempFolder().getChildFile (name);
+    file.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (32));
+    writer->writeFromAudioSampleBuffer (b, 0, length);
+    return file;
+}
+
+// The left channel of the clips mixed at one sample (layered, as the session plays them)
+float valueOf76 (const std::vector<Clip>& clips, juce::int64 at, int crossfade)
+{
+    juce::AudioBuffer<float> out (2, 1);
+    out.clear();
+    Session::mixClipList (clips, at, 1, out, true, crossfade);
+    return out.getSample (0, 0);
+}
+
+MidiRecorder::Event midiEvent76 (juce::int64 at, std::uint8_t status, std::uint8_t d1, std::uint8_t d2)
+{
+    MidiRecorder::Event e;
+    e.position = at;
+    e.bytes[0] = status;
+    e.bytes[1] = d1;
+    e.bytes[2] = d2;
+    e.size = 3;
+    return e;
+}
+} // namespace
+
+void loopRecordingChecks()
+{
+    std::printf ("[76] Loop recording (F8): loopPasses gives the passes of the spec (and the latency's shift), a short pass is dropped; finishRecording makes one clip per pass in one take group, the last pass on top, each pass reading the file where it should; the top pass plays; compTake and promoteTake with their undo; the XML round trip of takeGroup, takeIndex, comp and showTakes; a MIDI loop take in arrival order, a note held across the wrap; MCP comp_take and promote_take with their refusals\n");
+    juce::String err;
+    const juce::int64 kLoopEnd = 48000;   // a loop of 0.0 to 1.0 s at 48 kHz
+
+    // 1. the passes: 3.25 s recorded from 0.25 s, no latency: pass 0 is 0.75 s at 0.25 s, then whole loops, the last one cut to what was recorded
+    {
+        const auto p = loopPasses (156000, 12000, 0, 0, kLoopEnd, 4800);
+        test::check (p.size() == 4 && p[0].fileOffset == 0 && p[0].length == 36000 && p[0].timelineStart == 12000,
+                     test::fmt ("loopPasses: pass 0 is at 0.25 s for 0.75 s (%d passes)", (int) p.size()));
+        test::check (p.size() == 4 && p[1].fileOffset == 36000 && p[2].fileOffset == 84000 && p[3].fileOffset == 132000,
+                     "loopPasses: the passes 1 to 3 start at file offsets 36000, 84000 and 132000");
+        test::check (p.size() == 4 && p[1].length == 48000 && p[2].length == 48000 && p[3].length == 24000 && p[1].timelineStart == 0 && p[3].timelineStart == 0,
+                     "loopPasses: the passes 1 and 2 are a whole loop each at 0; the last is cut to the 0.5 s recorded (not 1 s)");
+        // with a latency of 100 samples every file offset moves by 100 and pass 0 starts 100 samples earlier
+        const auto q = loopPasses (156000, 12000, 100, 0, kLoopEnd, 4800);
+        test::check (q.size() == 4 && q[0].timelineStart == 11900 && q[0].length == 36100 && q[1].fileOffset == 36100 && q[2].fileOffset == 84100
+                         && q[3].fileOffset == 132100,
+                     "with a latency of 100 the offsets shift by 100 and pass 0 starts at 0.25 s minus 100 samples");
+        // a pass shorter than the minimum is dropped: 85000 frames leave 1000 samples for pass 2
+        const auto r = loopPasses (85000, 12000, 0, 0, kLoopEnd, 4800);
+        test::check (r.size() == 2 && r[1].fileOffset == 36000, "a pass under the minimum length is dropped (2 passes for 85000 frames)");
+    }
+
+    // 2. finishRecording with a loop on a ramp file: one clip per pass, layers rising, one take group, and each pass plays its file samples
+    Session s;
+    s.addEmptyTrack ("Gtr");
+    Editor ed (s);
+    const auto ramp = makeRamp76 ("loop76-ramp.wav", 156000);
+    const std::pair<juce::int64, juce::int64> loop { 0, kLoopEnd };
+    std::vector<ClipRef> placed;
+    const std::vector<Recorder::Finished> takes { { 0, ramp, 156000 } };
+    test::check (finishRecording (takes, 12000, 0, ed, err, &placed, nullptr, &loop, 4800) && placed.size() == 4,
+                 "a loop take on a ramp is placed as 4 passes: " + err);
+    const auto& clips = s.tracks[0]->clips;
+    test::check (clips.size() == 4 && clips[0].start == 12000 && clips[0].offset == 0 && clips[0].length == 36000,
+                 "pass 0: at 0.25 s, from the file's start, for 0.75 s");
+    test::check (clips.size() == 4 && clips[1].start == 0 && clips[1].offset == 36000 && clips[1].length == 48000
+                     && clips[2].offset == 84000 && clips[3].offset == 132000 && clips[3].length == 24000,
+                 "passes 1 to 3: at 0, from 36000, 84000 and 132000 in the file");
+    bool layersRise = clips.size() == 4;
+    for (size_t i = 1; layersRise && i < clips.size(); ++i)
+        layersRise = clips[i].layer > clips[i - 1].layer;
+    test::check (layersRise, "the layers rise with the pass: the last pass is on top");
+    bool groupOk = clips.size() == 4;
+    for (size_t i = 0; groupOk && i < clips.size(); ++i)
+        groupOk = clips[i].takeGroup == 0 && clips[i].takeIndex == (int) i && ! clips[i].comp;
+    test::check (groupOk, "the four passes share one take group, numbered 0 to 3, none of them a comp");
+    // each pass reads its own file samples: the value at the middle of a pass is the file's ramp at that sample
+    bool ramps = clips.size() == 4;
+    for (size_t i = 0; ramps && i < clips.size(); ++i)
+    {
+        const juce::int64 mid = clips[i].start + clips[i].length / 2;
+        const double expected = (double) (clips[i].offset + clips[i].length / 2) / 1.0e6;
+        ramps = std::abs (valueOf76 ({ clips[i] }, mid, 0) - (float) expected) < 2.0e-6f;
+    }
+    test::check (ramps, "each pass reads the file samples the formula gives (its value at its middle)");
+    test::check (std::abs (valueOf76 (clips, 24000, s.crossfadeSamples) - 0.108f) < 2.0e-6f,
+                 "the top pass plays: at 0.5 s the last pass that covers it gives its ramp (file sample 108000)");
+
+    // 2b. one undo after the loop take removes all four passes, and redo brings them back
+    {
+        Session u;
+        u.addEmptyTrack ("Gtr");
+        Editor ue (u);
+        std::vector<ClipRef> placedU;
+        const std::vector<Recorder::Finished> loopTake { { 0, ramp, 156000 } };
+        test::check (finishRecording (loopTake, 12000, 0, ue, err, &placedU, nullptr, &loop, 4800) && u.tracks[0]->clips.size() == 4,
+                     "the loop take is four passes before the undo");
+        test::check (ue.undo() && u.tracks[0]->clips.empty(), "one undo removes all four pass clips");
+        test::check (ue.redo() && u.tracks[0]->clips.size() == 4, "redo brings the four pass clips back");
+    }
+
+    // 2c. promoteTake refuses a plain imported clip (not a take): the reason is given and nothing changes
+    {
+        Session p;
+        p.addEmptyTrack ("Gtr");
+        Editor pe (p);
+        const auto plain = makeRamp76 ("loop76-plain.wav", 48000);
+        test::check (pe.addClip (0, plain, 0, 0, 48000, err).valid(), "a plain clip is imported: " + err);
+        const auto layerBefore = p.tracks[0]->clips[0].layer;
+        const auto undoBefore = pe.undoLabel();
+        test::check (! pe.promoteTake (0, 0, err) && err.contains ("is not a take: only a recorded take can be promoted") && p.tracks[0]->clips.size() == 1
+                         && p.tracks[0]->clips[0].layer == layerBefore && pe.undoLabel() == undoBefore,
+                     "promoteTake of a plain clip is refused with the reason and changes nothing (" + err + ")");
+    }
+
+    // 3. compTake: 0.2 to 0.4 s of pass 1 plays pass 1 there, with the last pass still playing at 0.6 s
+    const auto comp = ed.compTake (0, 1, 9600, 19200, err);
+    test::check (comp.valid() && s.tracks[0]->clips.size() == 5 && s.tracks[0]->clips[4].comp && s.tracks[0]->clips[4].takeGroup == 0
+                     && s.tracks[0]->clips[4].takeIndex == 1 && s.tracks[0]->clips[4].start == 9600 && s.tracks[0]->clips[4].length == 9600
+                     && s.tracks[0]->clips[4].offset == 36000 + (9600 - 0) && s.tracks[0]->clips[4].fadeIn == 0 && s.tracks[0]->clips[4].fadeOut == 0,
+                 "compTake: a comp of 0.2 to 0.4 s from pass 1 is a clip of its own, from the take's file (" + err + ")");
+    const auto& all = s.tracks[0]->clips;
+    test::check (std::abs (valueOf76 (all, 14400, s.crossfadeSamples) - 0.0504f) < 2.0e-6f, "the comp plays pass 1 at 0.3 s");
+    test::check (std::abs (valueOf76 (all, 28800, s.crossfadeSamples) - 0.1128f) < 2.0e-6f, "the last pass is still the one at 0.6 s");
+    test::check (ed.undoLabel() == "Comp take" && ed.undo() && s.tracks[0]->clips.size() == 4, "one undo step takes the comp out");
+    test::check (ed.redo() && s.tracks[0]->clips.size() == 5, "redo brings it back");
+    test::check (! ed.compTake (0, 1, 40000, 60000, err).valid() && err.contains ("inside") && s.tracks[0]->clips.size() == 5,
+                 "a comp that runs past its take (pass 1 ends at 1.0 s) is refused, with the reason, and nothing is added");
+    test::check (! ed.compTake (0, 1, 9600, 9600 + 10, err).valid() && err.contains ("1 ms") && s.tracks[0]->clips.size() == 5, "a comp under 1 ms is refused");
+
+    // 4. promoteTake: pass 0 goes above the comp and gives its own value at 0.3 s and at 0.5 s
+    test::check (ed.promoteTake (0, 0, err) && s.tracks[0]->clips[0].layer > s.tracks[0]->clips[4].layer,
+                 "promoteTake: pass 0 is above the comp");
+    test::check (std::abs (valueOf76 (s.tracks[0]->clips, 24000, s.crossfadeSamples) - 0.012f) < 2.0e-6f,
+                 "pass 0 on top gives its own value at 0.5 s (file sample 12000)");
+    test::check (std::abs (valueOf76 (s.tracks[0]->clips, 14400, s.crossfadeSamples) - 0.0024f) < 2.0e-6f,
+                 "and at 0.3 s it is above the comp (file sample 2400)");
+    test::check (ed.undoLabel() == "Promote take" && ed.undo() && s.tracks[0]->clips[0].layer < s.tracks[0]->clips[4].layer,
+                 "promoteTake is one undo step");
+    test::check (ed.redo(), "and redo makes it again");
+    test::check (! ed.promoteTake (0, 4, err) && err.contains ("comp"), "a comp cannot be promoted: refused, with the reason");
+
+    // 5. the XML round trip: the take fields and the TAKES flag come back
+    test::check (ed.setTrackShowTakes (0, true, err) && s.tracks[0]->showTakes, "TAKES is set on the track");
+    {
+        const auto file = tempFolder().getChildFile ("loop76/takes.olympus");
+        file.getParentDirectory().createDirectory();
+        test::check (s.save (file, err), "the project with the takes is saved");
+        Session t;
+        test::check (t.load (file, err) && t.tracks[0]->clips.size() == 5 && t.tracks[0]->showTakes,
+                     "and loads back with its five clips and the TAKES flag");
+        const auto& a = s.tracks[0]->clips;
+        const auto& b = t.tracks[0]->clips;
+        bool same = b.size() == a.size();
+        for (size_t i = 0; same && i < a.size(); ++i)
+            same = b[i].takeGroup == a[i].takeGroup && b[i].takeIndex == a[i].takeIndex && b[i].comp == a[i].comp;
+        test::check (same && b[4].comp && b[4].takeIndex == 1, "takeGroup, takeIndex and comp are the same after the round trip");
+        const auto xml = s.toXml (file.getParentDirectory());
+        const auto* firstTrack = xml != nullptr ? xml->getChildByName ("Track") : nullptr;
+        test::check (firstTrack != nullptr && firstTrack->getBoolAttribute ("showTakes"), "showTakes is an attribute of the track in the project");
+    }
+
+    // 6. a MIDI loop take: the notes are paired in arrival order; a note on at 0.9 s and off at 0.1 s is held across the wrap (it ends at 1.0 s)
+    {
+        Session m;
+        m.adoptRate (48000.0, err);
+        const std::vector<MidiRecorder::Event> arrival { midiEvent76 (24000, 0x90, 60, 100), midiEvent76 (28800, 0x80, 60, 0),
+                                                         midiEvent76 (12000, 0x90, 62, 100), midiEvent76 (14400, 0x80, 62, 0) };
+        const auto notes = buildRecordedMidi (arrival, 24000, 0, m.tempo, nullptr, kLoopEnd);
+        test::check (notes.notes.size() == 2 && notes.notes[0].pitch == 60 && notes.notes[1].pitch == 62,
+                     test::fmt ("the wrapped take keeps both notes (%d)", (int) notes.notes.size()));
+        const std::vector<MidiRecorder::Event> held { midiEvent76 (43200, 0x90, 64, 100), midiEvent76 (4800, 0x80, 64, 0) };
+        const auto wrapped = buildRecordedMidi (held, 4800, 0, m.tempo, nullptr, kLoopEnd);
+        test::check (wrapped.notes.size() == 1 && std::abs (wrapped.notes[0].durationBeats - 0.2) < 1e-4,
+                     test::fmt ("a note held across the wrap ends at the loop's end: 0.1 s, 0.2 beats (got %.4f)",
+                                wrapped.notes.empty() ? -1.0 : wrapped.notes[0].durationBeats));
+        Session mt;
+        mt.adoptRate (48000.0, err);
+        Editor med (mt);
+        const int track = med.addMidiTrack ("Keys");
+        std::vector<MidiClipRef> placedMidi;
+        const std::vector<MidiRecorder::Event> both { midiEvent76 (24000, 0x90, 60, 100), midiEvent76 (28800, 0x80, 60, 0),
+                                                      midiEvent76 (12000, 0x90, 62, 100), midiEvent76 (14400, 0x80, 62, 0),
+                                                      midiEvent76 (43200, 0x90, 64, 100), midiEvent76 (4800, 0x80, 64, 0) };
+        test::check (finishMidiRecording (both, 4800, 0, { track }, mt.tempo, med, err, &placedMidi, nullptr, kLoopEnd) && placedMidi.size() == 1
+                         && mt.tracks[(size_t) track]->midiClips.size() == 1 && mt.tracks[(size_t) track]->midiClips[0].notes.size() == 3,
+                     "a loop take's MIDI is one clip with all its notes");
+    }
+
+    // 7. MCP comp_take and promote_take: each argument checked, a range outside the take refused, a comp not promoted
+    {
+        Session ms;
+        ms.addEmptyTrack ("Gtr");
+        Editor med (ms);
+        const auto wav = makeWav ("loop76-mcp.wav", 44100.0, 2, 48000, 0.5f, 220.0);
+        const auto first = med.addClip (0, wav, 0, 0, 0, err);
+        const auto second = med.addClip (0, wav, 0, 0, 0, err);
+        test::check (first.valid() && second.valid() && med.setTakeOf (first, med.newTakeGroup(), 0, err) && med.setTakeOf (second, 0, 1, err),
+                     "two takes of one group for the MCP checks: " + err);
+        McpServer server (ms);
+        const auto outside = toolCall (server, "comp_take", "{\"track\":0,\"clip\":0,\"start_seconds\":0.5,\"end_seconds\":1.5}");
+        test::check ((bool) outside["isError"] && toolText (outside).contains ("inside") && ms.tracks[0]->clips.size() == 2,
+                     "comp_take outside the take is refused with the reason, and nothing changes");
+        const auto bad = toolCall (server, "comp_take", "{\"track\":0,\"clip\":0,\"start_seconds\":0.4,\"end_seconds\":0.2}");
+        test::check ((bool) bad["isError"] && ms.tracks[0]->clips.size() == 2, "comp_take with an end before the start is refused");
+        const auto comped = toolCall (server, "comp_take", "{\"track\":0,\"clip\":1,\"start_seconds\":0.2,\"end_seconds\":0.4}");
+        test::check (! (bool) comped["isError"] && ms.tracks[0]->clips.size() == 3 && ms.tracks[0]->clips[2].comp,
+                     "comp_take of 0.2 to 0.4 s from take 2 adds a comp: " + toolText (comped).substring (0, 80));
+        const auto promotedComp = toolCall (server, "promote_take", "{\"track\":0,\"clip\":2}");
+        test::check ((bool) promotedComp["isError"] && toolText (promotedComp).contains ("comp"), "promote_take of a comp is refused with the reason");
+        const auto promoted = toolCall (server, "promote_take", "{\"track\":0,\"clip\":0}");
+        test::check (! (bool) promoted["isError"] && ms.tracks[0]->clips[0].layer > ms.tracks[0]->clips[2].layer, "promote_take of a take puts it on top");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -6316,6 +8222,14 @@ int main()
     busSendSidechainChecks();
     trackInstrumentSlotChecks();
     missingAudioRelinkChecks();
+    midiFileChecks();
+    trackColourGroupChecks();
+    layeredClipChecks();
+    automationModeChecks();
+    punchChecks();
+    monitoringChecks();
+    midiInputChecks();
+    loopRecordingChecks();
     tempFolder().deleteRecursively();
     return test::finish ("OlympusTests");
 }

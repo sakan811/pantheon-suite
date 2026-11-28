@@ -9,6 +9,7 @@
 #include "MixerView.h"
 #include "PianoRoll.h"
 #include "PluginPicker.h"
+#include "../AutoWrite.h"
 #include "../Edit.h"
 #include "../Record.h"
 #include "LevelMeter.h"
@@ -166,7 +167,7 @@ private:
 // The whole window: the project buttons and the transport along the top, the arrangement (ArrangeView) in the body, and the notes at the
 // foot. It owns the session, the editor that changes it, and the audio device.
 class MainComponent : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer, private juce::AsyncUpdater,
-                      private juce::ChangeListener
+                      private juce::ChangeListener, public juce::MidiInputCallback
 {
 public:
     static constexpr int kDesignWidth = 1280, kDesignHeight = ui::editorHeightFor (kDesignWidth);
@@ -233,9 +234,14 @@ public:
     explicit MainComponent (Options options);
     ~MainComponent() override;
 
+    // The hardware MIDI input (F7), on the MIDI thread: a note, a controller or a pitch bend goes into session.inputMidiFifo with its arrival
+    // time. Public so the checks can call it with a null input.
+    void handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message) override;
+
     Session session;
     Settings settings;
     Editor editor { session };          // every timeline edit, and the undo of it, goes through here
+    AutomationWriter automation { session, editor }; // records the lanes in Touch, Latch or Write while the transport plays (AutoWrite.h)
 
     // ---- what the buttons do (public so the checks can press them) ----------------------------------------------------------------
     void newProject();
@@ -269,6 +275,9 @@ public:
     void redoEdit();
     void toggleLoop();
     void toggleMetronome();
+    void togglePunch();                         // the PUNCH button: on with the loop's range, else one bar from the playhead
+    void setPunchEdge (bool out);               // I (punch-in at the playhead) and O (punch-out): keeps the other edge when it is still ahead
+    void cycleCountIn();                        // the COUNT-IN button: 0, 1, 2 bars, saved with the settings
     void zoomBy (double factor);
     void removeTrack (int index);
     // Writes the stems and the mix. Returns the reason when it fails, an empty string when it worked.
@@ -408,7 +417,8 @@ public:
         addMidiButton { "+ MIDI" }, addBusButton { "+ Bus" }, importButton { "Import audio" }, pluginsButton { "Plugins" }, renderButton { "Render stems" }, exportButton { "Export" }, audioButton { "Audio" };
     juce::TextButton rewindButton { "|<" }, undoButton { "Undo" }, redoButton { "Redo" }, zoomOutButton { "-" }, zoomInButton { "+" }, zoomFitButton { "Fit" };
     LampButton playButton { "Play" }, recordButton { "Rec" }, loopButton { "Loop" }, metronomeButton { "Click" }, snapButton { "Snap" },
-        mixerButton { "Mixer" };
+        mixerButton { "Mixer" }, punchButton { "Punch" };
+    juce::TextButton countInButton { "COUNT 0" };     // the bars of clicks before a take (Settings::countInBars), cycled 0, 1, 2
     juce::TextEditor bpmField;                       // the tempo, when the project has one; the tempo at the playhead when it has more
     juce::ComboBox signatureBox, gridBox;
     juce::Label deviceLabel;                         // the device summary, under the buttons
@@ -453,12 +463,24 @@ private:
     {
         explicit Source (MainComponent& m) : owner (m) {}
         void getNextAudioBlock (const juce::AudioSourceChannelInfo& info);
+        void monitorFrom (const juce::AudioSourceChannelInfo& info, int from, juce::int64 held);   // F6: the monitoring tracks, while not rolling
         MainComponent& owner;
         std::atomic<juce::int64> position { 0 };
         std::atomic<bool> playing { false };
         std::atomic<bool> loopOn { false };
         std::atomic<bool> metronomeOn { false };
         std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 }, endOfAudio { 0 };
+        // Loop recording (F8): decided at REC and fixed for the take. While a loop take runs the transport wraps at the take's own loop points
+        // (takeLoopStart, takeLoopEnd), which startRecording stores before the recorder starts; the playback loop may then not change.
+        std::atomic<bool> loopRecording { false };
+        std::atomic<juce::int64> takeLoopStart { 0 }, takeLoopEnd { 0 };
+        // The count-in (F5) before a take: the first countInLeft samples of the block are the click only, the position does not move. The
+        // message thread writes countInTotal and countInMap, then stores countInLeft (the last write); the audio thread reads the map only
+        // while countInLeft is above 0, inside countInReading, which startRecording waits for before it writes the map again.
+        std::atomic<juce::int64> countInLeft { 0 };
+        std::atomic<bool> countInReading { false };
+        juce::int64 countInTotal = 0;
+        TempoMap countInMap;
         juce::AudioBuffer<float> chunk { 2, kBlockSize };
     };
 
@@ -475,12 +497,15 @@ private:
     void chooseFolder();
     void chooseAndRender();
     void chooseAndExport();
+    // Standard MIDI File export (F1): one chooser, then Editor::exportMidi. track -1: every MIDI track; clip -1: the whole track.
+    void chooseAndExportMidi (int track, int clip);
     void launchRenderChooser (const juce::String& chooserTitle, const juce::String& progressTitle, const juce::File& start, RenderOptions choice);
     void runRenderJob (const juce::File& folder, RenderOptions choice, const juce::String& title);
     // The render dialog's default: bit depth and mix-only, as AlertWindow (modal). Returns false when cancelled.
     static bool askRenderDialog (RenderOptions& options);
     // The export dialog's default: bit depth only, as AlertWindow (modal). Returns false when cancelled.
-    static bool askExportDialog (RenderOptions& options);
+    // exportMidi is set when the user chose "Export all MIDI..." instead of the mix.
+    static bool askExportDialog (RenderOptions& options, bool& exportMidi);
     // Autosave and recovery (the file names are in autosaveFile and offerRecovery).
     juce::File autosaveFileFor (const juce::File& project) const;
     juce::File untitledAutosaveFile() const;
@@ -519,8 +544,10 @@ private:
     void applyDeviceStart (const DeviceStart&);
     void saveAudioState();
     void updateRecording();                         // the timer's part of a take: its strip, its time, a device that stopped
-    void finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, juce::int64 headSkipped, const juce::String& problem);
+    void finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, juce::int64 headSkipped, const juce::String& problem,
+                               const std::vector<MidiRecorder::Event>& midi, juce::int64 midiLost, juce::int64 stopAt);
     void setTakeLatency();
+    void enableMidiInputs();                        // every MIDI input the device manager lists is switched on (the window with a device only)
     void loadMonitorChain();                        // reads monitor.xml once the catalog is filled
     void saveMonitorChain();                        // writes monitor.xml; nothing before the chain was read (never overwrites an unread file)
     void monitorEditorClosed (const Slot* slot);    // a monitor plugin's window was closed: its state may have changed
@@ -564,6 +591,12 @@ private:
     // a take in progress: the latency its clips are placed earlier by (fixed at REC), and the playhead it began at (the fallback when the
     // callback never ran); the device stopped (set by the device thread, read by the timer)
     juce::int64 takeLatency = 0, takeFrom = 0;
+    juce::int64 takeMidiLatency = 0;   // the same without the device's input latency: a MIDI take is placed by what is heard, not what is played
+    std::vector<int> takeMidiTracks;   // the armed MIDI tracks at REC: the MIDI take's clips go on these, whatever is armed at the stop
+    // the punch range of the take in progress (F5), fixed at REC: finishRecordingTakes trims the takes to it, then it is cleared
+    std::optional<std::pair<juce::int64, juce::int64>> takePunch;
+    // the loop of the take in progress (F8), fixed at REC: each pass of it becomes a take (finishRecording). Empty for a take without the loop.
+    std::optional<std::pair<juce::int64, juce::int64>> takeLoop;
     std::atomic<bool> deviceStopped { false };
     std::atomic<bool> deviceStarting { false };
     std::atomic<bool> recordStarting { false };

@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include "MidiFiles.h"
 #include "Session.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -393,7 +395,7 @@ public:
         if (at <= c->start || at >= c->end()) { error = "The split point must be inside the clip (after " + juce::String (c->start) + ", before " + juce::String (c->end()) + ")."; return {}; }
         auto before = captureIfNeeded();
         const juce::int64 cut = at - c->start;
-        Clip right = *c;
+        Clip right = *c; // keeps the layer, the gain line and the mute: both halves are the same take
         right.start = at;
         right.offset = c->offset + cut;
         right.length = c->length - cut;
@@ -435,6 +437,7 @@ public:
         Clip moved = from[(size_t) clip];
         from.erase (from.begin() + clip);
         moved.start = juce::jmax ((juce::int64) 0, newStart);
+        moved.layer = session.nextLayerLocked (newTrack); // on the new track it goes on top, as a new clip does
         auto& to = session.tracks[(size_t) newTrack]->clips;
         to.push_back (std::move (moved));
         record (before, "Move clip");
@@ -495,10 +498,88 @@ public:
         auto before = captureIfNeeded();
         Clip copy = *c;
         copy.start = c->end();
+        copy.layer = session.nextLayerLocked (track); // a copy is a new layer on top
         auto& clips = session.tracks[(size_t) track]->clips;
         clips.push_back (std::move (copy));
         record (before, "Duplicate clip");
         return { track, (int) clips.size() - 1 };
+    }
+
+    // ---- takes and comping (F8) ----------------------------------------------------------------------------------------------------
+    // The take group a new recording takes: one above every take group in the session. Recording (Record.h) calls it for each take.
+    int newTakeGroup()
+    {
+        const juce::ScopedLock sl (session.lock);
+        return session.nextTakeGroupLocked();
+    }
+
+    // Puts a clip that a recording just made into its take group, at its place in the group. Inside the recording's gesture, one step with it.
+    bool setTakeOf (ClipRef ref, int group, int index, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (ref.track, ref.clip, error);
+        if (c == nullptr) return false;
+        auto before = captureIfNeeded();
+        c->takeGroup = group;
+        c->takeIndex = index;
+        c->comp = false;
+        record (before, "Record");
+        return true;
+    }
+
+    // Comps a range out of a take (F8): a new clip on the take's own audio, on the layer above every other clip of the track, so it plays where
+    // it lies and the layering's crossfade makes its edges. The range is in samples on the timeline, inside the take and at least 1 ms. It has
+    // no fades of its own. One undo step.
+    ClipRef compTake (int track, int clip, juce::int64 start, juce::int64 end, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return {};
+        if (c->takeGroup < 0 || c->comp) { error = "Clip " + juce::String (clip) + " on track " + juce::String (track) + " is not a take: only a take can be comped."; return {}; }
+        if (start < c->start || end > c->end() || end <= start)
+        {
+            error = "The range " + juce::String (start) + "-" + juce::String (end) + " must lie inside take " + juce::String (clip) + " ("
+                    + juce::String (c->start) + "-" + juce::String (c->end()) + ").";
+            return {};
+        }
+        const juce::int64 minLength = juce::jmax ((juce::int64) 1, (juce::int64) std::llround (session.sampleRate / 1000.0));
+        if (end - start < minLength)
+        {
+            error = "A comp must be at least 1 ms long.";
+            return {};
+        }
+        auto before = captureIfNeeded();
+        Clip copy = *c;
+        copy.offset = c->offset + (start - c->start);
+        copy.start = start;
+        copy.length = end - start;
+        copy.fadeIn = 0;
+        copy.fadeOut = 0;
+        copy.comp = true;
+        copy.layer = session.nextLayerLocked (track);
+        auto& clips = session.tracks[(size_t) track]->clips;
+        clips.push_back (std::move (copy));
+        record (before, "Comp take");
+        return { track, (int) clips.size() - 1 };
+    }
+
+    // Raises a take to the top of its track, so it plays where it lies (F8). A comp is not a take: it is refused, with the reason.
+    bool promoteTake (int track, int clip, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return false;
+        if (c->takeGroup < 0)
+        {
+            error = "Clip " + juce::String (clip) + " on track " + juce::String (track) + " is not a take: only a recorded take can be promoted.";
+            return false;
+        }
+        if (c->comp) { error = "Clip " + juce::String (clip) + " on track " + juce::String (track) + " is a comp: only a take can be promoted, the take it was comped from is the one to promote."; return false; }
+        if (isOnTopLocked (track, clip)) return true;
+        auto before = captureIfNeeded();
+        c->layer = session.nextLayerLocked (track);
+        record (before, "Promote take");
+        return true;
     }
 
     bool deleteClip (int track, int clip, juce::String& error)
@@ -569,6 +650,154 @@ public:
         return true;
     }
 
+    // ---- layers, crossfades and the clip gain line (F3) -----------------------------------------------------------------------------
+    // Raises a clip above every other clip of its track, or lowers it below them: one undo step each. Already there: nothing changes.
+    bool raiseClipToTop (int track, int clip, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return false;
+        if (isOnTopLocked (track, clip)) return true;
+        auto before = captureIfNeeded();
+        c->layer = session.nextLayerLocked (track);
+        record (before, "Raise clip");
+        return true;
+    }
+
+    bool lowerClipToBottom (int track, int clip, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return false;
+        if (isAtBottomLocked (track, clip)) return true;
+        const auto& clips = session.tracks[(size_t) track]->clips;
+        int lowest = c->layer;
+        for (const auto& other : clips)
+            lowest = juce::jmin (lowest, other.layer);
+        auto before = captureIfNeeded();
+        c->layer = lowest - 1; // a negative layer is allowed: the file keeps it
+        record (before, "Lower clip");
+        return true;
+    }
+
+    // Switches layered mode for the whole session (structural undo: the project XML carries the flag). Returns false only when the
+    // setting is already that, which changes nothing.
+    bool setLayered (bool on)
+    {
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (session.layered == on) return true;
+        }
+        auto before = captureStructuralXml();
+        {
+            const juce::ScopedLock sl (session.lock);
+            session.layered = on;
+            if (! on) session.punchOn = false; // a punch needs layers (setPunch): it goes off with them, in the same undo step
+            session.dirty = true;
+            session.publishPlaybackSnapshotLocked();
+            session.bumpRevision();
+        }
+        recordStructural (std::move (before), on ? "Layered clips on" : "Layered clips off");
+        return true;
+    }
+
+    // The crossfade length at each layer's edge, 0..2000 ms (structural undo, as setLayered).
+    bool setCrossfadeMs (int ms, juce::String& error)
+    {
+        if (ms < 0 || ms > 2000) { error = "The crossfade length must be 0 to 2000 ms."; return false; }
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (session.crossfadeMs == ms) return true;
+        }
+        auto before = captureStructuralXml();
+        {
+            const juce::ScopedLock sl (session.lock);
+            session.crossfadeMs = ms;
+            session.updateCrossfadeLocked();
+            session.dirty = true;
+            session.publishPlaybackSnapshotLocked();
+            session.bumpRevision();
+        }
+        recordStructural (std::move (before), "Crossfade length");
+        return true;
+    }
+
+    // The clip gain line. A point is a SOURCE sample (`at`, the one `offset` counts in) and a gain in dB, clamped to -60..+12. The line
+    // is kept sorted by `at`. A point at a sample that already has one replaces its dB. Returns the point's index on the line, or -1.
+    int addClipGainPoint (int track, int clip, juce::int64 at, float db, juce::String& error)
+    {
+        if (! std::isfinite (db)) { error = "A gain point must be a finite dB value."; return -1; }
+        if (at < 0) { error = "A gain point must be at a source sample of 0 or later."; return -1; }
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return -1;
+        const float value = juce::jlimit (-60.0f, 12.0f, db);
+        auto& pts = c->gainEnv;
+        const auto it = gainPointPosition (pts, at);
+        const bool exists = it != pts.end() && it->at == at;
+        if (exists && same (it->db, value))
+            return (int) (it - pts.begin());
+        auto before = captureIfNeeded();
+        int index = (int) (it - pts.begin());
+        if (exists)
+            it->db = value;
+        else
+            pts.insert (it, ClipGainPoint { at, value });
+        record (before, "Add gain point");
+        return index;
+    }
+
+    // Moves point `point` of the line to another source sample and dB (clamped as addClipGainPoint). Returns its new index, or -1.
+    int moveClipGainPoint (int track, int clip, int point, juce::int64 at, float db, juce::String& error)
+    {
+        if (! std::isfinite (db)) { error = "A gain point must be a finite dB value."; return -1; }
+        if (at < 0) { error = "A gain point must be at a source sample of 0 or later."; return -1; }
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return -1;
+        auto& pts = c->gainEnv;
+        if (! juce::isPositiveAndBelow (point, (int) pts.size())) { error = "No gain point " + juce::String (point) + " on that clip."; return -1; }
+        const float value = juce::jlimit (-60.0f, 12.0f, db);
+        if (pts[(size_t) point].at == at && same (pts[(size_t) point].db, value))
+            return point;
+        auto before = captureIfNeeded();
+        pts.erase (pts.begin() + point);
+        const auto it = gainPointPosition (pts, at);
+        int index = (int) (it - pts.begin());
+        if (it != pts.end() && it->at == at)
+            it->db = value;
+        else
+            pts.insert (it, ClipGainPoint { at, value });
+        record (before, "Move gain point");
+        return index;
+    }
+
+    bool removeClipGainPoint (int track, int clip, int point, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return false;
+        auto& pts = c->gainEnv;
+        if (! juce::isPositiveAndBelow (point, (int) pts.size())) { error = "No gain point " + juce::String (point) + " on that clip."; return false; }
+        auto before = captureIfNeeded();
+        pts.erase (pts.begin() + point);
+        record (before, "Delete gain point");
+        return true;
+    }
+
+    // Takes the whole gain line off the clip (one undo step; nothing if it had none).
+    bool clearClipGain (int track, int clip, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        Clip* c = clipAt (track, clip, error);
+        if (c == nullptr) return false;
+        if (c->gainEnv.empty()) return true;
+        auto before = captureIfNeeded();
+        c->gainEnv.clear();
+        record (before, "Clear clip gain");
+        return true;
+    }
+
     bool relinkMissingAudio (const juce::File& oldFile, const juce::File& newFile, int& relinkedCount, juce::String& error)
     {
         return relinkClipOrMatching (-1, -1, oldFile, newFile, relinkedCount, error);
@@ -595,6 +824,146 @@ public:
         if (relinked > 0)
             record (before, "Rescan missing audio");
         return relinked;
+    }
+
+    // ---- Standard MIDI Files (F1) ---------------------------------------------------------------------------------------------
+    // Reads a .mid file into the timeline as one undo step. intoTrack < 0: one new MIDI track per track of the file, its clip at
+    // atSample. intoTrack >= 0: all the notes go into one clip on that MIDI track. useFileTempo sets the tempo at beat 0 and the
+    // time signature from the file, inside the same step. Nothing changes when it returns false.
+    bool importMidiFile (const juce::File& file, juce::int64 atSample, int intoTrack, bool useFileTempo, juce::String& error,
+                         std::vector<int>* newTracks = nullptr)
+    {
+        std::vector<ImportedMidiTrack> imported;
+        double firstBpm = 0.0;
+        int num = 0, den = 0;
+        if (! readMidiFile (file, imported, firstBpm, num, den, error))
+            return false;
+        if (imported.empty())
+        {
+            error = file.getFileName() + " has no notes to import.";
+            return false;
+        }
+        {
+            const juce::ScopedLock sl (session.lock);
+            if (intoTrack >= 0 && (! isTrack (intoTrack) || ! session.tracks[(size_t) intoTrack]->isMidi))
+            {
+                error = isTrack (intoTrack) ? "Track " + juce::String (intoTrack) + " is not a MIDI track."
+                                            : "No track " + juce::String (intoTrack);
+                return false;
+            }
+        }
+
+        auto before = captureStructuralXml();
+        std::vector<int> touched;
+        {
+            const juce::ScopedLock sl (session.lock);
+            // a new track sets the session's rate when there is none, so the tracks come first and the clip maths after
+            std::vector<int> tracksForClips;
+            if (intoTrack >= 0)
+                tracksForClips.assign (1, intoTrack);
+            else
+                for (const auto& it : imported)
+                    tracksForClips.push_back (session.addMidiTrack (it.name));
+
+            if (useFileTempo)
+            {
+                if (firstBpm > 0.0)
+                    session.tempo.setTempo (0.0, firstBpm);
+                if (num > 0 && den > 0)
+                    session.tempo.setSignature (num, den);
+            }
+            const TempoMap& map = session.tempo;
+            const double bpb = juce::jmax (1.0, map.beatsPerBar());
+
+            const auto addClip = [&] (int track, const std::vector<MidiNote>& notes, const juce::String& name)
+            {
+                double lastEnd = 0.0;
+                for (const auto& n : notes) lastEnd = std::max (lastEnd, n.startBeat + n.durationBeats);
+                // whole bars, at least one, measured from the clip's start
+                const double lengthBeats = std::max (1.0, std::ceil (lastEnd / bpb - 1e-9)) * bpb;
+                const double startBeat = map.samplesToBeats ((double) atSample);
+                const double lengthSamples = map.beatsToSamples (startBeat + lengthBeats) - map.beatsToSamples (startBeat);
+                MidiClip mc;
+                mc.name = name;
+                mc.start = juce::jlimit ((juce::int64) 0, kMaxSafeSample, atSample);
+                mc.length = juce::jlimit ((juce::int64) 1, kMaxSafeSample, (juce::int64) std::llround (lengthSamples));
+                mc.notes = notes;
+                session.tracks[(size_t) track]->midiClips.push_back (std::move (mc));
+            };
+
+            if (intoTrack >= 0)
+            {
+                std::vector<MidiNote> all;
+                for (const auto& it : imported)
+                    all.insert (all.end(), it.notes.begin(), it.notes.end());
+                std::stable_sort (all.begin(), all.end(), [] (const MidiNote& a, const MidiNote& b) { return a.startBeat < b.startBeat; });
+                addClip (intoTrack, all, file.getFileNameWithoutExtension());
+                touched.push_back (intoTrack);
+            }
+            else
+            {
+                for (size_t i = 0; i < imported.size(); ++i)
+                {
+                    addClip (tracksForClips[i], imported[i].notes, imported[i].name);
+                    touched.push_back (tracksForClips[i]);
+                }
+            }
+            session.publishPlaybackSnapshotLocked();
+            session.bumpRevision();
+            session.dirty = true;
+        }
+        recordStructural (std::move (before), "Import MIDI");
+        if (newTracks != nullptr)
+            *newTracks = touched;
+        return true;
+    }
+
+    // Writes the MIDI clips to a .mid file. Not an edit: no undo step. track < 0: every MIDI track's unmuted clips, at their
+    // absolute beats. track >= 0, clip < 0: that track's unmuted clips. Both >= 0: that clip alone, from beat 0, cut at its end.
+    bool exportMidi (const juce::File& file, int track, int clip, juce::String& error)
+    {
+        std::vector<ExportMidiTrack> out;
+        TempoMap map;
+        {
+            const juce::ScopedLock sl (session.lock);
+            map = session.tempo;
+            if (track < 0)
+            {
+                if (clip >= 0) { error = "Give a track with a clip to export one clip."; return false; }
+                for (const auto& t : session.tracks)
+                {
+                    if (! t->isMidi) continue;
+                    ExportMidiTrack e;
+                    e.name = t->name;
+                    for (const auto& mc : t->midiClips)
+                        if (! mc.mute) appendClipNotes (map, mc, true, e.notes);
+                    out.push_back (std::move (e));
+                }
+                if (out.empty()) { error = "There are no MIDI tracks to export."; return false; }
+            }
+            else
+            {
+                if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+                const auto& t = *session.tracks[(size_t) track];
+                if (! t.isMidi) { error = "Track " + juce::String (track) + " is not a MIDI track."; return false; }
+                ExportMidiTrack e;
+                e.name = t.name;
+                if (clip < 0)
+                {
+                    for (const auto& mc : t.midiClips)
+                        if (! mc.mute) appendClipNotes (map, mc, true, e.notes);
+                }
+                else
+                {
+                    const MidiClip* mc = midiClipAt (track, clip, error);
+                    if (mc == nullptr) return false;
+                    e.name = mc->name.isNotEmpty() ? mc->name : t.name;
+                    appendClipNotes (map, *mc, false, e.notes);
+                }
+                out.push_back (std::move (e));
+            }
+        }
+        return writeMidiFile (file, out, map, error);
     }
 
     // ---- MIDI clips and notes -------------------------------------------------------------------------------------------------
@@ -1333,6 +1702,7 @@ public:
             {
                 Clip copy = cc.audio;
                 copy.start = dstStart;
+                copy.layer = session.nextLayerLocked (dstTrack); // each pasted clip goes on top of what is there, the earlier ones included
                 auto& clips = session.tracks[(size_t) dstTrack]->clips;
                 clips.push_back (std::move (copy));
                 pasted.push_back ({ dstTrack, (int) clips.size() - 1, false });
@@ -1350,17 +1720,43 @@ public:
     }
 
     // ---- track mix and master -------------------------------------------------------------------------------------------------
-    // The fader, clamped to -100..+12 dB.
-    bool setTrackGain (int track, float db, juce::String& error)
+    // The fader, clamped to -100..+12 dB. In an active group whose gain link is on, every member moves by the same dB step, so the group
+    // keeps its balance; the step is limited so that no member leaves -100..+12. `alone` moves this track only.
+    bool setTrackGain (int track, float db, juce::String& error, bool alone = false)
     {
         if (! std::isfinite (db)) { error = "Track gain must be a finite number."; return false; }
         const juce::ScopedLock sl (session.lock);
         if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
-        auto& t = *session.tracks[(size_t) track];
-        const float gain = juce::jlimit (-100.0f, 12.0f, db);
-        if (same (gain, t.gainDb)) return true;
+        const float target = juce::jlimit (-100.0f, 12.0f, db);
+        const auto members = session.linkedTracksLocked (track, alone, &TrackGroup::gain);
+        if (members.size() == 1)
+        {
+            auto& t = *session.tracks[(size_t) track];
+            if (same (target, t.gainDb)) return true;
+            auto before = captureIfNeeded();
+            t.gainDb = target;
+            record (before, "Track gain");
+            return true;
+        }
+        // the step is the requested change of this track, limited so that the quietest audible member stays above -100 and the loudest below +12;
+        // a member at -100 (silent) is not counted in the fall, so it stays silent and does not hold the others back
+        float lowest = 12.0f, highest = -100.0f;
+        bool audible = false;
+        for (int m : members)
+        {
+            const float g = session.tracks[(size_t) m]->gainDb;
+            if (g > -99.999f) { lowest = juce::jmin (lowest, g); audible = true; }
+            highest = juce::jmax (highest, g);
+        }
+        const float fallLimit = audible ? -100.0f - lowest : 0.0f;
+        const float step = juce::jlimit (fallLimit, 12.0f - highest, target - session.tracks[(size_t) track]->gainDb);
+        if (step == 0.0f) return true;
         auto before = captureIfNeeded();
-        t.gainDb = gain;
+        for (int m : members)
+        {
+            auto& t = *session.tracks[(size_t) m];
+            t.gainDb = juce::jlimit (-100.0f, 12.0f, t.gainDb + step);
+        }
         record (before, "Track gain");
         return true;
     }
@@ -1380,27 +1776,176 @@ public:
         return true;
     }
 
-    bool setTrackMute (int track, bool on, juce::String& error)
+    // Mute, solo: in an active group whose link is on, every member gets the same state, unless `alone`.
+    bool setTrackMute (int track, bool on, juce::String& error, bool alone = false)
     {
         const juce::ScopedLock sl (session.lock);
         if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
-        auto& t = *session.tracks[(size_t) track];
-        if (on == t.mute) return true;
+        const auto members = session.linkedTracksLocked (track, alone, &TrackGroup::mute);
+        if (std::none_of (members.begin(), members.end(), [this, on] (int m) { return session.tracks[(size_t) m]->mute != on; })) return true;
         auto before = captureIfNeeded();
-        t.mute = on;
+        for (int m : members)
+            session.tracks[(size_t) m]->mute = on;
         record (before, on ? "Mute track" : "Unmute track");
         return true;
     }
 
-    bool setTrackSolo (int track, bool on, juce::String& error)
+    bool setTrackSolo (int track, bool on, juce::String& error, bool alone = false)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        const auto members = session.linkedTracksLocked (track, alone, &TrackGroup::solo);
+        if (std::none_of (members.begin(), members.end(), [this, on] (int m) { return session.tracks[(size_t) m]->solo != on; })) return true;
+        auto before = captureIfNeeded();
+        for (int m : members)
+            session.tracks[(size_t) m]->solo = on;
+        record (before, on ? "Solo track" : "Unsolo track");
+        return true;
+    }
+
+    // Software input monitoring (F6): what an armed audio track plays while the transport is stopped or a take records (Auto), or always (In).
+    // One undo step (EditState). Refused for a bus or a MIDI track, which has no input to hear.
+    bool setTrackMonitor (int track, MonitorMode mode, juce::String& error)
     {
         const juce::ScopedLock sl (session.lock);
         if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
         auto& t = *session.tracks[(size_t) track];
-        if (on == t.solo) return true;
+        if (t.isBus() || t.isMidi) { error = "Track '" + t.name + "' has no input to monitor: input monitoring is for audio tracks."; return false; }
+        if (t.monitor == mode) return true;
         auto before = captureIfNeeded();
-        t.solo = on;
-        record (before, on ? "Solo track" : "Unsolo track");
+        t.monitor = mode;
+        session.refreshMonitoringLocked();
+        record (before, "Input monitoring");
+        return true;
+    }
+
+    // ---- colour, polarity, groups (structural undo: the project XML carries them) ----------------------------------------------
+    // The session setters publish the playback snapshot and bump the revision; these structure edits set fields directly, so they do it here.
+    void publishDirect()
+    {
+        session.dirty = true;
+        session.publishPlaybackSnapshotLocked();
+        session.bumpRevision();
+    }
+
+    // A track's colour (ARGB, opaque); 0 = automatic, the palette by index.
+    bool setTrackColour (int track, juce::uint32 argb, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        auto& t = *session.tracks[(size_t) track];
+        if (t.colour == argb) return true;
+        auto before = captureStructuralXml();
+        t.colour = argb;
+        publishDirect();
+        recordStructural (std::move (before), "Track colour");
+        return true;
+    }
+
+    // Ø: both channels inverted at the track's source, before its chain.
+    bool setTrackPolarity (int track, bool on, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        auto& t = *session.tracks[(size_t) track];
+        if (t.polarity == on) return true;
+        auto before = captureStructuralXml();
+        t.polarity = on;
+        publishDirect();
+        recordStructural (std::move (before), on ? "Polarity on" : "Polarity off");
+        return true;
+    }
+
+    // Puts a track in a group (-1 = none). A group index that does not exist is refused.
+    bool setTrackGroup (int track, int group, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        if (! (group == -1 || juce::isPositiveAndBelow (group, (int) session.groups.size())))
+        {
+            error = "No group " + juce::String (group);
+            return false;
+        }
+        auto& t = *session.tracks[(size_t) track];
+        if (t.group == group) return true;
+        auto before = captureStructuralXml();
+        t.group = group;
+        publishDirect();
+        recordStructural (std::move (before), "Track group");
+        return true;
+    }
+
+    // Adds a group at the end, with the given links (all on by default), and returns its index, or -1 with the reason (an empty name).
+    // One undo step, so a new group with its links is one step.
+    int addGroup (juce::String name, juce::String& error, TrackGroup links = {})
+    {
+        const juce::ScopedLock sl (session.lock);
+        const auto text = name.trim();
+        if (text.isEmpty()) { error = "The group needs a name."; return -1; }
+        if (! std::isfinite (links.vcaDb)) { error = "The VCA offset must be a finite number."; return -1; }
+        auto before = captureStructuralXml();
+        TrackGroup g = links;
+        g.name = text;
+        g.vcaDb = juce::jlimit (-100.0f, 12.0f, g.vcaDb);
+        session.groups.push_back (g);
+        const int index = (int) session.groups.size() - 1;
+        publishDirect();
+        recordStructural (std::move (before), "Add group");
+        return index;
+    }
+
+    // Replaces a group's name, colour, links and VCA offset (-100..+12). Refused: a group that is not there, an empty name, a
+    // non-finite offset. The VCA fader's drag uses setGroupVca instead, which is a plain fader step.
+    bool setGroup (int group, TrackGroup value, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! juce::isPositiveAndBelow (group, (int) session.groups.size())) { error = "No group " + juce::String (group); return false; }
+        if (! std::isfinite (value.vcaDb)) { error = "The VCA offset must be a finite number."; return false; }
+        value.name = value.name.trim();
+        if (value.name.isEmpty()) { error = "The group needs a name."; return false; }
+        value.vcaDb = juce::jlimit (-100.0f, 12.0f, value.vcaDb);
+        auto& g = session.groups[(size_t) group];
+        if (g.name == value.name && g.colour == value.colour && g.active == value.active && g.gain == value.gain && g.mute == value.mute
+            && g.solo == value.solo && g.arm == value.arm && same (g.vcaDb, value.vcaDb))
+            return true;
+        auto before = captureStructuralXml();
+        g = value;
+        publishDirect();
+        recordStructural (std::move (before), "Edit group");
+        return true;
+    }
+
+    // Removes a group: its members are in no group, and the groups above it move down one index.
+    bool removeGroup (int group, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! juce::isPositiveAndBelow (group, (int) session.groups.size())) { error = "No group " + juce::String (group); return false; }
+        auto before = captureStructuralXml();
+        for (auto& t : session.tracks)
+        {
+            if (t->group == group)
+                t->group = -1;
+            else if (t->group > group)
+                --t->group;
+        }
+        session.groups.erase (session.groups.begin() + group);
+        publishDirect();
+        recordStructural (std::move (before), "Remove group");
+        return true;
+    }
+
+    // The VCA fader of a group, -100..+12 dB. A plain step (no structure change), so a Gesture around a drag makes it one undo step.
+    bool setGroupVca (int group, float db, juce::String& error)
+    {
+        if (! std::isfinite (db)) { error = "The VCA offset must be a finite number."; return false; }
+        const juce::ScopedLock sl (session.lock);
+        if (! juce::isPositiveAndBelow (group, (int) session.groups.size())) { error = "No group " + juce::String (group); return false; }
+        auto& g = session.groups[(size_t) group];
+        const float value = juce::jlimit (-100.0f, 12.0f, db);
+        if (same (value, g.vcaDb)) return true;
+        auto before = captureIfNeeded();
+        g.vcaDb = value;
+        record (before, "Group VCA");
         return true;
     }
 
@@ -1485,6 +2030,28 @@ public:
         session.loopEnd = e;
         session.loopOn = isOn;
         record (before, "Loop");
+    }
+
+    // Punch (F5): the range a take is trimmed to at the stop, one undo step like the loop. Refuses, with the reason and nothing changed, a start
+    // before 0, an end not after the start, and turning on while the session is not layered (a punched take replaces what lies under it).
+    bool setPunch (bool on, juce::int64 start, juce::int64 end, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (start < 0) { error = "Punch start cannot be negative."; return false; }
+        if (end <= start) { error = "Punch end must be after punch start."; return false; }
+        if (on && ! session.layered)
+        {
+            // the triangle is written as its UTF-8 bytes: a plain literal is not read as UTF-8 by every build of the string type
+            error = juce::String (juce::CharPointer_UTF8 ("Punch needs layered clips (Project \xE2\x96\xB8 Layered clips): a punched take must replace what lies under it."));
+            return false;
+        }
+        if (on == session.punchOn && start == session.punchStart && end == session.punchEnd) return true;
+        auto before = captureIfNeeded();
+        session.punchOn = on;
+        session.punchStart = start;
+        session.punchEnd = end;
+        record (before, "Punch");
+        return true;
     }
 
     // The metronome (a click, not in the stems): an undo step like the loop.
@@ -1673,6 +2240,19 @@ public:
         return true;
     }
 
+    // The take sub-lanes of a track are shown or not (a view setting, saved with the project, not undone: as the automation lanes are).
+    bool setTrackShowTakes (int track, bool show, juce::String& error)
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        auto& t = *session.tracks[(size_t) track];
+        if (t.showTakes == show) return true;
+        t.showTakes = show;
+        session.dirty = true;
+        session.bumpRevision();
+        return true;
+    }
+
     bool setTrackActiveAutoTarget (int track, const juce::String& targetId, juce::String& error)
     {
         int slotIdx = -1, paramIdx = -1;
@@ -1683,6 +2263,126 @@ public:
         if (t.activeAutoTarget == targetId) return true;
         t.activeAutoTarget = targetId;
         session.dirty = true;
+        session.bumpRevision();
+        return true;
+    }
+
+    // The mode of a lane (F4): one undo step, or part of the gesture around it (the automation pass ends a Write lane as Touch inside its own
+    // gesture). A lane that is missing is created, as a first point creates it, unless the mode is Read (then nothing changes).
+    bool setAutomationMode (int track, const juce::String& targetId, AutoMode mode, juce::String& error)
+    {
+        int slotIdx = -1, paramIdx = -1;
+        if (! parseAutoTargetId (targetId, slotIdx, paramIdx, error)) return false;
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) { error = "No track " + juce::String (track); return false; }
+        auto& t = *session.tracks[(size_t) track];
+        AutomationLane* existing = nullptr;
+        for (auto& l : t.automation)
+            if (l.targetId == targetId) { existing = &l; break; }
+        if (existing != nullptr ? existing->mode == mode : mode == AutoMode::Read) return true;
+        auto before = captureIfNeeded();
+        auto& lane = existing != nullptr ? *existing : findOrCreateLane (t, targetId, slotIdx, paramIdx);
+        lane.mode = mode;
+        record (before, "Automation mode");
+        return true;
+    }
+
+    // The automation writer's segment (F4): erases the points in (from, to] and puts one at `to` with `value`. With from == to it only sets
+    // the point at `to` (a guard point beside the curve, erasing nothing). Creates the lane when it is missing. False for a bad track or target.
+    bool writeAutomationSegment (int track, const juce::String& targetId, juce::int64 from, juce::int64 to, float value)
+    {
+        int slotIdx = -1, paramIdx = -1;
+        juce::String error;
+        if (! std::isfinite (value) || ! parseAutoTargetId (targetId, slotIdx, paramIdx, error)) return false;
+        const juce::ScopedLock sl (session.lock);
+        if (! isTrack (track)) return false;
+        const juce::int64 a = juce::jlimit ((juce::int64) 0, kMaxSafeSample, from);
+        const juce::int64 b = juce::jlimit ((juce::int64) 0, kMaxSafeSample, to);
+        if (b < a) return false;
+        auto before = captureIfNeeded();
+        auto& lane = findOrCreateLane (*session.tracks[(size_t) track], targetId, slotIdx, paramIdx);
+        auto& pts = lane.points;
+        if (b > a)
+            pts.erase (std::remove_if (pts.begin(), pts.end(), [a, b] (const AutoPoint& p) { return p.sample > a && p.sample <= b; }), pts.end());
+        const float v = juce::jlimit (0.0f, 1.0f, value);
+        auto it = std::lower_bound (pts.begin(), pts.end(), b, [] (const AutoPoint& p, juce::int64 s) { return p.sample < s; });
+        if (it != pts.end() && it->sample == b)
+        {
+            it->value = v;
+            it->curve = AutoCurveType::Linear;
+        }
+        else
+        {
+            pts.insert (it, AutoPoint { b, v, AutoCurveType::Linear });
+        }
+        record (before, "Write automation");
+        return true;
+    }
+
+    // The writer's thinning (F4): removes the Linear points strictly inside [from, to] that lie within `tolerance` (normalised) of the line
+    // through their neighbours; the ends stay. Returns how many it removed (0 for a missing lane, and nothing is recorded then).
+    int thinAutomationRange (int track, const juce::String& targetId, juce::int64 from, juce::int64 to, float tolerance)
+    {
+        juce::String error;
+        const juce::ScopedLock sl (session.lock);
+        auto* lane = findAutomationLane (track, targetId, error);
+        if (lane == nullptr) return 0;
+        auto& pts = lane->points;
+        const auto lo = (int) (std::lower_bound (pts.begin(), pts.end(), from, [] (const AutoPoint& p, juce::int64 s) { return p.sample < s; }) - pts.begin());
+        const auto hi = (int) (std::upper_bound (pts.begin(), pts.end(), to, [] (juce::int64 s, const AutoPoint& p) { return s < p.sample; }) - pts.begin());
+        // the candidates, found first: a change is recorded only when there is one
+        int removable = 0;
+        for (int i = lo + 1; i + 1 < hi; ++i)
+        {
+            const auto& p0 = pts[(size_t) (i - 1)];
+            const auto& p1 = pts[(size_t) i];
+            const auto& p2 = pts[(size_t) (i + 1)];
+            if (p1.curve != AutoCurveType::Linear || p2.sample <= p0.sample) continue;
+            const double t = (double) (p1.sample - p0.sample) / (double) (p2.sample - p0.sample);
+            if (std::abs (p1.value - (p0.value + (p2.value - p0.value) * t)) <= tolerance) ++removable;
+        }
+        if (removable == 0) return 0;
+        auto before = captureIfNeeded();
+        int removed = 0;
+        int i = lo + 1, end = hi - 1; // interior points are i in (lo, end)
+        while (i < end)
+        {
+            const auto& p0 = pts[(size_t) (i - 1)];
+            const auto& p1 = pts[(size_t) i];
+            const auto& p2 = pts[(size_t) (i + 1)];
+            bool drop = false;
+            if (p1.curve == AutoCurveType::Linear && p2.sample > p0.sample)
+            {
+                const double t = (double) (p1.sample - p0.sample) / (double) (p2.sample - p0.sample);
+                drop = std::abs (p1.value - (p0.value + (p2.value - p0.value) * t)) <= tolerance;
+            }
+            if (drop)
+            {
+                pts.erase (pts.begin() + i);
+                --end;
+                ++removed;
+            }
+            else
+            {
+                ++i;
+            }
+        }
+        if (removed > 0)
+            record (before, "Thin automation");
+        return removed;
+    }
+
+    // The writer's mark on a lane while a pass writes it (F4): a lane marked overriding is not played (findActiveLane, runChain). It is not an
+    // edit: no undo step and not saved. The playback snapshot is republished so the audio thread sees the change.
+    bool setAutomationOverriding (int track, const juce::String& targetId, bool overriding)
+    {
+        juce::String error;
+        const juce::ScopedLock sl (session.lock);
+        auto* lane = findAutomationLane (track, targetId, error);
+        if (lane == nullptr) return false;
+        if (lane->overriding == overriding) return true;
+        lane->overriding = overriding;
+        session.publishPlaybackSnapshotLocked();
         session.bumpRevision();
         return true;
     }
@@ -2062,6 +2762,54 @@ private:
                 clips.erase (clips.begin() + r.clip);
             }
         }
+    }
+
+    // Appends a clip's notes in absolute beats (`absolute`: the clip's start is added, the clip's own beats are from its start),
+    // cut at the clip's end. Called under the lock.
+    static void appendClipNotes (const TempoMap& map, const MidiClip& mc, bool absolute, std::vector<MidiNote>& out)
+    {
+        const double startBeat = absolute ? map.samplesToBeats ((double) mc.start) : 0.0;
+        const double endBeat = absolute ? map.samplesToBeats ((double) mc.end())
+                                        : map.samplesToBeats ((double) mc.end()) - map.samplesToBeats ((double) mc.start);
+        for (const auto& n : mc.notes)
+        {
+            if (! std::isfinite (n.startBeat) || ! std::isfinite (n.durationBeats) || n.durationBeats <= 0.0)
+                continue;
+            const double on = startBeat + n.startBeat;
+            if (on >= endBeat) continue;
+            const double off = std::min (on + n.durationBeats, endBeat);
+            MidiNote copy = n;
+            copy.startBeat = on;
+            copy.durationBeats = off - on;
+            out.push_back (copy);
+        }
+    }
+
+    // No other clip of the track is above clip `clip` (it is on top), or below it (it is at the bottom), by Session::isUpperOf. Under the lock.
+    bool isOnTopLocked (int track, int clip) const
+    {
+        const auto& clips = session.tracks[(size_t) track]->clips;
+        const Clip& c = clips[(size_t) clip];
+        for (size_t j = 0; j < clips.size(); ++j)
+            if (j != (size_t) clip && Session::isUpperOf (clips[j], j, c, (size_t) clip))
+                return false;
+        return true;
+    }
+
+    bool isAtBottomLocked (int track, int clip) const
+    {
+        const auto& clips = session.tracks[(size_t) track]->clips;
+        const Clip& c = clips[(size_t) clip];
+        for (size_t j = 0; j < clips.size(); ++j)
+            if (j != (size_t) clip && Session::isUpperOf (c, (size_t) clip, clips[j], j))
+                return false;
+        return true;
+    }
+
+    // Where a point at source sample `at` goes on a gain line sorted by sample: the point that has that sample, or the first one after it.
+    static std::vector<ClipGainPoint>::iterator gainPointPosition (std::vector<ClipGainPoint>& pts, juce::int64 at)
+    {
+        return std::lower_bound (pts.begin(), pts.end(), at, [] (const ClipGainPoint& p, juce::int64 a) { return p.at < a; });
     }
 
     bool isTrack (int track) const { return juce::isPositiveAndBelow (track, (int) session.tracks.size()); }

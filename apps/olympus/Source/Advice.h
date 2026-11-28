@@ -13,17 +13,17 @@ namespace olympus
 inline const char* guideTitle() { return "Olympus"; }
 inline const char* guideText()
 {
-    return "Olympus is a basic DAW for the Pantheon plugins and for any VST3 (on macOS also Audio Unit) plugin the scan finds.\n\n"
-           "It is for arranging audio and MIDI on a timeline: IMPORT AUDIO, or drop files on the window, puts each file on a track at the playhead; "
+    return "Olympus Studio is a multitrack studio for the Pantheon plugins and for any VST3 (on macOS also Audio Unit) plugin the scan finds.\n\n"
+           "It is for arranging audio and MIDI on a timeline: IMPORT AUDIO, or drop files on the window, puts each file on a track at the playhead (a dropped .mid becomes new MIDI tracks at the drop point); "
            "+ MIDI adds a MIDI track with the built-in synth (double-click a MIDI clip for the Piano Roll and Velocity Lane). Drag clips to move them, "
-           "edges to trim them, S splits at the playhead. Toggle AUTO on a track header for track volume, pan or plugin parameter automation curves. "
-           "Set the tempo, the grid, markers and a loop. Each track has a chain of plugins (FX), a fader and a pan. RENDER STEMS writes one WAV per "
+           "edges to trim them, S splits at the playhead. A clip on top of another replaces what lies under it, with a short crossfade at its edges (an old project keeps summing them: Layered clips in the lane's menu); G shows each clip's gain line: click to add a point, drag it, Alt-click to remove it. Toggle AUTO on a track header for track volume, pan or plugin parameter automation curves; a lane's mode button (READ, TOUCH, LATCH, WRITE) records the fader, pan or plugin control while the transport plays (TOUCH while held, LATCH from the first touch until stop, WRITE from play until stop, then TOUCH). "
+           "Set the tempo, the grid, markers and a loop. Each track has a chain of plugins (FX), a fader and a pan. Tracks in a group move together (fader, mute, solo, arm); hold Alt to move one alone, and the group's VCA fader in the mixer scales them all. RENDER STEMS writes one WAV per "
            "track and the mix; EXPORT writes the final mix (mix.wav) alone, without stems or the monitor chain.\n\n"
            "It records from your audio interface: AUDIO chooses the input and the output device. Arm a track (R) and choose its input (IN); REC "
            "(or the R key) records every armed track into a take, one file per track, kept on disk. When you stop, each take is placed on its track, "
-           "earlier by the device's round trip, so it lines up with what you heard.\n\n"
-           "It is not for software input monitoring: hear yourself through your interface's direct monitoring or a zero-latency mix. It does not "
-           "punch in, loop-record or comp takes. It does not time-stretch: audio keeps its own speed, and a "
+           "earlier by the device's round trip, so it lines up with what you heard. Arm a MIDI track and play a keyboard: REC records it into a clip. PUNCH (I and O set its ends at the playhead) trims each take to that range when you stop and needs layered clips; COUNT puts one or two bars of clicks before a take. MON on a track header hears its input with AUTO while the transport is stopped or a take records, and with IN always, after the track's plugins: use headphones.\n\n"
+           "It is not for zero-latency monitoring: MON hears the input after the track's plugins, so hear yourself through your interface's direct monitoring when the delay matters. "
+           "With the loop on and layered clips, REC makes each pass of the loop a take on top of the last, and TAKES on a track header lists the takes as lanes: a drag across one comps a range of it, a click on its label puts it on top. It does not time-stretch: audio keeps its own speed, and a "
            "tempo change moves the grid, not the audio.\n\n"
            "Keys: Space plays and stops, Return rewinds, Home and End go to the start and the end, comma and full stop go to the marker before and "
            "after the playhead, L loops, M adds a marker, R records, Delete removes the selected clip, Cmd+D duplicates it, Cmd+C, Cmd+X and Cmd+V "
@@ -109,6 +109,19 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
                                              + juce::String (1000.0 * t->latency() / (s.sampleRate > 0.0 ? s.sampleRate : 48000.0), 1) + " ms). Playback and stems are aligned for it.");
                 break;
             }
+        // IN monitoring hears the input after the track's chain, so a long chain is heard late (Session::runChain)
+        for (auto& t : s.tracks)
+            if (t->armed && t->monitor == MonitorMode::In && ! t->frozen && ! t->isBus() && ! t->isMidi)
+            {
+                const double rate = s.sampleRate > 0.0 ? s.sampleRate : 48000.0;
+                const int ms = juce::roundToInt (1000.0 * t->latency() / rate);
+                if (ms > 20)
+                {
+                    add (ui::Severity::warning, ("'" + t->name.substring (0, 24) + "': IN monitoring is " + juce::String (ms)
+                                                 + " ms late (plugins). Use AUTO or direct monitoring.").substring (0, ui::kMaxNoteChars));
+                    break;
+                }
+            }
         // the monitor chain: what the headphones hear, never a render (Session::processMonitor)
         if (! s.monitor.empty())
         {
@@ -140,9 +153,9 @@ inline std::vector<ui::Note> adviceFor (const Session& s, const AdviceDevice& de
     if (locked)
     {
         if (s.tracks.empty())
-            add (ui::Severity::info, "No audio yet: IMPORT AUDIO, or drop files on the window, puts them on tracks at the playhead.");
+            add (ui::Severity::info, "No audio yet: IMPORT AUDIO or a drop puts files on tracks at the playhead; a dropped .mid makes MIDI tracks.");
         else if (clips == 0)
-            add (ui::Severity::info, "No audio yet: the tracks are empty. IMPORT AUDIO puts a file at the playhead, or drop one on a lane.");
+            add (ui::Severity::info, "No audio yet: tracks are empty. IMPORT AUDIO puts a file at the playhead; a dropped .mid makes MIDI tracks.");
     }
     // the strip shows the kit's own "plugin" reminder when there is nothing else: Olympus always has a line of its own
     if (notes.empty())

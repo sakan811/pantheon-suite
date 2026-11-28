@@ -8,6 +8,7 @@ namespace olympus::gui
 namespace
 {
 const char* const kAudioWildcard = "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.caf";
+const char* const kImportWildcard = "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.caf;*.mid;*.midi";
 
 // The master fader's tooltip: its current value, so the fader can be read without the mouse on the scale.
 juce::String masterTooltip (double db)
@@ -228,20 +229,78 @@ void PluginWindow::moved()
 // loop's start. Without a loop the playback stops at the end of the audio (the longest track, and the latency of its chains). While a take
 // runs, neither happens: the loop does not wrap and the playhead goes on past the end of the audio. The click with no audio has no end to
 // stop at either: it runs free until the click goes off.
+// Software input monitoring (F6), with the transport not rolling: writes [from, numSamples) of the block with what the monitoring tracks hear.
+// The playhead does not move and no click is played. Each chunk runs the stopped pass and then the headphones' chain, as playback does.
+void MainComponent::Source::monitorFrom (const juce::AudioSourceChannelInfo& info, int from, juce::int64 held)
+{
+    for (int at = from; at < info.numSamples; at += kBlockSize)
+    {
+        const int n = juce::jmin (kBlockSize, info.numSamples - at);
+        chunk.setSize (2, n, false, false, true);
+        owner.session.liveInputOffset = info.startSample + at;
+        owner.session.processMonitoringOnly (chunk, held);
+        owner.session.processMonitor (chunk);
+        for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
+            info.buffer->copyFrom (ch, info.startSample + at, chunk, juce::jmin (ch, 1), 0, n);
+    }
+}
+
 void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
 {
     if (! playing.load())
     {
-        info.clearActiveBufferRegion();
+        // stopped: silence, or the monitoring tracks when there are any (the position stays where it is)
+        if (owner.session.anyMonitoring.load())
+            monitorFrom (info, 0, position.load());
+        else
+        {
+            // nothing plays the notes while no track monitors or is an armed MIDI track: they are dropped now, not kept for a track armed later
+            owner.session.dropLiveMidi (info.numSamples);
+            info.clearActiveBufferRegion();
+        }
         return;
     }
     const bool recording = owner.recorder.isRecording();
-    const juce::int64 start = loopStart.load(), end = loopEnd.load(), audioEnd = endOfAudio.load();
+    // a loop take wraps at its own loop points, fixed at REC (loopRecording); any other take plays on past the loop's end
+    const bool takeLoop = recording && loopRecording.load();
+    const juce::int64 start = takeLoop ? takeLoopStart.load() : loopStart.load();
+    const juce::int64 end = takeLoop ? takeLoopEnd.load() : loopEnd.load();
+    const juce::int64 audioEnd = endOfAudio.load();
     const bool clickOnly = metronomeOn.load() && audioEnd <= 0;
-    const bool wrap = ! recording && loopOn.load() && end > start;
+    // during a take only the REC-time flag wraps it: turning the LOOP off mid-take does not cut the take's passes short
+    const bool wrap = recording ? (loopRecording.load() && end > start) : (loopOn.load() && end > start);
     juce::int64 pos = position.load();
     const juce::int64 loaded = pos;
     int done = 0;
+    // The count-in (F5): the first samples of the block are the click only. They are not played, the position stays where it is, and
+    // countInLeft counts them down (a compare-exchange, so a stop that set it to 0 meanwhile stands). countInReading covers the read of
+    // countInMap, which startRecording waits for. No allocation: the chunk is the preallocated one, cut at kBlockSize.
+    countInReading.store (true);
+    const juce::int64 clickLeft = countInLeft.load();
+    if (clickLeft > 0)
+    {
+        const int k = (int) juce::jmin (clickLeft, (juce::int64) info.numSamples);
+        for (int at = 0; at < k; at += kBlockSize)
+        {
+            const int n = juce::jmin (kBlockSize, k - at);
+            chunk.setSize (2, n, false, false, true);
+            chunk.clear();
+            // the monitored inputs come first, through the chain as playback runs it; the click goes on top of them, as before
+            if (owner.session.anyMonitoring.load())
+            {
+                owner.session.liveInputOffset = info.startSample + at;
+                owner.session.processMonitoringOnly (chunk, loaded);
+                owner.session.processMonitor (chunk);
+            }
+            Session::addMetronomeWith (chunk, countInTotal - clickLeft + at, countInMap, true);
+            for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
+                info.buffer->copyFrom (ch, info.startSample + at, chunk, juce::jmin (ch, 1), 0, n);
+        }
+        done = k;
+        juce::int64 expected = clickLeft;
+        countInLeft.compare_exchange_strong (expected, clickLeft - k);
+    }
+    countInReading.store (false);
     while (done < info.numSamples)
     {
         if (wrap && pos >= end)
@@ -254,6 +313,7 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
         const juce::int64 room = wrap ? end - pos : (recording || clickOnly) ? (juce::int64) info.numSamples : audioEnd - pos;
         const int n = (int) juce::jmin ((juce::int64) juce::jmin (kBlockSize, info.numSamples - done), room);
         chunk.setSize (2, n, false, false, true);
+        owner.session.liveInputOffset = info.startSample + done;   // where this chunk's inputs start in the device block (Session::setLiveInputs)
         owner.session.processBlock (chunk, pos);
         owner.session.processMonitor (chunk); // the headphones' chain: playback only (Session::processMonitor)
         for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
@@ -262,7 +322,13 @@ void MainComponent::Source::getNextAudioBlock (const juce::AudioSourceChannelInf
         done += n;
     }
     if (done < info.numSamples)
-        info.buffer->clear (info.startSample + done, info.numSamples - done);
+    {
+        // the transport stopped at the end of the audio inside this block: the rest is the monitoring tracks, or silence
+        if (owner.session.anyMonitoring.load())
+            monitorFrom (info, done, pos);
+        else
+            info.buffer->clear (info.startSample + done, info.numSamples - done);
+    }
     // The playhead moves on from where this block started, and only from there: a seek or a rate's scaled write that landed while the block
     // was being built is the newer decision, so it stands and this one is dropped (a plain store here would swallow it).
     juce::int64 expected = loaded;
@@ -290,8 +356,23 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
     // and latches it itself, inside the busy scope Recorder::stop() waits for, so a stop cannot come between the write and its start.
     // The blocks that arrive while the take's files open are not written at all; they are counted, so the stop says how much of the head
     // is missing (Recorder::start makes the folder and the headers on this thread's caller, the message thread).
+    // The count-in (F5) is read before the transport runs. Its clicks are not the take's: the meters get them (meterOnly), and what the take
+    // gets is the input after the click, from the block the count-in ends in (the input pointers moved past it; the position is held, so
+    // it is the take's first sample).
+    const juce::int64 left = owner.source.countInLeft.load();
     if (owner.recordStarting.load())
         owner.recorder.countSkippedWhileOpening (n);
+    else if (left >= n)
+        owner.recorder.meterOnly (in, numIn, n);
+    else if (left > 0)
+    {
+        owner.recorder.meterOnly (in, numIn, n);
+        const float* shifted[Recorder::kMaxInputs];
+        const int count = juce::jmin (numIn, Recorder::kMaxInputs);
+        for (int i = 0; i < count; ++i)
+            shifted[i] = in != nullptr && in[i] != nullptr ? in[i] + left : nullptr;
+        owner.recorder.push (shifted, count, (int) (n - left), owner.source.position.load());
+    }
     else
         owner.recorder.push (in, numIn, n, owner.source.position.load());
     if (out == nullptr || numOut <= 0 || hasNullChannel (out, numOut))
@@ -323,8 +404,13 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
                 const int chunk = juce::jmin (n - offset, kBlockSize);
                 if (owner.source.playing.load())   // a stopped transport does not advance, as in the hit branch's getNextAudioBlock
                 {
+                    // a count-in's samples are not played, so the position stays for them (as getNextAudioBlock does)
+                    juce::int64 left = owner.source.countInLeft.load();
+                    const int held = (int) juce::jmin ((juce::int64) chunk, left);
+                    if (held > 0)
+                        owner.source.countInLeft.compare_exchange_strong (left, left - held);
                     juce::int64 expected = owner.source.position.load();
-                    owner.source.position.compare_exchange_strong (expected, expected + chunk);
+                    owner.source.position.compare_exchange_strong (expected, expected + chunk - held);
                 }
                 offset += chunk;
             }
@@ -333,7 +419,20 @@ void MainComponent::DeviceCallback::deviceBlock (const float* const* in, int num
     }
     juce::AudioBuffer<float> buffer (out, numOut, n);
     juce::AudioSourceChannelInfo info (&buffer, 0, n);
-    owner.source.getNextAudioBlock (info);
+    // Software input monitoring (F6): the device's inputs of this block by absolute number, for the transport's monitoring tracks. A stack
+    // array, valid for this block and ended below; nothing is built while no track monitors. The scratch path above writes no output, so it
+    // hands nothing over.
+    if (owner.session.anyMonitoring.load())
+    {
+        const float* byInput[Recorder::kMaxInputs];
+        for (int a = 0; a < Recorder::kMaxInputs; ++a)
+            byInput[a] = owner.recorder.inputFor (in, numIn, a);
+        owner.session.setLiveInputs (byInput, Recorder::kMaxInputs, n);
+        owner.source.getNextAudioBlock (info);
+        owner.session.setLiveInputs (nullptr, 0, 0);
+    }
+    else
+        owner.source.getNextAudioBlock (info);
     // the device's output ceiling: no sample leaves above full scale (the mix is over 1.0 when the master is raised). Only this path is held:
     // the stems and mix.wav are rendered by Session::renderStems and stay float. The master's peak was read before this (Session::processBlock).
     // FloatVectorOperations::clip does not define NaN (SSE turns it into +1.0, full-scale DC), so each sample is limited here: NaN becomes 0,
@@ -481,6 +580,8 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.dialogOpen = &dialogOpen;
     editor.onBeforeStructureChange = [this] { closeTrackEditors(); arrange.clearSelection(); };
     arrange.onSeek = [this] (juce::int64 s) { seek (s); };
+    arrange.automation = &automation;   // the fader and pan drags tell the writer when the control is held
+    mixer.automation = &automation;
     arrange.onStructure = [this] { syncTransport(); updateTitle(); updateTransport(); if (pianoRoll.isVisible()) pianoRoll.refresh(); if (mixer.isVisible()) mixer.refresh(); repaint (noteStrip); };
     arrange.onTrackMenu = [this] (int track) { showTrackMenu (track); };
     arrange.onRemoveTrack = [this] (int track) { removeTrack (track); };
@@ -493,6 +594,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     arrange.onInputMenu = [this] (int track) { showInputMenu (track); };
     arrange.onInstrumentMenu = [this] (int track) { showInstrumentMenu (track); };
     arrange.onLocateMissingAudio = [this] (ClipRef ref) { locateMissingAudio (ref); };
+    arrange.onExportMidiClip = [this] (MidiClipRef ref) { if (! refuseWhileBusy()) chooseAndExportMidi (ref.track, ref.clip); };
     arrange.onRescanMissingAudio = [this] { rescanMissingAudio(); };
     arrange.onOpenMidiClip = [this] (MidiClipRef ref)
     {
@@ -599,12 +701,14 @@ MainComponent::MainComponent (Options options) : opts (options)
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &addBusButton, &importButton, &pluginsButton, &renderButton, &exportButton, &audioButton,
                      &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton, &zoomFitButton })
         addAndMakeVisible (*b);
-    for (auto* b : { &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &mixerButton })
+    for (auto* b : { &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &mixerButton, &punchButton })
     {
         b->setClickingTogglesState (false);   // the session says what state they are in: see updateTransport
         addAndMakeVisible (*b);
     }
     recordButton.lamp = colours::bad;
+    punchButton.lamp = colours::bad;      // a punch is a red lamp, as the record is
+    addAndMakeVisible (countInButton);
     addAndMakeVisible (guideButton);
     addAndMakeVisible (bpmField);
     addAndMakeVisible (signatureBox);
@@ -645,7 +749,7 @@ MainComponent::MainComponent (Options options) : opts (options)
     for (auto* c : std::initializer_list<juce::Component*> { &newButton, &openButton, &saveButton, &saveAsButton, &addTrackButton, &addMidiButton, &addBusButton, &importButton, &pluginsButton,
                                                              &renderButton, &exportButton, &audioButton, &rewindButton, &undoButton, &redoButton, &zoomOutButton, &zoomInButton,
                                                              &zoomFitButton, &playButton, &recordButton, &loopButton, &metronomeButton, &snapButton, &mixerButton, &guideButton,
-                                                             &signatureBox, &gridBox })
+                                                             &signatureBox, &gridBox, &punchButton, &countInButton })
         c->setWantsKeyboardFocus (false);
 
     newButton.onClick = [this] { askToDiscard ("Start a new project and lose them?", [this] { newProject(); }); };
@@ -665,6 +769,8 @@ MainComponent::MainComponent (Options options) : opts (options)
     recordButton.onClick = [this] { toggleRecord(); };
     loopButton.onClick = [this] { toggleLoop(); };
     metronomeButton.onClick = [this] { toggleMetronome(); };
+    punchButton.onClick = [this] { togglePunch(); };
+    countInButton.onClick = [this] { cycleCountIn(); };
     snapButton.onClick = [this] { editor.setSnap (! session.snapOn); updateTransport(); if (pianoRoll.isVisible()) pianoRoll.refresh(); };
     undoButton.onClick = [this] { undoEdit(); };
     redoButton.onClick = [this] { redoEdit(); };
@@ -689,6 +795,8 @@ MainComponent::MainComponent (Options options) : opts (options)
     rewindButton.setTooltip ("Back to the loop's start when the loop is on, else to the start (Return).");
     loopButton.setTooltip ("Loop the region between the loop markers (L). A loop with no range yet covers the first four bars.");
     metronomeButton.setTooltip ("A click on every beat, a higher one on the bar. Not in the stems. (Undoable.)");
+    punchButton.setTooltip ("Punch: a take is recorded from the punch-in to the punch-out and trimmed to that range at the stop (I sets the punch-in, O the punch-out). Needs layered clips. (Undoable.)");
+    countInButton.setTooltip ("Clicks before a take: 0, 1 or 2 bars at the tempo of the record point, the click only; the take starts when they end. Saved with the settings.");
     snapButton.setTooltip ("Snap moves and edges to the grid.");
     undoButton.setTooltip ("Undo the last edit (Cmd+Z).");
     redoButton.setTooltip ("Redo (Shift+Cmd+Z).");
@@ -734,6 +842,8 @@ MainComponent::MainComponent (Options options) : opts (options)
         const auto error = deviceManager.initialise (32, 2, saved.get(), true);
         deviceManager.addAudioCallback (&io);
         deviceManager.addChangeListener (this);
+        enableMidiInputs();
+        deviceManager.addMidiInputDeviceCallback ({}, this);   // the hardware keyboards (handleIncomingMidiMessage)
         if (error.isNotEmpty())
             showError ("The audio device could not be opened: " + error);
         readDevice();
@@ -780,9 +890,11 @@ MainComponent::~MainComponent()
     // a take still running keeps its files (Record.h: the takes are never deleted); the project is going away with the window
     if (recorder.isRecording())
         recorder.stop();
+    session.midiRecorder.stop();
     session.recording = false;
     if (opts.audioDevice)
     {
+        deviceManager.removeMidiInputDeviceCallback ({}, this);
         deviceManager.removeChangeListener (this);
         deviceManager.removeAudioCallback (&io);
     }
@@ -930,6 +1042,9 @@ void MainComponent::updateTransport()
     recordButton.setToggleState (recorder.isRecording(), juce::dontSendNotification);
     loopButton.setToggleState (session.loopOn, juce::dontSendNotification);
     metronomeButton.setToggleState (session.metronomeOn, juce::dontSendNotification);
+    punchButton.setToggleState (session.punchOn, juce::dontSendNotification);
+    if (countInButton.getButtonText() != "COUNT " + juce::String (settings.countInBars))
+        countInButton.setButtonText ("COUNT " + juce::String (settings.countInBars));
     snapButton.setToggleState (session.snapOn, juce::dontSendNotification);
     mixerButton.setToggleState (mixer.isVisible(), juce::dontSendNotification);
     if (gridBox.getSelectedItemIndex() != (int) session.grid) gridBox.setSelectedItemIndex ((int) session.grid, juce::dontSendNotification);
@@ -1130,6 +1245,32 @@ void MainComponent::deviceChanged()
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     deviceChanged();
+    if (opts.audioDevice)
+        enableMidiInputs();   // the device list may have changed: a new MIDI input is switched on too
+}
+
+// Every MIDI input the device manager lists is switched on, so a keyboard plugged in later is heard after the list changes (changeListenerCallback).
+void MainComponent::enableMidiInputs()
+{
+    for (const auto& info : juce::MidiInput::getAvailableDevices())
+        deviceManager.setMidiInputDeviceEnabled (info.identifier, true);
+}
+
+// MIDI thread. A note on or off, a controller or a pitch bend (at most three bytes) goes into the input FIFO with its arrival time: the
+// producers are the MIDI threads (several devices at once), so they take the FIFO's producer lock; the audio thread takes none. Nothing is
+// allocated here.
+void MainComponent::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& message)
+{
+    const auto* d = message.getRawData();
+    const int size = message.getRawDataSize();
+    if (d == nullptr || size < 2 || size > 3)
+        return;
+    const int kind = d[0] & 0xF0;
+    if (kind != 0x80 && kind != 0x90 && kind != 0xB0 && kind != 0xE0)
+        return;
+    const std::uint8_t data2 = size == 3 ? d[2] : 0;
+    const juce::SpinLock::ScopedLockType producer (session.inputMidiLock);
+    session.inputMidiFifo.push (MidiFifo::MidiEvent { d[0], d[1], data2, 0, juce::Time::getMillisecondCounterHiRes() });
 }
 
 // The device's settings as XML text, saved with the other settings, so the device comes back as it was chosen.
@@ -1156,7 +1297,8 @@ void MainComponent::showAudioSettings()
     {
         // the inputs the dialog may switch on are exactly the ones the recorder meters and the IN menu offers (Recorder::kMaxInputs), so no
         // input can be chosen that a take then refuses
-        audioDialog = std::make_unique<AudioDialog> (std::make_unique<juce::AudioDeviceSelectorComponent> (deviceManager, 0, Recorder::kMaxInputs, 0, 2, false, false, false, false));
+        // the MIDI input switches are shown too (showMidiInputOptions): the keyboards a MIDI track records from are chosen here
+        audioDialog = std::make_unique<AudioDialog> (std::make_unique<juce::AudioDeviceSelectorComponent> (deviceManager, 0, Recorder::kMaxInputs, 0, 2, true, false, false, false));
         audioDialog->setLookAndFeel (&look);
         audioDialog->centreAroundComponent (this, audioDialog->getWidth(), audioDialog->getHeight());
     }
@@ -1210,6 +1352,8 @@ void MainComponent::setTakeLatency()
         chains = session.maxLatency();
     }
     takeLatency = (juce::int64) device.inputLatency + device.outputLatency + settings.extraLatencySamples + session.monitorLatency() + chains;
+    // a MIDI take is heard through the outputs, not the audio inputs: the input latency is not in its placement
+    takeMidiLatency = (juce::int64) device.outputLatency + settings.extraLatencySamples + session.monitorLatency() + chains;
 }
 
 bool MainComponent::startRecording()
@@ -1233,18 +1377,103 @@ bool MainComponent::startRecording()
         showError (error);
         return false;
     }
+    // Punch (F5): the range is fixed now and the transport is moved to two bars before its start (at the tempo there), so the take has a head
+    // to hear; the take records from there, and the stop trims it to the range. The seek comes before the take starts (a take refuses it).
+    takePunch.reset();
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (session.punchOn && session.punchEnd > session.punchStart)
+            takePunch = std::make_pair (session.punchStart, session.punchEnd);
+    }
+    // Loop recording (F8): decided now and fixed for the take. Each pass of the loop becomes a take, so it needs layers, and the loop is not
+    // recorded with a punch (the punch trims a take to its range; a loop has no such range). Its loop points are the take's own.
+    takeLoop.reset();
+    juce::int64 loopStartAtRec = 0, loopEndAtRec = 0;
+    bool loopRec = false, layeredAtRec = false;
+    {
+        const juce::ScopedLock sl (session.lock);
+        loopRec = session.loopOn && session.loopEnd > session.loopStart && ! takePunch.has_value();
+        loopStartAtRec = session.loopStart;
+        loopEndAtRec = session.loopEnd;
+        layeredAtRec = session.layered;
+    }
+    if (loopRec && ! layeredAtRec)
+    {
+        // refused before the playhead moves, so it is where it was
+        takePunch.reset();
+        showError ("Loop recording needs layered clips (the lane menu's Layered clips): each pass is a take on top of the last.");
+        return false;
+    }
+    // where the playhead was before the pre-roll seek: a refusal after the seek puts it back there
+    const auto heldPosition = position();
+    if (takePunch.has_value())
+    {
+        const double beatsPerBar = session.tempo.numerator * 4.0 / session.tempo.denominator;
+        const double preRollBeats = std::max (0.0, session.tempo.samplesToBeats ((double) takePunch->first) - 2.0 * beatsPerBar);
+        seek ((juce::int64) std::llround (session.tempo.beatsToSamples (preRollBeats)));
+    }
+    else if (loopRec && (heldPosition < loopStartAtRec || heldPosition >= loopEndAtRec))
+    {
+        // the take begins inside the loop: the playhead is moved to its start first, as the punch's pre-roll does
+        seek (loopStartAtRec);
+    }
+    if (loopRec)
+        takeLoop = std::make_pair (loopStartAtRec, loopEndAtRec);
     takeFrom = position();
     setTakeLatency();
     syncTransport();
     session.prepare (false);
+    // the audio thread reads the take's loop points with loopRecording: they are stored before the recorder starts (beginRecording)
+    source.takeLoopStart.store (loopStartAtRec);
+    source.takeLoopEnd.store (loopEndAtRec);
+    source.loopRecording.store (loopRec);
     // recordStarting: the blocks that arrive until the files are open are counted as skipped, not written. Recorder::start clears this
     // take's start and its counters and raises the flag itself, after the clear and before it opens the files, so a block counted in the
     // window is not erased by the count; it is let go of here, once the take began or was refused.
     if (! beginRecording (recorder, session, recordingFolder(), device.rate, error, &recordStarting))
     {
         recordStarting = false;
+        takePunch.reset();
+        takeLoop.reset();
+        source.loopRecording.store (false);
+        seek (heldPosition);
         showError (error);
         return false;
+    }
+    if (settings.countInBars > 0)
+    {
+        // The count-in (F5): a copy of the session's tempo reduced to the tempo at the record position, from beat 0. The map is written
+        // before countInLeft is stored (which the audio thread reads first), and not while the audio thread is inside the click.
+        const int bars = juce::jlimit (1, 2, settings.countInBars);
+        TempoMap clickMap;
+        {
+            const juce::ScopedLock sl (session.lock);
+            clickMap = session.tempo;
+        }
+        const double bpm = clickMap.bpmAtBeat (clickMap.samplesToBeats ((double) takeFrom));
+        clickMap.points.assign (1, TempoPoint { 0.0, bpm });
+        const double beatsPerBar = clickMap.numerator * 4.0 / clickMap.denominator;
+        const auto total = (juce::int64) std::llround (clickMap.beatsToSamples (bars * beatsPerBar));
+        // The wait is bounded (500 ms of one-millisecond sleeps). The audio thread sets countInReading only inside the one callback that
+        // reads the map, so an expiry cannot normally happen; if it does, the take is stopped and REC is refused.
+        int waited = 0;
+        while (source.countInReading.load() && waited < 500)
+        {
+            juce::Thread::sleep (1);
+            ++waited;
+        }
+        if (source.countInReading.load())
+        {
+            recordStarting = false;
+            stopRecording();
+            takePunch.reset();
+            seek (heldPosition);
+            showError ("The audio device did not answer: try REC again.");
+            return false;
+        }
+        source.countInMap = clickMap;
+        source.countInTotal = total;
+        source.countInLeft.store (total);
     }
     source.playing = true;
     session.recording = true;
@@ -1253,9 +1482,14 @@ bool MainComponent::startRecording()
     {
         const juce::ScopedLock sl (session.lock);
         arrange.recordingTracks.clear();
+        takeMidiTracks.clear();
         for (int i = 0; i < (int) session.tracks.size(); ++i)
             if (session.tracks[(size_t) i]->armed)
+            {
                 arrange.recordingTracks.push_back (i);
+                if (session.tracks[(size_t) i]->isMidi && ! session.tracks[(size_t) i]->isBus())
+                    takeMidiTracks.push_back (i);
+            }
     }
     arrange.recordingFrom = arrange.recordingTo = (double) takeFrom;
     updateTransport();
@@ -1275,28 +1509,63 @@ void MainComponent::stopRecording (const juce::String& problem)
 {
     if (! recorder.isRecording())
         return;
+    source.countInLeft.store (0);   // a stop during the count-in: the take has no frames, so it is no clip and no error
     source.playing = false;
+    // the transport's position at the stop: a note still held ends there (finishRecordingTakes)
+    const juce::int64 stopAt = position();
     const auto takes = recorder.stop();
+    source.loopRecording.store (false);   // the take is over: the transport's wrap is its loop again, which is off while not recording
     session.recording = false;
+    // the MIDI take: its events are stopped and read here, on the message thread (MidiRecorder::stop waits for a push in flight)
+    session.midiRecorder.stop();
+    std::vector<MidiRecorder::Event> midi;
+    session.midiRecorder.drainAll (midi);
+    const juce::int64 midiLost = session.midiRecorder.lostEvents();
     // where the take really began (the playhead of its first block, which stop() waited for) and how much of its head never got written
     // because the files were still opening. The first is -1 when no block ran, the second 0 when the window cost nothing.
     const juce::int64 heard = recorder.takeStartSample();
     const juce::int64 headSkipped = recorder.samplesSkippedWhileOpening();
-    finishRecordingTakes (takes, heard, headSkipped, problem);
+    finishRecordingTakes (takes, heard, headSkipped, problem, midi, midiLost, stopAt);
 }
 
 void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>& takes, juce::int64 heard, juce::int64 headSkipped,
-                                          const juce::String& problem)
+                                          const juce::String& problem, const std::vector<MidiRecorder::Event>& midi, juce::int64 midiLost,
+                                          juce::int64 stopAt)
 {
     const juce::int64 start = heard >= 0 ? heard : takeFrom;
     const juce::int64 begin = juce::jmax ((juce::int64) 0, start - takeLatency);
 
     juce::String error;
     std::vector<ClipRef> placed;
-    if (! finishRecording (takes, start, (int) takeLatency, editor, error, &placed) && error.isEmpty())
-        error = "A take could not be placed on its track.";
+    std::vector<MidiClipRef> placedMidi;
+    // the audio takes and the MIDI clips are one undo step: the gesture is open over both
+    {
+        Editor::Gesture gesture (editor, "Record");
+        // a loop take's passes are 100 ms at the least: a shorter pass is too little to hear (loopPasses drops it)
+        const auto minPass = (juce::int64) std::llround (device.rate * 0.1);
+        if (! finishRecording (takes, start, (int) takeLatency, editor, error, &placed, takePunch ? &*takePunch : nullptr,
+                               takeLoop ? &*takeLoop : nullptr, minPass) && error.isEmpty())
+            error = "A take could not be placed on its track.";
+        if (! midi.empty())
+        {
+            TempoMap map;
+            {
+                const juce::ScopedLock sl (session.lock);
+                map = session.tempo;
+            }
+            juce::String midiError;
+            const juce::int64 wrapAt = takeLoop ? takeLoop->second : -1;
+            if (! finishMidiRecording (midi, stopAt, takeMidiLatency, takeMidiTracks, map, editor, midiError, &placedMidi, takePunch ? &*takePunch : nullptr, wrapAt) && error.isEmpty())
+                error = midiError;
+        }
+    }
+    takePunch.reset();
+    takeLoop.reset();
+    takeMidiTracks.clear();
     for (const auto& take : takes)
         if (take.frames > 0) { session.dirty = true; break; }   // a take that placed nothing changes nothing
+    if (! placedMidi.empty())
+        session.dirty = true;
 
     // the clips the takes actually became, in the order of the takes: not any clip that happens to start at the same sample, which would
     // win the selection when a take was skipped and scroll the view to a clip the user never recorded
@@ -1315,6 +1584,10 @@ void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>&
     arrange.recordingTracks.clear();
     if (first.valid())
         arrange.selected = first;
+    else if (! placedMidi.empty())
+    {
+        arrange.selectedMidi = placedMidi.front();   // a MIDI take: its clip is the one selected
+    }
     arrange.scrollTo (begin);
     syncTransport();
     refreshNow();
@@ -1336,6 +1609,9 @@ void MainComponent::finishRecordingTakes (const std::vector<Recorder::Finished>&
         if (take.lost > 0 && validTrack) lossTracks.add (trackName);
         if (take.failed) problems.add ("The take could not be written: " + take.file.getFullPathName());
     }
+    // the MIDI events the take had no room for (MidiRecorder's ring): the notes after them are missing
+    if (midiLost > 0)
+        problems.add (juce::String (midiLost) + " MIDI events were lost because the take had no room for them: the notes they made are missing.");
     if (lost > 0)
     {
         const double ms = device.rate > 0.0 ? 1000.0 * (double) lost / device.rate : 0.0;
@@ -1606,6 +1882,14 @@ void MainComponent::importFiles (const juce::StringArray& files, int track, juce
     for (const auto& f : files)
     {
         const juce::File file (f);
+        // a MIDI file always becomes new tracks at `at`: its tracks are its own, not a clip to place on one
+        if (file.hasFileExtension ("mid;midi"))
+        {
+            juce::String midiError;
+            if (! editor.importMidiFile (file, at, -1, false, midiError))
+                problems.add (midiError);
+            continue;
+        }
         const bool fresh = track < 0;
         int target = track;
         if (fresh)
@@ -1695,6 +1979,69 @@ void MainComponent::toggleMetronome()
 {
     editor.setMetronome (! session.metronomeOn);
     syncTransport();   // the callback's copy of the click follows the switch, so a click-only playback stops when it goes off
+    updateTransport();
+}
+
+// The PUNCH button (F5). Turned on with no range yet, the punch takes the loop's range, or else one bar from the playhead.
+void MainComponent::togglePunch()
+{
+    const bool on = ! session.punchOn;
+    juce::int64 start = session.punchStart, end = session.punchEnd;
+    if (on && end <= start)
+    {
+        if (session.loopOn && session.loopEnd > session.loopStart)
+        {
+            start = session.loopStart;
+            end = session.loopEnd;
+        }
+        else
+        {
+            start = position();
+            const double beat = session.tempo.samplesToBeats ((double) start);
+            end = (juce::int64) std::llround (session.tempo.beatsToSamples (beat + session.tempo.beatsPerBar()));
+        }
+    }
+    juce::String error;
+    if (! editor.setPunch (on, start, end, error))
+        showError (error);
+    updateTransport();
+    arrange.repaint();
+}
+
+// I and O (F5): the punch-in or the punch-out at the playhead. The other edge stays where it is when it is still on the right side of the
+// playhead; when it is not, it moves one bar away from the playhead on that side.
+void MainComponent::setPunchEdge (bool out)
+{
+    const juce::int64 at = position();
+    juce::int64 start = session.punchStart, end = session.punchEnd;
+    const double bar = session.tempo.beatsPerBar();
+    const auto barAfter = [this, bar] (juce::int64 from) { return (juce::int64) std::llround (session.tempo.beatsToSamples (session.tempo.samplesToBeats ((double) from) + bar)); };
+    const auto barBefore = [this, bar] (juce::int64 from)
+    {
+        return (juce::int64) std::llround (session.tempo.beatsToSamples (std::max (0.0, session.tempo.samplesToBeats ((double) from) - bar)));
+    };
+    if (out)
+    {
+        end = at;
+        if (start >= at) start = barBefore (at);
+    }
+    else
+    {
+        start = at;
+        if (end <= at) end = barAfter (at);
+    }
+    juce::String error;
+    if (! editor.setPunch (session.punchOn, start, end, error))
+        showError (error);
+    updateTransport();
+    arrange.repaint();
+}
+
+// The COUNT-IN button (F5): 0, then 1, then 2 bars of clicks before a take. A preference of the machine: saved with the settings.
+void MainComponent::cycleCountIn()
+{
+    settings.countInBars = (settings.countInBars + 1) % 3;
+    settings.save (opts.settingsFile);
     updateTransport();
 }
 
@@ -1848,6 +2195,7 @@ void MainComponent::chooseAndOpen()
 
 void MainComponent::chooseAndImport()
 {
+    if (refuseWhileBusy()) return;
     const auto at = position();
     if (dialogOpen) return;
     dialogOpen = true;
@@ -1863,7 +2211,7 @@ void MainComponent::chooseAndImport()
         chooseImportFiles (start, std::move (finish));
         return;
     }
-    chooser = std::make_unique<juce::FileChooser> ("Import audio", start, kAudioWildcard);
+    chooser = std::make_unique<juce::FileChooser> ("Import audio", start, kImportWildcard);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
                           [finishCb = std::move (finish)] (const juce::FileChooser& fc)
                           {
@@ -1998,16 +2346,24 @@ bool MainComponent::askRenderDialog (RenderOptions& options)
     return true;
 }
 
-bool MainComponent::askExportDialog (RenderOptions& options)
+bool MainComponent::askExportDialog (RenderOptions& options, bool& exportMidi)
 {
+    exportMidi = false;
     juce::AlertWindow box ("Export final audio",
                            "Writes the final mix (mix.wav) with the master gain. No stems are written, and the monitor/headphone chain is never rendered.",
                            juce::AlertWindow::NoIcon);
     box.addComboBox ("bits", { "32-bit float", "24-bit", "16-bit" }, "Bit depth:");
     box.getComboBoxComponent ("bits")->setSelectedItemIndex (options.bits == 16 ? 2 : options.bits == 24 ? 1 : 0, juce::dontSendNotification);
     box.addButton ("Export", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    box.addButton ("Export all MIDI...", 2);
     box.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    if (box.runModalLoop() != 1)
+    const int answer = box.runModalLoop();
+    if (answer == 2)
+    {
+        exportMidi = true;
+        return false;
+    }
+    if (answer != 1)
         return false;
     const int index = box.getComboBoxComponent ("bits")->getSelectedItemIndex();
     options.bits = index == 2 ? 16 : index == 1 ? 24 : 32;
@@ -2023,6 +2379,7 @@ void MainComponent::runRenderJob (const juce::File& folder, RenderOptions choice
     // the message thread stops the transport, closes the tracks' plugin windows and prepares plugins for offline
     // rendering before the worker starts: a window or prepare call is never run on the worker
     source.playing = false;
+    automation.stop(); // an open pass ends here: its lanes play again, so the render takes their automation
     closeTrackEditors();
     session.prepare (true);
     struct RestoreRealtime { Session& s; ~RestoreRealtime() { s.prepare (false); } } restoreRealtime { session };
@@ -2110,9 +2467,15 @@ void MainComponent::chooseAndExport()
     choice.writeStems = false;
     choice.writeMix = true;
     bool chosen = true;
+    bool exportMidi = false;
     {
         const DialogBusy busy (dialogOpen);
-        chosen = chooseRenderOptions ? chooseRenderOptions (choice) : askExportDialog (choice);
+        chosen = chooseRenderOptions ? chooseRenderOptions (choice) : askExportDialog (choice, exportMidi);
+    }
+    if (exportMidi)
+    {
+        chooseAndExportMidi (-1, -1);
+        return;
     }
     if (! chosen)
         return;
@@ -2122,6 +2485,39 @@ void MainComponent::chooseAndExport()
     settings.save (opts.settingsFile);
     const auto start = session.projectFile != juce::File() ? session.projectFile.getParentDirectory() : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
     launchRenderChooser ("Export final audio into this folder", "Exporting final audio", start, choice);
+}
+
+// Standard MIDI File export: the chooser names the file after the clip or track, then Editor::exportMidi writes it (not an undo step).
+void MainComponent::chooseAndExportMidi (int track, int clip)
+{
+    if (dialogOpen) return;
+    juce::String name = "Olympus MIDI";
+    {
+        const juce::ScopedLock sl (session.lock);
+        if (juce::isPositiveAndBelow (track, (int) session.tracks.size()))
+        {
+            const auto& t = *session.tracks[(size_t) track];
+            name = t.name;
+            if (clip >= 0 && juce::isPositiveAndBelow (clip, (int) t.midiClips.size()) && t.midiClips[(size_t) clip].name.isNotEmpty())
+                name = t.midiClips[(size_t) clip].name;
+        }
+    }
+    const auto start = session.projectFile != juce::File() ? session.projectFile.getParentDirectory() : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    dialogOpen = true;
+    chooser = std::make_unique<juce::FileChooser> (clip >= 0 ? "Export MIDI clip" : track >= 0 ? "Export track as MIDI" : "Export all MIDI",
+                                                   start.getChildFile (juce::File::createLegalFileName (name) + ".mid"), "*.mid;*.midi");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [safe = juce::Component::SafePointer<MainComponent> (this), track, clip] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr) return;
+                              safe->dialogOpen = false;
+                              auto file = fc.getResult();
+                              if (file == juce::File()) return;
+                              if (! file.hasFileExtension ("mid;midi")) file = file.withFileExtension ("mid");
+                              juce::String error;
+                              if (! safe->editor.exportMidi (file, track, clip, error))
+                                  safe->showError (error);
+                          });
 }
 
 // After a render: a cancel is quiet (its files are gone); a failure is shown; a success names the folder and the files and reveals it.
@@ -2327,6 +2723,7 @@ void MainComponent::showTrackMenu (int track)
     juce::PopupMenu menu;
     bool frozen = false;
     bool isBus = false;
+    bool isMidi = false;
     {
         const juce::ScopedTryLock sl (session.lock);
         if (! sl.isLocked())
@@ -2336,6 +2733,7 @@ void MainComponent::showTrackMenu (int track)
         const auto& trk = *session.tracks[(size_t) track];
         frozen = trk.frozen;
         isBus = trk.isBus();
+        isMidi = trk.isMidi;
         const auto& chain = trk.chain;
         const int count = (int) chain.size();
 
@@ -2541,6 +2939,14 @@ void MainComponent::showTrackMenu (int track)
                     safe->showError (error);
             }
             safe->requestRefresh();
+        });
+    }
+    if (isMidi)
+    {
+        menu.addSeparator();
+        menu.addItem ("Export track as MIDI...", [safe, track]
+        {
+            if (safe != nullptr && ! safe->refuseWhileBusy()) safe->chooseAndExportMidi (track, -1);
         });
     }
     menu.showMenuAsync (juce::PopupMenu::Options());
@@ -3407,6 +3813,7 @@ void MainComponent::timerCallback()
     syncPlayhead();
     arrange.showInputLevels = ! isPlaying() || recorder.isRecording();
     updateRecording();
+    automation.tick (position(), isPlaying()); // the automation writer: a no-op while a render runs
     if (mixer.isVisible())
         mixer.tickMeters();
     updateMaster (juce::Time::getMillisecondCounterHiRes());   // the master's meter, peak read-out and CLIP: the only reader of the master's peaks
@@ -3504,6 +3911,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (is ('s')) { syncPlayhead(); arrange.splitAtPlayhead(); return true; }
     if (is ('m')) { syncPlayhead(); arrange.addMarkerAtPlayhead(); return true; }
     if (is ('l')) { toggleLoop(); return true; }
+    if (is ('i')) { setPunchEdge (false); return true; }
+    if (is ('o')) { setPunchEdge (true); return true; }
     if (is ('+') || is ('=')) { zoomBy (1.5); return true; }
     if (is ('-')) { zoomBy (1.0 / 1.5); return true; }
     return false;
@@ -3541,22 +3950,24 @@ void MainComponent::resized()
     audioButton.setBounds (x, rowA, 68, h);
     guideButton.setBounds (w - kMargin - 70, rowA, 70, h);
 
-    // row B: the transport, then the zoom
-    x = 290;
+    // row B: the transport, then the zoom. It ends at 1258 px, inside the 1280 px design width (the nameplate ends at 266).
+    x = 280;
     rewindButton.setBounds (x, rowB, 34, hb);       x += 40;
-    playButton.setBounds (x, rowB, 66, hb);         x += 72;
-    recordButton.setBounds (x, rowB, 60, hb);       x += 66;
-    loopButton.setBounds (x, rowB, 60, hb);         x += 66;
-    metronomeButton.setBounds (x, rowB, 64, hb);    x += 70;
-    bpmField.setBounds (x, rowB, 70, hb);           x += 76;
-    signatureBox.setBounds (x, rowB, 66, hb);       x += 72;
-    snapButton.setBounds (x, rowB, 56, hb);         x += 62;
-    gridBox.setBounds (x, rowB, 84, hb);            x += 90;
-    undoButton.setBounds (x, rowB, 54, hb);         x += 60;
-    redoButton.setBounds (x, rowB, 54, hb);         x += 60;
-    zoomOutButton.setBounds (x, rowB, 30, hb);      x += 36;
-    zoomInButton.setBounds (x, rowB, 30, hb);       x += 36;
-    zoomFitButton.setBounds (x, rowB, 44, hb);      x += 50;
+    playButton.setBounds (x, rowB, 66, hb);         x += 70;
+    recordButton.setBounds (x, rowB, 60, hb);       x += 64;
+    loopButton.setBounds (x, rowB, 60, hb);         x += 64;
+    metronomeButton.setBounds (x, rowB, 56, hb);    x += 58;
+    countInButton.setBounds (x, rowB, 72, hb);      x += 76;
+    punchButton.setBounds (x, rowB, 60, hb);        x += 64;
+    bpmField.setBounds (x, rowB, 60, hb);           x += 66;
+    signatureBox.setBounds (x, rowB, 62, hb);       x += 66;
+    snapButton.setBounds (x, rowB, 52, hb);         x += 56;
+    gridBox.setBounds (x, rowB, 76, hb);            x += 82;
+    undoButton.setBounds (x, rowB, 50, hb);         x += 54;
+    redoButton.setBounds (x, rowB, 50, hb);         x += 54;
+    zoomOutButton.setBounds (x, rowB, 28, hb);      x += 32;
+    zoomInButton.setBounds (x, rowB, 28, hb);       x += 32;
+    zoomFitButton.setBounds (x, rowB, 40, hb);      x += 44;
     mixerButton.setBounds (x, rowB, 56, hb);
 
     // row C: the device's summary, the take's time or the track count, and the position
@@ -3612,7 +4023,7 @@ void MainComponent::paint (juce::Graphics& g)
     if (clip.intersects (juce::Rectangle<int> (0, 0, getWidth(), kHeaderHeight)))
         ui::hw::drawHeaderPlate (g, juce::Rectangle<float> (0.0f, 0.0f, (float) getWidth(), (float) kHeaderHeight - 6.0f));
     if (clip.intersects (juce::Rectangle<int> (kMargin, 8, 250, 66)))
-        ui::hw::drawNameplate (g, { kMargin, 8, 250, 66 }, "Olympus", "Basic DAW", "Pantheon plugins", ! session.tracks.empty(), 24.0f);
+        ui::hw::drawNameplate (g, { kMargin, 8, 250, 66 }, "Olympus", "Studio", "Pantheon plugins", ! session.tracks.empty(), 24.0f);
 
     // the position read-out, on glass
     if (clip.intersects (positionBox))

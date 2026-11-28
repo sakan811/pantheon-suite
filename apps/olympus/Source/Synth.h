@@ -4,11 +4,14 @@
 #pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_core/juce_core.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace olympus
 {
@@ -297,7 +300,8 @@ private:
     }
 };
 
-// Lock-free single-producer / single-consumer ring buffer for live 3-byte MIDI events.
+// Lock-free single-producer / single-consumer ring buffer for live 3-byte MIDI events. A producer that is not the only one (the hardware input,
+// several devices on several threads) holds its own lock around push(); the consumer (the audio thread) never does.
 class MidiFifo
 {
 public:
@@ -309,6 +313,9 @@ public:
         std::uint8_t data1 = 0;
         std::uint8_t data2 = 0;
         int sampleOffset = 0;
+        // juce::Time::getMillisecondCounterHiRes() when the event arrived; 0 = no time, and sampleOffset is used as it is. With a time, drain()
+        // places the event by how long ago it arrived (the same rule as juce::MidiMessageCollector).
+        double timeMs = 0.0;
     };
 
     bool push (const MidiEvent& ev) noexcept
@@ -322,7 +329,7 @@ public:
 
     bool push (std::uint8_t status, std::uint8_t data1, std::uint8_t data2, int sampleOffset = 0) noexcept
     {
-        return push (MidiEvent { status, data1, data2, sampleOffset });
+        return push (MidiEvent { status, data1, data2, sampleOffset, 0.0 });
     }
 
     bool pop (MidiEvent& out) noexcept
@@ -334,7 +341,10 @@ public:
         return true;
     }
 
-    int drain (juce::MidiBuffer& dest, int blockNumSamples)
+    // Audio thread. Every queued event goes into `dest` at its offset in a block of `blockNumSamples`. An event with a time is placed
+    // `(nowMs - timeMs) * sampleRate / 1000` samples before the block's end (clamped into the block); one without a time keeps its offset.
+    // `sampleRate` 0 places nothing by time.
+    int drain (juce::MidiBuffer& dest, int blockNumSamples, double sampleRate, double nowMs)
     {
         const int ready = fifo.getNumReady();
         if (ready <= 0)
@@ -350,8 +360,14 @@ public:
             {
                 const auto& ev = events[static_cast<size_t> (start + i)];
                 const std::uint8_t msg[3] = { ev.status, ev.data1, ev.data2 };
-                const int offset = std::clamp (ev.sampleOffset, 0, maxOffset);
-                dest.addEvent (msg, 3, offset);
+                double offset = (double) ev.sampleOffset;
+                if (ev.timeMs > 0.0 && sampleRate > 0.0)
+                    offset = (double) blockNumSamples - (nowMs - ev.timeMs) * sampleRate / 1000.0;
+                // clamped as a double first: an event that is very old, or from the future, must not overflow the int
+                if (! (offset >= 0.0))
+                    offset = 0.0;
+                const int at = offset >= (double) maxOffset ? maxOffset : (int) offset;
+                dest.addEvent (msg, 3, at);
                 ++count;
             }
         };
@@ -362,11 +378,101 @@ public:
         return count;
     }
 
+    // Audio thread, events without a time. The piano roll's preview uses this.
+    int drain (juce::MidiBuffer& dest, int blockNumSamples)
+    {
+        return drain (dest, blockNumSamples, 0.0, 0.0);
+    }
+
     int getNumReady() const noexcept { return fifo.getNumReady(); }
     void clear() noexcept { fifo.reset(); }
 
 private:
     juce::AbstractFifo fifo { kCapacity };
     std::array<MidiEvent, kCapacity> events {};
+};
+// Captures hardware MIDI for a take: a ring of 32768 events, preallocated. start() and stop() run on the message thread; push() runs on the audio
+// thread and allocates nothing and takes no lock. Its `busy` flag is what stop() waits for, so once stop() returns no push is in flight and
+// drainAll() may read the ring. An event that finds the ring full is counted in `lost`, not kept.
+class MidiRecorder
+{
+public:
+    static constexpr int kCapacity = 32768;
+
+    struct Event
+    {
+        juce::int64 position = 0;   // timeline samples: the block's start plus the event's offset in it
+        std::uint8_t bytes[3] {};
+        std::uint8_t size = 0;
+    };
+
+    // Message thread. Empties the ring and starts keeping events.
+    void start()
+    {
+        fifo.reset();
+        lost.store (0);
+        recording.store (true);
+    }
+
+    // Message thread. Stops keeping events and waits for a push in flight; after it returns the ring is safe to read.
+    void stop()
+    {
+        recording.store (false);
+        while (busy.load())
+            juce::Thread::sleep (1);
+    }
+
+    bool isRecording() const noexcept { return recording.load(); }
+
+    // Audio thread. Raw bytes of one message (at most three are kept).
+    void push (juce::int64 position, const std::uint8_t* bytes, int size) noexcept
+    {
+        busy.store (true);   // before the check, so that stop() cannot miss a push that is about to write
+        if (recording.load() && bytes != nullptr && size > 0)
+        {
+            const auto scope = fifo.write (1);
+            if (scope.blockSize1 < 1)
+                lost.fetch_add (1);
+            else
+            {
+                auto& e = events[static_cast<size_t> (scope.startIndex1)];
+                e.position = position;
+                e.size = (std::uint8_t) juce::jmin (3, size);
+                for (int i = 0; i < 3; ++i)
+                    e.bytes[i] = i < e.size ? bytes[i] : 0;
+            }
+        }
+        busy.store (false);
+    }
+
+    // Audio thread. A message as juce::MidiMessage's bytes.
+    void push (juce::int64 position, const juce::MidiMessage& m) noexcept
+    {
+        push (position, m.getRawData(), m.getRawDataSize());
+    }
+
+    // Message thread, after stop(). Moves the events out in the order they were pushed, and empties the ring.
+    void drainAll (std::vector<Event>& out)
+    {
+        out.clear();
+        const int ready = fifo.getNumReady();
+        if (ready <= 0)
+            return;
+        const auto scope = fifo.read (ready);
+        for (int i = 0; i < scope.blockSize1; ++i)
+            out.push_back (events[static_cast<size_t> (scope.startIndex1 + i)]);
+        for (int i = 0; i < scope.blockSize2; ++i)
+            out.push_back (events[static_cast<size_t> (scope.startIndex2 + i)]);
+    }
+
+    // Events the ring had no room for since start().
+    juce::int64 lostEvents() const noexcept { return lost.load(); }
+
+private:
+    // AbstractFifo keeps one slot free, so it is made one larger than the events it holds
+    juce::AbstractFifo fifo { kCapacity + 1 };
+    std::array<Event, kCapacity + 1> events {};
+    std::atomic<bool> recording { false }, busy { false };
+    std::atomic<juce::int64> lost { 0 };
 };
 }

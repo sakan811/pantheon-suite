@@ -36,7 +36,7 @@
 // back to the lock-free playback snapshot when `lock` is held. Offline rendering holds it throughout. The audio pool is touched on the message thread only.
 namespace olympus
 {
-inline constexpr int kProjectVersion = 3;
+inline constexpr int kProjectVersion = 4; // 4: clip layers, the layered flag, the crossfade and the clip gain lines (a version 3 reader would sum them)
 inline constexpr int kMonitorVersion = 1; // monitor.xml, separate from the project's version
 inline constexpr int kBlockSize = 512;
 inline constexpr int kMaxMonitorChannels = 8; // the most channels the monitor chain is handed (a device's outputs past this are not run)
@@ -57,6 +57,21 @@ public:
     }
 };
 
+// Hears a plugin parameter's gesture (its control is being held, or let go). A plugin may say so on any thread, so this only stores the
+// parameter's index and whether the gesture is starting; the automation writer (AutoWrite.h) reads both on the message thread.
+class ParamTouchWatch : public juce::AudioProcessorParameter::Listener
+{
+public:
+    std::atomic<int> touchedParam { -1 };
+    std::atomic<bool> touching { false };
+    void parameterValueChanged (int, float) override {}
+    void parameterGestureChanged (int index, bool starting) override
+    {
+        touchedParam = index;
+        touching = starting;
+    }
+};
+
 struct Slot
 {
     juce::String plugin;                                 // the plugin's name, as the catalog knows it
@@ -67,11 +82,30 @@ struct Slot
     std::unique_ptr<juce::AudioPluginInstance> instance; // null while the plugin is not installed on this machine
     juce::MemoryBlock savedState;                        // what a missing plugin had, kept so a project that is saved again does not lose it
     LatencyWatch* watch = nullptr;                       // the session's listener on `instance`, removed before the instance goes
+    ParamTouchWatch touch;                               // hears the gestures of the instance's parameters (listenToParameters)
 
     Slot() = default;
     Slot (const Slot&) = delete;
     Slot& operator= (const Slot&) = delete;
-    ~Slot() { if (instance != nullptr && watch != nullptr) instance->removeListener (watch); }
+    ~Slot()
+    {
+        stopListeningToParameters(); // while the instance still exists: its parameters hold the listener's pointer
+        if (instance != nullptr && watch != nullptr) instance->removeListener (watch);
+    }
+
+    void listenToParameters()
+    {
+        if (instance != nullptr)
+            for (auto* p : instance->getParameters())
+                if (p != nullptr) p->addListener (&touch);
+    }
+
+    void stopListeningToParameters()
+    {
+        if (instance != nullptr)
+            for (auto* p : instance->getParameters())
+                if (p != nullptr) p->removeListener (&touch);
+    }
 
     int latency() const { return instance != nullptr && ! bypass ? juce::jmax (0, instance->getLatencySamples()) : 0; }
 };
@@ -81,6 +115,14 @@ struct Marker
 {
     juce::String name;
     juce::int64 start = 0;
+};
+
+// A point of a clip's gain line. `at` is a SOURCE sample (the frame `offset` counts in), so trimming and splitting keep the point on the
+// audio it was set on; `db` is the gain there.
+struct ClipGainPoint
+{
+    juce::int64 at = 0;
+    float db = 0.0f;
 };
 
 // A piece of an audio file on a track. Clips cut from one file share one buffer (the audio pool), and undo copies share it too.
@@ -95,6 +137,13 @@ struct Clip
     float gainDb = 0.0f;
     juce::int64 fadeIn = 0, fadeOut = 0;                 // linear, in samples: from silence at the start, to silence at the end
     bool mute = false;
+    int layer = 0;                                       // higher is on top; with equal layers the later index is on top (layered mode)
+    std::vector<ClipGainPoint> gainEnv;                  // the clip gain line, sorted by `at`; empty = no line (the usual path)
+    // Takes (F8): the clips one recording made share a takeGroup (-1 for a clip that is not a take); a loop recording's passes are numbered
+    // by takeIndex from 0, the first pass first. `comp` marks a range that was comped from a take (Editor::compTake): it is not a take.
+    int takeGroup = -1;
+    int takeIndex = 0;
+    bool comp = false;
 
     juce::int64 end() const { return start + length; }
 };
@@ -143,12 +192,45 @@ inline float dbToAutoNorm (float db)
     return juce::jlimit (0.0f, 1.0f, (db + 100.0f) / 112.0f);
 }
 
+// What a lane does with the control it automates (F4). Read plays the lane only. Touch records while the control is held, Latch from the
+// first touch until the transport stops (and keeps the last value), Write from the start of the pass until it stops. A pass that ends turns
+// Write into Touch, so a second pass does not overwrite by accident. Saved as the lane's `mode` attribute ("read" when absent).
+enum class AutoMode { Read = 0, Touch = 1, Latch = 2, Write = 3 };
+
+inline const char* autoModeName (AutoMode m)
+{
+    switch (m)
+    {
+        case AutoMode::Touch: return "touch";
+        case AutoMode::Latch: return "latch";
+        case AutoMode::Write: return "write";
+        case AutoMode::Read: break;
+    }
+    return "read";
+}
+
+// The mode a name ("read", "touch", "latch", "write", any case) stands for; false for anything else.
+inline bool parseAutoMode (const juce::String& text, AutoMode& out)
+{
+    const auto t = text.trim().toLowerCase();
+    if (t == "read") out = AutoMode::Read;
+    else if (t == "touch") out = AutoMode::Touch;
+    else if (t == "latch") out = AutoMode::Latch;
+    else if (t == "write") out = AutoMode::Write;
+    else return false;
+    return true;
+}
+
 struct AutomationLane
 {
     juce::String targetId; // "volume", "pan", or "plugin:<slot>:<param>"
     int slotIndex = -1;
     int paramIndex = -1;
     bool enabled = true;
+    AutoMode mode = AutoMode::Read;
+    // Set while an automation pass writes this lane: the lane is not played then (the fader, the pan or the plugin's own value is used).
+    // Not saved and not undone; the writer clears it at the pass's end, and the snapshot copies it (Editor::setAutomationOverriding).
+    bool overriding = false;
     std::vector<AutoPoint> points; // sorted by sample
 
     float evaluateAt (juce::int64 sample) const
@@ -181,6 +263,23 @@ struct AutomationLane
 };
 
 enum class TrackKind { Audio, Midi, Bus };
+
+// Software input monitoring (F6): an armed audio track plays its device input instead of its clips, in Auto while the transport is stopped or
+// a take records, in In always. Saved as the track's `monitor` attribute (off, auto or in); an absent attribute is off.
+enum class MonitorMode { Off, Auto, In };
+inline const char* monitorName (MonitorMode mode)
+{
+    return mode == MonitorMode::In ? "in" : (mode == MonitorMode::Auto ? "auto" : "off");
+}
+// Reads "off", "auto" or "in" (any case). Returns false and leaves `mode` alone for anything else.
+inline bool parseMonitorMode (const juce::String& text, MonitorMode& mode)
+{
+    const auto s = text.trim().toLowerCase();
+    if (s == "off") { mode = MonitorMode::Off; return true; }
+    if (s == "auto") { mode = MonitorMode::Auto; return true; }
+    if (s == "in") { mode = MonitorMode::In; return true; }
+    return false;
+}
 
 struct AuxSend
 {
@@ -266,12 +365,26 @@ struct ActiveNoteMask
     }
 };
 
+// A group of tracks: its links (gain, mute, solo, arm) make the members move together while the group is active, and its VCA
+// offset (vcaDb) is added to the fader of every member. Saved in the project, changed through Editor.
+struct TrackGroup
+{
+    juce::String name;
+    juce::uint32 colour = 0;           // ARGB; 0 = none
+    bool active = true;                // the links below apply only while this is on (the VCA offset always applies)
+    bool gain = true, mute = true, solo = true, arm = true;
+    float vcaDb = 0.0f;                // -100..+12
+};
+
 struct Track
 {
     using TrackKind = ::olympus::TrackKind;
     using AuxSend = ::olympus::AuxSend;
 
     juce::String name;
+    juce::uint32 colour = 0;                             // ARGB; 0 = automatic (the palette by index)
+    bool polarity = false;                               // both channels inverted, at the source (before the chain)
+    int group = -1;                                      // index into Session::groups, -1 = none
     TrackKind kind = TrackKind::Audio;
     bool isBus() const { return kind == TrackKind::Bus; }
     int outputTrack = -1;                                // -1 = Master, >= 0 = target Bus track index
@@ -288,9 +401,11 @@ struct Track
     // state, saved in the project as attributes; not undone.
     bool armed = false;
     int inputLeft = 0, inputRight = 1;
+    MonitorMode monitor = MonitorMode::Off;              // software input monitoring (F6): see Session::monitoringInput
     std::vector<std::unique_ptr<Slot>> chain;
     std::vector<AutomationLane> automation;
     bool showAutomation = false;
+    bool showTakes = false;                              // the take lanes under the track (a view setting, saved; Arrange.cpp)
     juce::String activeAutoTarget { "volume" };
     bool frozen = false;
     juce::File frozenFile;
@@ -358,13 +473,17 @@ struct EditState
         juce::String name;
         float gainDb = 0.0f, pan = 0.0f;
         bool mute = false, solo = false;
+        MonitorMode monitor = MonitorMode::Off;
     };
     std::vector<Mix> mix; // per track
+    std::vector<float> groupVcaDb; // per group (the VCA offset is undone with the fader)
     float masterDb = 0.0f;
     TempoMap tempo;
     std::vector<Marker> markers;
     juce::int64 loopStart = 0, loopEnd = 0;
     bool loopOn = false;
+    bool punchOn = false;
+    juce::int64 punchStart = 0, punchEnd = 0;
     bool metronomeOn = false;
 };
 
@@ -382,6 +501,8 @@ struct PlaybackSnapshot
         bool hasMidiPlugin = false;
         float gainDb = 0.0f;
         float pan = 0.0f;
+        float vcaDb = 0.0f;                  // the group's VCA offset, added to the fader and to a volume lane
+        bool polarity = false;
         bool mute = false;
         bool solo = false;
         bool armed = false;
@@ -397,6 +518,8 @@ struct PlaybackSnapshot
     double sampleRate = 0.0;
     TempoMap tempo;
     bool metronomeOn = false;
+    bool layered = false;      // the session's layered flag (clip layers, crossfades); off = the clips are summed, as before version 4
+    int crossfadeSamples = 0;  // the crossfade length at the session's rate
 };
 
 class Session
@@ -413,6 +536,30 @@ public:
     std::atomic<juce::uint64> revision { 1 };
     void bumpRevision() { revision.fetch_add (1, std::memory_order_release); }
     std::vector<std::unique_ptr<Track>> tracks;
+    std::vector<TrackGroup> groups;    // changed through Editor; the links and the VCA offset read them
+    // The VCA offset a track hears: its group's, 0 for a track in no group. Under the lock.
+    float vcaDbOfLocked (int track) const
+    {
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) return 0.0f;
+        const int g = tracks[(size_t) track]->group;
+        return juce::isPositiveAndBelow (g, (int) groups.size()) ? groups[(size_t) g].vcaDb : 0.0f;
+    }
+    // The tracks a change to `track` reaches through a link (`link` is one of TrackGroup's switches): the track alone when `alone`, or when
+    // it is in no active group or the group does not link that; otherwise every member of its group. Under the lock.
+    std::vector<int> linkedTracksLocked (int track, bool alone, bool TrackGroup::*link) const
+    {
+        std::vector<int> out { track };
+        if (alone || ! juce::isPositiveAndBelow (track, (int) tracks.size())) return out;
+        const int g = tracks[(size_t) track]->group;
+        if (! juce::isPositiveAndBelow (g, (int) groups.size())) return out;
+        const auto& grp = groups[(size_t) g];
+        if (! grp.active || ! (grp.*link)) return out;
+        out.clear();
+        for (int i = 0; i < (int) tracks.size(); ++i)
+            if (tracks[(size_t) i]->group == g)
+                out.push_back (i);
+        return out;
+    }
     double sampleRate = 0.0; // 0 until the first clip is added
     juce::File projectFile;
     juce::String name { "Untitled" };
@@ -420,7 +567,12 @@ public:
     juce::StringArray warnings; // what the last load could not do
 
     // ---- live MIDI & lock-free playback snapshot -----------------------------------------------------------------------
-    MidiFifo liveMidiFifo;
+    MidiFifo liveMidiFifo;                 // the piano roll's preview: its producer is the message thread
+    // Hardware input (F7): several MIDI input threads push, under inputMidiLock; the audio thread is the only consumer and takes no lock. The
+    // recorder keeps its notes (midiRecorder) and the armed MIDI tracks play them, in both passes.
+    MidiFifo inputMidiFifo;
+    juce::SpinLock inputMidiLock;
+    MidiRecorder midiRecorder;             // what a MIDI take keeps (Synth.h); started and stopped by beginRecording and stopRecording
     std::array<PlaybackSnapshot, 2> snapshots;
     std::atomic<int> activeSnapshot { 0 };
     std::atomic<bool> snapshotValid { false };
@@ -458,6 +610,8 @@ public:
             }
             t.gainDb = src.gainDb;
             t.pan = src.pan;
+            t.vcaDb = vcaDbOfLocked ((int) i);
+            t.polarity = src.polarity;
             t.mute = src.mute;
             t.solo = src.solo;
             t.armed = src.armed;
@@ -475,6 +629,8 @@ public:
         }
         dst.audibleScratch.assign (tracks.size(), false);
         dst.masterDb = masterDb;
+        dst.layered = layered;
+        dst.crossfadeSamples = crossfadeSamples;
         dst.sampleRate = sampleRate;
         dst.tempo = tempo;
         dst.metronomeOn = metronomeOn;
@@ -490,9 +646,65 @@ public:
     std::vector<Marker> markers;    // sorted by start
     juce::int64 loopStart = 0, loopEnd = 0;
     bool loopOn = false;
+    // Punch (F5): a take recorded from the punch-in to the punch-out is trimmed to that range at the stop (Record.h). Only with layers.
+    bool punchOn = false;
+    juce::int64 punchStart = 0, punchEnd = 0;
     bool metronomeOn = false;       // a click on every beat, a higher one on the bar; not in the stems
     bool snapOn = true;             // view settings, saved with the project
     Grid grid = Grid::Quarter;
+    // Layers (F3). A new project is layered; a loaded one without the attribute is not (its clips keep being summed). crossfadeSamples is
+    // crossfadeMs at the session's rate, recomputed by updateCrossfadeLocked whenever either changes.
+    bool layered = true;
+    int crossfadeMs = 10;           // 0..2000
+    int crossfadeSamples = 0;
+    void updateCrossfadeLocked()
+    {
+        crossfadeSamples = sampleRate > 0.0 ? (int) std::llround ((double) crossfadeMs * sampleRate / 1000.0) : 0;
+    }
+    // 1 + the highest takeGroup over every clip of every track, or 0 when there is none: the group a new recording takes. Under the lock.
+    int nextTakeGroupLocked() const
+    {
+        int highest = -1;
+        for (const auto& t : tracks)
+            for (const auto& c : t->clips)
+                highest = juce::jmax (highest, c.takeGroup);
+        return highest + 1;
+    }
+    // 1 + the highest layer on the track, or 0 for an empty track (or one that is not there): a new clip goes on top. Under the lock.
+    int nextLayerLocked (int track) const
+    {
+        if (! juce::isPositiveAndBelow (track, (int) tracks.size())) return 0;
+        const auto& clips = tracks[(size_t) track]->clips;
+        if (clips.empty()) return 0;
+        int highest = clips.front().layer;
+        for (const auto& c : clips)
+            highest = juce::jmax (highest, c.layer);
+        return highest + 1;
+    }
+
+    // ---- software input monitoring (F6) -----------------------------------------------------------------------------------
+    // `anyMonitoring` is true while some armed audio track has a monitor mode on. It is kept by refreshMonitoringLocked (under the lock) after
+    // every change of arm, mode or the track list, and the audio callback reads it so that the device's inputs are handed over only when needed.
+    // setLiveInputs gives the session the device's inputs for one block (stack pointers, valid while the transport runs); liveInputOffset is
+    // where the transport's block starts in that device block, set by the transport before each processBlock.
+    std::atomic<bool> anyMonitoring { false };
+    int liveInputOffset = 0;
+    void refreshMonitoringLocked()
+    {
+        // an armed MIDI track counts too: while the transport is stopped it plays its live input, which only the stopped pass runs
+        bool any = false;
+        for (const auto& t : tracks)
+            any = any || (t->armed && ! t->isBus() && (t->isMidi || t->monitor != MonitorMode::Off));
+        anyMonitoring.store (any);
+    }
+    // Audio thread, from DeviceCallback::deviceBlock: `byAbsolute[a]` is the device's samples of absolute input a (nullptr when it is off),
+    // `count` entries, `samples` per channel. The array lives on the caller's stack for the block; nullptr ends it.
+    void setLiveInputs (const float* const* byAbsolute, int count, int samples)
+    {
+        liveInputs = byAbsolute;
+        liveInputCount = count;
+        liveInputSamples = samples;
+    }
 
     // ---- the monitor chain ----------------------------------------------------------------------------------------------
     // The plugins the headphones hear (a correction plugin, say): run on the playback block by processMonitor, after processBlock, and
@@ -511,6 +723,7 @@ public:
         midiScratch.ensureSize (32768);
         snapshotMidiScratch.ensureSize (16384);
         liveMidiScratch.ensureSize (16384);
+        inputMidiScratch.ensureSize (16384);
     }
     ~Session()
     {
@@ -541,6 +754,7 @@ public:
         clip.file = file;
         clip.audio = audio;
         clip.length = audio->getNumSamples();
+        clip.layer = 0; // the only clip of a new track (nextLayerLocked of an empty track)
         track->clips.push_back (std::move (clip));
         const juce::ScopedLock sl (lock);
         makeTrackLocked (*track);
@@ -822,6 +1036,7 @@ public:
         clip.start = juce::jmax ((juce::int64) 0, startSample);
         clip.offset = offset;
         clip.length = play;
+        clip.layer = nextLayerLocked (track); // a new take goes on top of the track
         auto& clips = tracks[(size_t) track]->clips;
         clips.push_back (std::move (clip));
         publishPlaybackSnapshotLocked();
@@ -863,6 +1078,7 @@ public:
         for (auto& s : tracks[(size_t) index]->chain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         tracks.erase (tracks.begin() + index);
+        refreshMonitoringLocked();
         for (auto& t : tracks)
         {
             if (t->outputTrack == index) t->outputTrack = -1;
@@ -1131,12 +1347,21 @@ public:
 
     // ---- markers --------------------------------------------------------------------------------------------------------
     // Recording set-up of a track (Record.h). Under the lock; a refusal changes nothing and says why. Saved with the project, not undone.
-    bool setTrackArm (int track, bool on, juce::String& error)
+    // In an active group whose arm link is on, every member is armed or disarmed together, unless `alone` (the window passes it when Alt is held).
+    // This is the only arm setter, so the window and the server both link through it. Not undoable.
+    bool setTrackArm (int track, bool on, juce::String& error, bool alone = false)
     {
         const juce::ScopedLock sl (lock);
         if (! juce::isPositiveAndBelow (track, (int) tracks.size())) { error = "No track " + juce::String (track); return false; }
-        auto& t = *tracks[(size_t) track];
-        if (t.armed != on) { t.armed = on; publishPlaybackSnapshotLocked(); dirty = true; bumpRevision(); }
+        bool changed = false;
+        for (int m : linkedTracksLocked (track, alone, &TrackGroup::arm))
+            if (tracks[(size_t) m]->armed != on)
+            {
+                tracks[(size_t) m]->armed = on;
+                changed = true;
+            }
+        refreshMonitoringLocked();
+        if (changed) { publishPlaybackSnapshotLocked(); dirty = true; bumpRevision(); }
         return true;
     }
 
@@ -1879,17 +2104,175 @@ public:
         right = pan < 0.0f ? 1.0f + pan : 1.0f;
     }
 
+    // ---- layers (F3) ----------------------------------------------------------------------------------------------------------
+    // A clip that plays: not muted, with audio, and a length. Only these cover a clip, or are covered by one.
+    static bool clipPlays (const Clip& c)
+    {
+        return ! c.mute && c.audio != nullptr && c.length > 0;
+    }
+
+    // Whether clip u (index ui) is on top of clip c (index ci): a higher layer, or the same layer and a later index in the track.
+    static bool isUpperOf (const Clip& u, size_t ui, const Clip& c, size_t ci)
+    {
+        return u.layer > c.layer || (u.layer == c.layer && ui > ci);
+    }
+
+    // The length of an edge's fade in layered mode: the clip's own fade or the crossfade, whichever is longer, at most half the clip so the
+    // two edges never meet. Zero is no fade.
+    static juce::int64 edgeLength (juce::int64 fade, int crossfadeSamples, juce::int64 length)
+    {
+        return juce::jmin (juce::jmax ((juce::int64) crossfadeSamples, fade), length / 2);
+    }
+
+    // The share of a lower clip that the upper clip u lets through at timeline sample s: cos (pi/2 * p / r) over u's start edge, 0 under u,
+    // cos (pi/2 * (len - p) / r) over its end edge, and 1 outside u. Paired with u's own sin edge (sin^2 + cos^2 = 1) the crossfade keeps
+    // the power. A zero-length edge has no ramp, so there is no division by it.
+    static float coverAt (const Clip& u, juce::int64 s, int crossfadeSamples)
+    {
+        const juce::int64 p = s - u.start;
+        if (p < 0 || p >= u.length)
+            return 1.0f;
+        const juce::int64 rIn = edgeLength (u.fadeIn, crossfadeSamples, u.length);
+        const juce::int64 rOut = edgeLength (u.fadeOut, crossfadeSamples, u.length);
+        if (p < rIn)
+            return (float) std::cos (juce::MathConstants<double>::halfPi * (double) p / (double) rIn);
+        const juce::int64 remaining = u.length - p;
+        if (remaining < rOut)
+            return (float) std::cos (juce::MathConstants<double>::halfPi * (double) remaining / (double) rOut);
+        return 0.0f;
+    }
+
+    // The clip gain line in dB at source sample `at`: linear in dB between the points, held flat before the first and after the last. The
+    // points are sorted by `at`; with none the line is 0 dB. The arrangement draws the same line this returns.
+    static float gainLineDbAt (const std::vector<ClipGainPoint>& pts, juce::int64 at)
+    {
+        if (pts.empty())
+            return 0.0f;
+        if (at <= pts.front().at)
+            return pts.front().db;
+        if (at >= pts.back().at)
+            return pts.back().db;
+        const auto next = std::upper_bound (pts.begin(), pts.end(), at,
+                                            [] (juce::int64 a, const ClipGainPoint& p) { return a < p.at; });
+        const auto& a = *(next - 1);
+        const auto& b = *next;
+        const double t = (double) (at - a.at) / (double) (b.at - a.at);
+        return (float) (a.db + t * (b.db - a.db));
+    }
+
+    // The same line as linear gain, as the mix multiplies it in.
+    static float gainLineAt (const std::vector<ClipGainPoint>& pts, juce::int64 at)
+    {
+        return pts.empty() ? 1.0f : juce::Decibels::decibelsToGain (gainLineDbAt (pts, at), -100.0f);
+    }
+
+    // The edges of clip ci that sit over a lower clip: a lower clip sounds inside the edge's fade region. Such an edge fades with
+    // sin (pi/2 * p / r), the complement of the lower clip's cover, in place of its linear fade. in = the start edge, out = the end edge.
+    struct Edges
+    {
+        bool in = false, out = false;
+        juce::int64 rIn = 0, rOut = 0;
+    };
+
+    static Edges edgesOf (const std::vector<Clip>& clips, size_t ci, int crossfadeSamples)
+    {
+        const Clip& c = clips[ci];
+        Edges e;
+        e.rIn = edgeLength (c.fadeIn, crossfadeSamples, c.length);
+        e.rOut = edgeLength (c.fadeOut, crossfadeSamples, c.length);
+        for (size_t j = 0; j < clips.size(); ++j)
+        {
+            const Clip& l = clips[j];
+            if (j == ci || ! clipPlays (l) || isUpperOf (l, j, c, ci))
+                continue;
+            if (e.rIn > 0 && l.start < c.start + e.rIn && l.end() > c.start)
+                e.in = true;
+            if (e.rOut > 0 && l.start < c.end() && l.end() > c.end() - e.rOut)
+                e.out = true;
+        }
+        return e;
+    }
+
+    // The uppers of one clip that a block is checked against come from a fixed list of this size; more than this are looked up per sample.
+    static constexpr size_t kMaxCover = 16;
+
+    // A clip mixed sample by sample, for a clip with a gain line, an upper clip over it in this block, or a sin edge over a lower clip. The
+    // arithmetic is the fast path's (gain, then the fades) with the cover and the gain line multiplied in. No allocation, no lock, no IO.
+    static void mixClipPerSample (const std::vector<Clip>& clips, size_t ci, juce::int64 start, juce::int64 from, juce::int64 to,
+                                  juce::int64 sFrom, juce::int64 sTo, float gain, bool layered, int crossfadeSamples,
+                                  const Edges& edges, juce::AudioBuffer<float>& dest, int channels)
+    {
+        const Clip& c = clips[ci];
+        const auto& src = *c.audio;
+        const int srcChannels = src.getNumChannels();
+        std::array<size_t, kMaxCover> upper {};
+        int count = 0;
+        bool scanAll = false;
+        if (layered)
+            for (size_t j = 0; j < clips.size(); ++j)
+            {
+                const Clip& u = clips[j];
+                if (j == ci || ! clipPlays (u) || ! isUpperOf (u, j, c, ci) || u.end() <= from || u.start >= to)
+                    continue;
+                if (count < (int) kMaxCover)
+                    upper[(size_t) count++] = j;
+                else
+                    scanAll = true;
+            }
+        const double halfPi = juce::MathConstants<double>::halfPi;
+        for (juce::int64 s = sFrom; s < sTo; ++s)
+        {
+            const juce::int64 local = s - c.start;
+            const juce::int64 index = c.offset + local;
+            const juce::int64 remaining = c.length - local;
+            float env = gain * gainLineAt (c.gainEnv, index);
+            if (edges.in && local < edges.rIn)
+                env *= (float) std::sin (halfPi * (double) local / (double) edges.rIn);
+            else if (! edges.in && local < c.fadeIn)
+                env *= (float) local / (float) c.fadeIn;
+            if (edges.out && remaining < edges.rOut)
+                env *= (float) std::sin (halfPi * (double) remaining / (double) edges.rOut);
+            else if (! edges.out && remaining < c.fadeOut)
+                env *= (float) remaining / (float) c.fadeOut;
+            if (layered)
+            {
+                float cover = 1.0f;
+                if (! scanAll)
+                {
+                    for (int i = 0; i < count; ++i)
+                        cover *= coverAt (clips[upper[(size_t) i]], s, crossfadeSamples);
+                }
+                else
+                {
+                    for (size_t j = 0; j < clips.size(); ++j)
+                        if (j != ci && clipPlays (clips[j]) && isUpperOf (clips[j], j, c, ci))
+                            cover *= coverAt (clips[j], s, crossfadeSamples);
+                }
+                env *= cover;
+            }
+            const int destIdx = (int) (s - start);
+            const int srcIdx = (int) index;
+            for (int ch = 0; ch < channels; ++ch)
+                dest.getWritePointer (ch)[destIdx] += src.getReadPointer (juce::jmin (ch, srcChannels - 1))[srcIdx] * env;
+        }
+    }
+
     // The clips of a track on [start, start + n), summed into `dest` (cleared first; n <= dest's length). Muted clips and clips without
     // audio are silent. A clip is gain, then the linear fades at its start and end, inside the clip only. Used by the real time path and
     // the render alike, so both hear the same thing.
-    static void mixClipList (const std::vector<Clip>& clips, juce::int64 start, int n, juce::AudioBuffer<float>& dest)
+    // Layered (F3): an upper clip (isUpperOf) covers the clips under it, so under it a lower clip is silent, and at its edges the two cross
+    // over with an equal-power cos/sin pair. With `layered` off this is the plain sum. A clip that no upper clip overlaps in the block, no
+    // edge of it lies over a lower clip, and that has no gain line takes the fast path below: the sum's own code.
+    static void mixClipList (const std::vector<Clip>& clips, juce::int64 start, int n, juce::AudioBuffer<float>& dest,
+                             bool layered, int crossfadeSamples)
     {
         dest.clear (0, n);
         const int channels = juce::jmin (2, dest.getNumChannels());
         if (channels <= 0 || n <= 0)
             return;
-        for (const auto& c : clips)
+        for (size_t ci = 0; ci < clips.size(); ++ci)
         {
+            const auto& c = clips[ci];
             if (c.mute || c.audio == nullptr || c.length <= 0)
                 continue;
             const juce::int64 from = juce::jmax (start, c.start), to = juce::jmin (start + n, c.end());
@@ -1905,6 +2288,17 @@ public:
             if (sFrom >= sTo)
                 continue;
             const float gain = juce::Decibels::decibelsToGain (c.gainDb, -100.0f);
+
+            const Edges edges = layered ? edgesOf (clips, ci, crossfadeSamples) : Edges {};
+            bool slow = ! c.gainEnv.empty() || (edges.in && from < c.start + edges.rIn) || (edges.out && to > c.end() - edges.rOut);
+            for (size_t j = 0; layered && ! slow && j < clips.size(); ++j)
+                slow = j != ci && clipPlays (clips[j]) && isUpperOf (clips[j], j, c, ci) && clips[j].end() > from && clips[j].start < to;
+            if (slow)
+            {
+                mixClipPerSample (clips, ci, start, from, to, sFrom, sTo, gain, layered, crossfadeSamples, edges, dest, channels);
+                continue;
+            }
+
             const juce::int64 flatStart = c.fadeIn > 0 ? juce::jlimit (sFrom, sTo, c.start + c.fadeIn) : sFrom;
             const juce::int64 flatEnd = c.fadeOut > 0 ? juce::jlimit (flatStart, sTo, c.end() - c.fadeOut + 1) : sTo;
 
@@ -1945,9 +2339,9 @@ public:
         }
     }
 
-    static void mixClips (const Track& t, juce::int64 start, int n, juce::AudioBuffer<float>& dest)
+    static void mixClips (const Track& t, juce::int64 start, int n, juce::AudioBuffer<float>& dest, bool layered, int crossfadeSamples)
     {
-        mixClipList (t.clips, start, n, dest);
+        mixClipList (t.clips, start, n, dest, layered, crossfadeSamples);
     }
 
     static void collectMidiEvents (const std::vector<MidiClip>& midiClips, const TempoMap& map,
@@ -2104,6 +2498,7 @@ public:
             {
                 c.start = scale (c.start);
                 c.offset = scale (c.offset);
+                for (auto& p : c.gainEnv) p.at = scale (p.at); // the gain line is at source samples, so it moves with the audio
                 c.length = juce::jmax ((juce::int64) 1, scale (c.length));
                 if (c.audio != nullptr)
                 {
@@ -2134,6 +2529,8 @@ public:
         loopStart = scale (loopStart);
         loopEnd = scale (loopEnd);
         loopOn = loopOn && loopEnd > loopStart; // a narrow loop can scale to equal ends: off then, as load() and Editor::setLoop keep it
+        punchStart = scale (punchStart);
+        punchEnd = scale (punchEnd);
 
         setSampleRateLocked (rate);  // also the tempo's rate, and the monitor chain
         prepareLocked (false);       // every plugin of every track
@@ -2167,17 +2564,31 @@ public:
             return;
         out.clear();
         liveMidiScratch.clear();
+        inputMidiScratch.clear();
+        // both FIFOs play in both passes: a note played while the transport is stopped sounds now (the stopped pass runs the armed MIDI tracks
+        // through their live input), rather than bursting at the next play
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();   // read once per block: every event is placed against the same time
         liveMidiFifo.drain (liveMidiScratch, n);
+        inputMidiFifo.drain (inputMidiScratch, n, sampleRate, nowMs);
+        // the take keeps the hardware notes only (not the piano roll's preview). Taken before the try-lock, so the snapshot fallback records too.
+        if (rollingPass.load (std::memory_order_relaxed) && midiRecorder.isRecording())
+            captureMidiInput (inputMidiScratch, start);
+        liveMidiScratch.addEvents (inputMidiScratch, 0, n, 0);
         const juce::ScopedTryLock sl (lock);
         if (! sl.isLocked())
         {
-            if (snapshotValid.load (std::memory_order_acquire))
+            // the snapshot plays the clips, so the stopped pass, which plays none, does not take it: its block stays silent
+            if (rollingPass.load (std::memory_order_relaxed) && snapshotValid.load (std::memory_order_acquire))
                 processBlockFromSnapshot (out, start);
             return;
         }
-        const bool wasFallback = lastBlockWasFallback;
-        lastBlockWasFallback = false;
-        const bool discontinuous = ! rendering() && lastProcessedEnd >= 0 && start != lastProcessedEnd;
+        // the stopped pass leaves the fallback and the discontinuity state alone: nothing plays, so nothing is discontinuous, and the synths
+        // are not reset every block while the transport is stopped
+        const bool rolling = rollingPass.load (std::memory_order_relaxed);
+        const bool wasFallback = rolling && lastBlockWasFallback;
+        if (rolling)
+            lastBlockWasFallback = false;
+        const bool discontinuous = rolling && ! rendering() && lastProcessedEnd >= 0 && start != lastProcessedEnd;
         if (wasFallback || discontinuous)
         {
             for (auto& t : tracks)
@@ -2198,7 +2609,7 @@ public:
         {
             const int count = juce::jmin (kBlockSize, n - done);
             const juce::int64 blockStart = start + done;
-            publishHead (blockStart, true);
+            publishHead (blockStart, rolling);
             for (auto& t : tracks)
                 if (t->isBus())
                     t->busInput.clear (0, count);
@@ -2207,7 +2618,12 @@ public:
             {
                 auto& t = *tracks[(size_t) ti];
                 const bool isAudible = (size_t) ti < cachedAudibleScratch.size() && cachedAudibleScratch[(size_t) ti];
-                if (! isAudible || (! t.isBus() && ! (t.frozen && t.frozenAudio != nullptr) && t.clips.empty() && t.midiClips.empty() && ! t.isMidi))
+                // a track plays its clips, or its input while it monitors (monitoringInput); the stopped pass plays nothing else
+                const bool monitors = monitoringInput (t, rolling);
+                // an armed MIDI track is a source in the stopped pass too: its live input plays (its clips do not, see runChain)
+                const bool hasSource = t.isBus() || monitors || (t.isMidi && t.armed)
+                                       || (rolling && ((t.frozen && t.frozenAudio != nullptr) || ! t.clips.empty() || ! t.midiClips.empty() || t.isMidi));
+                if (! isAudible || ! hasSource)
                 {
                     if (t.synth != nullptr)
                         t.synth->reset();
@@ -2262,7 +2678,7 @@ public:
                                                    : maxLat;
                 mixTrackBlock (t.scratch, t.postScratch, 0, count, blockStart - autoOffset, t.gainDb, t.pan,
                                findActiveLane (t.automation, "volume"), findActiveLane (t.automation, "pan"),
-                               &pL, &pR);
+                               vcaDbOfLocked (ti), &pL, &pR);
                 if (std::isfinite (pL)) t.peakL = juce::jmax (t.peakL.load(), pL);
                 if (std::isfinite (pR)) t.peakR = juce::jmax (t.peakR.load(), pR);
 
@@ -2307,7 +2723,9 @@ public:
                     out.copyFrom (ch, done, masterScratch, ch, 0, count);
             }
         }
-        addMetronome (out, start);
+        // the stopped pass has no metronome: the click belongs to the transport (the count-in adds its own, in Source)
+        if (rolling)
+            addMetronome (out, start);
         out.applyGain (juce::Decibels::decibelsToGain (masterDb, -100.0f));
         if (channels > 0)
         {
@@ -2319,7 +2737,44 @@ public:
             const float mR = out.getMagnitude (1, 0, n);
             if (std::isfinite (mR)) masterPeakR = juce::jmax (masterPeakR.load(), mR);
         }
-        lastProcessedEnd = start + n;
+        if (rolling)
+            lastProcessedEnd = start + n;
+    }
+
+    // The stopped transport (F6): what the monitoring tracks hear, through their chains, the buses, the master chain and the fader, as
+    // processBlock makes it, with no clips, no MIDI, no metronome and no move of the playhead (`start` is the held position). The caller runs
+    // processMonitor after it, as for playback. Audio thread.
+    void processMonitoringOnly (juce::AudioBuffer<float>& out, juce::int64 start)
+    {
+        rollingPass.store (false, std::memory_order_relaxed);
+        processBlock (out, start);
+        rollingPass.store (true, std::memory_order_relaxed);
+    }
+
+    // Audio thread, the transport stopped with nothing to play them (no monitoring track, no armed MIDI track): the notes of the block are taken out
+    // of both FIFOs and dropped, so that a track armed later does not sound them all at once.
+    void dropLiveMidi (int n) noexcept
+    {
+        liveMidiScratch.clear();
+        inputMidiScratch.clear();
+        liveMidiFifo.drain (liveMidiScratch, juce::jmax (1, n));
+        inputMidiFifo.drain (inputMidiScratch, juce::jmax (1, n), sampleRate, juce::Time::getMillisecondCounterHiRes());
+    }
+
+    // Audio thread. The hardware notes of a block that the take keeps: note on and off, sustain (CC 64) and pitch bend, each at `start` plus its
+    // offset in the block. Other controllers are not recorded; the MIDI clip holds notes only. Allocates nothing, takes no lock.
+    void captureMidiInput (const juce::MidiBuffer& input, juce::int64 start) noexcept
+    {
+        for (const auto metadata : input)
+        {
+            if (metadata.numBytes < 3)
+                continue;
+            const auto* d = metadata.data;
+            const int kind = d[0] & 0xF0;
+            const bool keep = kind == 0x80 || kind == 0x90 || kind == 0xE0 || (kind == 0xB0 && d[1] == 64);
+            if (keep)
+                midiRecorder.push (start + metadata.samplePosition, d, 3);
+        }
     }
 
     // ---- rendering ------------------------------------------------------------------------------------------------------
@@ -2366,7 +2821,7 @@ public:
             o.trackIndex = ti;
             o.track = t.get();
             o.latency = outLat[(size_t) ti];
-            trackGains (*o.track, o.left, o.right);
+            trackGains (*o.track, vcaDbOfLocked (ti), o.left, o.right);
             o.file = options.folder.getChildFile (juce::String (ti + 1).paddedLeft ('0', 2) + "-" + juce::File::createLegalFileName (t->name) + ".wav");
             if (options.writeStems)
             {
@@ -2510,10 +2965,11 @@ public:
                 const auto* volLane = findActiveLane (t.automation, "volume");
                 const auto* panLane = findActiveLane (t.automation, "pan");
                 const int trackLat = outLat[(size_t) ti];
+                const float vcaDb = vcaDbOfLocked (ti);
                 if (volLane == nullptr && panLane == nullptr)
                 {
                     float gL = 1.0f, gR = 1.0f;
-                    trackGains (t, gL, gR);
+                    trackGains (t, vcaDbOfLocked (ti), gL, gR);
                     for (int ch = 0; ch < 2; ++ch)
                     {
                         t.postScratch.copyFrom (ch, 0, t.scratch, ch, 0, n);
@@ -2531,7 +2987,7 @@ public:
                         const juce::int64 stemPos = start + i - trackLat;
                         const float gainDb = volLane != nullptr ? autoNormToDb (volLane->evaluateAt (stemPos)) : t.gainDb;
                         const float panVal = panLane != nullptr ? juce::jlimit (-1.0f, 1.0f, panLane->evaluateAt (stemPos) * 2.0f - 1.0f) : t.pan;
-                        const float g = juce::Decibels::decibelsToGain (gainDb, -100.0f);
+                        const float g = faderGain (gainDb, vcaDb);
                         float pL = 1.0f, pR = 1.0f;
                         panGains (panVal, pL, pR);
                         dst0[i] = src0[i] * (g * pL);
@@ -2702,9 +3158,14 @@ public:
         xml->setAttribute ("loopStart", juce::String (loopStart));
         xml->setAttribute ("loopEnd", juce::String (loopEnd));
         xml->setAttribute ("loopOn", loopOn);
+        xml->setAttribute ("punchOn", punchOn);
+        xml->setAttribute ("punchStart", juce::String (punchStart));
+        xml->setAttribute ("punchEnd", juce::String (punchEnd));
         xml->setAttribute ("metronome", metronomeOn);
         xml->setAttribute ("snap", snapOn);
         xml->setAttribute ("grid", (int) grid);
+        xml->setAttribute ("layered", layered);
+        xml->setAttribute ("crossfadeMs", crossfadeMs);
         xml->setAttribute ("tsNum", tempo.numerator);
         xml->setAttribute ("tsDen", tempo.denominator);
         for (auto& p : tempo.points)
@@ -2719,10 +3180,29 @@ public:
             e->setAttribute ("name", m.name);
             e->setAttribute ("sample", juce::String (m.start));
         }
+        auto* groupsXml = xml->createNewChildElement ("Groups");
+        for (const auto& g : groups)
+        {
+            auto* ge = groupsXml->createNewChildElement ("Group");
+            ge->setAttribute ("name", g.name);
+            if (g.colour != 0)
+                ge->setAttribute ("colour", juce::String::toHexString ((juce::int64) g.colour).toUpperCase());
+            ge->setAttribute ("active", g.active);
+            ge->setAttribute ("gain", g.gain);
+            ge->setAttribute ("mute", g.mute);
+            ge->setAttribute ("solo", g.solo);
+            ge->setAttribute ("arm", g.arm);
+            ge->setAttribute ("vcaDb", (double) g.vcaDb);
+        }
         for (auto& t : tracks)
         {
             auto* e = xml->createNewChildElement ("Track");
             e->setAttribute ("name", t->name);
+            if (t->colour != 0)
+                e->setAttribute ("colour", juce::String::toHexString ((juce::int64) t->colour).toUpperCase());
+            e->setAttribute ("polarity", t->polarity);
+            e->setAttribute ("monitor", monitorName (t->monitor));
+            e->setAttribute ("group", t->group);
             e->setAttribute ("kind", t->isBus() ? "bus" : (t->kind == TrackKind::Midi ? "midi" : "audio"));
             e->setAttribute ("outputTrack", t->outputTrack);
             e->setAttribute ("pan", (double) t->pan);
@@ -2734,6 +3214,7 @@ public:
             e->setAttribute ("inputRight", t->inputRight);
             e->setAttribute ("isMidi", t->isMidi);
             e->setAttribute ("showAutomation", t->showAutomation);
+            e->setAttribute ("showTakes", t->showTakes);
             e->setAttribute ("activeAutoTarget", t->activeAutoTarget);
             e->setAttribute ("frozen", t->frozen);
             if (t->frozen && t->frozenFile != juce::File())
@@ -2766,6 +3247,19 @@ public:
                 k->setAttribute ("fadeIn", juce::String (c.fadeIn));
                 k->setAttribute ("fadeOut", juce::String (c.fadeOut));
                 k->setAttribute ("mute", c.mute);
+                k->setAttribute ("layer", c.layer);
+                if (c.takeGroup >= 0)
+                {
+                    k->setAttribute ("takeGroup", c.takeGroup);
+                    k->setAttribute ("takeIndex", c.takeIndex);
+                    k->setAttribute ("comp", c.comp);
+                }
+                for (const auto& p : c.gainEnv)
+                {
+                    auto* pe = k->createNewChildElement ("GainPoint");
+                    pe->setAttribute ("at", juce::String (p.at));
+                    pe->setAttribute ("db", (double) p.db);
+                }
             }
             for (auto& mc : t->midiClips)
             {
@@ -2795,6 +3289,7 @@ public:
                 ae->setAttribute ("slotIndex", lane.slotIndex);
                 ae->setAttribute ("paramIndex", lane.paramIndex);
                 ae->setAttribute ("enabled", lane.enabled);
+                ae->setAttribute ("mode", autoModeName (lane.mode));
                 for (const auto& pt : lane.points)
                 {
                     auto* pe = ae->createNewChildElement ("Point");
@@ -2882,6 +3377,8 @@ public:
         const juce::ScopedLock sl (lock);
         clearProjectPlayheadsLocked();
         tracks = std::move (parsed.tracks);
+        refreshMonitoringLocked();
+        groups = std::move (parsed.groups);
         masterChain = std::move (parsed.masterChain);
         setSampleRateLocked (parsed.rate);
         attachProjectPlayheadsLocked();
@@ -2892,9 +3389,15 @@ public:
         loopStart = parsed.loopStart;
         loopEnd = parsed.loopEnd;
         loopOn = parsed.loopOn;
+        punchOn = parsed.punchOn;
+        punchStart = parsed.punchStart;
+        punchEnd = parsed.punchEnd;
         metronomeOn = parsed.metronomeOn;
         snapOn = parsed.snapOn;
         grid = parsed.grid;
+        layered = parsed.layered;
+        crossfadeMs = parsed.crossfadeMs;
+        updateCrossfadeLocked();
         projectFile = file;
         name = xml->getStringAttribute ("name", file.getFileNameWithoutExtension());
         warnings = parsed.problems;
@@ -2941,6 +3444,8 @@ public:
         const juce::ScopedLock sl (lock);
         clearProjectPlayheadsLocked();
         tracks = std::move (parsed.tracks);
+        refreshMonitoringLocked();
+        groups = std::move (parsed.groups);
         masterChain = std::move (parsed.masterChain);
         attachProjectPlayheadsLocked();
         masterDb = parsed.masterDb;
@@ -2951,9 +3456,15 @@ public:
         loopStart = parsed.loopStart;
         loopEnd = parsed.loopEnd;
         loopOn = parsed.loopOn;
+        punchOn = parsed.punchOn;
+        punchStart = parsed.punchStart;
+        punchEnd = parsed.punchEnd;
         metronomeOn = parsed.metronomeOn;
         grid = parsed.grid;
         snapOn = parsed.snapOn;
+        layered = parsed.layered;
+        crossfadeMs = parsed.crossfadeMs;
+        updateCrossfadeLocked();
         if (warningsOut != nullptr)
             *warningsOut = parsed.problems;
 
@@ -2990,14 +3501,20 @@ public:
             mix.pan = t->pan;
             mix.mute = t->mute;
             mix.solo = t->solo;
+            mix.monitor = t->monitor;
             e.mix.push_back (mix);
         }
+        for (const auto& g : groups)
+            e.groupVcaDb.push_back (g.vcaDb);
         e.masterDb = masterDb;
         e.tempo = tempo;
         e.markers = markers;
         e.loopStart = loopStart;
         e.loopEnd = loopEnd;
         e.loopOn = loopOn;
+        e.punchOn = punchOn;
+        e.punchStart = punchStart;
+        e.punchEnd = punchEnd;
         e.metronomeOn = metronomeOn;
         return e;
     }
@@ -3014,14 +3531,27 @@ public:
             t.clips = e.clips[i];
             t.midiClips = e.midiClips[i];
             if (e.automation.size() == tracks.size())
-                t.automation = e.automation[i];
+            {
+                // `overriding` is not part of an edit: a lane an automation pass is writing keeps the flag it has now
+                auto restored = e.automation[i];
+                for (auto& lane : restored)
+                    for (const auto& now : t.automation)
+                        if (now.overriding && now.targetId == lane.targetId)
+                            lane.overriding = true;
+                t.automation = std::move (restored);
+            }
             t.name = e.mix[i].name;
             t.gainDb = e.mix[i].gainDb;
             t.pan = e.mix[i].pan;
             t.mute = e.mix[i].mute;
             t.solo = e.mix[i].solo;
+            t.monitor = e.mix[i].monitor;
         }
+        if (e.groupVcaDb.size() == groups.size())
+            for (size_t g = 0; g < groups.size(); ++g)
+                groups[g].vcaDb = e.groupVcaDb[g];
         masterDb = e.masterDb;
+        refreshMonitoringLocked();
         const double rate = tempo.sampleRate;
         tempo = e.tempo;
         tempo.sampleRate = sampleRate > 0.0 ? sampleRate : rate;
@@ -3029,6 +3559,9 @@ public:
         loopStart = e.loopStart;
         loopEnd = e.loopEnd;
         loopOn = e.loopOn;
+        punchOn = e.punchOn;
+        punchStart = e.punchStart;
+        punchEnd = e.punchEnd;
         metronomeOn = e.metronomeOn;
         publishPlaybackSnapshotLocked();
         dirty = true;
@@ -3047,6 +3580,8 @@ public:
                 if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         }
         tracks.clear();
+        refreshMonitoringLocked();
+        groups.clear();
         for (auto& s : masterChain)
             if (s->instance != nullptr) s->instance->setPlayHead (nullptr);
         masterChain.clear();
@@ -3057,9 +3592,14 @@ public:
         markers.clear();
         loopStart = loopEnd = 0;
         loopOn = false;
+        punchOn = false;
+        punchStart = punchEnd = 0;
         metronomeOn = false;
         snapOn = true;
         grid = Grid::Quarter;
+        layered = true;
+        crossfadeMs = 10;
+        updateCrossfadeLocked();
         projectFile = juce::File();
         name = projectName.isNotEmpty() ? projectName : "Untitled";
         publishPlaybackSnapshotLocked();
@@ -3108,9 +3648,34 @@ public:
         loop->setProperty ("end_seconds", seconds (loopEnd));
         loop->setProperty ("on", loopOn);
         root->setProperty ("loop", juce::var (loop));
+        auto* punch = new juce::DynamicObject();
+        punch->setProperty ("on", punchOn);
+        punch->setProperty ("start_seconds", seconds (punchStart));
+        punch->setProperty ("end_seconds", seconds (punchEnd));
+        root->setProperty ("punch", juce::var (punch));
         root->setProperty ("metronome", metronomeOn);
         root->setProperty ("snap", snapOn);
         root->setProperty ("grid", juce::String (gridName (grid)));
+        root->setProperty ("layered", layered);
+        root->setProperty ("crossfade_ms", crossfadeMs);
+
+        juce::Array<juce::var> groupList;
+        int gi = 0;
+        for (const auto& g : groups)
+        {
+            auto* o = new juce::DynamicObject();
+            o->setProperty ("index", gi++);
+            o->setProperty ("name", g.name);
+            o->setProperty ("colour", g.colour != 0 ? juce::String ("#") + juce::String::toHexString ((juce::int64) (g.colour & 0xFFFFFFu)).paddedLeft ('0', 6).toUpperCase() : juce::String ("auto"));
+            o->setProperty ("active", g.active);
+            o->setProperty ("gain", g.gain);
+            o->setProperty ("mute", g.mute);
+            o->setProperty ("solo", g.solo);
+            o->setProperty ("arm", g.arm);
+            o->setProperty ("vca_db", (double) g.vcaDb);
+            groupList.add (juce::var (o));
+        }
+        root->setProperty ("groups", groupList);
 
         juce::Array<juce::var> list;
         int i = 0;
@@ -3131,6 +3696,10 @@ public:
             o->setProperty ("latency_samples", t->latency());
             o->setProperty ("frozen", t->frozen);
             o->setProperty ("armed", t->armed);
+            o->setProperty ("colour", t->colour != 0 ? juce::String ("#") + juce::String::toHexString ((juce::int64) (t->colour & 0xFFFFFFu)).paddedLeft ('0', 6).toUpperCase() : juce::String ("auto"));
+            o->setProperty ("polarity", t->polarity);
+            o->setProperty ("monitor", juce::String (monitorName (t->monitor)));
+            o->setProperty ("group", t->group);
             o->setProperty ("input_left", t->inputLeft);
             o->setProperty ("input_right", t->inputRight);
 
@@ -3163,6 +3732,19 @@ public:
                 co->setProperty ("fade_in_seconds", seconds (c.fadeIn));
                 co->setProperty ("fade_out_seconds", seconds (c.fadeOut));
                 co->setProperty ("mute", c.mute);
+                co->setProperty ("layer", c.layer);
+                co->setProperty ("take_group", c.takeGroup);
+                co->setProperty ("take_index", c.takeIndex);
+                co->setProperty ("comp", c.comp);
+                juce::Array<juce::var> envList;
+                for (const auto& p : c.gainEnv)
+                {
+                    juce::Array<juce::var> pair;
+                    pair.add ((double) (p.at - c.offset) / (sampleRate > 0.0 ? sampleRate : 1.0)); // seconds from the clip's start
+                    pair.add ((double) p.db);
+                    envList.add (juce::var (pair));
+                }
+                co->setProperty ("gain_envelope", envList);
                 clips.add (juce::var (co));
             }
             o->setProperty ("clips", clips);
@@ -3286,6 +3868,7 @@ public:
         slot->instance = std::move (instance);
         slot->watch = &latencyWatch;
         slot->instance->addListener (&latencyWatch);
+        slot->listenToParameters();
         return slot;
     }
 
@@ -3347,8 +3930,10 @@ public:
             auto fresh = makeSlot (slot.plugin, &slot.savedState, error, 0.0, allowSidechain);
             if (fresh == nullptr)
                 return;
+            fresh->stopListeningToParameters();            // the listener is the slot's: it is re-attached to the instance it now holds
             slot.instance = std::move (fresh->instance);   // fresh keeps no instance, so its destructor removes nothing
             slot.watch = fresh->watch;
+            slot.listenToParameters();
             ++count;
         };
         for (auto& t : tracks)
@@ -3545,11 +4130,17 @@ private:
     juce::MidiBuffer midiScratch;
     juce::MidiBuffer snapshotMidiScratch;
     juce::MidiBuffer liveMidiScratch;
+    juce::MidiBuffer inputMidiScratch;   // the hardware input's events of the block: captured, then appended to liveMidiScratch
     std::array<std::atomic<int>, 2> snapshotReaders {};
     std::array<BasicSynth, 64> fallbackSynths {};
     bool lastBlockWasFallback = false;
     size_t lastFallbackTrackCount = 0;
     juce::int64 lastProcessedEnd = -1;
+    // false only inside processMonitoringOnly (the stopped pass). Atomic because renderStems and freezeTrack run on the message thread and read
+    // it too; they never monitor, because monitoringInput checks rendering() and the frozen flag first, so the value they read does not matter.
+    std::atomic<bool> rollingPass { true };
+    const float* const* liveInputs = nullptr;             // setLiveInputs: the device's inputs of this block, by absolute number
+    int liveInputCount = 0, liveInputSamples = 0;
     std::vector<int> cachedTopoOrder;
     std::vector<int> cachedInLat;
     std::vector<int> cachedOutLat;
@@ -3681,7 +4272,9 @@ private:
     }
 
     // One clip from a project element. A version 1 track is read as its own clip: the whole file at sample 0.
-    Clip readClip (const juce::XmlElement& e, const juce::File& base, double& rate, bool legacy, const juce::String& trackName, juce::StringArray& problems)
+    // `index` is the clip's place in its track: a clip without a layer attribute (version 3 and older) is on the layer of its index.
+    Clip readClip (const juce::XmlElement& e, const juce::File& base, double& rate, bool legacy, const juce::String& trackName, juce::StringArray& problems,
+                   int index)
     {
         Clip c;
         c.file = resolveSavedFile (e.getStringAttribute ("file").trim(), e.getStringAttribute ("path").trim(), base);
@@ -3695,6 +4288,20 @@ private:
         c.fadeIn = juce::jmax ((juce::int64) 0, e.getStringAttribute ("fadeIn", "0").getLargeIntValue());
         c.fadeOut = juce::jmax ((juce::int64) 0, e.getStringAttribute ("fadeOut", "0").getLargeIntValue());
         c.mute = e.getBoolAttribute ("mute");
+        c.layer = e.getIntAttribute ("layer", index);
+        c.takeGroup = juce::jmax (-1, e.getIntAttribute ("takeGroup", -1));
+        c.takeIndex = juce::jmax (0, e.getIntAttribute ("takeIndex", 0));
+        c.comp = e.getBoolAttribute ("comp", false);
+        if (c.takeGroup < 0) { c.takeIndex = 0; c.comp = false; }
+        for (auto* pe : e.getChildWithTagNameIterator ("GainPoint"))
+        {
+            const double db = pe->getDoubleAttribute ("db", 0.0);
+            ClipGainPoint p;
+            p.at = juce::jlimit ((juce::int64) 0, kMaxSafeSample, pe->getStringAttribute ("at", "0").getLargeIntValue());
+            p.db = std::isfinite (db) ? (float) juce::jlimit (-60.0, 12.0, db) : 0.0f;
+            c.gainEnv.push_back (p);
+        }
+        std::stable_sort (c.gainEnv.begin(), c.gainEnv.end(), [] (const ClipGainPoint& a, const ClipGainPoint& b) { return a.at < b.at; });
 
         juce::String problem;
         c.audio = pooledAudio (c.file, rate, problem);
@@ -3729,6 +4336,7 @@ private:
         sampleRate = r;
         if (r > 0.0)
             tempo.sampleRate = r;
+        updateCrossfadeLocked(); // the crossfade is a time, so its length in samples follows the rate
         // the monitor chain is made before the rate may be known: it is set up again for the new one (never by a render, which leaves it alone)
         if (changed && r > 0.0)
             for (auto& s : monitor)
@@ -3849,11 +4457,27 @@ private:
         return slot;
     }
 
+    // A track's or group's colour as the project writes it: hex text (RRGGBB, or AARRGGBB with the alpha ignored); absent or empty is 0
+    // (automatic). Text that is not hex is reported and ignored, so a bad colour never stops a load.
+    static juce::uint32 readColourAttribute (const juce::XmlElement& e, const char* attribute, const juce::String& who, juce::StringArray& problems)
+    {
+        const auto text = e.getStringAttribute (attribute).trim();
+        if (text.isEmpty())
+            return 0;
+        if (text.length() > 8 || ! text.containsOnly ("0123456789abcdefABCDEF"))
+        {
+            problems.add (who + ": the colour '" + text + "' is not hex and is ignored.");
+            return 0;
+        }
+        return 0xFF000000u | ((juce::uint32) text.getHexValue64() & 0x00FFFFFFu);
+    }
+
     struct ParsedXml
     {
         double rate = 0.0;
         std::vector<double> slotPreparedRates;
         std::vector<std::unique_ptr<Track>> tracks;
+        std::vector<TrackGroup> groups;
         std::vector<std::unique_ptr<Slot>> masterChain;
         TempoMap tempo;
         std::vector<Marker> markers;
@@ -3861,9 +4485,14 @@ private:
         juce::int64 loopStart = 0;
         juce::int64 loopEnd = 0;
         bool loopOn = false;
+        bool punchOn = false;
+        juce::int64 punchStart = 0;
+        juce::int64 punchEnd = 0;
         bool metronomeOn = false;
         bool snapOn = true;
         Grid grid = Grid::Quarter;
+        bool layered = false;   // a project without the attribute (version 3 and older) keeps its clips summed
+        int crossfadeMs = 10;
         juce::StringArray problems;
     };
 
@@ -3879,6 +4508,12 @@ private:
         {
             auto t = std::make_unique<Track>();
             t->name = e->getStringAttribute ("name");
+            t->colour = readColourAttribute (*e, "colour", "Track '" + t->name + "'", out.problems);
+            t->polarity = e->getBoolAttribute ("polarity");
+            // an absent or unknown mode is off (a project from before input monitoring has none)
+            if (! parseMonitorMode (e->getStringAttribute ("monitor"), t->monitor))
+                t->monitor = MonitorMode::Off;
+            t->group = juce::jmax (-1, e->getIntAttribute ("group", -1));
             const double trackGain = e->getDoubleAttribute ("gainDb", 0.0);
             const double trackPan = e->getDoubleAttribute ("pan", 0.0);
             // the same range as the fader and Editor::setTrackGain (-100 is silence, +12 the top)
@@ -3924,6 +4559,7 @@ private:
                 t->sends.push_back (snd);
             }
             t->showAutomation = e->getBoolAttribute ("showAutomation", false);
+            t->showTakes = e->getBoolAttribute ("showTakes", false);
             t->activeAutoTarget = e->getStringAttribute ("activeAutoTarget", "volume");
             if (t->activeAutoTarget.isEmpty()) t->activeAutoTarget = "volume";
             if (e->getBoolAttribute ("frozen", false))
@@ -3948,10 +4584,10 @@ private:
                 t->synth = std::make_unique<BasicSynth>();
             const bool legacy = e->getChildByName ("Clip") == nullptr && (e->hasAttribute ("file") || e->hasAttribute ("path"));
             if (legacy)
-                t->clips.push_back (readClip (*e, baseDir, out.rate, true, t->name, out.problems));
+                t->clips.push_back (readClip (*e, baseDir, out.rate, true, t->name, out.problems, 0));
             else
                 for (auto* c : e->getChildWithTagNameIterator ("Clip"))
-                    t->clips.push_back (readClip (*c, baseDir, out.rate, false, t->name, out.problems));
+                    t->clips.push_back (readClip (*c, baseDir, out.rate, false, t->name, out.problems, (int) t->clips.size()));
 
             for (auto* mc : e->getChildWithTagNameIterator ("MidiClip"))
             {
@@ -3988,6 +4624,9 @@ private:
                 lane.slotIndex = ae->getIntAttribute ("slotIndex", -1);
                 lane.paramIndex = ae->getIntAttribute ("paramIndex", -1);
                 lane.enabled = ae->getBoolAttribute ("enabled", true);
+                // an absent or unknown mode is Read: a file from before F4 plays its lanes as it always did
+                if (! parseAutoMode (ae->getStringAttribute ("mode", "read"), lane.mode))
+                    lane.mode = AutoMode::Read;
                 for (auto* pe : ae->getChildWithTagNameIterator ("Point"))
                 {
                     AutoPoint pt;
@@ -4008,10 +4647,33 @@ private:
             for (auto* c : mc->getChildWithTagNameIterator ("Plugin"))
                 out.masterChain.push_back (readSlotXml (*c, out.rate, "Master", out.problems, out.slotPreparedRates));
 
+        if (auto* gs = xml.getChildByName ("Groups"))
+            for (auto* ge : gs->getChildWithTagNameIterator ("Group"))
+            {
+                TrackGroup g;
+                g.name = ge->getStringAttribute ("name");
+                g.colour = readColourAttribute (*ge, "colour", "Group '" + g.name + "'", out.problems);
+                g.active = ge->getBoolAttribute ("active", true);
+                g.gain = ge->getBoolAttribute ("gain", true);
+                g.mute = ge->getBoolAttribute ("mute", true);
+                g.solo = ge->getBoolAttribute ("solo", true);
+                g.arm = ge->getBoolAttribute ("arm", true);
+                const double vca = ge->getDoubleAttribute ("vcaDb", 0.0);
+                if (std::isfinite (vca) && vca > 12.0)
+                    out.problems.add ("Group '" + g.name + "': the VCA offset was above +12 dB and is set to +12 dB.");
+                g.vcaDb = std::isfinite (vca) ? (float) juce::jlimit (-100.0, 12.0, vca) : 0.0f;
+                out.groups.push_back (g);
+            }
+
         const int numTracks = (int) out.tracks.size();
         for (int ti = 0; ti < numTracks; ++ti)
         {
             auto& t = *out.tracks[(size_t) ti];
+            if (t.group != -1 && ! juce::isPositiveAndBelow (t.group, (int) out.groups.size()))
+            {
+                out.problems.add ("Track '" + t.name + "': group " + juce::String (t.group) + " does not exist; the track is in no group.");
+                t.group = -1;
+            }
             if (t.outputTrack >= 0)
             {
                 if (t.outputTrack == ti || ! juce::isPositiveAndBelow (t.outputTrack, numTracks) || ! out.tracks[(size_t) t.outputTrack]->isBus())
@@ -4129,9 +4791,16 @@ private:
         out.loopStart = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml.getStringAttribute ("loopStart", "0").getLargeIntValue());
         out.loopEnd = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml.getStringAttribute ("loopEnd", "0").getLargeIntValue());
         out.loopOn = xml.getBoolAttribute ("loopOn") && out.loopEnd > out.loopStart;
+        // a punch range that is empty or negative is no range: it stays off (Editor::setPunch refuses it too)
+        out.punchStart = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml.getStringAttribute ("punchStart", "0").getLargeIntValue());
+        out.punchEnd = juce::jlimit ((juce::int64) 0, kMaxSafeSample, xml.getStringAttribute ("punchEnd", "0").getLargeIntValue());
+        out.punchOn = xml.getBoolAttribute ("punchOn") && out.punchEnd > out.punchStart;
         out.metronomeOn = xml.getBoolAttribute ("metronome");
         out.snapOn = xml.getBoolAttribute ("snap", true);
         out.grid = (Grid) juce::jlimit (0, 5, xml.getIntAttribute ("grid", (int) Grid::Quarter));
+        out.layered = xml.getBoolAttribute ("layered", false);
+        out.punchOn = out.punchOn && out.layered; // a punch needs layers (Editor::setPunch): a file that is not layered loads with it off
+        out.crossfadeMs = juce::jlimit (0, 2000, xml.getIntAttribute ("crossfadeMs", 10));
         return out;
     }
 
@@ -4458,10 +5127,17 @@ private:
         bumpRevision();
     }
 
-    // The fader and the balance of a track as the two channel gains.
-    static void trackGains (const Track& t, float& left, float& right)
+    // A fader (or a volume lane's value) in dB with a VCA offset added. -100 is silence, the fader's bottom, whatever the offset: the
+    // offset must not lift a track that is switched off by its fader.
+    static float faderGain (float db, float vcaDb)
     {
-        const float gain = juce::Decibels::decibelsToGain (t.gainDb, -100.0f);
+        return db <= -100.0f ? 0.0f : juce::Decibels::decibelsToGain (db + vcaDb, -100.0f);
+    }
+
+    // The fader and the balance of a track as the two channel gains; `vcaDb` is its group's offset (0 for none).
+    static void trackGains (const Track& t, float vcaDb, float& left, float& right)
+    {
+        const float gain = faderGain (t.gainDb, vcaDb);
         float l = 1.0f, r = 1.0f;
         panGains (t.pan, l, r);
         left = gain * l;
@@ -4558,7 +5234,7 @@ private:
     static const AutomationLane* findActiveLane (const std::vector<AutomationLane>& lanes, juce::StringRef targetId)
     {
         for (const auto& lane : lanes)
-            if (lane.enabled && ! lane.points.empty() && lane.targetId == targetId)
+            if (lane.enabled && ! lane.overriding && ! lane.points.empty() && lane.targetId == targetId)
                 return &lane;
         return nullptr;
     }
@@ -4567,12 +5243,12 @@ private:
                                int outOffset, int count, juce::int64 blockStart,
                                float baseGainDb, float basePan,
                                const AutomationLane* volLane, const AutomationLane* panLane,
-                               float* outPeakL = nullptr, float* outPeakR = nullptr)
+                               float vcaDb, float* outPeakL = nullptr, float* outPeakR = nullptr)
     {
         const int channels = juce::jmin (2, out.getNumChannels());
         if (volLane == nullptr && panLane == nullptr)
         {
-            const float gain = juce::Decibels::decibelsToGain (baseGainDb, -100.0f);
+            const float gain = faderGain (baseGainDb, vcaDb);
             float l = 1.0f, r = 1.0f;
             panGains (basePan, l, r);
             const float left = gain * l, right = gain * r;
@@ -4595,7 +5271,7 @@ private:
             const juce::int64 pos = blockStart + s;
             const float gainDb = volLane != nullptr ? autoNormToDb (volLane->evaluateAt (pos)) : baseGainDb;
             const float panVal = panLane != nullptr ? juce::jlimit (-1.0f, 1.0f, panLane->evaluateAt (pos) * 2.0f - 1.0f) : basePan;
-            const float gain = juce::Decibels::decibelsToGain (gainDb, -100.0f);
+            const float gain = faderGain (gainDb, vcaDb);
             float panL = 1.0f, panR = 1.0f;
             panGains (panVal, panL, panR);
             const float vL = (srcL != nullptr ? srcL[s] : 0.0f) * (gain * panL);
@@ -4620,8 +5296,10 @@ private:
             head.setLoopPoints (tempo.samplesToBeats ((double) loopStart), tempo.samplesToBeats ((double) loopEnd));
     }
 
+public:
     // The metronome: a click of 15 ms at every beat that starts in [start - click, start + n). It is computed from the distance since
-    // each beat, so a block that starts in the middle of a click gets the rest of it, and nothing is kept between blocks.
+    // each beat, so a block that starts in the middle of a click gets the rest of it, and nothing is kept between blocks. Public: the count-in
+    // (F5) draws its clicks on a tempo map of its own, on the transport's thread.
     static void addMetronomeWith (juce::AudioBuffer<float>& out, juce::int64 start, const TempoMap& map, bool on)
     {
         if (! on)
@@ -4658,6 +5336,10 @@ private:
         addMetronomeWith (out, start, tempo, metronomeOn);
     }
 
+private:
+
+    // The fallback for a block the lock missed (processBlock): it plays the clips from the snapshot, so it never monitors. An input is heard
+    // only through runChain, on the locked path.
     void processBlockFromSnapshot (juce::AudioBuffer<float>& out, juce::int64 start)
     {
         int snapIdx = 0;
@@ -4726,7 +5408,7 @@ private:
                 }
                 else
                 {
-                    mixClipList (st.clips, blockStart, count, snapshotScratch);
+                    mixClipList (st.clips, blockStart, count, snapshotScratch, snap.layered, snap.crossfadeSamples);
                     if (st.isMidi && ! st.hasMidiPlugin && ti < fallbackSynths.size())
                     {
                         auto& synth = fallbackSynths[ti];
@@ -4744,6 +5426,10 @@ private:
                         fallbackSynths[ti].reset();
                     }
                 }
+                // Polarity at the source, as runChain puts it; a frozen track's audio already has it (its freeze ran runChain).
+                if (st.polarity && ! (st.frozen && st.frozenAudio != nullptr))
+                    for (int ch = 0; ch < juce::jmin (2, snapshotScratch.getNumChannels()); ++ch)
+                        juce::FloatVectorOperations::negate (snapshotScratch.getWritePointer (ch, 0), snapshotScratch.getReadPointer (ch, 0), count);
                 for (const auto& snd : st.sends)
                 {
                     if (! snd.preFader || snd.mute) continue;
@@ -4760,7 +5446,7 @@ private:
                 {
                     snap.postScratches[ti].clear (0, count);
                     mixTrackBlock (snapshotScratch, snap.postScratches[ti], 0, count, blockStart, st.gainDb, st.pan,
-                                   findActiveLane (st.automation, "volume"), findActiveLane (st.automation, "pan"));
+                                   findActiveLane (st.automation, "volume"), findActiveLane (st.automation, "pan"), st.vcaDb);
                     for (const auto& snd : st.sends)
                     {
                         if (snd.preFader || snd.mute) continue;
@@ -4789,7 +5475,7 @@ private:
                 else
                 {
                     mixTrackBlock (snapshotScratch, out, done, count, blockStart, st.gainDb, st.pan,
-                                   findActiveLane (st.automation, "volume"), findActiveLane (st.automation, "pan"));
+                                   findActiveLane (st.automation, "volume"), findActiveLane (st.automation, "pan"), st.vcaDb);
                 }
             }
         }
@@ -4864,10 +5550,41 @@ private:
     }
 
     // The block [start, start + n) of the track through its clips and its chain, left in track.scratch. Silent outside the audio.
+    // Whether `t` plays its device input now instead of its clips (F6). In Auto that is while a take records and while the transport is stopped
+    // (`rolling` false, the stopped pass). Never in a render, never for a frozen track, a bus, a MIDI track or a track with no input.
+    bool monitoringInput (const Track& t, bool rolling) const
+    {
+        if (rendering() || t.frozen || ! t.armed || t.isBus() || t.isMidi || t.inputLeft < 0 || t.monitor == MonitorMode::Off)
+            return false;
+        if (t.monitor == MonitorMode::In)
+            return true;
+        return recording.load() || ! rolling;
+    }
+
+    // Copies a monitoring track's device inputs into its scratch: channel 0 from inputLeft, channel 1 from inputRight (inputLeft again for a mono
+    // input). Sample i of this call is device sample liveInputOffset + liveOffset + i. An input that is off, or a sample past the device block,
+    // is silence. No allocation.
+    void copyMonitoredInputs (Track& t, int n, int liveOffset)
+    {
+        const int base = liveInputOffset + liveOffset;
+        const int first = juce::jmax (0, -base);
+        const int last = juce::jmin (n, liveInputSamples - base);
+        for (int ch = 0; ch < juce::jmin (2, t.scratch.getNumChannels()); ++ch)
+        {
+            const int input = (ch == 1 && t.inputRight >= 0) ? t.inputRight : t.inputLeft;
+            const float* src = (liveInputs != nullptr && juce::isPositiveAndBelow (input, liveInputCount)) ? liveInputs[input] : nullptr;
+            t.scratch.clear (ch, 0, n);
+            if (src != nullptr && last > first)
+                juce::FloatVectorOperations::copy (t.scratch.getWritePointer (ch, first), src + base + first, last - first);
+        }
+    }
+
     void runChain (Track& t, juce::int64 start, int n, const juce::MidiBuffer* liveMidi = nullptr, int liveOffset = 0)
     {
         if (n <= 0)
             return;
+        const bool rolling = rollingPass.load (std::memory_order_relaxed);
+        const bool monitors = monitoringInput (t, rolling);
         if (t.frozen && t.frozenAudio != nullptr)
         {
             copyFrozenSlice (*t.frozenAudio, start, n, t.scratch);
@@ -4883,14 +5600,21 @@ private:
             }
             else
             {
-                mixClips (t, start, n, t.scratch);
+                // a monitoring track plays its device input in place of its clips (the same chain, fader and pan follow)
+                if (monitors)
+                    copyMonitoredInputs (t, n, liveOffset);
+                else if (rolling)
+                    mixClips (t, start, n, t.scratch, layered, crossfadeSamples);
+                else
+                    t.scratch.clear (0, n);   // the stopped pass plays no clips: an armed MIDI track sounds its live input only
                 if (! rendering() && t.pendingNoteFlush)
                 {
                     t.activeNotes.appendNoteOffs (midiScratch, 0);
                     t.activeNotes.reset();
                     t.pendingNoteFlush = false;
                 }
-                collectMidiEvents (t.midiClips, tempo, start, n, midiScratch);
+                if (rolling)   // the stopped pass plays no clip MIDI (its clips are not played either)
+                    collectMidiEvents (t.midiClips, tempo, start, n, midiScratch);
                 if (liveMidi != nullptr)
                     appendLiveMidiSlice (*liveMidi, liveOffset, n, midiScratch);
                 if (! rendering())
@@ -4926,7 +5650,7 @@ private:
             juce::AudioBuffer<float> view (t.scratch.getArrayOfWritePointers(), t.scratch.getNumChannels(), n);
             for (const auto& lane : t.automation)
             {
-                if (! lane.enabled || lane.points.empty() || lane.slotIndex < 0 || lane.paramIndex < 0)
+                if (! lane.enabled || lane.overriding || lane.points.empty() || lane.slotIndex < 0 || lane.paramIndex < 0)
                     continue;
                 if (lane.slotIndex < (int) t.chain.size())
                 {
@@ -4939,6 +5663,10 @@ private:
                     }
                 }
             }
+            // Polarity is at the source, before the chain (a frozen track has it baked in: its freeze ran this). A sign flip, no allocation.
+            if (t.polarity)
+                for (int ch = 0; ch < juce::jmin (2, t.scratch.getNumChannels()); ++ch)
+                    juce::FloatVectorOperations::negate (t.scratch.getWritePointer (ch, 0), t.scratch.getReadPointer (ch, 0), n);
             for (auto& s : t.chain)
             {
                 if (t.scratch.getNumChannels() >= 4)
