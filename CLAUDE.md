@@ -57,13 +57,16 @@ This file keeps only the rules; do not copy a skill's steps into it. A new skill
 
 ## Sub-agents: the main session is the orchestrator
 
-Five cheap agents live in [.claude/agents/](.claude/agents) (read-only except `fixer`; each file owns its tools, limits, and report format, so this section only says how they run):
+Eight cheap agents live in [.claude/agents/](.claude/agents) (mirrored for Antigravity in `.agents/plugins/pantheon/agents/`, with that tool's tool names: change both together). `builder` and `fixer` edit files, `commit-writer` and `pr-writer` write to git and GitHub, the rest only read; each file owns its tools, limits, and report format, so this section only says how they run:
 
+- `builder`: one briefed slice of a feature → code, its tests, built with `scripts/build.sh`.
 - `bug-hunter`: a symptom, a plugin or app → cause and place.
 - `code-checker`: a diff or named files → findings.
-- `fixer`: findings → the smallest edit, built with `scripts/build.sh`.
 - `feature-checker`: a plugin and a feature → what is missing.
-- `commit-writer`: commits by topic.
+- `doc-checker`: a diff, a module or the repo → docs that disagree with the code or with each other (counts, names, links, captions).
+- `fixer`: findings → the smallest edit, built with `scripts/build.sh`.
+- `commit-writer`: commits by topic, each commit building on its own (it may unstage, never touch the working tree).
+- `pr-writer`: opens a PR from a pushed branch, turns on auto-merge when told, reads a PR's failed CI.
 
 **Standing rule (every task):** Always, for every task (a feature, a fix, a review, a doc change, a build-speed change; none is too small), the main session acts as **orchestrator** (plans, splits, writes briefs, passes reports between agents as text, owns every decision, runs final checks itself, and is the only one that talks to the user) and runs the work through a pipeline of **Haiku** agents (`model: haiku`; where the named agents above are unavailable, use a general-purpose agent with `model: haiku`). Task size changes how many stages run, never whether the pipeline is used (a one-line fix is one `fixer` + orchestrator verification). Agents never call each other and never talk to the user; use them without being asked, as with skills.
 
@@ -73,11 +76,12 @@ orchestrator: plan, split, brief ─► builder / fixer (one at a time) ─► r
 
 - **Chains & concurrency:**
   - **Fix chain:** `bug-hunter` (skip when cause is known) → `fixer` with its report → `code-checker` on the diff → back to `fixer` with the findings (**at most 2 rounds**; if not clean after the second, stop and tell the user what is left).
-  - **Feature chain:** builder (one at a time, split along seams; never two builds or two editors on the same files) → `code-checker` and `feature-checker` (or diff reviewer and bug hunter) in **parallel** → `fixer` for what they report → `code-checker` once more (at most 2 fixer rounds).
+  - **Feature chain:** `builder` (one at a time, split along seams; never two builds or two editors on the same files) → `code-checker` and `feature-checker` (and `doc-checker` when a doc or a counted thing changed) in **parallel** → `fixer` for what they report → `code-checker` once more (at most 2 fixer rounds).
+  - **Ship chain** (only when the user asks to commit, push or open a PR): orchestrator's checks pass → `commit-writer` (push if asked) → `pr-writer open` (auto-merge only with the method the user named) → on a red CI, `pr-writer status` → the fix chain.
   - **Parallel only for reads:** fan out only when read-only agents read the same state without dependencies (do not fan out for show).
 - **What a brief must have:** goal and purpose; files to read first (the module's `CLAUDE.md` and target files); boundaries (what it may and may not touch, e.g. `shared/`, commits); exact foreground `scripts/build.sh ...` commands with a timeout (no background jobs — they die with the agent); definition of done (checks pass, screenshots regenerated and inspected); a test for every defect or feature; concrete numbers and examples (not "make it robust"); and the report format (`git diff --stat`, pass counts, what it looked at, and `"unverified"` for anything not confirmed). Reviewers also get the module's invariants (`CLAUDE.md`) and failure classes to look for (audio thread, locks, real third-party plugins and devices).
 - **What the orchestrator does itself (never delegated to an agent alone):** design, `shared/` design and verification, multi-plugin changes, the skills above (`plugin-parameter-change`, `shared-change`, `new-plugin`), regenerating and looking at screenshots, and `install-and-validate` (`fixer` stops and reports when a finding needs one of these). Re-run `scripts/build.sh` yourself, inspect PNGs yourself, read risky code yourself (audio thread, locks, file/device I/O), scrutinize changed test expectations, and drop findings not confirmed in the code. Never claim "done" on an agent's word or with a background/unrun build.
-- **Commits, pushes, and final report:** Commits and pushes happen only when the user asks (or a configured hook asks); `commit-writer` (or the orchestrator) runs them after checks pass, one commit per verified step, never commits to `main`, and pushes only when the user explicitly said push. End a chain with a short report to the user: what was found, what changed (`git diff --stat`), the check that ran and its result, and what is left.
+- **Commits, pushes, and final report:** Commits and pushes happen only when the user asks (or a configured hook asks); `commit-writer` (or the orchestrator) runs them after checks pass, one commit per verified step, never commits to `main`, and pushes only when the user explicitly said push; a PR is opened, and auto-merge turned on, only when the user asked for it. End a chain with a short report to the user: what was found, what changed (`git diff --stat`), the check that ran and its result, and what is left.
 
 ## shared/ui
 

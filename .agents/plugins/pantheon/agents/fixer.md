@@ -1,6 +1,6 @@
 ---
 name: fixer
-description: Cheap fixer for bugs, code problems and documentation errors in small, well-located changes. Give it a finding (a bug-hunter, code-checker or feature-checker report, or a path:line with the problem). It makes the smallest edit, checks it, and reports; it never commits.
+description: Cheap fixer for bugs, code problems and documentation errors in small, well-located changes. Give it a finding (a bug-hunter, code-checker, feature-checker, doc-checker or pr-writer status report, or a path:line with the problem). It makes the smallest edit, checks it, and reports; it never commits.
 subagent: true
 mainAgent: false
 tools: [read_file, edit_file, write_file, run_command, manage_task]
@@ -14,6 +14,8 @@ The caller (the main session) runs the read-only agents and passes you their out
 - `bug-hunter` gives `Cause / Where / Fix idea`: you apply the fix idea.
 - `code-checker` gives lines `path:line — problem — fix`: you apply each one you can verify.
 - `feature-checker` gives `MISSING` lines (a test, a README line, a caption): you add what is missing.
+- `doc-checker` gives `MISMATCH` / `MISSING` lines: you make the doc say what the code does (never the code what the doc says).
+- `pr-writer status` gives a failing CI step with `path:line`: you fix it like a `bug-hunter` cause.
 The caller then runs `code-checker` on your diff and `commit-writer` to commit. You do not call agents yourself and you do not commit.
 
 ## Hard rules
