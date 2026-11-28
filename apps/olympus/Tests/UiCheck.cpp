@@ -12,6 +12,8 @@
 #include <thread>
 #include "UI/Arrange.h"
 #include "UI/MainComponent.h"
+#include "UI/TrackColours.h"
+#include "UI/LampButton.h"
 #include <atomic>
 
 using namespace olympus;
@@ -4702,6 +4704,848 @@ int main()
 
         w.reset();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    std::printf ("[58] Standard MIDI File dropped on the window: new MIDI tracks at the drop, one undo step\n");
+    {
+        const auto midi = tempFolder().getChildFile ("drop-58.mid");
+        {
+            Session src;
+            Editor ed (src);
+            juce::String err;
+            for (const auto* name : { "Keys", "Bass" })
+            {
+                const int t = ed.addMidiTrack (name);
+                const auto mc = ed.addMidiClip (t, 0, 48000 * 4, {}, err);
+                ed.addMidiNote (t, mc.clip, 0.0, 1.0, 60, 100, 1, err);
+            }
+            test::check (ed.exportMidi (midi, -1, -1, err) && midi.existsAsFile(), "a two-track MIDI file is made for the drop");
+        }
+        auto w = makeWindow();
+        const auto before = w->session.tracks.size();
+        w->filesDropped ({ midi.getFullPathName() }, 0, 0);
+        const bool made = w->session.tracks.size() == before + 2
+                          && w->session.tracks[before]->isMidi && w->session.tracks[before + 1]->isMidi;
+        test::check (made, "a dropped .mid file creates its MIDI tracks");
+        w->undoEdit();
+        test::check (w->session.tracks.size() == before, "undo removes the MIDI tracks a drop made");
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    std::printf ("[59] Track colour, polarity and groups from the track menu's handler; the VCA strip's fader; Alt (alone); the arrangement and the mixer paint with colours\n");
+    {
+        auto w = makeWindow();
+        juce::String err;
+        const auto leadFile = makeWav ("colour-59-lead.wav", 48000);
+        const auto padFile = makeWav ("colour-59-pad.wav", 48000);
+        test::check (w->editor.addTrack (leadFile, "Lead", err) && w->editor.addTrack (padFile, "Pad", err), "colour: two tracks");
+        w->refreshNow();
+
+        // the track menu's handler: Colour (a swatch, then Auto), Polarity (Ø), Group (New group..., then the group's VCA)
+        w->arrange.trackMenuAction (0, ArrangeView::menuColourFirst + 4);
+        test::check (w->session.tracks[0]->colour == olympus::gui::trackPalette()[4].argb && w->session.tracks[1]->colour == 0,
+                     "the menu's Colour swatch sets the track's colour; the other track stays automatic");
+        w->arrange.trackMenuAction (0, ArrangeView::menuColourAuto);
+        test::check (w->session.tracks[0]->colour == 0, "the menu's Colour Auto returns the track to the palette");
+        w->arrange.trackMenuAction (0, ArrangeView::menuColourFirst + 4);
+        w->arrange.trackMenuAction (1, ArrangeView::menuPolarity);
+        test::check (w->session.tracks[1]->polarity && ! w->session.tracks[0]->polarity, "the menu's Polarity (Ø) turns polarity on for that track");
+        w->arrange.trackMenuAction (1, ArrangeView::menuPolarity);
+        test::check (! w->session.tracks[1]->polarity, "the menu's Polarity (Ø) toggles it off again");
+
+        w->arrange.trackMenuAction (0, ArrangeView::menuGroupNew);
+        w->arrange.finishOpenDialogForTest (true, "Drums");
+        test::check (w->session.groups.size() == 1 && w->session.groups[0].name == "Drums" && w->session.tracks[0]->group == 0,
+                     "the menu's New group names a group and puts the track in it");
+        w->arrange.trackMenuAction (1, ArrangeView::menuGroupFirst + 0);
+        test::check (w->session.tracks[1]->group == 0, "the menu's group entry puts another track in that group");
+
+        // the VCA strip: its fader sets the group's offset, which the member hears (the pad is muted so the lead is measured alone)
+        w->editor.setTrackMute (1, true, err, true);
+        press (w->mixerButton);
+        w->refreshNow();
+        test::check (w->mixer.vcaStripCount() == 1 && w->mixer.vcaNameText (0) == "Drums", "the mixer has one VCA strip for the group, named");
+        const auto leadPeak = [&w]
+        {
+            juce::AudioBuffer<float> out (2, 512);
+            w->session.processBlock (out, 0);
+            return out.getMagnitude (0, 0, 512);
+        };
+        const float before = leadPeak();
+        auto* vca = w->mixer.vcaFader (0);
+        test::check (vca != nullptr && vca->getMinimum() == -100.0 && std::abs (vca->getMaximum() - 12.0) < 1e-9
+                         && vca->isDoubleClickReturnEnabled() && std::abs (vca->getDoubleClickReturnValue()) < 1e-9,
+                     "the VCA fader runs -100..+12 and double-click returns it to 0");
+        vca->setValue (-6.0, juce::sendNotificationSync);
+        test::check (std::abs (w->session.groups[0].vcaDb + 6.0f) < 1e-4f, "moving the VCA fader to -6 sets the group's offset");
+        const float after = leadPeak();
+        test::check (before > 0.01f && std::abs (after - 0.5f * before) < 1e-3f, "the member's level is halved by the -6 dB VCA (" + juce::String (before) + " -> " + juce::String (after) + ")");
+        vca->setValue (0.0, juce::sendNotificationSync);
+        w->editor.setTrackMute (1, false, err, true);
+
+        // Alt (alone): the editor's linked fader moves the group; the same call with alone moves one member only
+        const float padBefore = w->session.tracks[1]->gainDb;
+        test::check (w->editor.setTrackGain (0, -3.0f, err, true) && std::abs (w->session.tracks[0]->gainDb + 3.0f) < 1e-4f
+                         && std::abs (w->session.tracks[1]->gainDb - padBefore) < 1e-4f,
+                     "Alt (alone): the fader moves its own track only");
+        test::check (w->editor.setTrackGain (0, -6.0f, err) && std::abs (w->session.tracks[1]->gainDb - (padBefore - 3.0f)) < 1e-4f && std::abs (w->session.tracks[0]->gainDb + 6.0f) < 1e-4f,
+                     "the group's fader links the members when Alt is not held");
+
+        // paint: the arrangement's colour strips and clip fills, the mixer's colour caps and the VCA strip, with no crash
+        {
+            juce::Image img (juce::Image::ARGB, 1200, 750, true);
+            juce::Graphics g (img);
+            w->arrange.paintEntireComponent (g, false);
+            w->mixer.paintEntireComponent (g, false);
+        }
+        test::check (w->mixer.trackStripCount() == 2, "the arrangement and the mixer paint with colours and VCA strips without a crash");
+
+        // Ø on the mixer strip is the same edit as the menu's
+        test::check (w->editor.setTrackPolarity (0, true, err) && w->session.tracks[0]->polarity, "the mixer's Ø is the same Editor edit");
+        test::check (w->mixer.trackPolarityTextForTest (0) == juce::String::charToString ((juce::juce_wchar) 0x00D8),
+                     "the mixer strip's polarity button reads Ø (U+00D8), not the bytes of its UTF-8 encoding");
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    std::printf ("[60] Layered clips (F3): G and the lane menu show the clip gain line; a click on it adds a point, a drag moves it and Alt-click deletes it, each one undo step; raise and lower from the clip menu; the crossfade prompt; the layered toggle; a paint with overlapping layered clips\n");
+    {
+        auto w = makeWindow();
+        juce::String err;
+        const auto lowFile = makeWav ("layer-60-low.wav", 48000);
+        const auto highFile = makeWav ("layer-60-high.wav", 48000);
+        test::check (w->editor.addTrack (lowFile, "Low", err) && w->editor.addClip (0, highFile, 12000, 0, 0, err).valid(),
+                     "layers: two clips on a track, the second over the first: " + err);
+        w->refreshNow();
+        const ClipRef low { 0, 0, false }, high { 0, 1, false };
+        w->arrange.zoom = 400.0; // 1 s is 400 px: the upper clip starts a quarter of a second in, 100 px along
+        w->refreshNow();
+
+        test::check (! w->arrange.clipGainShown(), "the clip gain line is hidden to begin with");
+        w->arrange.keyPressed (juce::KeyPress ('g'));
+        test::check (w->arrange.clipGainShown(), "G shows the clip gain line");
+        w->arrange.keyPressed (juce::KeyPress ('G'));
+        test::check (! w->arrange.clipGainShown(), "G again hides it");
+        w->arrange.laneMenuAction (0, 0, 5);
+        test::check (w->arrange.clipGainShown(), "the lane menu's Clip gain shows it too");
+        w->arrange.laneMenuAction (0, 0, 5);
+        test::check (! w->arrange.clipGainShown(), "and its Clip gain again hides it");
+        w->arrange.keyPressed (juce::KeyPress ('g'));
+
+        // the line is at 0 dB (a sixth of the clip's height from its top: +12 dB at the top, -60 at the bottom)
+        const auto rect = w->arrange.clipBounds (low);
+        const juce::Point<int> onLine (rect.getX() + 20, rect.getY() + rect.getHeight() / 6);
+        test::check (! rect.isEmpty() && w->arrange.clipAt (onLine) == low, "the press on the line is on the lower clip, away from the upper one");
+        w->arrange.mouseDown (mouseAt (w->arrange, onLine));
+        w->arrange.mouseUp (mouseAt (w->arrange, onLine));
+        test::check (w->session.tracks[0]->clips[0].gainEnv.size() == 1, "a click on the gain line adds a point");
+        test::check (w->editor.undo() && w->session.tracks[0]->clips[0].gainEnv.empty() && w->editor.redo()
+                         && w->session.tracks[0]->clips[0].gainEnv.size() == 1, "the click is one undo step");
+
+        // a drag of the point up by a quarter of the clip's height moves it: still one point, now above 0 dB
+        const float beforeDrag = w->session.tracks[0]->clips[0].gainEnv.empty() ? 0.0f : w->session.tracks[0]->clips[0].gainEnv[0].db;
+        const juce::Point<int> up (onLine.x, onLine.y - rect.getHeight() / 4);
+        w->arrange.mouseDown (mouseAt (w->arrange, onLine));
+        w->arrange.mouseDrag (mouseAt (w->arrange, up));
+        w->arrange.mouseUp (mouseAt (w->arrange, up));
+        test::check (w->session.tracks[0]->clips[0].gainEnv.size() == 1 && w->session.tracks[0]->clips[0].gainEnv[0].db > beforeDrag + 1.0f,
+                     "a drag moves the point up, and it stays one point");
+        test::check (w->editor.undo() && ! w->session.tracks[0]->clips[0].gainEnv.empty() && std::abs (w->session.tracks[0]->clips[0].gainEnv[0].db - beforeDrag) < 1e-3f,
+                     "the drag is one undo step: the point goes back to where it was");
+
+        // Alt-click on the point deletes it (one undo step)
+        w->arrange.mouseDown (mouseAtComp (w->arrange, onLine, juce::ModifierKeys (juce::ModifierKeys::altModifier)));
+        w->arrange.mouseUp (mouseAtComp (w->arrange, onLine, juce::ModifierKeys (juce::ModifierKeys::altModifier)));
+        test::check (w->session.tracks[0]->clips[0].gainEnv.empty(), "Alt-click on a point deletes it");
+        test::check (w->editor.undo() && w->session.tracks[0]->clips[0].gainEnv.size() == 1, "the deletion is one undo step");
+
+        // the clip menu: raise to top puts the lower clip above the upper one; lower to bottom puts it back under
+        w->arrange.clipMenuAction (low, 14);
+        test::check (w->session.tracks[0]->clips[0].layer > w->session.tracks[0]->clips[1].layer, "Raise to top puts the clip above the other one");
+        w->arrange.clipMenuAction (low, 15);
+        test::check (w->session.tracks[0]->clips[0].layer < w->session.tracks[0]->clips[1].layer, "Lower to bottom puts it under the other one again");
+        (void) high;
+
+        // the lane menu: the crossfade prompt (a whole number of ms, else refused), and Layered clips
+        w->arrange.laneMenuAction (0, 0, 4);
+        w->arrange.finishOpenDialogForTest (true, "25");
+        test::check (w->session.crossfadeMs == 25 && w->session.crossfadeSamples == 1200, "Crossfade length sets the crossfade from the prompt");
+        w->arrange.laneMenuAction (0, 0, 4);
+        w->arrange.finishOpenDialogForTest (true, "lots");
+        test::check (w->session.crossfadeMs == 25, "a crossfade that is not a number is refused and the length kept");
+        w->arrange.laneMenuAction (0, 0, 3);
+        test::check (! w->session.layered, "Layered clips in the lane menu turns layered off");
+        w->arrange.laneMenuAction (0, 0, 3);
+        test::check (w->session.layered, "and on again");
+
+        // a paint with overlapping layered clips, the gain line shown and not, layered and summed: no crash, the clips still there
+        {
+            juce::Image img (juce::Image::ARGB, 1200, 750, true);
+            juce::Graphics g (img);
+            w->arrange.setClipGainShown (true);
+            w->arrange.paintEntireComponent (g, false);
+            w->editor.setLayered (false);
+            w->refreshNow();
+            w->arrange.paintEntireComponent (g, false);
+            w->arrange.setClipGainShown (false);
+            w->editor.setLayered (true);
+            w->refreshNow();
+            w->arrange.paintEntireComponent (g, false);
+        }
+        test::check (w->session.tracks[0]->clips.size() == 2 && w->session.layered, "paints with overlapping layered clips do not crash and change nothing");
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    // [61] Automation modes (F4) in the window: the lane's mode button cycles READ, TOUCH, LATCH, WRITE; a fader drag in Touch is written by the
+    // writer's ticks with the transport advancing, the lamp is lit while the lane writes and dark after the release; the pass is one undo step;
+    // a paint with a writing lane does not crash
+    std::printf ("[61] Automation modes (F4): the lane's mode button cycles READ, TOUCH, LATCH, WRITE; a fader drag in Touch is written by the ticks; the lamp follows the writing; the pass is one undo step; paint\n");
+    {
+        const auto dir61 = tempFolder().getChildFile ("automation-mode-ui");
+        dir61.deleteRecursively();
+        dir61.createDirectory();
+        auto w = makeWindow (true, dir61.getChildFile ("settings.xml"));
+        w->addTracks ({ makeWav ("auto-mode-ui.wav").getFullPathName() });
+        w->refreshNow();
+        press (*w->arrange.automationButton (0)); // AUTO: the lane and its mode button show
+        w->refreshNow();
+        auto* modeBtn = w->arrange.autoModeButton (0);
+        test::check (modeBtn != nullptr && modeBtn->isVisible() && modeBtn->getButtonText() == "READ", "the lane's mode button shows READ");
+
+        const char* order[] = { "TOUCH", "LATCH", "WRITE", "READ" };
+        bool cycled = true;
+        for (const char* next : order)
+        {
+            press (*modeBtn);
+            w->refreshNow();
+            cycled = cycled && modeBtn->getButtonText() == next;
+        }
+        test::check (cycled, "the mode button cycles READ, TOUCH, LATCH, WRITE and back to READ");
+        press (*modeBtn);
+        w->refreshNow();
+        test::check (w->session.tracks[0]->automation.size() == 1 && w->session.tracks[0]->automation[0].mode == AutoMode::Touch
+                     && modeBtn->getButtonText() == "TOUCH" && ! modeBtn->getToggleState(),
+                     "the mode is Touch in the session and on the button, its lamp dark while nothing is written");
+
+        // a fader drag in Touch, with the transport advancing: the ticks write the fader's value, the lamp is lit while the lane writes
+        auto* fader = w->arrange.faderSlider (0);
+        test::check (fader != nullptr, "the track's fader is there");
+        const auto preDrag = w->session.tracks[0]->automation[0].points.size();
+        fader->onDragStart();
+        w->automation.tick (0, true);
+        for (int k = 1; k <= 8; ++k)
+        {
+            fader->setValue (-6.0 - 2.0 * k, juce::sendNotificationSync);
+            w->automation.tick ((juce::int64) k * 1600, true);
+        }
+        w->refreshNow();
+        test::check (w->automation.isWriting (0, "volume") && modeBtn->getToggleState(), "while the fader is held the lane writes and its lamp is lit");
+        fader->onDragEnd();
+        w->automation.tick (14000, true);
+        w->refreshNow();
+        const auto& lane = w->session.tracks[0]->automation[0];
+        test::check (lane.points.size() > preDrag + 2 && ! w->automation.isWriting (0, "volume") && ! modeBtn->getToggleState(),
+                     "the fader's values are written as points, and the lamp is dark after the release");
+        test::check (! lane.overriding, "the lane plays again after the release");
+        {
+            juce::Image img (juce::Image::ARGB, 1200, 750, true);
+            juce::Graphics g (img);
+            w->arrange.paintEntireComponent (g, false);
+        }
+        test::check (w->session.tracks[0]->automation[0].mode == AutoMode::Touch, "a paint with the lane after its pass changes nothing");
+
+        // a pass that runs and stops is one undo step: undo puts the lane back as it was before the drag
+        w->automation.tick (16000, false);
+        const auto undoLabel = w->editor.undoLabel();
+        test::check (undoLabel == "Track gain" || undoLabel == "Automation pass", "the pass is recorded as one undo step: " + undoLabel);
+        w->refreshNow();
+        test::check (w->editor.undo() && w->session.tracks[0]->automation[0].points.size() == preDrag,
+                     "one undo puts back the lane's points from before the drag");
+
+        // a render that starts during a Touch pass ends the pass first: the lane plays again and the render takes its automation
+        w->automation.begin (0, "volume");
+        w->automation.tick (20000, true);
+        test::check (w->session.tracks[0]->automation[0].overriding && w->automation.isWriting (0, "volume"), "a Touch pass is open before the render");
+        w->chooseRenderFolder = [] (const juce::String&, const juce::File&, std::function<void (const juce::File&)> done)
+        {
+            done (tempFolder().getChildFile ("automation-render-61"));
+        };
+        press (w->renderButton);
+        w->refreshNow();
+        test::check (! w->session.tracks[0]->automation[0].overriding && ! w->automation.isWriting (0, "volume"),
+                     "the render ends the pass: no lane is overriding after it");
+        w.reset();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+    }
+
+    // [62] Punch and count-in (F5): the count-in's clicks hold the position and reach the outputs only; the take starts at the first sample
+    // after the count-in, also when the count-in ends in the middle of a block; REC with punch moves the playhead to two bars before the
+    // punch-in; the PUNCH, COUNT and I / O controls; the punch lane paints
+    std::printf ("[62] Punch and count-in (F5): the count-in is clicks only and holds the position, the take starts after it (also mid-block), the pre-roll, PUNCH, COUNT, I and O, paint\n");
+    {
+        const auto dir62 = tempFolder().getChildFile ("punch62");
+        dir62.deleteRecursively();
+        dir62.createDirectory();
+        const auto settings62 = dir62.getChildFile ("settings.xml");
+        // `count` samples in blocks of `block`: input 1 at DC 0.5; the outputs' left channel is kept in `heard` when given
+        const auto feed = [] (MainComponent& w, juce::int64& fed, int count, int block, std::vector<float>* heard)
+        {
+            while (count > 0)
+            {
+                const int n = juce::jmin (count, block);
+                std::vector<std::vector<float>> in (4, std::vector<float> ((size_t) n, 0.0f));
+                std::vector<std::vector<float>> out (2, std::vector<float> ((size_t) n, 0.0f));
+                std::fill (in[0].begin(), in[0].end(), 0.5f);
+                const float* inPtr[4] = { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
+                float* outPtr[2] = { out[0].data(), out[1].data() };
+                w.io.deviceBlock (inPtr, 4, outPtr, 2, n);
+                if (heard != nullptr)
+                    heard->insert (heard->end(), out[0].begin(), out[0].end());
+                fed += n;
+                count -= n;
+            }
+        };
+        const auto armed = [] (MainComponent& w)
+        {
+            juce::String error;
+            w.session.addEmptyTrack ("Gtr");
+            return w.session.setTrackArm (0, true, error) && w.session.setTrackInput (0, 0, -1, error);
+        };
+
+        {
+            // one bar of count-in at 120 bpm 4/4 (96000 samples); the take starts after it, at the record position
+            auto w = makeWindow (true, settings62);
+            test::check (armed (*w), "a track armed on input 1");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->seek (4800);
+            w->settings.countInBars = 1;
+            gErrors.clear();
+            test::check (w->startRecording() && w->isRecording(), "REC starts with a count-in of one bar");
+            juce::int64 fed = 0;
+            std::vector<float> heard;
+            feed (*w, fed, 96000, 512, &heard);
+            test::check (w->position() == 4800 && w->recorderForChecks().framesRecorded() == 0,
+                         "during the count-in the position stays at the record position and nothing is written");
+            bool clicks = true;
+            for (const int at : { 0, 24000, 48000, 72000 })
+            {
+                bool any = false;
+                for (int i = at; i < at + 100 && i < (int) heard.size(); ++i)
+                    any = any || heard[(size_t) i] != 0.0f;
+                clicks = clicks && any;
+            }
+            test::check (clicks, "the outputs carry a click at 0, 24000, 48000 and 72000");
+            test::check (heard[12000] == 0.0f && heard[30000] == 0.0f && heard[60000] == 0.0f,
+                         "and nothing between the clicks: the count-in is the click only");
+            feed (*w, fed, 4800, 512, nullptr);
+            const auto frames = w->recorderForChecks().framesRecorded();
+            test::check (frames >= 4800 - 512 && frames <= 4800 + 512 && frames == 4800,
+                         test::fmt ("after 4800 more samples the take has %d frames (4800 expected)", (int) frames));
+            test::check (w->position() == 9600, test::fmt ("and the transport has moved on from the record position: %d", (int) w->position()));
+            w->stopRecording();
+            const auto& clips = w->session.tracks[0]->clips;
+            test::check (clips.size() == 1 && clips[0].start == 4800 && clips[0].length == 4800 && clips[0].offset == 0,
+                         test::fmt ("the take starts at the record position, after the count-in (%d clips)", (int) clips.size()));
+        }
+        {
+            // the count-in ends in the middle of a block: 97000 samples in blocks of 777; the block from 95571 holds the last 429 clicks and the
+            // first 348 samples of the take's 1000, so the take must hold exactly those 1000 frames and start at the record position
+            auto w = makeWindow (true, settings62);
+            test::check (armed (*w), "a track armed for the mid-block count-in");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->seek (4800);
+            w->settings.countInBars = 1;
+            test::check (w->startRecording(), "REC starts");
+            juce::int64 fed = 0;
+            feed (*w, fed, 97000, 777, nullptr);
+            test::check (w->recorderForChecks().framesRecorded() == 1000, test::fmt ("a count-in that ends mid-block: exactly the 1000 samples after it are written (%d)", (int) w->recorderForChecks().framesRecorded()));
+            test::check (w->position() == 5800, test::fmt ("and the transport played the 1000 samples after the count-in: %d", (int) w->position()));
+            w->stopRecording();
+            const auto& clips = w->session.tracks[0]->clips;
+            test::check (clips.size() == 1 && clips[0].start == 4800 && clips[0].length == 1000, "the take is placed at the record position with those 1000 samples");
+        }
+        {
+            // the COUNT button cycles 0, 1, 2 bars and the choice is saved
+            auto w = makeWindow (true, settings62);
+            test::check (w->countInButton.getButtonText() == "COUNT 0" && w->settings.countInBars == 0, "the COUNT button starts at 0");
+            press (w->countInButton);
+            test::check (w->settings.countInBars == 1 && w->countInButton.getButtonText() == "COUNT 1", "COUNT goes to 1 bar");
+            press (w->countInButton);
+            test::check (w->settings.countInBars == 2 && w->countInButton.getButtonText() == "COUNT 2", "and to 2 bars");
+            press (w->countInButton);
+            test::check (w->settings.countInBars == 0 && w->countInButton.getButtonText() == "COUNT 0", "and back to 0");
+            press (w->countInButton);
+            test::check (juce::File (settings62).existsAsFile() && Settings::load (settings62).countInBars == 1, "the setting is saved with the settings file");
+            press (w->countInButton);
+            press (w->countInButton);
+        }
+        {
+            // a stop during the count-in ends the take with nothing in it: no clip and no error, and the playhead stays where REC began
+            auto w = makeWindow (true, settings62);
+            test::check (armed (*w), "a track armed for a stop in the count-in");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->seek (4800);
+            w->settings.countInBars = 2;
+            gErrors.clear();
+            test::check (w->startRecording(), "REC starts with two bars of count-in");
+            juce::int64 fed = 0;
+            feed (*w, fed, 1000, 512, nullptr);
+            w->stopRecording();
+            test::check (w->session.tracks[0]->clips.empty() && gErrors.empty() && ! w->isRecording() && w->position() == 4800,
+                         "a stop in the count-in places no clip, reports nothing and leaves the playhead at the record position");
+        }
+        {
+            // REC with punch on starts the transport two bars before the punch-in (at 120 bpm, 4 s before it): a punch at 4 s starts at 0, at 10 s at 6 s
+            auto w = makeWindow (true, settings62);
+            test::check (armed (*w), "a track armed for the punch");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            juce::String error;
+            test::check (w->editor.setPunch (true, 192000, 288000, error), "a punch from 4 s to 6 s: " + error);
+            w->seek (100000);
+            test::check (w->startRecording() && w->position() == 0, test::fmt ("REC with punch at 4 s moves the playhead to the pre-roll, 0 (got %d)", (int) w->position()));
+            w->stopRecording();
+            test::check (w->editor.setPunch (true, 480000, 576000, error), "a punch from 10 s to 12 s");
+            w->seek (0);
+            test::check (w->startRecording() && w->position() == 288000, test::fmt ("and at 10 s the pre-roll is 6 s (got %d)", (int) w->position()));
+            w->stopRecording();
+        }
+        {
+            // a REC that the take refuses after the pre-roll seek (no armed track) puts the playhead back where it was: 8 s, not the pre-roll's 2 s
+            auto w = makeWindow (true, settings62);
+            test::check (w->editor.addEmptyTrack ("Vox") == 0, "a track for the refused REC");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            juce::String error;
+            test::check (w->editor.setPunch (true, 192000, 288000, error), "a punch from 4 s to 6 s for a refused REC: " + error);
+            for (int i = 0; i < (int) w->session.tracks.size(); ++i)
+                w->session.setTrackArm (i, false, error);
+            test::check (! w->session.tracks[0]->armed, "no track is armed for the refused REC");
+            w->seek (384000);
+            gErrors.clear();
+            test::check (! w->startRecording() && ! w->isRecording() && gErrors.size() == 1 && gErrors.back().contains ("No track is armed"),
+                         "REC with punch on and no armed track is refused, and says so");
+            test::check (w->position() == 384000, test::fmt ("the refused REC leaves the playhead at 8 s (got %d)", (int) w->position()));
+        }
+        {
+            // the PUNCH button turns the punch on with one bar from the playhead (no range yet), and off again; without layers it is refused
+            auto w = makeWindow (true, settings62);
+            w->seek (48000);
+            gErrors.clear();
+            test::check (! w->session.punchOn && ! w->punchButton.getToggleState(), "the punch is off at the start");
+            press (w->punchButton);
+            test::check (w->session.punchOn && w->punchButton.getToggleState() && w->session.punchStart == 48000 && w->session.punchEnd == 48000 + 96000,
+                         test::fmt ("PUNCH turns on with one bar from the playhead (%d to %d)", (int) w->session.punchStart, (int) w->session.punchEnd));
+            press (w->punchButton);
+            test::check (! w->session.punchOn && ! w->punchButton.getToggleState(), "and off again");
+            w->editor.setLayered (false);
+            w->refreshNow();
+            press (w->punchButton);
+            test::check (! w->session.punchOn && gErrors.size() == 1 && gErrors.back().contains ("layered clips"), "without layers PUNCH is refused and says why");
+        }
+        {
+            // I sets the punch-in at the playhead, O the punch-out; the lane paints with the punch on and off
+            auto w = makeWindow (true, settings62);
+            w->seek (0);
+            w->keyPressed (juce::KeyPress ('i'));
+            w->seek (48000);
+            w->keyPressed (juce::KeyPress ('o'));
+            test::check (w->session.punchStart == 0 && w->session.punchEnd == 48000 && ! w->session.punchOn,
+                         test::fmt ("I and O set the punch range (%d to %d), off", (int) w->session.punchStart, (int) w->session.punchEnd));
+            juce::Image img (juce::Image::ARGB, 1200, 750, true);
+            juce::Graphics g (img);
+            w->arrange.paintEntireComponent (g, false);
+            juce::String punchError;
+            test::check (w->editor.setPunch (true, 0, 48000, punchError), "the punch is set with the lane's range: " + punchError);
+            w->refreshNow();
+            w->arrange.paintEntireComponent (g, false);
+            test::check (w->session.punchOn, "the punch lane paints with the punch on and off, without a crash");
+        }
+    }
+
+    // [63] Software input monitoring (F6): an armed track plays its device inputs through its chain while the transport is stopped (In always,
+    // Auto stopped), its clips when Auto plays without a take, its input when Auto records; Off and an unarmed track are silent; a mono input is on
+    // both sides; a chain's gain applies to it; the MON button cycles OFF, AUTO, IN and lights amber and green; the header paints
+    std::printf ("[63] Software input monitoring (F6): In while stopped, Off and unarmed silent, Auto stopped and recording, Auto playing plays the clip, a mono input, a plugin's gain, MON cycles and lights, paint\n");
+    {
+        juce::String error;
+        constexpr int kBlock = 512;
+        // one device block of DC: input 1 at `left`, input 2 at `right`; returns the last sample of the outputs, left and right
+        const auto block = [] (MainComponent& w, float left, float right)
+        {
+            std::vector<float> in0 (kBlock, left), in1 (kBlock, right), in2 (kBlock, 0.0f), in3 (kBlock, 0.0f);
+            std::vector<float> outL (kBlock, 0.0f), outR (kBlock, 0.0f);
+            const float* inPtr[4] = { in0.data(), in1.data(), in2.data(), in3.data() };
+            float* outPtr[2] = { outL.data(), outR.data() };
+            w.io.deviceBlock (inPtr, 4, outPtr, 2, kBlock);
+            return std::pair<float, float> (outL[kBlock - 1], outR[kBlock - 1]);
+        };
+        // a track on inputs 1 and 2 (the first two), armed, on a device with no latency, with the given monitor mode
+        const auto monitoredWindow = [&error] (MonitorMode mode, bool armed = true)
+        {
+            auto w = makeWindow();
+            w->session.addEmptyTrack ("Mon");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->session.setTrackInput (0, 0, 1, error);
+            w->session.setTrackArm (0, armed, error);
+            w->editor.setTrackMonitor (0, mode, error);
+            return w;
+        };
+        const auto near = [] (float a, float b, float tol) { return std::abs (a - b) <= tol; };
+
+        {
+            auto w = monitoredWindow (MonitorMode::In);
+            const auto out = block (*w, 0.5f, 0.25f);
+            test::check (near (out.first, 0.5f, 1e-4f) && near (out.second, 0.25f, 1e-4f),
+                         test::fmt ("monitor In, stopped: the input is heard, L %.4f and R %.4f", out.first, out.second));
+            test::check (w->position() == 0 && ! w->isPlaying(), "and the position has not moved");
+        }
+        {
+            auto w = monitoredWindow (MonitorMode::Off);
+            const auto out = block (*w, 0.5f, 0.25f);
+            test::check (out.first == 0.0f && out.second == 0.0f, "monitor Off: silence");
+        }
+        {
+            auto w = monitoredWindow (MonitorMode::In, false);
+            const auto out = block (*w, 0.5f, 0.25f);
+            test::check (out.first == 0.0f && out.second == 0.0f, "an unarmed track is silent, even with monitor In");
+        }
+        {
+            auto w = monitoredWindow (MonitorMode::Auto);
+            const auto out = block (*w, 0.5f, 0.25f);
+            test::check (near (out.first, 0.5f, 1e-4f) && near (out.second, 0.25f, 1e-4f), "Auto while stopped: the input");
+        }
+        {
+            // a mono input: one input on both sides
+            auto w = monitoredWindow (MonitorMode::In);
+            w->session.setTrackInput (0, 0, -1, error);
+            const auto out = block (*w, 0.5f, 0.25f);
+            test::check (near (out.first, 0.5f, 1e-4f) && near (out.second, 0.5f, 1e-4f), "a mono input is on both sides: 0.5 and 0.5");
+        }
+        {
+            // a plugin on the track: the input runs through it (a gain of -6 dB halves it on each side)
+            auto w = monitoredWindow (MonitorMode::In);
+            test::check (w->session.addPlugin (0, "test gain", -1, error), "a test gain goes on the track: " + error);
+            auto* p = dynamic_cast<juce::RangedAudioParameter*> (w->session.tracks[0]->chain[0]->instance->getParameters()[0]);
+            test::check (p != nullptr, "the gain's parameter is there");
+            p->setValueNotifyingHost (p->convertTo0to1 (-6.0f));
+            const auto out = block (*w, 0.5f, 0.25f);
+            test::check (near (out.first, 0.25f, 2e-3f) && near (out.second, 0.125f, 2e-3f),
+                         test::fmt ("the input goes through the chain: -6 dB gives L %.4f and R %.4f", out.first, out.second));
+        }
+        {
+            // Auto while the transport plays and no take records: the clip, not the input
+            const auto dc = tempFolder().getChildFile ("monitor63/dc-0.1.wav");
+            dc.getParentDirectory().createDirectory();
+            {
+                juce::AudioBuffer<float> b (2, 96000);
+                b.clear();
+                for (int ch = 0; ch < 2; ++ch)
+                    juce::FloatVectorOperations::fill (b.getWritePointer (ch), 0.1f, 96000);
+                std::unique_ptr<juce::OutputStream> stream (dc.createOutputStream());
+                juce::WavAudioFormat wav;
+                auto writer = wav.createWriterFor (stream, juce::AudioFormatWriter::Options {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (24));
+                writer->writeFromAudioSampleBuffer (b, 0, 96000);
+            }
+            auto w = makeWindow();
+            test::check (w->session.addTrack (dc, "Mon", error), "a track with a DC 0.1 clip: " + error);
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->session.setTrackInput (0, 0, 1, error);
+            w->session.setTrackArm (0, true, error);
+            w->editor.setTrackMonitor (0, MonitorMode::Auto, error);
+            w->seek (0);
+            w->togglePlay();
+            std::pair<float, float> out { 0.0f, 0.0f };
+            for (int i = 0; i < 4; ++i)
+                out = block (*w, 0.5f, 0.25f);
+            test::check (w->isPlaying() && near (out.first, 0.1f, 1e-3f) && near (out.second, 0.1f, 1e-3f),
+                         test::fmt ("Auto while playing, not recording: the clip (0.1), not the input (L %.4f, R %.4f)", out.first, out.second));
+        }
+        {
+            // Auto while a take records: the input, through the chain as it is heard
+            auto w = monitoredWindow (MonitorMode::Auto);
+            test::check (w->startRecording() && w->isRecording(), "REC starts a take on the monitoring track");
+            const auto out = block (*w, 0.5f, 0.25f);
+            test::check (near (out.first, 0.5f, 1e-4f) && near (out.second, 0.25f, 1e-4f),
+                         test::fmt ("Auto while recording: the input (L %.4f, R %.4f)", out.first, out.second));
+            w->stopRecording();
+        }
+        {
+            // the MON button: OFF, AUTO (amber), IN (green), OFF; enabled on an audio track; the header paints with it lit
+            auto w = makeWindow();
+            w->session.addEmptyTrack ("Mon");
+            w->refreshNow();
+            juce::Button* mon = w->arrange.monitorButton (0);
+            test::check (mon != nullptr && mon->isEnabled() && ! mon->getToggleState() && mon->getButtonText() == "MON",
+                         "the MON button is on an audio track: enabled and unlit");
+            press (*mon);
+            w->refreshNow();
+            test::check (w->session.tracks[0]->monitor == MonitorMode::Auto && mon->getToggleState()
+                             && static_cast<LampButton*> (mon)->lamp == colours::amber,
+                         "OFF to AUTO: lit, amber");
+            press (*mon);
+            w->refreshNow();
+            test::check (w->session.tracks[0]->monitor == MonitorMode::In && mon->getToggleState()
+                             && static_cast<LampButton*> (mon)->lamp == colours::good,
+                         "AUTO to IN: lit, green");
+            press (*mon);
+            w->refreshNow();
+            test::check (w->session.tracks[0]->monitor == MonitorMode::Off && ! mon->getToggleState(), "IN back to OFF: unlit");
+            w->editor.setTrackMonitor (0, MonitorMode::In, error);
+            w->session.setTrackArm (0, true, error);
+            w->refreshNow();
+            juce::Image img (juce::Image::ARGB, 1200, 750, true);
+            juce::Graphics g (img);
+            w->arrange.paintEntireComponent (g, false);
+            test::check (mon->getToggleState(), "the header paints with a monitoring track, without a crash");
+        }
+    }
+
+    std::printf ("[64] MIDI input recording (F7): REC with only an armed MIDI track is valid and writes no file; a hardware note while recording is a MIDI clip at the stop; a note while stopped sounds through an armed MIDI track within two blocks; an armed MIDI track makes no audio take\n");
+    {
+        juce::String error;
+        {
+            // only a MIDI track armed: REC is valid, nothing is written to disk, and the stop is quiet
+            auto w = makeWindow();
+            const int keys = w->session.addMidiTrack ("Keys");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->session.setTrackArm (keys, true, error);
+            gErrors.clear();
+            test::check (w->startRecording() && w->isRecording() && gErrors.empty(),
+                         "REC with only an armed MIDI track is valid, with no error");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 4800);
+            w->toggleRecord();
+            test::check (! w->isRecording() && gErrors.empty(), "and it stops with no error");
+            test::check (w->recordingFolder().getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 0,
+                         "no audio file is written for a MIDI track");
+        }
+        {
+            // a hardware note played while the take records is a MIDI clip at the stop, with its note-off
+            auto w = makeWindow();
+            const int keys = w->session.addMidiTrack ("Keys");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->session.setTrackArm (keys, true, error);
+            w->seek (0);
+            test::check (w->startRecording(), "REC on the armed MIDI track");
+            w->handleIncomingMidiMessage (nullptr, juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100));
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 24000);
+            w->handleIncomingMidiMessage (nullptr, juce::MidiMessage::noteOff (1, 60));
+            feedDevice (*w, fed, 48000.0, 24000);
+            w->toggleRecord();
+            const auto& clips = w->session.tracks[(size_t) keys]->midiClips;
+            test::check (clips.size() == 1 && clips[0].notes.size() == 1 && clips[0].notes[0].pitch == 60
+                             && clips[0].notes[0].velocity == 100 && clips[0].notes[0].durationBeats > 0.0,
+                         test::fmt ("the note played while recording is a MIDI clip at the stop (%zu clips)", clips.size()));
+            test::check (w->editor.undo() && w->session.tracks[(size_t) keys]->midiClips.empty(), "and one undo takes that clip out");
+        }
+        {
+            // the transport is stopped: a note through the callback sounds on an armed MIDI track (BasicSynth), within two device blocks of 512
+            auto w = makeWindow();
+            const int keys = w->session.addMidiTrack ("Keys");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->session.setTrackArm (keys, true, error);
+            test::check (! w->isPlaying() && ! w->isRecording(), "the transport is stopped");
+            w->handleIncomingMidiMessage (nullptr, juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127));
+            const auto silentBlock = [] (MainComponent& m)
+            {
+                constexpr int kFrames = 512;
+                std::vector<float> in0 (kFrames, 0.0f), in1 (kFrames, 0.0f), in2 (kFrames, 0.0f), in3 (kFrames, 0.0f);
+                std::vector<float> outL (kFrames, 0.0f), outR (kFrames, 0.0f);
+                const float* inPtr[4] = { in0.data(), in1.data(), in2.data(), in3.data() };
+                float* outPtr[2] = { outL.data(), outR.data() };
+                m.io.deviceBlock (inPtr, 4, outPtr, 2, kFrames);
+                float peak = 0.0f;
+                for (int i = 0; i < kFrames; ++i)
+                    peak = juce::jmax (peak, std::abs (outL[(size_t) i]), std::abs (outR[(size_t) i]));
+                return peak;
+            };
+            const float first = silentBlock (*w);
+            const float second = silentBlock (*w);
+            test::check (juce::jmax (first, second) > 0.001f,
+                         test::fmt ("a note while stopped sounds through the armed MIDI track within two blocks (peaks %.4f, %.4f)", first, second));
+            test::check (w->position() == 0 && w->session.tracks[(size_t) keys]->midiClips.empty(), "and the playhead did not move, with no clip written");
+        }
+        {
+            // a note played while no MIDI track is armed is dropped, not kept for the track armed after it
+            auto w = makeWindow();
+            const int keys = w->session.addMidiTrack ("Keys");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->handleIncomingMidiMessage (nullptr, juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127));
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 512);
+            w->session.setTrackArm (keys, true, error);
+            const float after = feedDevice (*w, fed, 48000.0, 512);
+            test::check (after < 0.001f, test::fmt ("the note played before the track was armed is not heard then (peak %.4f)", after));
+        }
+        {
+            // an audio track and an armed MIDI track: one take file, for the audio track alone
+            auto w = makeWindow();
+            // the session takes the device's rate first: a MIDI track set on an empty session would make it 44.1 kHz
+            w->session.adoptRate (48000.0, error);
+            w->session.addEmptyTrack ("Mic");
+            const int keys = w->session.addMidiTrack ("Keys");
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            w->session.setTrackInput (0, 0, 1, error);
+            w->session.setTrackArm (0, true, error);
+            w->session.setTrackArm (keys, true, error);
+            test::check (w->startRecording(), "REC on an audio track and a MIDI track");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 4800);
+            w->toggleRecord();
+            juce::Array<juce::File> wavs;
+            w->recordingFolder().findChildFiles (wavs, juce::File::findFiles, false, "*.wav");
+            test::check (wavs.size() == 1 && wavs[0].getFileName().startsWith ("Mic-take-"),
+                         test::fmt ("one take file, for the audio track alone (%d files)", wavs.size()));
+            test::check (w->session.tracks[0]->clips.size() == 1 && w->session.tracks[(size_t) keys]->midiClips.empty(),
+                         test::fmt ("the audio track has its clip, and the MIDI track no audio clip (clips %zu, midi clips %zu)",
+                                    w->session.tracks[0]->clips.size(), w->session.tracks[(size_t) keys]->midiClips.size()));
+        }
+    }
+
+    // [65] Loop recording and take lanes (F8): a REC with the loop on wraps and makes one clip per pass in one take group; with layered clips
+    // off REC is refused with the reason and the playhead stays; REC outside the loop moves the playhead to its start; TAKES shows one sub-lane
+    // per take (4 x 22 px under the track); a drag across a take's lane comps a range; a click on its label puts it on top; the paint runs
+    std::printf ("[65] Loop recording and take lanes (F8): a loop REC makes one clip per pass in one take group, layered off refuses it with the reason, REC outside the loop moves the playhead to its start, TAKES shows the sub-lanes (4 x 22 px), a drag comps a range, a click on a label promotes, paint\n");
+    {
+        juce::String error;
+        const auto armedOn = [] (MainComponent& w)
+        {
+            juce::String e;
+            w.session.addEmptyTrack ("Gtr");
+            return w.session.setTrackArm (0, true, e) && w.session.setTrackInput (0, 0, -1, e);
+        };
+        {
+            // a loop of 0 to 1 s, REC at 0.25 s, 3.25 s of input: the position wraps below 1 s, and the take is four passes
+            auto w = makeWindow();
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            test::check (armedOn (*w), "a track armed on input 1 for the loop");
+            w->editor.setLoop (0, 48000, true);
+            w->seek (12000);
+            gErrors.clear();
+            test::check (w->startRecording() && w->isRecording(), "a loop REC starts at 0.25 s (layered clips on)");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 156000);
+            test::check (w->position() < 48000, test::fmt ("the transport wrapped back inside the loop during the take (at %d)", (int) w->position()));
+            w->stopRecording();
+            const auto& clips = w->session.tracks[0]->clips;
+            bool passes = clips.size() == 4;
+            for (size_t i = 0; passes && i < clips.size(); ++i)
+                passes = clips[i].takeGroup == clips[0].takeGroup && clips[i].takeIndex == (int) i && ! clips[i].comp
+                         && (i == 0 || clips[i].layer > clips[i - 1].layer);
+            test::check (passes, test::fmt ("after the stop the track has 4 passes in one take group, numbered 0 to 3, rising in layer (%d clips)", (int) clips.size()));
+            // the window's own latency moves every pass by `lat` samples (a monitor or device figure), so the check reads it back from pass 0
+            const juce::int64 lat = 12000 - (clips.size() == 4 ? clips[0].start : 0);
+            test::check (clips.size() == 4 && lat >= 0 && clips[0].length == 36000 + lat && clips[0].offset == 0 && clips[1].start == 0
+                             && clips[1].offset == 36000 + lat && clips[1].length == 48000 && clips[3].length == 24000 - lat,
+                         "the first pass is at 0.25 s less the latency for 0.75 s plus it, the others at 0, the last cut to what was recorded");
+
+            // TAKES: the switch is there with two takes of a group, and shows one sub-lane per take under the track
+            auto& view = w->arrange;
+            view.refresh();
+            test::check (view.takesButton (0) != nullptr && view.takesButton (0)->isVisible(), "the TAKES switch shows for a track with two takes of a group");
+            const int rowBefore = view.trackRowHeightForTest (0);
+            press (*view.takesButton (0));
+            test::check (w->session.tracks[0]->showTakes && view.trackRowHeightForTest (0) == rowBefore + 4 * ArrangeView::kTakeLaneHeight,
+                         test::fmt ("TAKES on: the row grows by 4 x 22 px (%d to %d)", rowBefore, view.trackRowHeightForTest (0)));
+            w->editor.setSnap (false);
+
+            // a drag across the second take's lane (0.85 to 0.95 s of pass 1, right of the label) comps that range: one more clip, from the take, on top
+            const int laneY = view.takeLaneBoundsForTest (0, 1).getCentreY();
+            view.mouseDown (mouseAt (view, { view.sampleXForTest (40800), laneY }));
+            view.mouseDrag (mouseAt (view, { view.sampleXForTest (45600), laneY }));
+            view.mouseUp (mouseAt (view, { view.sampleXForTest (45600), laneY }));
+            const auto& after = w->session.tracks[0]->clips;
+            test::check (after.size() == 5 && after[4].comp && after[4].start == 40800 && after[4].length == 4800 && after[4].takeIndex == 1,
+                         test::fmt ("a drag across take 2's lane comps 0.85 to 0.95 s (%d clips)", (int) after.size()));
+
+            {
+                // the comp is a clip of take 2 above it, so take 2's lane is lit over 0.85 to 0.95 s (the middle of the comp, 0.9 s), lit as
+                // a take's own part is: the track colour at 0.8 over the lane's ground, not the 0.16 of a dimmed part
+                const auto lane = view.takeLaneBoundsForTest (0, 1);
+                const auto pic = view.createComponentSnapshot (view.getLocalBounds());
+                const int px = view.sampleXForTest (43200);
+                const auto colour = olympus::gui::trackColour (w->session.tracks[0]->colour, 0);
+                const auto ground = pic.getPixelAt (px, lane.getY() + 1);
+                const auto seen = pic.getPixelAt (px, lane.getCentreY());
+                const auto lit = ground.interpolatedWith (colour, 0.8f), dim = ground.interpolatedWith (colour, 0.16f);
+                const auto distance = [] (juce::Colour a, juce::Colour b)
+                {
+                    return std::abs (a.getRed() - b.getRed()) + std::abs (a.getGreen() - b.getGreen()) + std::abs (a.getBlue() - b.getBlue());
+                };
+                test::check (distance (seen, lit) * 4 < distance (seen, dim),
+                             test::fmt ("take 2's lane is lit where its comp plays (0.9 s): distance to lit %d, to dim %d",
+                                        distance (seen, lit), distance (seen, dim)));
+            }
+
+            // a click on a label promotes its take: take 1 goes above every clip of the track
+            const int labelY = view.takeLaneBoundsForTest (0, 0).getCentreY();
+            view.mouseDown (mouseAt (view, { ArrangeView::kHeaderWidth + 6, labelY }));
+            view.mouseUp (mouseAt (view, { ArrangeView::kHeaderWidth + 6, labelY }));
+            bool top = true;
+            for (size_t i = 1; i < w->session.tracks[0]->clips.size(); ++i)
+                top = top && w->session.tracks[0]->clips[0].layer > w->session.tracks[0]->clips[i].layer;
+            test::check (top, "a click on take 1's label puts it above every other clip");
+
+            const auto img = view.createComponentSnapshot (view.getLocalBounds());
+            test::check (img.isValid(), "the arrangement with the take lanes paints");
+        }
+        {
+            // layered clips off: REC with the loop on is refused with the reason, and the playhead is where it was
+            auto w = makeWindow();
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            test::check (armedOn (*w) && w->editor.setLayered (false), "a track armed, layered clips off");
+            w->editor.setLoop (0, 48000, true);
+            w->seek (12000);
+            gErrors.clear();
+            test::check (! w->startRecording() && ! w->isRecording() && w->position() == 12000
+                             && ! gErrors.empty() && gErrors.back() == "Loop recording needs layered clips (the lane menu's Layered clips): each pass is a take on top of the last.",
+                         "loop REC without layered clips is refused with the reason, and the playhead stays at 0.25 s");
+        }
+        {
+            // REC with the playhead outside the loop: it goes to the loop's start first
+            auto w = makeWindow();
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            test::check (armedOn (*w), "a track armed for the outside-loop REC");
+            w->editor.setLoop (0, 48000, true);
+            w->seek (60000);
+            test::check (w->startRecording() && w->position() == 0, test::fmt ("REC with the playhead past the loop moves it to the loop's start (%d)", (int) w->position()));
+            w->stopRecording();
+        }
+        {
+            // the LOOP switched off during a loop take: the take still wraps at its loop's end, the REC-time flag decides
+            auto w = makeWindow();
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            test::check (armedOn (*w), "a track armed for the loop that is switched off mid-take");
+            w->editor.setLoop (0, 48000, true);
+            w->seek (12000);
+            gErrors.clear();
+            test::check (w->startRecording() && w->isRecording(), "a loop REC starts at 0.25 s");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 60000);
+            press (w->loopButton);
+            test::check (! w->session.loopOn && w->isRecording(), "the LOOP button turns the loop off while the take runs");
+            feedDevice (*w, fed, 48000.0, 100003);
+            test::check (w->isRecording() && w->position() < 48000,
+                         test::fmt ("with the loop off the take still wraps below the loop's end (at %d)", (int) w->position()));
+            w->stopRecording();
+        }
+        {
+            // a seek during a loop take is refused: the playhead does not move while the take records
+            auto w = makeWindow();
+            w->setDeviceForTest (fakeDevice (48000.0, 0, 0));
+            test::check (armedOn (*w), "a track armed for the seek check");
+            w->editor.setLoop (0, 48000, true);
+            w->seek (12000);
+            gErrors.clear();
+            test::check (w->startRecording() && w->isRecording(), "a loop REC starts at 0.25 s for the seek check");
+            juce::int64 fed = 0;
+            feedDevice (*w, fed, 48000.0, 8000);
+            const auto before = w->position();
+            w->seek (40000);
+            test::check (w->isRecording() && w->position() == before, test::fmt ("a seek during a loop take is refused and the playhead stays (%d)", (int) before));
+            w->stopRecording();
+        }
     }
 
     tempFolder().deleteRecursively();

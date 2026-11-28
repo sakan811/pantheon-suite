@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <utility>
 #include <vector>
 
 // Recording the device's inputs into takes, and putting the takes on the timeline.
@@ -84,6 +85,14 @@ public:
     Recorder& operator= (const Recorder&) = delete;
     ~Recorder() { stop(); }
 
+    // Audio thread: the device block of absolute input `absolute` (its position in the callback's `in`), or nullptr when the input is off or
+    // not in this block. Used by DeviceCallback::deviceBlock to hand the session the inputs a monitoring track plays.
+    const float* inputFor (const float* const* in, int numIn, int absolute) const
+    {
+        const int at = positionOf (absolute);
+        return (in != nullptr && at >= 0 && at < numIn) ? in[at] : nullptr;
+    }
+
     // Message thread, with the device stopped: the largest block push() will be given, the rate the buffers are sized for, and which device
     // inputs are switched on (by absolute number). The device's callback gets only the active inputs, in order, so input i is at the number
     // of active inputs below it; an input that is not active maps to -1 (silence, and REC refuses it).
@@ -121,7 +130,6 @@ public:
     {
         if (recording.load()) { error = "Already recording."; return false; }
         if (! prepared.load()) { error = "The recorder is not prepared: the audio device is not running."; return false; }
-        if (takes.empty()) { error = "No take to record."; return false; }
         if (! (rate > 0.0)) { error = "The recording rate must be above zero."; return false; }
         // The counters of the take that begins now, cleared before anything slow happens (the blocks that arrive while the files open are
         // counted as skipped, and that count must not be cleared by the count itself). What the last take left is read by no one again.
@@ -153,7 +161,8 @@ public:
             }
         }
 
-        if (! folder.createDirectory().wasOk()) { error = "Cannot make the folder " + folder.getFullPathName(); return false; }
+        // a session of MIDI tracks only records no file, so it makes no folder either
+        if (! takes.empty() && ! folder.createDirectory().wasOk()) { error = "Cannot make the folder " + folder.getFullPathName(); return false; }
 
         if (! thread.isThreadRunning())
             thread.startThread();
@@ -253,6 +262,29 @@ public:
             }
         }
         return first;
+    }
+
+    // Audio thread. The meters of one device block, as push() updates them, and nothing else: no take is written, no frame is counted, no
+    // latch is set. The count-in (F5) gives the meters the blocks the takes do not get; the same try-lock as push().
+    void meterOnly (const float* const* inputs, int numInputs, int numSamples)
+    {
+        const juce::SpinLock::ScopedTryLockType sl (prepareLock);
+        if (! sl.isLocked() || ! prepared.load() || inputs == nullptr || numSamples <= 0)
+            return;
+        for (int offset = 0; offset < numSamples; offset += blockMax)
+        {
+            const int n = juce::jmin (blockMax, numSamples - offset);
+            for (int k = 0; k < numActive; ++k)
+            {
+                const int input = activeList[(size_t) k];
+                const int at = positionOf (input);
+                if (at < 0 || at >= numInputs)
+                    continue;
+                const float p = peakOf (inputs[at] + offset, n);
+                if (p > meters[(size_t) input].load())
+                    meters[(size_t) input].store (p);
+            }
+        }
     }
 
     // Message thread. Ends the takes: waits for a push in flight, flushes every file, and returns them. Nothing when no take runs.
@@ -373,28 +405,230 @@ private:
     int numActive = 0;                                   // (both written by prepare and read by push under prepareLock)
 };
 
-// Starts a take on every armed track of the session, each on its own inputs. Refused, with the reason, when no track is armed. Takes the
-// session's lock only to read the tracks, not while the files are written. `opening` is passed to Recorder::start (its guard for the blocks
-// that arrive while the files open).
+// Starts a take on every armed audio track of the session, each on its own inputs, and the MIDI capture when a MIDI track is armed. A MIDI
+// track records no file: its input is kept as notes (Session::midiRecorder) and put on the timeline at the stop. Refused, with the reason,
+// when no track is armed. Takes the session's lock only to read the tracks, not while the files are written. `opening` is passed to
+// Recorder::start (its guard for the blocks that arrive while the files open).
 inline bool beginRecording (Recorder& recorder, Session& session, const juce::File& folder, double deviceRate, juce::String& error,
                             std::atomic<bool>* opening = nullptr)
 {
     std::vector<Recorder::Take> takes;
+    bool midiArmed = false;
     {
         const juce::ScopedLock sl (session.lock);
         for (int i = 0; i < (int) session.tracks.size(); ++i)
         {
             const auto& t = *session.tracks[(size_t) i];
-            if (t.armed)
+            if (! t.armed || t.isBus())
+                continue;
+            if (t.isMidi)
+                midiArmed = true;
+            else
                 takes.push_back ({ i, t.inputLeft, t.inputRight, t.name });
         }
     }
-    if (takes.empty())
+    if (takes.empty() && ! midiArmed)
     {
         error = "No track is armed: arm a track to record it.";
         return false;
     }
-    return recorder.start (takes, folder, deviceRate, error, opening);
+    // a take with no audio takes is valid: the recorder runs (its counters, the take's start) and writes nothing to disk
+    if (! recorder.start (takes, folder, deviceRate, error, opening))
+        return false;
+    if (midiArmed)
+        session.midiRecorder.start();
+    return true;
+}
+
+// A MIDI take's notes (F7): the events the take kept, paired by channel and pitch (a note on of velocity 0 is a note off), moved earlier by
+// `latency` samples (the playback latency, so a note sits where it was heard) and placed on the tempo map. A note still held at the stop ends
+// at `stopSample`, or at its last event when that is later. A note whose shifted start falls before 0 is dropped, not moved to 0. The sustain
+// pedal (CC 64, down at 64 or more) holds the notes that are released while it is down: they end at the pedal up, at the same key played
+// again, or at the stop. With `punch` (the take's range on the timeline) only the notes that start in [punch.first, punch.second) are kept, and
+// each ends at punch.second at the latest. The clip starts at the bar before the first note's bar (at 0 at the earliest) and
+// ends at the bar after the last note-off's bar; its notes' beats count from its start. No note, no clip.
+struct RecordedMidi
+{
+    juce::int64 start = 0;          // the clip's start on the timeline, in samples
+    juce::int64 length = 0;         // the clip's length, in samples
+    std::vector<MidiNote> notes;    // beats from the clip's start
+};
+
+// `wrapAt` (F8) is the loop's end when the take was a loop recording: the transport wraps there, so the positions are not in order. The events
+// are paired in the order they arrived (the vector's order), and a note whose off position is before its on position was held across the
+// wrap: it ends at `wrapAt`. Without a loop the events are sorted by position first, as they always were (the take's events are in arrival
+// order already, and the sort keeps a list written out of order paired as it was meant). -1 for a take without a loop.
+inline RecordedMidi buildRecordedMidi (std::vector<MidiRecorder::Event> events, juce::int64 stopSample, juce::int64 latency, const TempoMap& map,
+                                       const std::pair<juce::int64, juce::int64>* punch = nullptr, juce::int64 wrapAt = -1)
+{
+    RecordedMidi out;
+    if (wrapAt < 0)
+        std::stable_sort (events.begin(), events.end(), [] (const MidiRecorder::Event& a, const MidiRecorder::Event& b) { return a.position < b.position; });
+    struct Open { juce::int64 on = -1; int pitch = 0, velocity = 0, channel = 1; bool released = false; };
+    struct Span { juce::int64 on = 0, off = 0; int pitch = 0, velocity = 0, channel = 1; };
+    std::array<Open, 16 * 128> open {};   // by channel (0-15) and pitch
+    std::array<bool, 16> pedal {};        // the sustain pedal of each channel: down at 64 or more
+    std::vector<Span> spans;
+    const auto close = [&] (int key, juce::int64 at)
+    {
+        const auto o = open[(size_t) key];
+        open[(size_t) key] = Open {};
+        // the note's shift. Shifted before 0 it started before the take, so it is dropped rather than moved to 0 (the rest of the take keeps its time)
+        const juce::int64 on = o.on - latency;
+        if (on < 0)
+            return;
+        // at least one sample long, so a note cut at once is still a note
+        // a position before the note's own start is the other side of the wrap: the note ran to the loop's end
+        const juce::int64 end = (wrapAt >= 0 && at < o.on) ? wrapAt : at;
+        juce::int64 off = juce::jmax (on + 1, end - latency);
+        if (punch != nullptr)
+        {
+            // a note that starts outside the punch range is not in the take; one that runs past the punch-out is cut there
+            if (on < punch->first || on >= punch->second)
+                return;
+            off = juce::jmin (off, punch->second);
+        }
+        spans.push_back ({ on, off, o.pitch, o.velocity, o.channel });
+    };
+
+    juce::int64 lastPosition = 0;
+    for (const auto& e : events)
+    {
+        lastPosition = juce::jmax (lastPosition, e.position);
+        if (e.size < 2)
+            continue;
+        const int kind = e.bytes[0] & 0xF0;
+        const int channel = e.bytes[0] & 0x0F;
+        if (kind == 0xB0 && e.size == 3 && e.bytes[1] == 64)   // the sustain pedal: up ends the notes it was holding
+        {
+            if (e.bytes[2] >= 64)
+                pedal[(size_t) channel] = true;
+            else
+            {
+                pedal[(size_t) channel] = false;
+                for (int p = 0; p < 128; ++p)
+                    if (open[(size_t) (channel * 128 + p)].released)
+                        close (channel * 128 + p, e.position);
+            }
+            continue;
+        }
+        const int pitch = e.bytes[1] & 0x7F;
+        const int key = channel * 128 + pitch;
+        if (kind == 0x90 && e.size == 3 && e.bytes[2] > 0)
+        {
+            if (open[(size_t) key].on >= 0)
+                close (key, e.position);   // the same key again: the held note ends where the new one starts
+            open[(size_t) key] = Open { e.position, pitch, (int) (e.bytes[2] & 0x7F), channel + 1 };
+        }
+        else if (kind == 0x80 || (kind == 0x90 && e.size == 3))   // a note off, or a note on of velocity 0
+        {
+            if (open[(size_t) key].on >= 0)
+            {
+                if (pedal[(size_t) channel])
+                    open[(size_t) key].released = true;   // the pedal holds it: it ends at the pedal up, or where the same key is played again
+                else
+                    close (key, e.position);
+            }
+        }
+    }
+    const juce::int64 heldEnd = juce::jmax (stopSample, lastPosition);
+    for (int key = 0; key < (int) open.size(); ++key)
+        if (open[(size_t) key].on >= 0)
+            close (key, heldEnd);
+
+    if (spans.empty())
+        return out;
+    juce::int64 first = spans.front().on, last = spans.front().off;
+    for (const auto& s : spans)
+    {
+        first = juce::jmin (first, s.on);
+        last = juce::jmax (last, s.off);
+    }
+    const double bar = map.beatsPerBar();
+    const double firstBeat = map.samplesToBeats ((double) first), lastBeat = map.samplesToBeats ((double) last);
+    const double startBeat = juce::jmax (0.0, (std::floor (firstBeat / bar) - 1.0) * bar);
+    const double endBeat = (std::floor (lastBeat / bar) + 1.0) * bar;
+    out.start = (juce::int64) std::llround (map.beatsToSamples (startBeat));
+    out.length = juce::jmax ((juce::int64) 1, (juce::int64) std::llround (map.beatsToSamples (endBeat)) - out.start);
+
+    const double clipBeat = map.samplesToBeats ((double) out.start);
+    for (const auto& s : spans)
+    {
+        MidiNote note;
+        note.startBeat = map.samplesToBeats ((double) s.on) - clipBeat;
+        note.durationBeats = map.samplesToBeats ((double) s.off) - map.samplesToBeats ((double) s.on);
+        note.pitch = s.pitch;
+        note.velocity = juce::jlimit (1, 127, s.velocity);
+        note.channel = s.channel;
+        out.notes.push_back (note);
+    }
+    return out;
+}
+
+// Puts the notes of a MIDI take on each of `tracks` (the armed MIDI tracks) as one clip apiece. Called inside the caller's Editor::Gesture, so the
+// clips are the same undo step as the audio takes. No note, no clip. A track that cannot take its clip is skipped and the reason is returned.
+inline bool finishMidiRecording (const std::vector<MidiRecorder::Event>& events, juce::int64 stopSample, juce::int64 latency,
+                                 const std::vector<int>& tracks, const TempoMap& map, Editor& editor, juce::String& error,
+                                 std::vector<MidiClipRef>* placed = nullptr, const std::pair<juce::int64, juce::int64>* punch = nullptr,
+                                 juce::int64 wrapAt = -1)
+{
+    const auto notes = buildRecordedMidi (events, stopSample, latency, map, punch, wrapAt);
+    if (notes.notes.empty())
+        return true;
+    bool ok = true;
+    for (const int track : tracks)
+    {
+        juce::String clipError;
+        const auto ref = editor.addMidiClip (track, notes.start, notes.length, {}, clipError);
+        if (! ref.valid())
+        {
+            if (error.isEmpty()) error = clipError.isNotEmpty() ? clipError : "A MIDI take could not be placed on track " + juce::String (track + 1) + ".";
+            ok = false;
+            continue;
+        }
+        for (const auto& n : notes.notes)
+        {
+            juce::String noteError;
+            if (editor.addMidiNote (ref.track, ref.clip, n.startBeat, n.durationBeats, n.pitch, n.velocity, n.channel, noteError) < 0 && error.isEmpty())
+                error = noteError;
+        }
+        if (placed != nullptr)
+            placed->push_back (ref);
+    }
+    return ok;
+}
+
+// The passes of a take recorded with the loop on (F8). The file runs on through the loop: file sample i was played at the elapsed time i - latency
+// after the take's start `takeStart`, and the transport wrapped at `loopEnd` (back to `loopStart`). Pass 0 is the first run from the take's start
+// to the loop's end, placed at takeStart - latency (the caller skips what falls before 0, as for any take). Pass k >= 1 is one full run of the
+// loop, placed at loopStart; the last one is cut to what was recorded. A pass shorter than `minLength` is dropped (the file keeps going past it).
+// With L = loopEnd - loopStart and first = latency + (loopEnd - takeStart), pass 0 covers [0, first) and pass k covers [first + (k - 1) L, ...).
+struct LoopPass
+{
+    juce::int64 fileOffset = 0;
+    juce::int64 length = 0;
+    juce::int64 timelineStart = 0;
+};
+
+inline std::vector<LoopPass> loopPasses (juce::int64 frames, juce::int64 takeStart, juce::int64 latency, juce::int64 loopStart, juce::int64 loopEnd,
+                                         juce::int64 minLength)
+{
+    std::vector<LoopPass> out;
+    const juce::int64 loop = loopEnd - loopStart;
+    if (frames <= 0 || loop <= 0)
+        return out;
+    const juce::int64 first = latency + (loopEnd - takeStart);
+    const juce::int64 keep = juce::jmax ((juce::int64) 1, minLength);
+    const LoopPass head { 0, juce::jmin (frames, first), takeStart - latency };
+    if (head.length >= keep)
+        out.push_back (head);
+    for (juce::int64 offset = first; offset < frames; offset += loop)
+    {
+        const juce::int64 length = juce::jmin (loop, frames - offset);
+        if (length >= keep)
+            out.push_back ({ offset, length, loopStart });
+    }
+    return out;
 }
 
 // Puts each finished take on its track as a clip, all as one undo step. A take begins `latencyCompensation` samples before `startSample`
@@ -405,8 +639,17 @@ inline bool beginRecording (Recorder& recorder, Session& session, const juce::Fi
 // in `error` (false), and the files stay on disk. The clips added stay (the step is still one undo step). `placed`, when given, collects
 // the clips that were placed, in the order of the takes: the window selects what the takes actually became (see MainComponent's
 // finishRecordingTakes), not any clip that happens to start at the same sample.
+// With `punch` (F5) each take is trimmed to the range [punch.first, punch.second) on the timeline after its place is worked out: the clip starts at
+// the punch-in, its offset moves on by what was cut before it and its length stops at the punch-out. A take whose span does not meet the range
+// is not placed, and the note says which side it lies on (it ended before the punch-in or started after the punch-out).
+// With `loop` (F8: the take was a loop recording, `loop` is its loop's start and end) each take is put down as its passes (loopPasses): one clip per
+// pass, added in the order of the passes, so each one's layer is above the last and the last pass plays. The clips of one take share a new
+// takeGroup and are numbered by takeIndex from 0. `minPassLength` drops a pass shorter than it (100 ms at the rate, from the caller). Without
+// `loop` a take is one clip in a new takeGroup, with takeIndex 0.
 inline bool finishRecording (const std::vector<Recorder::Finished>& takes, juce::int64 startSample, int latencyCompensation, Editor& editor,
-                             juce::String& error, std::vector<ClipRef>* placed = nullptr)
+                             juce::String& error, std::vector<ClipRef>* placed = nullptr,
+                             const std::pair<juce::int64, juce::int64>* punch = nullptr,
+                             const std::pair<juce::int64, juce::int64>* loop = nullptr, juce::int64 minPassLength = 0)
 {
     Editor::Gesture gesture (editor, "Record");
     const juce::int64 latency = juce::jmax ((juce::int64) 0, (juce::int64) latencyCompensation);
@@ -419,19 +662,79 @@ inline bool finishRecording (const std::vector<Recorder::Finished>& takes, juce:
     {
         if (take.frames <= 0)
             continue;
+        if (loop != nullptr)
+        {
+            // each pass is a clip: the head before 0 is skipped on the first one, as the take's own head is
+            const auto passes = loopPasses (take.frames, startSample, latency, loop->first, loop->second, minPassLength);
+            if (passes.empty())
+            {
+                note ("A loop take on track " + juce::String (take.track + 1) + " had no pass to place: " + take.file.getFileName() + " is kept.");
+                continue;
+            }
+            const int group = editor.newTakeGroup();
+            int index = 0;
+            for (const auto& pass : passes)
+            {
+                juce::int64 at = pass.timelineStart, offset = pass.fileOffset, length = pass.length;
+                if (at < 0)
+                {
+                    offset += -at;
+                    length += at;
+                    at = 0;
+                }
+                if (length < 1)
+                    continue;
+                juce::String clipError;
+                const auto ref = editor.addClip (take.track, take.file, at, offset, length, clipError);
+                if (! ref.valid())
+                {
+                    note (clipError.isNotEmpty() ? clipError : "A pass of a loop take on track " + juce::String (take.track + 1) + " could not be placed: "
+                          + take.file.getFileName() + " is kept.");
+                    continue;
+                }
+                if (! editor.setTakeOf (ref, group, index++, clipError))
+                    note (clipError);
+                if (placed != nullptr)
+                    placed->push_back (ref);
+            }
+            continue;
+        }
         if (take.frames - skip < 1)
         {
             note ("A take on track " + juce::String (take.track + 1) + " was shorter than the latency and was not placed: "
                   + take.file.getFileName() + " is kept.");
             continue;
         }
+        juce::int64 clipStart = begin, clipOffset = skip, clipLength = take.frames - skip;
+        if (punch != nullptr)
+        {
+            const juce::int64 spanEnd = begin + take.frames - skip;   // the take's span on the timeline: [begin, spanEnd)
+            if (spanEnd <= punch->first)
+            {
+                note ("A take on track " + juce::String (take.track + 1) + " ended before the punch-in and was not placed: "
+                      + take.file.getFileName() + " is kept.");
+                continue;
+            }
+            if (begin >= punch->second)
+            {
+                note ("A take on track " + juce::String (take.track + 1) + " started after the punch-out and was not placed: "
+                      + take.file.getFileName() + " is kept.");
+                continue;
+            }
+            // the intersection is never empty here: both ends of the span and of the range are ordered as the tests above say
+            clipStart = juce::jmax (begin, punch->first);
+            clipOffset = skip + (clipStart - begin);
+            clipLength = juce::jmin (spanEnd, punch->second) - clipStart;
+        }
         juce::String clipError;
-        const auto ref = editor.addClip (take.track, take.file, begin, skip, take.frames - skip, clipError);
+        const auto ref = editor.addClip (take.track, take.file, clipStart, clipOffset, clipLength, clipError);
         if (! ref.valid())
         {
             note (clipError.isNotEmpty() ? clipError : "A take on track " + juce::String (take.track + 1) + " could not be placed: " + take.file.getFileName() + " is kept.");
             continue;
         }
+        if (! editor.setTakeOf (ref, editor.newTakeGroup(), 0, clipError))
+            note (clipError);
         if (placed != nullptr)
             placed->push_back (ref);
     }

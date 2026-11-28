@@ -125,7 +125,8 @@ private:
         return "Olympus is a session host for the Pantheon plugin suite. Typical use: new_project, add_track for each stem (a WAV or other audio file), "
                "set_chain or add_plugin to put plugins on a stem, set_parameter / load_preset to set them (get_plugin_state / set_plugin_state keep and restore a whole plugin state; plugin_notes gives the GUIDE and the session's notes), save_project (the user opens the .olympus file "
                "in the Olympus window to edit further), render_stems to write one WAV per stem. The timeline: add_clip places a file on a track at a "
-               "position (seconds or beats), split_clip / move_clip / trim_clip / delete_clip / set_clip edit clips, set_tempo, set_time_signature, "
+               "position (seconds or beats), split_clip / move_clip / trim_clip / delete_clip / set_clip edit clips (its gain line, its layer), set_layering "
+               "turns layered clips and crossfades on or off, set_tempo, set_time_signature, "
                "add_marker / remove_marker, set_loop and set_master set the rest. Tracks, clips, markers and plugin slots are numbered from 0; a track may also "
                "be named, a plugin may be given by the start of its name ('hermes'). Call list_plugins first: only plugins that are installed can be used. "
                "Parameter values are 0..1, or text as the plugin shows it ('-3.0 dB'). Nothing is played: this server only edits and renders. "
@@ -134,14 +135,38 @@ private:
     }
 
     // ---- the tools ------------------------------------------------------------------------------------------------------
-    static juce::var prop (const char* type, const char* description) { return object ({ { "type", type }, { "description", description } }); }
+    // The descriptions are UTF-8 (they hold "Ø"); a const char* juce::String would read them as ASCII.
+    static juce::var prop (const char* type, const char* description) { return object ({ { "type", type }, { "description", juce::String::fromUTF8 (description) } }); }
     static juce::var tool (const char* name, const char* description, std::initializer_list<Pair> properties, std::initializer_list<const char*> required = {})
     {
         juce::Array<juce::var> req;
         for (auto* r : required) req.add (juce::String (r));
         auto props = object (properties);
-        return object ({ { "name", name }, { "description", description },
+        return object ({ { "name", name }, { "description", juce::String::fromUTF8 (description) },
                          { "inputSchema", object ({ { "type", "object" }, { "properties", props }, { "required", req } }) } });
+    }
+
+    // A colour argument: "auto" (0, the palette by index) or "#RRGGBB" (opaque ARGB). Anything else is refused with the reason.
+    static bool parseColour (const juce::var& v, juce::uint32& out, juce::String& error)
+    {
+        const auto text = v.isString() ? v.toString().trim() : juce::String();
+        if (text.equalsIgnoreCase ("auto")) { out = 0; return true; }
+        if (text.length() == 7 && text.startsWithChar ('#') && text.substring (1).containsOnly ("0123456789abcdefABCDEF"))
+        {
+            out = 0xFF000000u | ((juce::uint32) text.substring (1).getHexValue64() & 0x00FFFFFFu);
+            return true;
+        }
+        error = "'colour' must be \"auto\" or \"#RRGGBB\".";
+        return false;
+    }
+
+    // A link switch of an object (`gain`, `mute`, `solo`, `arm`): absent keeps `out`; anything but true or false is refused.
+    static bool linkFlag (const juce::var& obj, const char* key, bool& out, juce::String& error)
+    {
+        if (! obj.isObject() || ! obj.hasProperty (key)) return true;
+        if (! obj[key].isBool()) { error = juce::String ("'") + key + "' must be true or false."; return false; }
+        out = (bool) obj[key];
+        return true;
     }
 
     static juce::var tools()
@@ -160,9 +185,13 @@ private:
                           { "name", prop ("string", "Track name (default: the file's name or track kind)") },
                           { "kind", prop ("string", "Track kind: 'audio' (default), 'midi', or 'bus'") } }));
         list.add (tool ("remove_track", "Removes a track.", { { "track", trackRef } }, { "track" }));
-        list.add (tool ("set_track", "Fader (dB), pan, mute, solo, name, frozen state, output bus routing, or aux sends of a track.",
+        list.add (tool ("set_track", "Fader (dB), pan, mute, solo, name, frozen state, output bus routing, aux sends, colour, polarity (Ø), group or input monitoring of a track.",
                         { { "track", trackRef }, { "gain_db", prop ("number", "Fader in dB") }, { "pan", prop ("number", "-1 (left) .. 1 (right)") },
                           { "mute", prop ("boolean", "") }, { "solo", prop ("boolean", "") }, { "name", prop ("string", "") },
+                          { "monitor", prop ("string", "Input monitoring of an audio track: \"off\" (default), \"auto\" (its input while the transport is stopped or a take records, else its clips) or \"in\" (always its input)") },
+                          { "colour", prop ("string", "\"#RRGGBB\" or \"auto\" (the palette by track index)") },
+                          { "polarity", prop ("boolean", "Ø: both channels inverted at the track's source") },
+                          { "group", prop ("integer", "Index of a group (from 0), or -1 for none") },
                           { "frozen", prop ("boolean", "Freeze (true) or unfreeze (false) the track") },
                           { "outputTrack", prop ("integer", "Target bus track index (-1 = Master)") },
                           { "sends", object ({ { "type", "array" },
@@ -227,7 +256,23 @@ private:
         list.add (tool ("set_clip", "Gain, fades, mute or name of a clip (give any of them).",
                         { { "track", trackRef }, { "clip", clipRef }, { "gain_db", prop ("number", "Clip gain in dB, -100 to +24") },
                           { "fade_in_seconds", pos ("Fade in from silence, in seconds") }, { "fade_out_seconds", pos ("Fade out to silence, in seconds") },
-                          { "mute", prop ("boolean", "") }, { "name", prop ("string", "") } }, { "track", "clip" }));
+                          { "mute", prop ("boolean", "") }, { "name", prop ("string", "") },
+                          { "gain_envelope", object ({ { "type", "array" },
+                                                       { "description", "The clip's gain line, replacing the whole line: [[seconds_from_clip_start, db], ...], each db -60 to +12, linear in dB between the points and held at the ends. [] clears it." },
+                                                       { "items", object ({ { "type", "array" } }) } }) },
+                          { "layer", prop ("string", "'top' raises the clip above the others on its track, 'bottom' lowers it below them") } }, { "track", "clip" }));
+        list.add (tool ("set_automation_mode", "The mode of an automation lane (created if missing): read plays it; touch records while the control is held; latch records from the first touch until playback stops and holds the last value; write records from the start of a pass until playback stops, then the lane becomes touch. Writing needs live playback in the window: this server cannot play, so it only sets the mode, and the window writes the points while the transport plays.",
+                        { { "track", trackRef }, { "target", prop ("string", "\"volume\", \"pan\" or \"plugin:<slot>:<param>\"") },
+                          { "mode", prop ("string", "read, touch, latch or write") } }, { "track", "target", "mode" }));
+        list.add (tool ("comp_take", "Comps a range out of a take (a clip of a take group, from record): a new clip of the take's audio from start to end, on top of the track, so it plays there with the layering's crossfade at its edges. The range must lie inside the take and be at least 1 ms. One undo step.",
+                        { { "track", trackRef }, { "clip", clipRef },
+                          { "start_seconds", pos ("Where the range begins, in seconds") }, { "start_beats", pos ("Where the range begins, in quarter notes") },
+                          { "end_seconds", pos ("Where the range ends, in seconds") }, { "end_beats", pos ("Where the range ends, in quarter notes") } }, { "track", "clip" }));
+        list.add (tool ("promote_take", "Puts a take on top of its track, so it plays where it lies (a comp cannot be promoted: promote the take it came from). One undo step.",
+                        { { "track", trackRef }, { "clip", clipRef } }, { "track", "clip" }));
+        list.add (tool ("set_layering", "Layered clips: on, an upper clip covers the clips under it with equal-power crossfades at its edges; off, the clips are summed as in version 3 and older projects. Also the crossfade length.",
+                        { { "layered", prop ("boolean", "true: layers and crossfades; false: the clips are summed") },
+                          { "crossfade_ms", prop ("integer", "Crossfade length at an upper clip's edges, 0 to 2000 ms (default 10)") } }, {}));
         list.add (tool ("set_tempo", "Sets the tempo from a beat on (a tempo change takes effect at its beat; audio does not follow it, the grid does).",
                         { { "bpm", prop ("number", "20 to 300") }, { "beat", prop ("number", "Quarter note from the start where it takes effect (default 0: the whole project)") } }, { "bpm" }));
         list.add (tool ("set_time_signature", "Sets the project's time signature.",
@@ -238,10 +283,35 @@ private:
         list.add (tool ("set_loop", "Sets the loop: from start to end (the end must be after the start), on or off (default on).",
                         { { "start_seconds", pos ("in seconds") }, { "start_beats", pos ("in quarter notes") },
                           { "end_seconds", pos ("in seconds") }, { "end_beats", pos ("in quarter notes") }, { "on", prop ("boolean", "Default true") } }, {}));
+        list.add (tool ("set_punch", "Sets the punch range: a take recorded with punch on is trimmed to start..end at the stop. Needs layered clips (the session must be layered, or the answer is the reason). The end must be after the start.",
+                        { { "start_seconds", pos ("in seconds") }, { "start_beats", pos ("in quarter notes") },
+                          { "end_seconds", pos ("in seconds") }, { "end_beats", pos ("in quarter notes") }, { "on", prop ("boolean", "Default true") } }, {}));
         list.add (tool ("set_master", "The master gain: applied to the playback and to mix.wav, never to the stems.",
                         { { "master_db", prop ("number", "-100 to +12 dB") } }, { "master_db" }));
         list.add (tool ("undo", "Undoes the last timeline edit (a clip, the mix, the master, the tempo, a marker, the loop, tracks, or plugins).", {}));
         list.add (tool ("redo", "Redoes the edit that undo took back.", {}));
+        list.add (tool ("import_midi", "Reads a Standard MIDI File (type 0 or 1, in beats) into the timeline as one undo step: one new MIDI track per track of the file, or, with 'track', all its notes into one clip on that MIDI track.",
+                        { { "path", prop ("string", "Absolute path, or relative to the working directory, of a .mid file") },
+                          { "track", prop ("string", "A MIDI track (number from 0 or name): put the notes in one clip on it. Default: new tracks") },
+                          { "at_seconds", pos ("Where the clips begin, in seconds (default 0)") }, { "at_beats", pos ("Where the clips begin, in quarter notes (default 0)") },
+                          { "use_file_tempo", prop ("boolean", "Set the project's tempo (from the file's first tempo) and time signature. Default false") } }, { "path" }));
+        list.add (tool ("export_midi", "Writes MIDI clips to a Standard MIDI File (type 1, 960 ticks per quarter note; the tempo map and time signature on track 0). Not an undo step.",
+                        { { "path", prop ("string", "Absolute path ending in .mid, or relative to the working directory") },
+                          { "track", prop ("string", "A MIDI track (number from 0 or name). Default: every MIDI track") },
+                          { "clip", prop ("integer", "A MIDI clip number from 0 on 'track': exported alone, from beat 0. Default: all unmuted clips of the track") } }, { "path" }));
+        list.add (tool ("add_group", "Adds a group of tracks (its links: gain, mute, solo and arm, all on by default, move the members together; a VCA offset is set with set_group). One undo step.",
+                        { { "name", prop ("string", "Group name") },
+                          { "links", object ({ { "type", "object" },
+                                               { "description", "Which links are on: {gain, mute, solo, arm}, each true or false (default true)" },
+                                               { "items", object ({ { "type", "object" } }) } }) } }, { "name" }));
+        list.add (tool ("set_group", "Changes a group: name, active (the links apply only while it is on), the four links, the VCA offset (vca_db, -100 to +12 dB, added to the fader of every member) and colour. One undo step.",
+                        { { "group", prop ("integer", "Group index from 0") }, { "name", prop ("string", "") }, { "active", prop ("boolean", "") },
+                          { "gain", prop ("boolean", "Link the faders") }, { "mute", prop ("boolean", "Link the mutes") },
+                          { "solo", prop ("boolean", "Link the solos") }, { "arm", prop ("boolean", "Link the arms") },
+                          { "vca_db", prop ("number", "VCA offset in dB, -100 to +12") },
+                          { "colour", prop ("string", "\"#RRGGBB\" or \"auto\"") } }, { "group" }));
+        list.add (tool ("remove_group", "Removes a group: its members are in no group, and the groups after it move down one index. One undo step.",
+                        { { "group", prop ("integer", "Group index from 0") } }, { "group" }));
         return list;
     }
 
@@ -319,6 +389,58 @@ private:
         }
 
         // the timeline that names no track: the tempo, the time signature, markers, the loop and the master
+        if (name == "import_midi")
+        {
+            if (! a.hasProperty ("path") || ! a["path"].isString() || a["path"].toString().trim().isEmpty())
+            { error = "Give 'path': the absolute path of a .mid file."; return {}; }
+            const auto file = resolvePath (a["path"].toString().trim());
+            juce::int64 at = 0;
+            if (a.hasProperty ("at_seconds") || a.hasProperty ("at_beats"))
+            {
+                const auto p = position (a, "at", error);
+                if (! p) return {};
+                at = *p;
+            }
+            int intoTrack = -1;
+            if (a.hasProperty ("track") && ! a["track"].isVoid())
+            {
+                intoTrack = session.findTrack (a["track"], error);
+                if (intoTrack < 0) return {};
+            }
+            bool useTempo = false;
+            if (a.hasProperty ("use_file_tempo") && ! a["use_file_tempo"].isVoid())
+            {
+                if (! a["use_file_tempo"].isBool()) { error = "'use_file_tempo' must be true or false."; return {}; }
+                useTempo = (bool) a["use_file_tempo"];
+            }
+            std::vector<int> made;
+            if (! editor.importMidiFile (file, at, intoTrack, useTempo, error, &made)) return {};
+            juce::Array<juce::var> tracks;
+            for (int t : made) tracks.add (t);
+            return object ({ { "tracks", tracks }, { "file", file.getFullPathName() } });
+        }
+        if (name == "export_midi")
+        {
+            if (! a.hasProperty ("path") || ! a["path"].isString() || a["path"].toString().trim().isEmpty())
+            { error = "Give 'path': the absolute path of the .mid file to write."; return {}; }
+            auto file = resolvePath (a["path"].toString().trim());
+            if (! file.hasFileExtension ("mid;midi")) file = file.withFileExtension ("mid");
+            int track = -1, clip = -1;
+            if (a.hasProperty ("track") && ! a["track"].isVoid())
+            {
+                track = session.findTrack (a["track"], error);
+                if (track < 0) return {};
+            }
+            if (a.hasProperty ("clip") && ! a["clip"].isVoid())
+            {
+                if (track < 0) { error = "Give 'track' with 'clip'."; return {}; }
+                const auto parsed = parseNonNegativeInt (a["clip"].toString());
+                if (! parsed) { error = "'clip' must be a MIDI clip number from 0."; return {}; }
+                clip = *parsed;
+            }
+            if (! editor.exportMidi (file, track, clip, error)) return {};
+            return object ({ { "exported", file.getFullPathName() } });
+        }
         if (name == "set_tempo")
         {
             if (! a.hasProperty ("bpm")) { error = "Give 'bpm' (20 to 300)."; return {}; }
@@ -332,6 +454,24 @@ private:
             }
             if (! (bpm >= TempoMap::kMinBpm && bpm <= TempoMap::kMaxBpm)) { error = "'bpm' must be 20 to 300 (got " + juce::String (bpm) + ")."; return {}; }
             if (! editor.setTempo (beat, bpm, error)) return {};
+            return session.describe();
+        }
+        if (name == "set_layering")
+        {
+            // layered mode and the crossfade length: each is one undo step (a structural change; they are not grouped in a Gesture)
+            if (! a.hasProperty ("layered") && ! a.hasProperty ("crossfade_ms"))
+            { error = "Give 'layered' (true or false) and/or 'crossfade_ms' (0 to 2000)."; return {}; }
+            bool layeredOn = false;
+            if (a.hasProperty ("layered"))
+            {
+                if (! a["layered"].isBool()) { error = "'layered' must be true or false."; return {}; }
+                layeredOn = (bool) a["layered"];
+            }
+            int crossfade = 0;
+            if (a.hasProperty ("crossfade_ms") && (! wholeNumber (a["crossfade_ms"], crossfade) || crossfade < 0 || crossfade > 2000))
+            { error = "'crossfade_ms' must be a whole number of milliseconds, 0 to 2000."; return {}; }
+            if (a.hasProperty ("layered") && ! editor.setLayered (layeredOn)) return {};
+            if (a.hasProperty ("crossfade_ms") && ! editor.setCrossfadeMs (crossfade, error)) return {};
             return session.describe();
         }
         if (name == "set_time_signature")
@@ -370,6 +510,19 @@ private:
             if (*end <= *start) { error = "The loop end must be after its start."; return {}; }
             if (a.hasProperty ("on") && ! a["on"].isBool()) { error = "'on' must be true or false."; return {}; }
             editor.setLoop (*start, *end, a.hasProperty ("on") ? (bool) a["on"] : true);
+            return session.describe();
+        }
+        if (name == "set_punch")
+        {
+            // every argument is checked before the punch is touched: Editor::setPunch refuses with the reason and changes nothing
+            if (a.hasProperty ("on") && ! a["on"].isBool()) { error = "'on' must be true or false."; return {}; }
+            const auto start = position (a, "start", error);
+            if (! start) return {};
+            const auto end = position (a, "end", error);
+            if (! end) return {};
+            if (*end <= *start) { error = "The punch end must be after its start."; return {}; }
+            juce::String punchError;
+            if (! editor.setPunch (a.hasProperty ("on") ? (bool) a["on"] : true, *start, *end, punchError)) { error = punchError; return {}; }
             return session.describe();
         }
         if (name == "set_master")
@@ -677,6 +830,55 @@ private:
             return object ({ { "stems", stems }, { "mix", r.mixFile }, { "mix_peak_db", r.mixPeakDb }, { "seconds", r.seconds } });
         }
 
+        // groups: an index from 0 as describe() lists them; every value is checked before anything is applied
+        if (name == "add_group")
+        {
+            if (! a.hasProperty ("name") || ! a["name"].isString() || a["name"].toString().trim().isEmpty())
+            { error = "Give 'name' (the group's name)."; return {}; }
+            if (a.hasProperty ("links") && ! a["links"].isObject())
+            { error = "'links' must be an object: {gain, mute, solo, arm}, each true or false."; return {}; }
+            TrackGroup links;
+            if (! linkFlag (a["links"], "gain", links.gain, error) || ! linkFlag (a["links"], "mute", links.mute, error)
+                || ! linkFlag (a["links"], "solo", links.solo, error) || ! linkFlag (a["links"], "arm", links.arm, error))
+                return {};
+            if (editor.addGroup (a["name"].toString(), error, links) < 0) return {};
+            return session.describe();
+        }
+        if (name == "set_group" || name == "remove_group")
+        {
+            int group = -1;
+            if (! a.hasProperty ("group") || ! wholeNumber (a["group"], group)) { error = "Give 'group' (a group index from 0)."; return {}; }
+            int count = 0;
+            { const juce::ScopedLock sl (session.lock); count = (int) session.groups.size(); }
+            if (! juce::isPositiveAndBelow (group, count)) { error = "No group " + juce::String (group) + "."; return {}; }
+            if (name == "remove_group")
+            {
+                if (! editor.removeGroup (group, error)) return {};
+                return session.describe();
+            }
+            TrackGroup value;
+            { const juce::ScopedLock sl (session.lock); value = session.groups[(size_t) group]; }
+            if (a.hasProperty ("name"))
+            {
+                if (! a["name"].isString() || a["name"].toString().trim().isEmpty()) { error = "'name' must be a non-empty string."; return {}; }
+                value.name = a["name"].toString().trim();
+            }
+            if (a.hasProperty ("active") && ! a["active"].isBool()) { error = "'active' must be true or false."; return {}; }
+            if (a.hasProperty ("active")) value.active = (bool) a["active"];
+            if (! linkFlag (a, "gain", value.gain, error) || ! linkFlag (a, "mute", value.mute, error)
+                || ! linkFlag (a, "solo", value.solo, error) || ! linkFlag (a, "arm", value.arm, error))
+                return {};
+            if (a.hasProperty ("vca_db"))
+            {
+                double vca = 0.0;
+                if (! finiteNumber (a["vca_db"], vca) || ! std::isfinite ((float) vca)) { error = "'vca_db' must be a finite number (-100 to +12)."; return {}; }
+                value.vcaDb = (float) vca;
+            }
+            if (a.hasProperty ("colour") && ! parseColour (a["colour"], value.colour, error)) return {};
+            if (! editor.setGroup (group, value, error)) return {};
+            return session.describe();
+        }
+
         // everything below names a track: verify tool name before resolving track
         const bool isCopyChain = (name == "copy_chain");
         const bool isChainTool = name == "add_plugin" || name == "set_chain" || name == "move_plugin"
@@ -685,9 +887,10 @@ private:
                                  || name == "get_plugin_state" || name == "set_plugin_state"
                                  || name == "list_presets" || name == "load_preset";
         const bool isTrackTool = isCopyChain || isChainTool
-                                 || name == "remove_track" || name == "set_track"
+                                 || name == "remove_track" || name == "set_track" || name == "set_automation_mode"
                                  || name == "add_clip" || name == "move_clip" || name == "split_clip"
-                                 || name == "trim_clip" || name == "delete_clip" || name == "set_clip";
+                                 || name == "trim_clip" || name == "delete_clip" || name == "set_clip"
+                                 || name == "comp_take" || name == "promote_take";
         if (! isTrackTool)
         {
             error = "Unknown tool '" + name + "'.";
@@ -725,6 +928,16 @@ private:
         const int track = isMaster ? -1 : session.findTrack (trackArg, error);
         if (! isMaster && track < 0) return {};
 
+        if (name == "set_automation_mode")
+        {
+            // writing needs live playback in the window: this server sets the mode and the window writes while the transport plays
+            if (! a.hasProperty ("target") || ! a["target"].isString()) { error = "Give 'target': \"volume\", \"pan\" or \"plugin:<slot>:<param>\"."; return {}; }
+            AutoMode mode = AutoMode::Read;
+            if (! a.hasProperty ("mode") || ! a["mode"].isString() || ! parseAutoMode (a["mode"].toString(), mode))
+            { error = "'mode' must be read, touch, latch or write."; return {}; }
+            if (! editor.setAutomationMode (track, a["target"].toString(), mode, error)) return {};
+            return session.describe();
+        }
         if (name == "remove_track")
         {
             if (! editor.removeTrack (track, error)) return {};
@@ -747,6 +960,28 @@ private:
             { error = "'frozen' must be true or false."; return {}; }
             const bool renaming = a.hasProperty ("name") && a["name"].toString().isNotEmpty();
             if (renaming && a["name"].toString().trim().isEmpty()) { error = "The name is empty."; return {}; }
+            juce::uint32 colour = 0;
+            if (a.hasProperty ("colour") && ! parseColour (a["colour"], colour, error)) return {};
+            if (a.hasProperty ("polarity") && ! a["polarity"].isBool()) { error = "'polarity' must be true or false."; return {}; }
+            MonitorMode monitor = MonitorMode::Off;
+            const bool monitorGiven = a.hasProperty ("monitor");
+            if (monitorGiven && (! a["monitor"].isString() || ! parseMonitorMode (a["monitor"].toString(), monitor)))
+            { error = "'monitor' must be \"off\", \"auto\" or \"in\"."; return {}; }
+            if (monitorGiven)
+            {
+                const juce::ScopedLock sl (session.lock);
+                if (session.tracks[(size_t) track]->isBus() || session.tracks[(size_t) track]->isMidi)
+                { error = "Track " + juce::String (track) + " has no input to monitor: 'monitor' is for audio tracks."; return {}; }
+            }
+            int group = -2; // -2: not given
+            if (a.hasProperty ("group"))
+            {
+                int g = -2;
+                if (! wholeNumber (a["group"], g) || g < -1) { error = "'group' must be -1 (none) or a group index from 0."; return {}; }
+                const juce::ScopedLock sl (session.lock);
+                if (g >= (int) session.groups.size()) { error = "No group " + juce::String (g) + "."; return {}; }
+                group = g;
+            }
 
             std::optional<int> nextOutputTrack;
             if (a.hasProperty ("outputTrack"))
@@ -855,6 +1090,11 @@ private:
                         return {};
                 }
             }
+            // each of these is an undo step of its own: a structure change inside the Gesture below would drop that gesture's step
+            if (a.hasProperty ("colour") && ! editor.setTrackColour (track, colour, error)) return {};
+            if (a.hasProperty ("polarity") && ! editor.setTrackPolarity (track, (bool) a["polarity"], error)) return {};
+            if (group != -2 && ! editor.setTrackGroup (track, group, error)) return {};
+            if (monitorGiven && ! editor.setTrackMonitor (track, monitor, error)) return {};
             if (a.hasProperty ("gain_db") || a.hasProperty ("pan") || a.hasProperty ("mute") || a.hasProperty ("solo") || renaming)
             {
                 // one gesture: the settings given are one undo step
@@ -931,6 +1171,26 @@ private:
             if (! editor.moveClipToTrack (track, clip, to, *start, error).valid()) return {};
             return session.describe();
         }
+        if (name == "comp_take")
+        {
+            // every argument is checked before the take is touched: Editor::compTake refuses with the reason and changes nothing
+            const int clip = indexArg (a, "clip", error);
+            if (clip < 0) return {};
+            const auto start = position (a, "start", error);
+            if (! start) return {};
+            const auto end = position (a, "end", error);
+            if (! end) return {};
+            if (*end <= *start) { error = "The comp's end must be after its start."; return {}; }
+            if (! editor.compTake (track, clip, *start, *end, error).valid()) return {};
+            return session.describe();
+        }
+        if (name == "promote_take")
+        {
+            const int clip = indexArg (a, "clip", error);
+            if (clip < 0) return {};
+            if (! editor.promoteTake (track, clip, error)) return {};
+            return session.describe();
+        }
         if (name == "split_clip")
         {
             const int clip = indexArg (a, "clip", error);
@@ -974,8 +1234,10 @@ private:
             const int clip = indexArg (a, "clip", error);
             if (clip < 0) return {};
             const bool given = a.hasProperty ("gain_db") || a.hasProperty ("fade_in_seconds") || a.hasProperty ("fade_out_seconds")
-                               || a.hasProperty ("mute") || a.hasProperty ("name");
-            if (! given) { error = "Give at least one of 'gain_db', 'fade_in_seconds', 'fade_out_seconds', 'mute' or 'name'."; return {}; }
+                               || a.hasProperty ("mute") || a.hasProperty ("name") || a.hasProperty ("gain_envelope") || a.hasProperty ("layer");
+            if (! given) { error = "Give at least one of 'gain_db', 'fade_in_seconds', 'fade_out_seconds', 'mute', 'name', 'gain_envelope' or 'layer'."; return {}; }
+            if (a.hasProperty ("layer") && (! a["layer"].isString() || (a["layer"].toString() != "top" && a["layer"].toString() != "bottom")))
+            { error = "'layer' must be 'top' or 'bottom'."; return {}; }
             double gainDb = 0.0;
             if (a.hasProperty ("gain_db") && (! finiteNumber (a["gain_db"], gainDb) || ! std::isfinite ((float) gainDb)))
             { error = "'gain_db' must be a finite number."; return {}; }
@@ -995,7 +1257,27 @@ private:
                 fadeOut = samplesOf (a, "fade_out_seconds", false, error);
                 if (! fadeOut) return {};
             }
+            // the gain line: [seconds from the clip's start, dB] pairs, turned into source samples (the frame `offset` counts in) below
+            std::vector<std::pair<double, double>> envelope;
+            if (a.hasProperty ("gain_envelope"))
+            {
+                const auto& points = a["gain_envelope"];
+                if (! points.isArray()) { error = "'gain_envelope' must be an array of [seconds, db] pairs ([] clears it)."; return {}; }
+                const int count = points.getArray()->size();
+                for (int i = 0; i < count; ++i)
+                {
+                    const auto& p = points[i];
+                    double sec = 0.0, db = 0.0;
+                    if (! p.isArray() || p.getArray()->size() != 2 || ! finiteNumber (p[0], sec) || ! finiteNumber (p[1], db))
+                    { error = "gain_envelope point " + juce::String (i) + " must be [seconds, db], two numbers."; return {}; }
+                    if (sec < 0.0) { error = "gain_envelope point " + juce::String (i) + " is before the clip's start (seconds must be 0 or more)."; return {}; }
+                    if (db < -60.0 || db > 12.0) { error = "gain_envelope point " + juce::String (i) + ": db must be -60 to +12 (got " + juce::String (db) + ")."; return {}; }
+                    envelope.push_back ({ sec, db });
+                }
+            }
+
             juce::int64 currentIn = 0, currentOut = 0;
+            std::vector<std::pair<juce::int64, float>> envelopeSamples;
             {
                 const juce::ScopedLock sl (session.lock);
                 const auto& clips = session.tracks[(size_t) track]->clips;
@@ -1004,8 +1286,25 @@ private:
                     error = "No clip " + juce::String (clip) + " on track " + juce::String (track) + " (it has " + juce::String ((int) clips.size()) + ")";
                     return {};
                 }
-                currentIn = clips[(size_t) clip].fadeIn;
-                currentOut = clips[(size_t) clip].fadeOut;
+                const auto& c = clips[(size_t) clip];
+                currentIn = c.fadeIn;
+                currentOut = c.fadeOut;
+                if (a.hasProperty ("gain_envelope"))
+                {
+                    if (session.sampleRate <= 0.0) { error = "The session has no sample rate yet, so no gain point can be placed: add a track first."; return {}; }
+                    const double clipSeconds = (double) c.length / session.sampleRate;
+                    for (size_t i = 0; i < envelope.size(); ++i)
+                    {
+                        if (envelope[i].first > clipSeconds + 1e-9)
+                        {
+                            error = "gain_envelope point " + juce::String ((int) i) + " is at " + juce::String (envelope[i].first)
+                                    + " s, after the clip's end (" + juce::String (clipSeconds) + " s).";
+                            return {};
+                        }
+                        const auto at = c.offset + (juce::int64) std::llround (envelope[i].first * session.sampleRate);
+                        envelopeSamples.push_back ({ at, (float) envelope[i].second });
+                    }
+                }
             }
 
             Gesture g (editor, "Clip settings");
@@ -1013,6 +1312,17 @@ private:
             if ((fadeIn || fadeOut) && ! editor.setClipFades (track, clip, fadeIn ? *fadeIn : currentIn, fadeOut ? *fadeOut : currentOut, error)) return {};
             if (a.hasProperty ("mute") && ! editor.setClipMute (track, clip, (bool) a["mute"], error)) return {};
             if (a.hasProperty ("name") && ! editor.renameClip (track, clip, a["name"].toString(), error)) return {};
+            if (a.hasProperty ("gain_envelope"))
+            {
+                if (! editor.clearClipGain (track, clip, error)) return {};
+                for (const auto& p : envelopeSamples)
+                    if (editor.addClipGainPoint (track, clip, p.first, p.second, error) < 0) return {};
+            }
+            if (a.hasProperty ("layer"))
+            {
+                const bool top = a["layer"].toString() == "top";
+                if (! (top ? editor.raiseClipToTop (track, clip, error) : editor.lowerClipToBottom (track, clip, error))) return {};
+            }
             return session.describe();
         }
         if (name == "add_plugin")

@@ -14,6 +14,11 @@
 #include <functional>
 #include <memory>
 
+namespace olympus
+{
+class AutomationWriter; // AutoWrite.h: the window owns it and points the views at it
+}
+
 namespace olympus::gui
 {
 struct ArrangeSnapshot; // the model copied out of the session for one paint or one mouse event (Arrange.cpp)
@@ -33,9 +38,12 @@ public:
     static constexpr int kHeaderWidth = 260;   // the track column on the left
     static constexpr int kRulerHeight = 40;    // bars and beats
     static constexpr int kLoopHeight = 22;     // the LOOP strip
+    static constexpr int kPunchHeight = 8;     // the punch lane, under the loop: a red bar from the punch-in to the punch-out (F5)
     static constexpr int kMarkerHeight = 26;   // the marker lane
     static constexpr int kLaneHeight = 92;     // one track
     static constexpr int kAutoLaneHeight = 48; // expanded automation lane below a track
+    static constexpr int kTakeLaneHeight = 22; // one take sub-lane under a track (TAKES on): one per take clip, not a comp (F8)
+    static constexpr int kTakeLabelWidth = 64; // the "Take N" label at the left of a sub-lane; a click there promotes the take
     static constexpr int kScrollStripHeight = 8; // slim horizontal overview/scrollbar strip
     static constexpr int kDesignWidth = 1280, kDesignHeight = ui::editorHeightFor (kDesignWidth);
     static constexpr double kDefaultZoom = 80.0; // pixels per second
@@ -57,9 +65,36 @@ public:
     void clearSelection();
     void selectAll();
 
+    // The automation writer (AutoWrite.h), set by the window: a fader or pan drag tells it the control is held, and the lanes' lamps read it.
+    AutomationWriter* automation = nullptr;
+
     // ---- callbacks ------------------------------------------------------------------------------------------------------------
     std::function<void (juce::int64)> onSeek;                                  // the ruler, the marker lane or a drag there moved the playhead
     std::function<void()> onStructure;                                         // after every change made here (an edit, the mix, markers, loop, tempo)
+    // The track menu, opened by a right-click on the track's name: Colour, Polarity (Ø) and Group. trackMenuAction applies one choice (the
+    // window calls it from the menu; the checks call it directly).
+    enum TrackMenuItem
+    {
+        menuColourAuto = 1000,
+        menuColourFirst = 1001,     // + the palette entry (0..11)
+        menuPolarity = 1100,
+        menuGroupNone = 1200,
+        menuGroupNew = 1201,
+        menuGroupRemove = 1202,
+        menuGroupRename = 1203,
+        menuGroupActive = 1204,
+        menuGroupGain = 1205,
+        menuGroupMute = 1206,
+        menuGroupSolo = 1207,
+        menuGroupArm = 1208,
+        menuGroupFirst = 2000       // + the group index
+    };
+    void trackNameMenu (int track);
+    void trackMenuAction (int track, int id);
+    // The clip menu and the lane menu: each choice applies the same way the menu applies it (the checks call these too).
+    void clipMenuAction (ClipRef ref, int action) { clipAction (ref, action); }
+    void laneMenuAction (int track, juce::int64 at, int action) { laneAction (track, at, action); }
+
     std::function<void (int)> onTrackMenu;                                     // the FX button of a track, or right-click on its header
     std::function<void (int)> onRemoveTrack;                                   // the X of a track: the window removes it (closes its plugin windows first)
     std::function<void (MidiClipRef)> onOpenMidiClip;                          // double-click or menu "Edit in Piano Roll" on a MIDI clip
@@ -74,6 +109,7 @@ public:
     std::function<void (int track)> onInstrumentMenu;
     // Right-click menu on a MISSING AUDIO clip: locate its file or rescan a folder for missing audio.
     std::function<void (ClipRef)> onLocateMissingAudio;
+    std::function<void (MidiClipRef)> onExportMidiClip;                        // "Export MIDI clip..." on a MIDI clip
     std::function<void()> onRescanMissingAudio;
     // The input a track records, the peak it reads from that input (linear; reading resets it), and whether the meters show it: the
     // window sets these (the view knows no device). An armed track's meter shows its input when showInputLevels is on.
@@ -111,11 +147,18 @@ public:
     // The header's ARM, IN, INST, AUTO, and target buttons and fader (the checks press and read them; nullptr when there is no such track).
     juce::Button* armButton (int track);
     juce::Button* inputButton (int track);
+    juce::Button* monitorButton (int track);   // MON: input monitoring (F6)
     juce::Button* instrumentButton (int track);
     juce::Button* automationButton (int track);
     juce::Button* autoTargetButton (int track);
+    juce::Button* autoModeButton (int track);
+    juce::Button* takesButton (int track);
     juce::Slider* faderSlider (int track);
     juce::Rectangle<int> autoLaneBounds (int track) const;
+    // Checks only: a take sub-lane's rectangle, a track's row height (its take lanes and automation lane included) and the x of a timeline sample.
+    juce::Rectangle<int> takeLaneBoundsForTest (int track, int lane) const;
+    int trackRowHeightForTest (int track) const;
+    int sampleXForTest (juce::int64 sample) const;
     bool isInteracting() const;
 
     // Checks only: drive an open askText box (clip gain, rename clip, rename marker) without clicking its native modal buttons.
@@ -151,6 +194,10 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    // The clip gain line (G, or the lane menu): drawn in each clip; a click on it adds a point, a drag moves one, Alt-click deletes one. A view
+    // setting, not saved and not an undo step.
+    bool clipGainShown() const { return showClipGain; }
+    void setClipGainShown (bool on) { showClipGain = on; repaint(); }
     bool keyPressed (const juce::KeyPress& key) override;
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray& files, int x, int y) override;
@@ -159,7 +206,7 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum class Mode { none, ruler, loop, marker, scrollX, marquee, move, moveMidi, resizeMidiStart, resizeMidiEnd, trimStart, trimEnd, fadeIn, fadeOut, autoPoint };
+    enum class Mode { none, ruler, loop, punch, marker, scrollX, marquee, move, moveMidi, resizeMidiStart, resizeMidiEnd, trimStart, trimEnd, fadeIn, fadeOut, autoPoint, gainPoint, takeComp };
     friend class ArrangeTrackHeader; // the header column reads and edits through the view's Editor and callbacks
 
     Session& session;
@@ -182,6 +229,8 @@ private:
     int dragAutoTrack = -1;
     juce::String dragAutoTarget;
     int dragAutoPoint = -1;
+    bool showClipGain = false;   // the gain line is drawn in the clips (G)
+    int dragGainPoint = -1;      // the point of the gain line a drag moves (its index on the line)
     double scrollSamples = 0.0;                         // the timeline's left edge, in samples
     int scrollY = 0;                                    // the lanes' top, in pixels
     double lastPlayhead = 0.0;
@@ -230,6 +279,16 @@ private:
     int trackAt (const ArrangeSnapshot& s, int y) const;
     juce::Rectangle<int> clipRect (const ArrangeSnapshot& s, int track, juce::int64 start, juce::int64 length, double pps) const;
     juce::Rectangle<int> autoLaneRect (const ArrangeSnapshot& s, int track) const;
+    // Take lanes (F8): the take clips of a track that its sub-lanes show, in take order (empty unless the track shows them); their height; the
+    // rectangle of one; the sub-lane under a point (-1 for none, and the track it lies in); the parts of a take that play (no higher clip covers them).
+    std::vector<int> takeClipsOf (const ArrangeSnapshot& s, int track) const;
+    int takeLanesHeight (const ArrangeSnapshot& s, int track) const;
+    juce::Rectangle<int> takeLaneRect (const ArrangeSnapshot& s, int track, int lane) const;
+    int takeLaneAt (const ArrangeSnapshot& s, juce::Point<int> p, int& track) const;
+    std::vector<std::pair<juce::int64, juce::int64>> audibleSegments (const ArrangeSnapshot& s, int track, int clipIndex) const;
+    void paintTakeLanes (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track) const;
+    int dragTakeTrack = -1, dragTakeClip = -1;          // the take a comp drag began on
+    juce::int64 takeAnchor = 0, takeCurrent = 0;         // the comp range's ends while the drag runs (snapped)
     float valueToAutoY (float val, const juce::Rectangle<int>& r) const;
     float autoYToValue (int y, const juce::Rectangle<int>& r) const;
     int hitAutoPoint (const ArrangeSnapshot& s, int track, juce::Point<int> p, double pps) const;
@@ -237,6 +296,12 @@ private:
     int maxScrollY (const ArrangeSnapshot& s) const;
     bool hitFadeIn (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
     bool hitFadeOut (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
+    int hitGainPoint (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
+    bool onGainLine (const ArrangeSnapshot& s, ClipRef ref, juce::Point<int> p, double pps) const;
+    juce::int64 sourceSampleAt (const Clip& c, int x, double pps) const;
+    void paintGainLine (juce::Graphics& g, double pps, const Clip& clip, juce::Rectangle<int> rect) const;
+    void paintCrossfades (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, size_t clipIndex, juce::Rectangle<int> rect) const;
+    void promptCrossfade();
     juce::Rectangle<int> scrollStripBounds() const;
     void scrollThumbMetrics (const ArrangeSnapshot& s, double pps, float& thumbX, float& thumbW, double& totalSamples) const;
     void updateDropHover (const juce::StringArray& files, int x, int y);
@@ -250,7 +315,7 @@ private:
     void edited();    // as changed, after the headers took the model
     void report (const juce::String& error) { if (reportError && error.isNotEmpty()) reportError (error); }
     void drawWave (juce::Graphics& g, const Clip& clip, juce::Rectangle<int> area, double pps, juce::Colour colour);
-    void paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const Clip& clip, bool selectedNow);
+    void paintClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, size_t clipIndex, bool selectedNow);
     void paintMidiClip (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track, const MidiClip& clip, bool selectedNow);
     void paintAutomationLane (juce::Graphics& g, const ArrangeSnapshot& s, double pps, int track);
     void autoTargetMenu (int track);

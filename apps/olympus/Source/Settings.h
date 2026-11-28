@@ -24,6 +24,8 @@ struct Settings
     // The last render's choice (the dialog before the folder chooser remembers it): bit depth 16, 24 or 32, and whether the stems are written.
     int renderBits = 32;
     bool renderStems = true;
+    // The count-in before a take (F5): 0, 1 or 2 bars of clicks before the take starts. A preference of the machine, saved beside the render's.
+    int countInBars = 0;
 
     // OLYMPUS_SETTINGS names another file (the tests use it, so they never touch the real one).
     static juce::File defaultFile()
@@ -69,6 +71,7 @@ struct Settings
             const int bits = xml->getIntAttribute ("renderBits", 32);
             s.renderBits = (bits == 16 || bits == 24 || bits == 32) ? bits : 32;
             s.renderStems = xml->getBoolAttribute ("renderStems", true);
+            s.countInBars = juce::jlimit (0, 2, xml->getIntAttribute ("countInBars", 0));
             if (auto* device = xml->getChildByName ("AudioDevice"); device != nullptr && device->getFirstChildElement() != nullptr)
                 s.audioDeviceState = device->getFirstChildElement()->toString();
         }
@@ -91,6 +94,7 @@ struct Settings
         xml.setAttribute ("extraLatency", extraLatencySamples);
         xml.setAttribute ("renderBits", renderBits);
         xml.setAttribute ("renderStems", renderStems ? 1 : 0);
+        xml.setAttribute ("countInBars", juce::jlimit (0, 2, countInBars));
         for (auto& f : pluginFolders)
             xml.createNewChildElement ("PluginFolder")->setAttribute ("path", f);
         if (auto device = juce::parseXML (audioDeviceState); device != nullptr)

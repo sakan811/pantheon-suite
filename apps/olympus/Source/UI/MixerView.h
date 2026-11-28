@@ -15,6 +15,11 @@
 #include <memory>
 #include <vector>
 
+namespace olympus
+{
+class AutomationWriter; // AutoWrite.h: the window owns it and points the views at it
+}
+
 namespace olympus::gui
 {
 // Console mixer view: horizontally scrollable per-track channel strips (name, plugin inserts, pan, M/S/R, fader, level meter, dB)
@@ -25,6 +30,7 @@ class MixerView : public juce::Component
 public:
     static constexpr int kTrackStripWidth = 96;
     static constexpr int kMasterStripWidth = 104;
+    static constexpr int kVcaStripWidth = 76;   // one per group, between the track strips and the master
     static constexpr int kStripGap = 2;
 
     MixerView (Session& session, Editor& editor);
@@ -47,6 +53,9 @@ public:
     // Inspection and test helpers (used by headless UI checks)
     int trackStripCount() const;
     juce::Slider* trackFader (int track);
+    int vcaStripCount() const;
+    juce::Slider* vcaFader (int group);
+    juce::String vcaNameText (int group) const;
     juce::Slider* trackPan (int track);
     juce::Button* trackMuteButton (int track);
     juce::Button* trackSoloButton (int track);
@@ -69,20 +78,26 @@ public:
     juce::String masterGainText() const;
 
     float trackMeterLevelForTest (int track) const;
+    juce::String trackPolarityTextForTest (int track) const;   // the text of the Ø button (UTF-8 read)
     float masterMeterLevelLForTest() const;
     float masterMeterLevelRForTest() const;
 
 private:
     class TrackStrip;
+    class VcaStrip;
     class MasterStrip;
 
     Session& session;
     Editor& editor;
     HardwareLookAndFeel look; // declared before strips so child sliders never outlive look
+public:
+    AutomationWriter* automation = nullptr; // the window's automation writer: a fader or pan drag tells it the control is held
+private:
 
     juce::Viewport stripViewport;
     juce::Component stripContainer;
     std::vector<std::unique_ptr<TrackStrip>> trackStrips;
+    std::vector<std::unique_ptr<VcaStrip>> vcaStrips;      // one per group, in group order
     std::unique_ptr<MasterStrip> masterStrip;
 
     juce::uint64 lastRevision = 0;

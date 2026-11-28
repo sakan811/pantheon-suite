@@ -2,6 +2,8 @@
 // Copyright (C) 2026 The Pantheon authors
 
 #include "MixerView.h"
+#include "TrackColours.h"
+#include "../AutoWrite.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,6 +13,12 @@ namespace olympus::gui
 {
 namespace
 {
+// Alt (Option on the Mac) held: the change is for this track alone, not for its group.
+inline bool altHeld()
+{
+    return juce::ModifierKeys::getCurrentModifiers().isAltDown();
+}
+
 constexpr int kSlotHeight = 18;
 constexpr int kSlotGap = 2;
 constexpr int kAddHeight = 18;
@@ -209,7 +217,7 @@ void syncSlotButtons (MixerView& view,
             btn->setToggleState (lit, juce::dontSendNotification);
         const auto tip = info.name + (info.missing ? " (not installed)" : info.bypass ? " (bypassed)" : "")
                          + slotWetText (info.wet)
-                         + " — click to open, Shift+click to bypass, right-click for menu";
+                         + juce::String (juce::CharPointer_UTF8 (" \xE2\x80\x94 click to open, Shift+click to bypass, right-click for menu"));
         if (btn->getTooltip() != tip)
             btn->setTooltip (tip);
         btn->onClick = [&view, targetTrack, i]
@@ -295,8 +303,16 @@ public:
         panSlider.setDoubleClickReturnValue (true, 0.0);
         panSlider.setWantsKeyboardFocus (false);
         panSlider.setTooltip ("Pan: C (drag, double-click for centre)");
-        panSlider.onDragStart = [this] { panGesture = std::make_unique<Editor::Gesture> (view.editor, "Track pan"); };
-        panSlider.onDragEnd = [this] { panGesture.reset(); };
+        panSlider.onDragStart = [this]
+        {
+            panGesture = std::make_unique<Editor::Gesture> (view.editor, "Track pan");
+            if (view.automation != nullptr) view.automation->begin (trackIndex, "pan");
+        };
+        panSlider.onDragEnd = [this]
+        {
+            if (view.automation != nullptr) view.automation->end (trackIndex, "pan");
+            panGesture.reset();
+        };
         panSlider.onValueChange = [this]
         {
             juce::String error;
@@ -314,7 +330,7 @@ public:
         muteButton.onClick = [this]
         {
             juce::String error;
-            if (! view.editor.setTrackMute (trackIndex, muteButton.getToggleState(), error))
+            if (! view.editor.setTrackMute (trackIndex, muteButton.getToggleState(), error, altHeld()))
                 view.report (error);
             view.edited();
         };
@@ -326,10 +342,24 @@ public:
         soloButton.onClick = [this]
         {
             juce::String error;
-            if (! view.editor.setTrackSolo (trackIndex, soloButton.getToggleState(), error))
+            if (! view.editor.setTrackSolo (trackIndex, soloButton.getToggleState(), error, altHeld()))
                 view.report (error);
             view.edited();
         };
+
+        // Ø: both channels inverted at the source, before the chain
+        polarityButton.setClickingTogglesState (true);
+        polarityButton.lamp = colours::amber;
+        polarityButton.setTooltip (juce::String (juce::CharPointer_UTF8 ("Polarity (\xC3\x98): invert both channels, at the track's source")));
+        polarityButton.setWantsKeyboardFocus (false);
+        polarityButton.onClick = [this]
+        {
+            juce::String error;
+            if (! view.editor.setTrackPolarity (trackIndex, polarityButton.getToggleState(), error))
+                view.report (error);
+            view.edited();
+        };
+        addAndMakeVisible (polarityButton);
 
         armButton.setClickingTogglesState (true);
         armButton.lamp = colours::bad;
@@ -338,7 +368,7 @@ public:
         armButton.onClick = [this]
         {
             juce::String error;
-            if (! view.session.setTrackArm (trackIndex, armButton.getToggleState(), error))
+            if (! view.session.setTrackArm (trackIndex, armButton.getToggleState(), error, altHeld()))
                 view.report (error);
             view.edited();
         };
@@ -353,12 +383,20 @@ public:
         faderSlider.setDoubleClickReturnValue (true, 0.0);
         faderSlider.setWantsKeyboardFocus (false);
         faderSlider.setTooltip (faderTooltip ("Fader", 0.0));
-        faderSlider.onDragStart = [this] { gainGesture = std::make_unique<Editor::Gesture> (view.editor, "Track gain"); };
-        faderSlider.onDragEnd = [this] { gainGesture.reset(); };
+        faderSlider.onDragStart = [this]
+        {
+            gainGesture = std::make_unique<Editor::Gesture> (view.editor, "Track gain");
+            if (view.automation != nullptr) view.automation->begin (trackIndex, "volume");
+        };
+        faderSlider.onDragEnd = [this]
+        {
+            if (view.automation != nullptr) view.automation->end (trackIndex, "volume");
+            gainGesture.reset();
+        };
         faderSlider.onValueChange = [this]
         {
             juce::String error;
-            if (! view.editor.setTrackGain (trackIndex, (float) faderSlider.getValue(), error))
+            if (! view.editor.setTrackGain (trackIndex, (float) faderSlider.getValue(), error, altHeld()))
                 view.report (error);
             const auto dbStr = formatDb (faderSlider.getValue());
             if (dbLabel.getText() != dbStr)
@@ -443,6 +481,9 @@ public:
         muteButton.setToggleState (t.mute, juce::dontSendNotification);
         soloButton.setToggleState (t.solo, juce::dontSendNotification);
         armButton.setToggleState (t.armed, juce::dontSendNotification);
+        polarityButton.setToggleState (t.polarity, juce::dontSendNotification);
+        capColour = trackColour (t.colour, index);
+        repaint();
 
         if (gainGesture == nullptr && ! faderSlider.isMouseButtonDown()
             && std::abs (faderSlider.getValue() - (double) t.gainDb) > 1.0e-4)
@@ -502,7 +543,8 @@ public:
         const int faderH = juce::jmax (24, h - pad - dbH - y);
         faderSlider.setBounds (pad + 8, y, 28, faderH);
         meterArea = juce::Rectangle<float> ((float) (pad + 50), (float) y + 4.0f, 12.0f, (float) juce::jmax (8, faderH - 8));
-        dbLabel.setBounds (pad, h - pad - dbH, innerW, dbH);
+        polarityButton.setBounds (pad, h - pad - dbH, 22, dbH);
+        dbLabel.setBounds (pad + 24, h - pad - dbH, innerW - 24, dbH);
     }
 
     void paint (juce::Graphics& g) override
@@ -522,12 +564,16 @@ public:
             g.setColour (colours::accent);
             g.drawFittedText ("[BUS]", armButton.getBounds(), juce::Justification::centred, 1);
         }
+        // the track's colour cap across the top of the strip
+        g.setColour (capColour);
+        g.fillRect (0, 0, getWidth(), 4);
         paintVerticalLevelBar (g, meterArea, meter);
     }
 
     MixerView& view;
     int trackIndex = 0;
     bool isBus = false;
+        juce::Colour capColour { colours::panelEdge };
     juce::Label nameLabel, dbLabel;
     juce::Viewport insertsViewport;
     juce::Component insertsContainer;
@@ -535,10 +581,115 @@ public:
     juce::TextButton addButton { "+" };
     juce::TextButton outButton { "Master" }, sendButton { "SEND" };
     juce::Slider panSlider, faderSlider;
-    MixerStripLamp muteButton { "M" }, soloButton { "S" }, armButton { "R" };
+    MixerStripLamp muteButton { "M" }, soloButton { "S" }, armButton { "R" }, polarityButton { juce::String (juce::CharPointer_UTF8 ("\xC3\x98")) };
     MeterBallistics meter;
     juce::Rectangle<float> meterArea;
     std::unique_ptr<Editor::Gesture> panGesture, gainGesture;
+};
+
+// ---- VcaStrip -------------------------------------------------------------------------------------------------------------
+// One VCA per group: its name, and a fader from -100 to +12 dB that is added to the fader (and the volume lane) of every member.
+// Double-click returns it to 0 dB; a drag is one undo step (Editor::Gesture).
+class MixerView::VcaStrip : public juce::Component
+{
+public:
+    VcaStrip (MixerView& owner, int index) : view (owner), groupIndex (index)
+    {
+        nameLabel.setFont (ui::font (11.0f, juce::Font::bold));
+        nameLabel.setColour (juce::Label::textColourId, colours::text);
+        nameLabel.setJustificationType (juce::Justification::centred);
+        nameLabel.setMinimumHorizontalScale (0.7f);
+        addAndMakeVisible (nameLabel);
+
+        faderSlider.setSliderStyle (juce::Slider::LinearVertical);
+        faderSlider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+        faderSlider.setLookAndFeel (&view.look);
+        faderSlider.setRange (-100.0, 12.0, 0.01);
+        faderSlider.setDoubleClickReturnValue (true, 0.0);
+        faderSlider.setWantsKeyboardFocus (false);
+        faderSlider.setTooltip (faderTooltip ("VCA", 0.0));
+        faderSlider.onDragStart = [this] { gesture = std::make_unique<Editor::Gesture> (view.editor, "Group VCA"); };
+        faderSlider.onDragEnd = [this] { gesture.reset(); };
+        faderSlider.onValueChange = [this]
+        {
+            juce::String error;
+            if (! view.editor.setGroupVca (groupIndex, (float) faderSlider.getValue(), error))
+                view.report (error);
+            const auto dbStr = formatDb (faderSlider.getValue());
+            if (dbLabel.getText() != dbStr)
+                dbLabel.setText (dbStr, juce::dontSendNotification);
+            faderSlider.setTooltip (faderTooltip ("VCA", faderSlider.getValue()));
+            view.changed();
+        };
+        addAndMakeVisible (faderSlider);
+
+        dbLabel.setFont (ui::lcdFont (10.0f));
+        dbLabel.setColour (juce::Label::textColourId, colours::amber);
+        dbLabel.setJustificationType (juce::Justification::centred);
+        dbLabel.setText ("+0.0 dB", juce::dontSendNotification);
+        addAndMakeVisible (dbLabel);
+    }
+
+    ~VcaStrip() override
+    {
+        faderSlider.setLookAndFeel (nullptr);
+    }
+
+    void sync (int index, const TrackGroup& g)
+    {
+        groupIndex = index;
+        if (nameLabel.getText() != g.name)
+            nameLabel.setText (g.name, juce::dontSendNotification);
+        const auto cap = trackColour (g.colour, index);
+        if (capColour != cap)
+        {
+            capColour = cap;
+            repaint();
+        }
+        if (gesture == nullptr && ! faderSlider.isMouseButtonDown()
+            && std::abs (faderSlider.getValue() - (double) g.vcaDb) > 1.0e-4)
+        {
+            faderSlider.setValue (g.vcaDb, juce::dontSendNotification);
+            faderSlider.setTooltip (faderTooltip ("VCA", g.vcaDb));
+        }
+        const auto dbStr = formatDb (faderSlider.getValue());
+        if (dbLabel.getText() != dbStr)
+            dbLabel.setText (dbStr, juce::dontSendNotification);
+    }
+
+    bool isInteracting() const
+    {
+        return faderSlider.isMouseButtonDown() || gesture != nullptr;
+    }
+
+    void resized() override
+    {
+        const int w = getWidth(), h = getHeight();
+        const int pad = 4;
+        const int innerW = juce::jmax (1, w - 2 * pad);
+        const int dbH = 15;
+        nameLabel.setBounds (pad, pad, innerW, 17);
+        dbLabel.setBounds (pad, h - pad - dbH, innerW, dbH);
+        const int faderY = pad + 21;
+        faderSlider.setBounds (pad + 8, faderY, 28, juce::jmax (24, h - pad - dbH - faderY));
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        const auto area = getLocalBounds().toFloat();
+        ui::hw::fillMetal (g, area, colours::panel.interpolatedWith (colours::accent, 0.08f));
+        g.setColour (colours::accent.withAlpha (0.45f));
+        g.drawRect (getLocalBounds(), 1);
+        g.setColour (capColour);
+        g.fillRect (0, 0, getWidth(), 4);
+    }
+
+    MixerView& view;
+    int groupIndex = 0;
+    juce::Label nameLabel, dbLabel;
+    juce::Slider faderSlider;
+    juce::Colour capColour { colours::panelEdge };
+    std::unique_ptr<Editor::Gesture> gesture;
 };
 
 // ---- MasterStrip ----------------------------------------------------------------------------------------------------------------
@@ -796,6 +947,25 @@ void MixerView::refresh()
     for (int i = 0; i < syncCount; ++i)
         trackStrips[(size_t) i]->sync (i, *session.tracks[(size_t) i], session);
 
+    // one VCA strip per group, in group order
+    const int groupCount = (int) session.groups.size();
+    if ((int) vcaStrips.size() != groupCount && ! isInteracting())
+    {
+        while ((int) vcaStrips.size() > groupCount)
+        {
+            stripContainer.removeChildComponent (vcaStrips.back().get());
+            vcaStrips.pop_back();
+        }
+        while ((int) vcaStrips.size() < groupCount)
+        {
+            vcaStrips.push_back (std::make_unique<VcaStrip> (*this, (int) vcaStrips.size()));
+            stripContainer.addAndMakeVisible (*vcaStrips.back());
+        }
+        countChanged = true;
+    }
+    for (int j = 0; j < juce::jmin (groupCount, (int) vcaStrips.size()); ++j)
+        vcaStrips[(size_t) j]->sync (j, session.groups[(size_t) j]);
+
     masterStrip->sync (session);
 
     if (countChanged)
@@ -837,6 +1007,9 @@ bool MixerView::isInteracting() const
     for (const auto& s : trackStrips)
         if (s->isInteracting())
             return true;
+    for (const auto& v : vcaStrips)
+        if (v->isInteracting())
+            return true;
     return false;
 }
 
@@ -848,12 +1021,17 @@ void MixerView::layoutStrips()
         return;
 
     const int n = (int) trackStrips.size();
-    const int totalW = n * kTrackStripWidth + juce::jmax (0, n - 1) * kStripGap;
+    const int m = (int) vcaStrips.size();
+    const int tracksW = n * kTrackStripWidth + juce::jmax (0, n - 1) * kStripGap;
+    const int vcaGap = m > 0 ? 2 * kStripGap : 0;   // a space between the tracks and the VCAs
+    const int totalW = tracksW + (m > 0 ? vcaGap + m * kVcaStripWidth + (m - 1) * kStripGap : 0);
     const bool needHScroll = totalW > vw;
     const int stripH = juce::jmax (1, vh - (needHScroll ? stripViewport.getScrollBarThickness() : 0));
     stripContainer.setSize (juce::jmax (vw, totalW), stripH);
     for (int i = 0; i < n; ++i)
         trackStrips[(size_t) i]->setBounds (i * (kTrackStripWidth + kStripGap), 0, kTrackStripWidth, stripH);
+    for (int j = 0; j < m; ++j)
+        vcaStrips[(size_t) j]->setBounds (tracksW + vcaGap + j * (kVcaStripWidth + kStripGap), 0, kVcaStripWidth, stripH);
 }
 
 void MixerView::resized()
@@ -1105,6 +1283,19 @@ float MixerView::trackMeterLevelForTest (int track) const
 {
     return juce::isPositiveAndBelow (track, (int) trackStrips.size()) ? trackStrips[(size_t) track]->meter.level : -100.0f;
 }
+juce::String MixerView::trackPolarityTextForTest (int track) const
+{
+    return juce::isPositiveAndBelow (track, (int) trackStrips.size()) ? trackStrips[(size_t) track]->polarityButton.getButtonText() : juce::String();
+}
 float MixerView::masterMeterLevelLForTest() const { return masterStrip->meterL.level; }
 float MixerView::masterMeterLevelRForTest() const { return masterStrip->meterR.level; }
+int MixerView::vcaStripCount() const { return (int) vcaStrips.size(); }
+juce::Slider* MixerView::vcaFader (int group)
+{
+    return juce::isPositiveAndBelow (group, (int) vcaStrips.size()) ? &vcaStrips[(size_t) group]->faderSlider : nullptr;
+}
+juce::String MixerView::vcaNameText (int group) const
+{
+    return juce::isPositiveAndBelow (group, (int) vcaStrips.size()) ? vcaStrips[(size_t) group]->nameLabel.getText() : juce::String();
+}
 } // namespace olympus::gui

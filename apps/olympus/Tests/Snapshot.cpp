@@ -10,9 +10,11 @@
 //
 // A second picture, next to <out.png> as screenshot-record.png: the same session while a take runs on two armed tracks (IN 1 and IN 3+4),
 // with a device the picture describes (there is no audio device in a headless run; the takes are written to a folder of the snapshot's own).
+// A third, next to <out.png> as screenshot-mixer.png: the same session with the mixer shown (the VCA strip of the group Rhythm, the Ø buttons).
 
 #include "TestPlugin.h"
 #include "UI/MainComponent.h"
+#include "UI/TrackColours.h"
 
 #include <string_view>
 
@@ -73,12 +75,13 @@ juce::File makeStem (const juce::File& folder, const juce::String& name, int kin
 }
 
 // A clip of the stem: from `offsetSeconds` in the file, placed at `startSeconds` on the timeline, for `lengthSeconds`.
-void clip (olympus::Editor& editor, int track, const juce::File& file, double startSeconds, double offsetSeconds, double lengthSeconds)
+olympus::ClipRef clip (olympus::Editor& editor, int track, const juce::File& file, double startSeconds, double offsetSeconds, double lengthSeconds)
 {
     juce::String error;
     const auto ref = editor.addClip (track, file, (juce::int64) (startSeconds * kRate), (juce::int64) (offsetSeconds * kRate), (juce::int64) (lengthSeconds * kRate), error);
     if (! ref.valid())
         std::printf ("clip on track %d: %s\n", track, error.toRawUTF8());
+    return ref;
 }
 }
 
@@ -135,6 +138,39 @@ static void setupDemoSession (olympus::gui::MainComponent& window, const juce::F
     const double gains[] = { -1.5, -3.0, -6.0, -9.0 };
     for (int i = 0; i < 4; ++i) editor.setTrackGain (i, (float) gains[i], error);
 
+    // each track its own palette colour; Bass and Drums in one group, Rhythm, with its VCA fader at -2 dB
+    const auto palette = olympus::gui::trackPalette();
+    for (int i = 0; i < 4; ++i) editor.setTrackColour (i, palette[(size_t) i].argb, error);
+    const int rhythm = editor.addGroup ("Rhythm", error);
+    editor.setTrackGroup (1, rhythm, error);
+    editor.setTrackGroup (2, rhythm, error);
+    editor.setGroupVca (rhythm, -2.0f, error);
+
+    // the chords' clip gain line: 0 dB at its start, -6 dB in the middle, 0 dB at its end (source samples: the clip starts at source 0)
+    const auto chords = clip (editor, 3, stems[3], 6.0, 0.0, 14.0);
+    editor.addClipGainPoint (3, chords.clip, 0, 0.0f, error);
+    editor.addClipGainPoint (3, chords.clip, (juce::int64) (7.0 * kRate), -6.0f, error);
+    editor.addClipGainPoint (3, chords.clip, (juce::int64) (14.0 * kRate), 0.0f, error);
+
+    // the drums' volume lane, in Touch mode, a few points (a dip into the chorus)
+    editor.addAutomationPoint (2, "volume", 0, olympus::dbToAutoNorm (-3.0f), olympus::AutoCurveType::Linear, error);
+    editor.addAutomationPoint (2, "volume", (juce::int64) (12.0 * kRate), olympus::dbToAutoNorm (-9.0f), olympus::AutoCurveType::Linear, error);
+    editor.addAutomationPoint (2, "volume", (juce::int64) (20.0 * kRate), olympus::dbToAutoNorm (-1.0f), olympus::AutoCurveType::Linear, error);
+    editor.setAutomationMode (2, "volume", olympus::AutoMode::Touch, error);
+    editor.setTrackShowAutomation (2, true, error);
+
+    // three takes of the vocal over 12-16 s, one take group, and a comp of 13-14 s from take 1
+    editor.setPunch (true, (juce::int64) (12.0 * kRate), (juce::int64) (16.0 * kRate), error);
+    const auto take0 = clip (editor, 0, stems[0], 12.0, 0.0, 4.0);
+    const auto take1 = clip (editor, 0, stems[0], 12.0, 4.0, 4.0);
+    const auto take2 = clip (editor, 0, stems[0], 12.0, 8.0, 4.0);
+    const int takeGroup = editor.newTakeGroup();
+    editor.setTakeOf (take0, takeGroup, 0, error);
+    editor.setTakeOf (take1, takeGroup, 1, error);
+    editor.setTakeOf (take2, takeGroup, 2, error);
+    editor.compTake (0, take1.clip, (juce::int64) (13.0 * kRate), (juce::int64) (14.0 * kRate), error);
+    editor.setTrackShowTakes (0, true, error);
+
     for (int i = 0; i < (int) chainNames.size(); ++i)
         session.addPlugin (0, chainNames[i], -1, error);
     // the headphones' chain, a stand-in for a correction plugin: on the MONITOR strip, playback only (the test plugins only)
@@ -146,6 +182,7 @@ static void setupDemoSession (olympus::gui::MainComponent& window, const juce::F
     editor.addMarker ("Chorus", (juce::int64) (20.0 * kRate));
     editor.setLoop ((juce::int64) (5.0 * kRate), (juce::int64) (20.0 * kRate), true);
     session.name = "Demo song";
+    window.arrange.setClipGainShown (true);   // the chords' gain line is drawn in the picture
     editor.clearUndo();
     window.arrange.zoomToFit();
     window.refreshNow();
@@ -243,6 +280,8 @@ int main (int argc, char** argv)
         }
 
         juce::String error;
+        // no punch for these takes: a take that ends before the punch-in is refused with a dialog, which a headless run cannot answer
+        window.editor.setPunch (false, (juce::int64) (12.0 * kRate), (juce::int64) (16.0 * kRate), error);
         window.session.setTrackArm (0, true, error);
         window.session.setTrackArm (2, true, error);
         window.session.setTrackInput (0, 0, -1, error);
@@ -271,13 +310,25 @@ int main (int argc, char** argv)
 
     bool ok = writePicture (window, juce::File (argv[1]));
 
+    // the third picture: the same window with the mixer shown (the VCA strip of Rhythm, the Ø buttons); the mixer is hidden again after it
+    window.mixerButton.onClick();   // the MIXER button: what a click does (toggleMixer)
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+    window.arrange.refresh();
+    ok = writePicture (window, juce::File (argv[1]).getSiblingFile ("screenshot-mixer.png")) && ok;
+    window.mixerButton.onClick();   // the MIXER button: what a click does (toggleMixer)
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+    window.arrange.refresh();
+
     // the second picture: two armed tracks, IN 1 and IN 3+4, while a take runs from bar 4 (8 seconds); the armed lanes show the take in red
     window.setDeviceForTest (makeTestDevice());
     juce::String error;
+    // no punch for this take (see the frames above): the picture shows REC, the armed lanes and MON; the punch is in the main picture
+    window.editor.setPunch (false, (juce::int64) (12.0 * kRate), (juce::int64) (16.0 * kRate), error);
     window.session.setTrackArm (0, true, error);
     window.session.setTrackArm (2, true, error);
     window.session.setTrackInput (0, 0, -1, error);
     window.session.setTrackInput (2, 2, 3, error);
+    window.editor.setTrackMonitor (0, olympus::MonitorMode::Auto, error);   // MON on the vocal: its lamp shows in the picture
     window.seek ((juce::int64) (8.0 * kRate));
     window.toggleRecord();
     feedDeviceAudio (window, (int) (3.5 * kRate), 0.4);
