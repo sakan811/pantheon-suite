@@ -22,7 +22,7 @@ flowchart LR
     J --> K["11. Themis Verdict<br/>Final Mastering Check"]
 ```
 
-Alongside the 11-stage mastering chain sit **Hestia Space** (inter-stem spacer), **Harmonia Pitch** (live vocal pitch correction), **Selene Poly** (16-voice synth), **Orpheus Pitch Editor**, and **Olympus Basic DAW**.
+Alongside the 11-stage mastering chain sit **Hestia Space** (inter-stem spacer), **Harmonia Pitch** (live vocal pitch correction), **Selene Poly** (16-voice synth), **Orpheus Pitch Editor**, and **Olympus Studio**.
 
 ### Core philosophy
 
@@ -57,7 +57,7 @@ Alongside the 11-stage mastering chain sit **Hestia Space** (inter-stem spacer),
 | App | What it is | Showcase |
 |---|---|---|
 | [Orpheus Pitch Editor](apps/orpheus/README.md) | Offline pitch editor for solo vocals: Viterbi pitch roll, per-note PSOLA resynthesis, 24-bit WAV export. | [docs/showcase.gif](apps/orpheus/docs/showcase.gif) |
-| [Olympus Basic DAW](apps/olympus/README.md) | Basic DAW hosting VST3/AU chains across tracks with MIDI, automation, recording, stem render, and 38-tool MCP server. | [docs/showcase.gif](apps/olympus/docs/showcase.gif) |
+| [Olympus Studio](apps/olympus/README.md) | Multitrack studio: VST3/AU chains, MIDI keyboards and files, groups and VCAs, layered takes with comping, live automation, punch and loop recording, stem render, and a 48-tool MCP server. | [docs/showcase.gif](apps/olympus/docs/showcase.gif) |
 
 ### UI colour legend (`Hardware.h`)
 
